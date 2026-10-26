@@ -278,12 +278,13 @@ impl CompileOutputNodePureContent {
         key: CompileOutputPureContentKey,
         value: CompileOutputValue,
         validated_at_generation: u64,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) {
         let value = verter_retention::heap_size::owned_tree(value);
         let footprint = verter_retention::heap_size::footprint(&(&key, &value));
         let Ok(entry) = CacheEntry::admit::<CompileOutputPureContentKey>(
             value,
-            ReadSetSignature::new(Arc::from(Vec::new().as_slice())),
+            ReadSetSignature::empty(fact_policy),
             Arc::from(Vec::new().as_slice()),
             validated_at_generation,
             footprint,
@@ -674,7 +675,7 @@ impl CompileOutputNodeFactValidatedSession {
                     match hook.borrow().as_ref() {
                         Some((extra, account)) => {
                             let facts = signature.facts.iter().chain(extra.facts.iter()).cloned().collect();
-                            (ReadSetSignature::new(verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)), account.clone())
+                            (ReadSetSignature::new(verter_session_query::facts::fact_read_set::seal_canonical_signature(verter_session_query::facts::policy::FactPolicy::production(), facts)), account.clone())
                         }
                         None => (signature, self.retention_account.clone()),
                     }

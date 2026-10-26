@@ -2,7 +2,7 @@
 //! helper that collapsed `FactReadSetFinalise::Overflow` into an
 //! empty signature and let the producer publish anyway) has been
 //! deleted, and **no production callsite outside the substrate
-//! helper `empty_fact_signature()` constructs an empty
+//! helper `verter_session_query::facts::policy::FactPolicy::production().empty_set()` constructs an empty
 //! `Arc<[FactVersionRef]>`** through any covered variant.
 //!
 //! The guard is an AST walk built on `syn::parse_file` +
@@ -45,7 +45,7 @@
 //!     `<empty>.collect()` (method chains that wrap the empty
 //!     receiver in another wrapper)
 //!
-//! Allow-listed: `fact_signature_helpers.rs::empty_fact_signature()`
+//! Allow-listed: `fact_signature_helpers.rs::verter_session_query::facts::policy::FactPolicy::production().empty_set()`
 //! is the substrate helper itself. No other production callsite may
 //! bypass the helper.
 //!
@@ -62,7 +62,7 @@ use syn::{Expr, ExprCall, ImplItemFn, ItemFn, Local, ReturnType, Type};
 /// `crates/verter_type_engine/src/` and assert no file references
 /// `finalise_signature_or_empty` (deleted) and no file syntactically
 /// constructs an empty `Arc<[FactVersionRef]>` outside the substrate
-/// helper `fact_signature_helpers::empty_fact_signature()`.
+/// helper `fact_signature_helpers::verter_session_query::facts::policy::FactPolicy::production().empty_set()`.
 #[test]
 fn no_call_site_constructs_empty_signature_from_overflow() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -801,7 +801,7 @@ fn ast_walker_flags_known_bypass_variants() {
             !walker.findings.is_empty(),
             "the AST walker MUST flag bypass variant `{label}`. The fixture source is:\n{src}\n\
              A walker that misses this variant lets a future producer bypass \
-             `empty_fact_signature()` through that syntactic path."
+             `verter_session_query::facts::policy::FactPolicy::production().empty_set()` through that syntactic path."
         );
     }
 }
@@ -900,7 +900,7 @@ fn ast_walker_does_not_false_positive_on_benign_shapes() {
             "the AST walker MUST NOT false-positive on `{label}`. The fixture source is:\n{src}\n\
              Findings: {:#?}\n\
              Over-eager matching would force unrelated callsites to route through \
-             `empty_fact_signature()`.",
+             `verter_session_query::facts::policy::FactPolicy::production().empty_set()`.",
             walker.findings
         );
     }

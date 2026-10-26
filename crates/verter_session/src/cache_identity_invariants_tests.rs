@@ -255,6 +255,9 @@ impl verter_workspace::WorkspaceRead for CountingWs {
 }
 
 impl WorkspaceAccess for CountingWs {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
         self.inner.record_parsed_edges(canonical_id, edges)
     }
@@ -355,6 +358,9 @@ impl verter_workspace::WorkspaceRead for BumpOrderProbeWs {
 }
 
 impl WorkspaceAccess for BumpOrderProbeWs {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
         self.inner.record_parsed_edges(canonical_id, edges)
     }
@@ -519,6 +525,9 @@ impl verter_workspace::WorkspaceRead for RouteSyncProbeWs {
 }
 
 impl WorkspaceAccess for RouteSyncProbeWs {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
         *self
             .record_calls

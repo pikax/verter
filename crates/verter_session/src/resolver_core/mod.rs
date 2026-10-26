@@ -810,7 +810,7 @@ where
 ///
 /// **Signature width**: never a refusal. A candidate's
 /// `fact_dep_signature` wider than
-/// [`verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH`] is
+/// [`verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()`] is
 /// sealed into its canonical order and admitted whole; every fact it holds
 /// is validated on every warm read.
 ///
@@ -969,18 +969,14 @@ impl<V: CachedData> ValidatedFactAdmission<V> {
 /// bound.
 pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
-/// Seal an admitted candidate's facts: kept as recorded while no wider than
-/// [`verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH`],
-/// put in canonical order (never truncated, never refused) when wider.
+/// Seal an admitted candidate's facts into its self-charged owned slice, in
+/// canonical order (never truncated, never refused) at every width. The
+/// facts are normalized in place: no set storage is built only to be read
+/// back into the slice.
 fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> OwnedFactSignature {
-    if facts.len() > verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH {
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)
-            .iter()
-            .cloned()
-            .collect()
-    } else {
-        OwnedFactSignature::from(facts)
-    }
+    OwnedFactSignature::from(
+        verter_session_query::facts::fact_read_set::canonical_signature_facts(facts),
+    )
 }
 
 fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
@@ -5081,10 +5077,12 @@ mod file_source_env_fact_rail_tests {
         let a = source_env_fact("/dep.ts", 1, 2, "/dep.ts");
         let b = source_env_fact("/dep.ts", 2, 2, "/dep.ts");
 
-        let mut forward = FactReadSet::new();
+        let mut forward =
+            FactReadSet::new(verter_session_query::facts::policy::FactPolicy::production());
         forward.observe(a.clone());
         forward.observe(b.clone());
-        let mut reverse = FactReadSet::new();
+        let mut reverse =
+            FactReadSet::new(verter_session_query::facts::policy::FactPolicy::production());
         reverse.observe(b.clone());
         reverse.observe(a.clone());
 
@@ -5642,7 +5640,7 @@ mod receipt_validation_tests {
     }
 
     fn wide_facts() -> Vec<FactVersionRef> {
-        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
+        (0..2 * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max() + 3)
             .map(|index| whole_hash(&format!("/wide/{index:05}.ts"), 1))
             .collect()
     }

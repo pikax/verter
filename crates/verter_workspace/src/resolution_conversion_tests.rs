@@ -555,6 +555,7 @@ fn run_production_driver(
         .expect("the in-memory workspace must publish a settled resolution world");
     let transaction = Mutex::new(crate::resolution_currency::ResolutionTransaction::new(
         world,
+        verter_session_query::facts::policy::FactPolicy::production(),
     ));
     let reader = FixtureReader {
         fixture,
@@ -587,6 +588,7 @@ fn run_production_driver_for_project(
         .expect("the in-memory workspace must publish a settled resolution world");
     let transaction = Mutex::new(crate::resolution_currency::ResolutionTransaction::new(
         world,
+        verter_session_query::facts::policy::FactPolicy::production(),
     ));
     let reader = FixtureReader {
         fixture,

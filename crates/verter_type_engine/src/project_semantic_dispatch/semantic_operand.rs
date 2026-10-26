@@ -139,12 +139,14 @@ fn union_operand_evidence(
     if inputs.is_empty() {
         return produced;
     }
+    let policy = produced.read_set().facts.policy();
     let mut facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
         produced.read_set().facts.iter().cloned().collect();
     let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
         produced.self_roots().to_vec();
     let mut deps: Vec<DepSignature> = produced.dep_signatures().to_vec();
     for input in inputs {
+        policy.assert_compatible(input.read_set().facts.policy());
         facts.extend(input.read_set().facts.iter().cloned());
         for root in input.self_roots().iter() {
             if !roots.contains(root) {
@@ -158,9 +160,7 @@ fn union_operand_evidence(
         }
     }
     SemanticOperandEvidence::seal(
-        ReadSetSignature::new(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
-        ),
+        ReadSetSignature::new(policy.seal(facts)),
         Arc::from(roots.into_boxed_slice()),
         Arc::from(deps.into_boxed_slice()),
         &SemanticOperandAuthority::mint_for_forcing_boundary(),
@@ -476,9 +476,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok((
             Arc::from(nodes.into_boxed_slice()),
             SemanticOperandEvidence::seal(
-                ReadSetSignature::new(
-                    verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
-                ),
+                ReadSetSignature::new(self.ctx.request_flags().fact_policy().seal(facts)),
                 Arc::from(roots.into_boxed_slice()),
                 Arc::from(deps.into_boxed_slice()),
                 &SemanticOperandAuthority::mint_for_forcing_boundary(),
@@ -1339,7 +1337,7 @@ pub fn authored_instantiate_key_fixture(
             authority,
         ),
         SemanticOperandEvidence::seal(
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
             Arc::from([]),
             Arc::from([]),
             &authority,

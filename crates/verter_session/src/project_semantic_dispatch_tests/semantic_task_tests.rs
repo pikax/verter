@@ -1543,3 +1543,188 @@ fn root_continuations_harness_fails_a_planted_unannounced_park_at_the_deadline()
         "the harness returns soon after its injected deadline",
     );
 }
+
+/// A storage-only narrow fact policy: a set past 16 facts (8 when built by
+/// extension) is a tree, while the strict-root and precise-domain decisions
+/// keep their production widths, so a host under it answers and seals the
+/// same facts a production host does, in different storage.
+fn narrow_storage_policy() -> verter_session_query::facts::policy::FactPolicy {
+    verter_session_query::facts::policy::FactPolicy::with_widths(
+        verter_session_query::facts::policy::FactWidths {
+            fresh_slice_max: 16,
+            strict_root_threshold: 1_024,
+            precise_domain_max: 1_024,
+            extension_slice_max: 8,
+        },
+    )
+    .expect("valid widths")
+}
+
+/// [`crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host`]
+/// composed with `policy`: the workspace seals its resolution witnesses
+/// under it and the host builds every set under it.
+fn audit_host_under(
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> Arc<crate::VerterHost> {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new_with_fact_policy(
+        verter_workspace::MemoryOptions::default(),
+        verter_session_query::resolution::InputResolutionBudgets::default(),
+        policy,
+    ));
+    Arc::new(crate::VerterHost::new_with_scheduler_config(
+        crate::HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            audit_enabled: true,
+            footprint_capture: false,
+            ..crate::HostConfig::default()
+        },
+        workspace,
+        verter_scheduler::scheduler::SchedulerConfig {
+            cpu_threads: 1,
+            ..verter_scheduler::scheduler::SchedulerConfig::default()
+        },
+    ))
+}
+
+/// A task suspended on another producer and resumed on another thread
+/// seals what it publishes under the policy of the request that lent it
+/// its state: the policy travels with the task, never with the thread.
+#[test]
+fn a_task_resumed_on_another_thread_seals_under_its_hosts_fact_policy() {
+    let policy = narrow_storage_policy();
+    let host = audit_host_under(policy);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        TASK_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CHAIN),
+        crate::FileLanguage::script_ts(),
+    );
+    assert_eq!(host.project_type_store().fact_policy(), policy);
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let answer = drive_x5_across_a_wait(&host, &dispatch, true);
+    assert_eq!(display(&dispatch, &answer), "\"ok\"");
+    let graph = host.project_type_store().semantic_graph();
+    let mut sealed = 0;
+    for name in ["x5", "x4", "x3", "x2"] {
+        if let Some(signature) =
+            graph.entry_read_set_signature_for_tests(&typeof_key(&dispatch, name))
+        {
+            assert_eq!(
+                signature.facts.policy(),
+                policy,
+                "the entry for `typeof {name}` is sealed under the host's policy"
+            );
+            sealed += 1;
+        }
+    }
+    assert!(sealed > 0, "the resumed task publishes what it produced");
+}
+
+/// The `typeof v0` of a chain of `count` modules, each constant initialized
+/// from the next module's: its read set names every module of the chain.
+fn module_chain_host(
+    policy: verter_session_query::facts::policy::FactPolicy,
+    count: usize,
+) -> Arc<crate::VerterHost> {
+    let host = audit_host_under(policy);
+    for index in 0..count {
+        let source = if index + 1 == count {
+            format!("export const v{index} = \"ok\" as const;")
+        } else {
+            let next = index + 1;
+            format!("import {{ v{next} }} from \"./m{next}\";\nexport const v{index} = v{next};")
+        };
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            &format!("/fact-policy/m{index}.ts"),
+            &source,
+            crate::FileLanguage::script_ts(),
+        );
+    }
+    host
+}
+
+/// The answer and the sealed read set of a traced cold `typeof v0`.
+fn traced_chain_head(
+    host: &crate::VerterHost,
+) -> (String, verter_session_query::facts::fact_set::FactSet) {
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let key = dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(
+                "/fact-policy/m0.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: verter_type_expr::OwnedStr::from("v0"),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+    );
+    let (answer, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let read = dispatch.execute_read(key);
+            match read.value() {
+                QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+                other => panic!("the chain head answers a type: {other:?}"),
+            }
+        },
+    );
+    let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(set) =
+        read_set.finalise()
+    else {
+        panic!("a stable, cacheable chain seals its read set");
+    };
+    (display(&dispatch, &answer), set)
+}
+
+/// Two hosts composed with different fact policies run the same workload
+/// at once in one process. Each seals every set under its own policy —
+/// the narrow host's wide read set is a charged tree — and both seal the
+/// same facts and give the same answer: a policy chooses storage, never
+/// content, and never leaks from one host into the other.
+#[test]
+fn hosts_with_different_fact_policies_run_side_by_side() {
+    const MODULES: usize = 24;
+    let narrow = narrow_storage_policy();
+    let production = verter_session_query::facts::policy::FactPolicy::production();
+    let ((production_answer, production_set), (narrow_answer, narrow_set)) =
+        std::thread::scope(|scope| {
+            let production_run =
+                scope.spawn(|| traced_chain_head(&module_chain_host(production, MODULES)));
+            let narrow_run = scope.spawn(|| traced_chain_head(&module_chain_host(narrow, MODULES)));
+            (
+                production_run.join().expect("the production host answers"),
+                narrow_run.join().expect("the narrow host answers"),
+            )
+        });
+    assert_eq!(production_answer, "\"ok\"");
+    assert_eq!(narrow_answer, production_answer);
+    assert_eq!(narrow_set, production_set, "both hosts seal the same facts");
+    assert!(
+        narrow_set.len() > narrow.fresh_slice_max(),
+        "the read set is wide under the narrow policy: {}",
+        narrow_set.len()
+    );
+    assert_eq!(production_set.policy(), production);
+    assert_eq!(narrow_set.policy(), narrow);
+    assert!(
+        narrow_set.tree_storage().is_some() && narrow_set.tree_node_charges() > 0,
+        "under the narrow policy the wide set is a tree charging its own nodes"
+    );
+    println!(
+        "read set: {} facts; production storage flat: {}",
+        production_set.len(),
+        production_set.as_flat().is_some()
+    );
+}
+
+/// A host's policy is fixed when it is composed: binding a workspace that
+/// seals its witnesses under another policy is refused.
+#[test]
+#[should_panic(expected = "different fact policies")]
+fn a_workspace_of_another_fact_policy_cannot_be_bound() {
+    let host = audit_host_under(narrow_storage_policy());
+    host.set_workspace(Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    )));
+}

@@ -1879,6 +1879,9 @@ impl verter_workspace::WorkspaceRead for TestResolverReader {
 }
 
 impl verter_workspace::WorkspaceAccess for TestResolverReader {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     // Reader-only stub overrides (R6/R7). Rationale: `TestResolverReader`
     // is an LSP test fixture that only feeds the resolver with file content
     // for definition/hover/completion test plumbing; it never participates

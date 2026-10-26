@@ -1037,7 +1037,10 @@ fn assert_compile_retention_refusal_suppresses_companions(files: usize) {
                 }
             })
             .collect();
-        let facts = seal_canonical_signature(facts);
+        let facts = seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            facts,
+        );
         // The wide consumed result's evidence carries its own charge, which
         // the compile's admission must claim whole.
         let consumed = ResultReceipt::new(facts.iter().cloned().collect());

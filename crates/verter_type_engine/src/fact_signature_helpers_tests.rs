@@ -40,7 +40,8 @@ mod read_set_signature_unit_tests {
     fn read_set_signature_empty_validates_vacuously_via_facts_path() {
         // Empty carrier: facts empty. `validate_fact_signature`
         // returns true on empty input.
-        let sig = ReadSetSignature::empty();
+        let sig =
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production());
         assert_eq!(sig.facts.len(), 0, "empty carrier carries no facts");
         // Don't assert validate without ctx — empty carrier's
         // `validate` short-circuits via empty fact list. Tested
@@ -52,7 +53,7 @@ mod read_set_signature_unit_tests {
         // facts mention /a.ts twice + /b.ts once. The canonical set
         // must collapse the duplicate /a.ts to one entry.
         let facts: verter_session_query::facts::fact_set::FactSet =
-            verter_session_query::facts::fact_set::FactSet::from(vec![
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                 fact_filewhole("/a.ts", 1),
                 fact_parse("/a.ts", 9),
                 fact_filewhole("/b.ts", 2),
@@ -75,7 +76,7 @@ mod read_set_signature_unit_tests {
     #[test]
     fn read_set_signature_canonical_ids_covers_all_fact_variants() {
         let facts: verter_session_query::facts::fact_set::FactSet =
-            verter_session_query::facts::fact_set::FactSet::from(vec![
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                 fact_filewhole("/wholehash.ts", 1),
                 fact_derived("/derived.ts", 2),
                 fact_parse("/parse.ts", 3),
@@ -131,7 +132,7 @@ mod read_set_signature_unit_tests {
         // contribute nothing to the reverse-index canonical set, while
         // the sibling `FileWholeHash` fact still surfaces.
         let facts: verter_session_query::facts::fact_set::FactSet =
-            verter_session_query::facts::fact_set::FactSet::from(vec![
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                 FactVersionRef::ProjectGeneration { generation: 7 },
                 fact_filewhole("/only.ts", 1),
             ]);
@@ -151,7 +152,8 @@ mod read_set_signature_unit_tests {
     #[test]
     fn read_set_signature_new_is_fact_only() {
         let facts: verter_session_query::facts::fact_set::FactSet =
-            verter_session_query::facts::fact_set::FactSet::from(vec![fact_filewhole("/a.ts", 1)]);
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of(vec![fact_filewhole("/a.ts", 1)]);
         let sig = ReadSetSignature::new(facts.clone());
         assert_eq!(sig.facts.len(), 1);
         assert!(sig.facts.ptr_eq(&facts), "new() stores facts verbatim");
@@ -184,7 +186,10 @@ mod file_source_env_observation_tests {
             ),
             file_language_id: FileArtifactKey::synthetic_file_language_for_test("/contrib.d.ts"),
         };
-        let sig = ReadSetSignature::new(StdArc::from(vec![fact]));
+        let sig = ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of_shared(StdArc::from(vec![fact])),
+        );
         let canons = sig.canonical_ids();
         assert_eq!(canons.len(), 1, "one contributor canonical expected");
         assert_eq!(canons[0].as_ref(), "/contrib.d.ts");
@@ -197,7 +202,10 @@ fn cacheability_probe_preserves_mutation_and_provenance_refusals() {
     use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
 
     let knobs = crate::engine_test_knobs::TestKnobs::default();
-    let source = FactTracerBasisSource::unbound_observers(&knobs);
+    let source = FactTracerBasisSource::unbound_observers(
+        &knobs,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     let (_, read_set) = source.with_fact_tracer_cell(|cell| {
         let probe = CacheabilityProbe {
             cell,
@@ -233,11 +241,12 @@ fn cacheability_probe_preserves_mutation_and_provenance_refusals() {
 #[test]
 fn a_completed_structural_carrier_shares_its_whole_file_name() {
     let canonical: Arc<str> = Arc::from("/shared-name.ts");
-    let facts =
-        verter_session_query::facts::fact_set::FactSet::from([FactVersionRef::FileWholeHash {
+    let facts = verter_session_query::facts::policy::FactPolicy::production().set_of([
+        FactVersionRef::FileWholeHash {
             canonical_id: Arc::clone(&canonical),
             hash: [9; 16],
-        }]);
+        },
+    ]);
     let (served, roots) = shared_completed_carrier_rooting_traced_files(&[], &facts)
         .expect("one canonical whole-file fact completes the carrier");
     assert!(served.ptr_eq(&facts));
@@ -251,6 +260,7 @@ fn a_completed_structural_carrier_shares_its_whole_file_name() {
 #[test]
 fn structural_completion_shares_the_sealed_set_and_its_names() {
     let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
         (0..32)
             .map(|index| FactVersionRef::FileWholeHash {
                 canonical_id: Arc::from(format!("/shared-{index:03}.ts")),
@@ -283,23 +293,27 @@ fn structural_completion_shares_the_sealed_set_and_its_names() {
 #[test]
 fn root_completion_rejects_conflicting_observed_versions() {
     let canonical = verter_type_expr::OwnedStr::from("/conflict.ts");
-    let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: Arc::from("/conflict.ts"),
-            hash: [1; 16],
-        },
-        FactVersionRef::FileWholeHash {
-            canonical_id: Arc::from("/conflict.ts"),
-            hash: [2; 16],
-        },
-    ]);
+    let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: Arc::from("/conflict.ts"),
+                hash: [1; 16],
+            },
+            FactVersionRef::FileWholeHash {
+                canonical_id: Arc::from("/conflict.ts"),
+                hash: [2; 16],
+            },
+        ],
+    );
     assert!(shared_completed_carrier_rooting_traced_files(&[], &signature).is_none());
-    let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(vec![
-        FactVersionRef::FileWholeHash {
+    let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        vec![FactVersionRef::FileWholeHash {
             canonical_id: Arc::from("/conflict.ts"),
             hash: [1; 16],
-        },
-    ]);
+        }],
+    );
     assert!(shared_completed_carrier_rooting_traced_files(
         &[(canonical.clone(), [1; 16]), (canonical, [2; 16])],
         &signature,

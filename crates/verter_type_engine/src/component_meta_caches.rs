@@ -366,7 +366,8 @@ impl ImportedRegistryDb {
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                .empty_set(),
             validated_at_generation: 0,
         });
         self.insert_for_test(key, entry);
@@ -1491,7 +1492,7 @@ impl ShapeCacheDb {
         let footprint = verter_session_query::retention::heap_size::footprint(&(key, &value));
         CacheEntry::admit::<ShapeCacheKey>(
             value,
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
             Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
             0,
             footprint,
@@ -1724,7 +1725,8 @@ mod retention_tests {
             key(),
             Arc::new(super::ImportedRegistryEntry {
                 value: Some(value.clone()),
-                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                    .empty_set(),
                 validated_at_generation: 0,
             }),
         );
@@ -1778,11 +1780,11 @@ mod retention_tests {
         let admitted = crate::cache_runtime::Candidate::admit::<super::ImportedRegistryKey>(
             crate::cache_runtime::FactCandidateDiscriminant {
                 validated_at_generation: 0,
-                facts: crate::fact_signature_helpers::empty_fact_signature(),
+                facts: verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             },
             (),
             verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ),
             Arc::from(Vec::<Arc<str>>::new()),
             0,

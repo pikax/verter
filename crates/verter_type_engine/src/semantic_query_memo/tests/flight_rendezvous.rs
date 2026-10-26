@@ -37,6 +37,7 @@ fn a_same_key_subscriber_of_another_flight_never_satisfies_readiness() {
         crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
             std::sync::atomic::AtomicU64::new(0),
         )),
+        verter_session_query::facts::policy::FactPolicy::production(),
     );
     let held = Arc::new(FlightCell::new());
     let other = Arc::new(FlightCell::new());
@@ -131,6 +132,7 @@ fn a_newer_rendezvous_for_another_key_never_shadows_the_older_live_one() {
         crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
             std::sync::atomic::AtomicU64::new(0),
         )),
+        verter_session_query::facts::policy::FactPolicy::production(),
     );
     let held = Arc::new(FlightCell::new());
     // The rendezvous lives inside the scope: a failed assertion unwinds

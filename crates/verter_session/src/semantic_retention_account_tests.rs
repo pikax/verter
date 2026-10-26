@@ -691,7 +691,7 @@ fn the_result_entry_footprint_scales_with_the_entry() {
         crate::component_meta_result_db::ComponentMetaResultEntry {
             payload: Arc::new(0u32),
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                Arc::from(facts),
+                verter_session_query::facts::policy::FactPolicy::production().set_of(facts),
             ),
             validated_at_generation: 0,
         }
@@ -721,7 +721,7 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
         ComponentMetaResultEntry {
             payload: Arc::new(value),
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                Arc::from(vec![
+                verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                         canonical_id: "/src/Owner.vue".into(),
                         hash: [1u8; 16],

@@ -21,7 +21,9 @@ fn seed_relation_scc_root(
     );
     store.insert_relation_payload_for_tests(
         root_key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::Assignable,
@@ -524,12 +526,14 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     // The carrier's fact rail names the test canonical via a
     // `FileWholeHash` fact — `register_reverse_index` registers under
     // every canonical `read_set_signature.canonical_ids()` yields.
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/helper_test.ts".into(),
-            hash: [7u8; 16],
-        },
-    ]));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/w/helper_test.ts".into(),
+                hash: [7u8; 16],
+            },
+        ]),
+    );
     store.warm_publish_one_for_tests(
         &host,
         &super::prepared::PreparedKeyHandle::prepare(key.clone()),
@@ -946,7 +950,7 @@ pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
         key_expanded.clone(),
         QueryResult::Value(value),
         verter_session_query::facts::fact_cache::ReadSetSignature::new(
-            verter_type_engine::fact_signature_helpers::empty_fact_signature(),
+            verter_session_query::facts::policy::FactPolicy::production().empty_set(),
         ),
         Arc::from([]),
         empty_signature(),
@@ -1026,7 +1030,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let walker_diagnostics: verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics =
         verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default();
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
-        verter_type_engine::fact_signature_helpers::empty_fact_signature(),
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
     );
     let inflight = Arc::new(FlightCell::new());
     // A `Navigate` terminal recorded into the `Expanded` slot — the
@@ -1684,7 +1688,9 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     // Cold insert → warm hit on the SAME full identity (no recompute).
     store.insert_relation_payload_for_tests(
         key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::NotAssignable,
@@ -1711,7 +1717,9 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     // discriminant ⇒ in-place replace, never a second candidate.
     store.insert_relation_payload_for_tests(
         key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::NotAssignable,
@@ -1760,7 +1768,9 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     let gen0 = host.project_type_store().current_project_generation();
     store.insert_relation_payload_for_tests(
         key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::Assignable,
@@ -1927,9 +1937,10 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
         verter_type_engine::semantic_query::RelationContext::default(),
     );
     let gen0 = host.project_type_store().current_project_generation();
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-        FactVersionRef::ProjectGeneration { generation: gen0 },
-    ]));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![FactVersionRef::ProjectGeneration { generation: gen0 }]),
+    );
     store.insert_relation_payload_for_tests(
         key.clone(),
         carrier,
@@ -1974,13 +1985,14 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
     let gen0 = host.project_type_store().current_project_generation();
 
     let touched = "/w/relation_touched.ts";
-    let touched_carrier =
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+    let touched_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: touched.into(),
                 hash: [0xAB; 16],
             },
-        ]));
+        ]),
+    );
     let touched_key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
         source,
         target,
@@ -2004,7 +2016,9 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
     );
     store.insert_relation_payload_for_tests(
         untouched_key,
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::NotAssignable,
@@ -2151,7 +2165,9 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
         store.publish_scc_members_fenced_for_tests(
             Some(&host),
             &root_witness,
-            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production()
+            ),
             &Arc::from(Vec::<Arc<str>>::new()),
             generation,
             vec![
@@ -2211,15 +2227,17 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
         target,
         verter_type_engine::semantic_query::RelationContext::default(),
     );
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
-        vec![
-            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: Arc::clone(&canonical),
-                hash: whole_hash,
-            },
-        ]
-        .into_boxed_slice(),
-    ));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(
+            vec![
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: Arc::clone(&canonical),
+                    hash: whole_hash,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+    );
     let roots = Arc::from(vec![Arc::clone(&canonical)].into_boxed_slice());
     store.insert_relation_payload_for_tests(
         root_key.clone(),
@@ -2328,17 +2346,20 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
         "fixture: the Relate family cap is the floor cap 4",
     );
 
-    let valid_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::empty();
+    let valid_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     let valid_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
     // The invalid candidate: self-rooted on a canonical the live store
     // view never tracked — strict self-root validation always fails.
-    let invalid_carrier =
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+    let invalid_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: "/w/relation_never_tracked.ts".into(),
                 hash: [0xCD; 16],
             },
-        ]));
+        ]),
+    );
     let invalid_roots: Arc<[Arc<str>]> =
         Arc::from(vec![Arc::<str>::from("/w/relation_never_tracked.ts")]);
 
@@ -2427,7 +2448,9 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     );
     store.insert_relation_payload_for_tests(
         admit_key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::NotAssignable,
@@ -2484,7 +2507,9 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
             >,
         >,
         &root_witness,
-        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         &Arc::from(Vec::<Arc<str>>::new()),
         gen0,
         vec![
@@ -2512,7 +2537,9 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
             >,
         >,
         &root_witness,
-        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         &Arc::from(Vec::<Arc<str>>::new()),
         gen0,
         vec![
@@ -2563,7 +2590,9 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let flight_published = store.publish_scc_members_fenced_for_tests(
         Some(&host),
         &root_witness,
-        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         &Arc::from(Vec::<Arc<str>>::new()),
         gen0,
         vec![
@@ -3147,7 +3176,9 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         &host,
         aborted_key.clone(),
         QueryResult::Value(node),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         verter_type_engine::semantic_query::DepSignature::default(),
         Arc::from([]),
         verter_type_engine::semantic_query::demand::MaterializedSet::single(
@@ -3177,7 +3208,9 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         &host,
         healthy_key.clone(),
         QueryResult::Value(node),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         verter_type_engine::semantic_query::DepSignature::default(),
         Arc::from([]),
         verter_type_engine::semantic_query::demand::MaterializedSet::single(
@@ -3334,12 +3367,14 @@ fn carrier_naming(
     canonical: &str,
     hash: u8,
 ) -> verter_session_query::facts::fact_cache::ReadSetSignature {
-    verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: [hash; 16],
-        },
-    ]))
+    verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [hash; 16],
+            },
+        ]),
+    )
 }
 
 #[test]
@@ -4673,7 +4708,8 @@ fn prefix_backfill_carries_traced_facts() {
     // does not go through the dispatch's `traced_build` wrapper, so it
     // builds `graph_carrier` itself here.
     let parent_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
-        Arc::clone(&parent_traced_facts),
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of_shared(Arc::clone(&parent_traced_facts)),
     );
     // What the walk sealed for the prefix as it reached it.
     let prefix_receipt =
@@ -5039,7 +5075,8 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                 // itself (the dispatch's `traced_build` wrapper is not
                 // in scope here).
                 let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                    Arc::from(vec![winner_fact_for_build.clone()]),
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_fact_for_build.clone()]),
                 );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
@@ -5252,7 +5289,8 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                 // unvalidatable legacy dep) yet the self-root
                 // observation is intact.
                 let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                    Arc::from(vec![winner_fact_for_build.clone()]),
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_fact_for_build.clone()]),
                 );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
@@ -5511,7 +5549,10 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 // Self-version-rooted carrier: one `FileWholeHash`
                 // self-root for the keyed canonical, plus the matching
                 // `self_root_canonicals` entry.
-                let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
+                let carrier = ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_fact_for_build.clone()]),
+                );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
                     dep_signature: verter_type_engine::semantic_query::DepSignature::new(
@@ -5729,7 +5770,10 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 rx_release_winner
                     .recv()
                     .expect("winner: released by driver");
-                let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
+                let carrier = ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_fact_for_build.clone()]),
+                );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
                     dep_signature: verter_type_engine::semantic_query::DepSignature::new(
@@ -6209,8 +6253,10 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                 // established for admission. So `cache_suppress=true`,
                 // `result_is_partial=false` (a complete result that still
                 // warms a component-meta final cache).
-                let carrier =
-                    ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
+                let carrier = ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_dep_fact_for_build.clone()]),
+                );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
                     dep_signature: verter_type_engine::semantic_query::DepSignature::new(
@@ -6504,8 +6550,10 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                 // *dependency* fact and an EMPTY `self_root_canonicals`
                 // — `cache_suppress` is `false` (a plain miss is a
                 // cacheable result, not a non-cacheable build).
-                let carrier =
-                    ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
+                let carrier = ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_dep_fact_for_build.clone()]),
+                );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Error(QueryError::Miss),
                     dep_signature: verter_type_engine::semantic_query::DepSignature::new(
@@ -6715,13 +6763,14 @@ fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
             name: verter_type_expr::OwnedStr::from(format!("Decl{i}")),
         });
         let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let carrier =
-            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+        let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: format!("/w/dist{i}.ts").into(),
                     hash: [1u8; 16],
                 },
-            ]));
+            ]),
+        );
         store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
     }
 
@@ -6796,8 +6845,10 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
                 hash: [1u8; 16],
             },
         ]);
-    let carrier =
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(two_canonical_facts);
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of_shared(two_canonical_facts),
+    );
     store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
     assert_eq!(store.canonical_to_entries_shard_count_for_test(), 2);
 
@@ -9428,22 +9479,24 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     let dep = empty_signature();
     let root_owner: Arc<str> = Arc::from("/w/owner.ts");
     let root_producer: Arc<str> = Arc::from("/w/producer.ts");
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
-        vec![
-            FactVersionRef::FileWholeHash {
-                canonical_id: root_owner.as_ref().to_string().into(),
-                hash: [1u8; 16],
-            },
-            // A whole-hash for a DIFFERENT canonical (a cross-file
-            // dependency): the rail is non-empty, but it carries no
-            // whole-hash for `root_producer`.
-            FactVersionRef::FileWholeHash {
-                canonical_id: String::from("/w/other.ts").into(),
-                hash: [2u8; 16],
-            },
-        ]
-        .into_boxed_slice(),
-    ));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(
+            vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: root_owner.as_ref().to_string().into(),
+                    hash: [1u8; 16],
+                },
+                // A whole-hash for a DIFFERENT canonical (a cross-file
+                // dependency): the rail is non-empty, but it carries no
+                // whole-hash for `root_producer`.
+                FactVersionRef::FileWholeHash {
+                    canonical_id: String::from("/w/other.ts").into(),
+                    hash: [2u8; 16],
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+    );
 
     // A listed root WITH its fact reconstructs onto the evidence.
     let evidence = semantic_operand_evidence(&carrier, &[Arc::clone(&root_owner)], &dep)
@@ -9470,20 +9523,24 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     // A wide carrier, extended so it is held in shared storage: the producer
     // root's fact sorts LAST, behind more than a wide signature of unrelated
     // dependencies.
-    let mut wide: Vec<FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 1)
-            .map(|index| FactVersionRef::FileWholeHash {
-                canonical_id: format!("/w/dep-{index:05}.ts").into(),
-                hash: [3u8; 16],
-            })
-            .collect();
+    let mut wide: Vec<FactVersionRef> = (0..2
+        * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+        + 1)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/w/dep-{index:05}.ts").into(),
+            hash: [3u8; 16],
+        })
+        .collect();
     wide.push(FactVersionRef::FileWholeHash {
         canonical_id: root_producer.as_ref().to_string().into(),
         hash: [4u8; 16],
     });
     let wide = verter_session_query::facts::fact_cache::ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(wide[..1].to_vec())
-            .union_with_facts(&wide[1..]),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            wide[..1].to_vec(),
+        )
+        .union_with_facts(&wide[1..]),
     );
     assert!(
         wide.facts.tree_storage().is_some()
@@ -9626,7 +9683,9 @@ fn a_candidate_over_a_destroyed_node_is_never_admitted() {
     store.publish_with_carrier_for_tests(
         stale_result.clone(),
         QueryResult::Value(a_obj),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::clone(&no_roots),
     );
     assert!(
@@ -9661,7 +9720,9 @@ fn a_candidate_over_a_destroyed_node_is_never_admitted() {
     store.publish_with_carrier_for_tests(
         live_key.clone(),
         QueryResult::Value(shared),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         no_roots,
     );
     assert!(

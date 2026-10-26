@@ -2111,7 +2111,9 @@ impl VerterHost {
                 },
                 refusal.diagnostics,
                 false,
-                crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
+                crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(
+                    self.project_type_store().fact_policy(),
+                ),
             ),
             Err(diagnostics) => {
                 let publication_fence = self.block_content.admission_fence.lock();
@@ -2295,6 +2297,7 @@ impl VerterHost {
                             captured_key,
                             compile_output_value,
                             captured_generation,
+                            self.project_type_store().fact_policy(),
                         );
                     }
                 }
@@ -3523,7 +3526,9 @@ impl VerterHost {
 
         // Convert raw template data into analysis types when available.
         let mut template_class_admission =
-            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable();
+            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(
+                self.project_type_store().fact_policy(),
+            );
         let template_analysis = products.template_facts().map(|facts_product| {
             let (analysis, admission) = self.template_analysis_from_facts(snapshot, facts_product);
             template_class_admission = admission;

@@ -24,7 +24,9 @@ use verter_type_engine::semantic_query::{
 fn seed_root(store: &SemanticGraphStore, key: &RelateMemoKey) -> SccRootWitness {
     store.insert_relation_payload_for_tests(
         key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(RelationOutcome::Assignable),
         0,
@@ -224,12 +226,14 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
             })
             .unwrap();
         let hash = host.ensure_indexed_ready(canonical).unwrap().whole_hash;
-        let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
-            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical.into(),
-                hash,
-            },
-        ]));
+        let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of([
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.into(),
+                    hash,
+                },
+            ]),
+        );
         let self_roots = Arc::from([Arc::<str>::from(canonical)]);
         let harness = GraphFixture::new();
         let task = harness.run(|store| store.task_registry_for_tests().register_task());
@@ -382,7 +386,9 @@ fn scc_batch_refuses_whole_when_a_member_value_could_not_be_held() {
                 >,
             >,
             &witness,
-            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             &Arc::from(Vec::<Arc<str>>::new()),
             0,
             pending,
@@ -440,7 +446,9 @@ fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, 
             >,
         >,
         &witness,
-        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         &Arc::from(Vec::<Arc<str>>::new()),
         0,
         pending,
@@ -708,7 +716,9 @@ fn scc_batch_refuses_whole_on_a_proof_key_mismatch() {
                 >,
             >,
             &witness,
-            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             &Arc::from(Vec::<Arc<str>>::new()),
             0,
             pending,
@@ -833,14 +843,16 @@ fn run_exact_fit_pressure_batch(
                     None,
                 ))),
                 flow_whole_return_projection(),
-                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
                 Arc::from(Vec::<Arc<str>>::new()),
                 0,
             );
         } else {
             store.insert_relation_payload_for_tests(
                 keys[1].clone(),
-                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                ),
                 Arc::from(Vec::<Arc<str>>::new()),
                 store.relation_payload_for_tests(RelationOutcome::Assignable),
                 0,
@@ -853,7 +865,9 @@ fn run_exact_fit_pressure_batch(
     for filler in &keys[filler_start..] {
         store.insert_relation_payload_for_tests(
             filler.clone(),
-            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             Arc::from(Vec::<Arc<str>>::new()),
             store.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
@@ -888,7 +902,9 @@ fn run_exact_fit_pressure_batch(
                 >,
             >,
             &witness,
-            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production()
+            ),
             &Arc::from(Vec::<Arc<str>>::new()),
             0,
             pending,
@@ -1063,17 +1079,23 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
     // live view does not carry, so the candidate is resident and can
     // never validate. Generations 1 / 3 / 4 carry empty rails and always
     // validate.
-    let stale = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: dep.into(),
-        hash: [0xEEu8; 16],
-    }]));
+    let stale = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: dep.into(),
+                hash: [0xEEu8; 16],
+            },
+        ]),
+    );
     for generation in 1..=4u64 {
         store.insert_relation_payload_for_tests(
             member_key.clone(),
             if generation == 2 {
                 stale.clone()
             } else {
-                ReadSetSignature::empty()
+                ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                )
             },
             Arc::clone(&empty_roots),
             store.relation_payload_for_tests(RelationOutcome::Assignable),
@@ -1094,7 +1116,7 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
     let published = store.publish_scc_members_fenced_for_tests(
         Some(&host),
         &witness,
-        &ReadSetSignature::empty(),
+        &ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         &empty_roots,
         9,
         vec![PendingRelationMember {

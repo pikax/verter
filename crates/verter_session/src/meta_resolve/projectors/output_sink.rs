@@ -542,10 +542,12 @@ fn member_shape_peek_or_compute<M: verter_audit::observe::ObserveExec>(
             return materialized_with_gate_fence;
         }
         let materialized_for_closure = materialized_with_gate_fence.clone();
+        let fact_policy = ctx.request_flags().fact_policy();
         let admitted = scope.get_or_compute(&key, move || {
             let scope_obs = observed_scope?;
             let parse_fact = scope_obs.syntactic_export_set.clone()?;
             match verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+                fact_policy,
                 &scope_obs,
                 parse_fact,
                 materialized_for_closure.dep_signature(),
@@ -687,6 +689,7 @@ fn admit_member_shape_if_possible<M: verter_audit::observe::ObserveExec>(
     };
     let fact_sig =
         match verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+            ctx.request_flags().fact_policy(),
             &observed_scope,
             parse_fact,
             value.dep_signature(),

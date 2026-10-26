@@ -2166,6 +2166,7 @@ mod ownership_tests {
                 crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                     std::sync::atomic::AtomicU64::new(0),
                 )),
+                verter_session_query::facts::policy::FactPolicy::production(),
             );
             let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
             ledger.set_limits_for_tests(1, 8);
@@ -2216,6 +2217,7 @@ mod envelope_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         let (guard, trip) = ledger.enter(false);
@@ -2250,6 +2252,7 @@ mod advisory_bytes_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         let (_guard, trip) = ledger.enter(false);
@@ -2336,6 +2339,7 @@ mod advisory_bytes_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         ledger.set_byte_limit_for_tests(100);
@@ -2423,6 +2427,7 @@ mod inline_cost_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         let (_guard, trip) = ledger.enter(false);

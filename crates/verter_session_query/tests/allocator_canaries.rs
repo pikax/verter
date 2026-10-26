@@ -167,7 +167,8 @@ fn a_fact_tree_charges_exactly_what_it_allocates() {
     let before = thread_live();
     // A fresh wide seal is born in tree storage; each later link adds one
     // fact and every seventh also removes one, sharing the rest.
-    let base = FactSet::from_facts((0..2_000).map(fact).collect());
+    let base = verter_session_query::facts::policy::FactPolicy::production()
+        .set_of((0..2_000).map(fact).collect::<Vec<_>>());
     held.push(base.clone());
     let mut set = base.union_with_facts(&[fact(1_000_000)]);
     drop(base);
