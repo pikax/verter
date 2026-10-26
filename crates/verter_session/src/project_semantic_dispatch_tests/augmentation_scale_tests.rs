@@ -864,21 +864,10 @@ fn retained(host: &VerterHost) -> Retained {
     }
 }
 
-/// Answering a merged interface at `FIRST` contributors and then, after
-/// edits add the rest, at `GROWN` leaves the engine retaining what a fresh
-/// engine answering only `GROWN` retains, plus the first answer.
-///
-/// Per-file state — artifacts, superseded versions, their parse-snapshot
-/// leases and pinned bytes — must equal the fresh engine's. The first
-/// demand's own cached answers may survive as superseded candidates, so
-/// the candidate excess is bounded by that demand's answers (its
-/// candidates beyond one lowering per contributor), and the retained-byte
-/// excess by what the first step retained. A per-contributor retention
-/// grows with the contributor count and fails both.
-#[test]
-fn growing_merged_contributors_between_answers_retains_only_the_answers() {
-    const FIRST: usize = 64;
-    const GROWN: usize = 256;
+/// [`growing_merged_contributors_between_answers_retains_only_the_answers`]
+/// from `FIRST` to `GROWN` contributors.
+#[allow(non_snake_case)]
+fn assert_growing_contributors_retain_only_the_answers(FIRST: usize, GROWN: usize) {
     for global in [true, false] {
         // The account is process-wide: the baseline engine is measured and
         // dropped before the growing one starts.
@@ -931,5 +920,36 @@ fn growing_merged_contributors_between_answers_retains_only_the_answers() {
                 <= baseline.retained_bytes + (first.retained_bytes - setup.retained_bytes),
             "retained bytes may exceed a fresh engine's only by the first step's: first={first:?}, {label}"
         );
+    }
+}
+
+/// The same growth from 16 to 64 contributors: the gate version of the
+/// 64-to-256 test in the nightly scale tier. Every bound is relative to a
+/// fresh engine answering the grown set, so it holds at any size, and the
+/// fourfold growth is the full-size test's.
+#[test]
+fn growing_merged_contributors_fourfold_retains_only_the_answers() {
+    assert_growing_contributors_retain_only_the_answers(16, 64);
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// Answering a merged interface at `FIRST` contributors and then, after
+    /// edits add the rest, at `GROWN` leaves the engine retaining what a fresh
+    /// engine answering only `GROWN` retains, plus the first answer.
+    ///
+    /// Per-file state — artifacts, superseded versions, their parse-snapshot
+    /// leases and pinned bytes — must equal the fresh engine's. The first
+    /// demand's own cached answers may survive as superseded candidates, so
+    /// the candidate excess is bounded by that demand's answers (its
+    /// candidates beyond one lowering per contributor), and the retained-byte
+    /// excess by what the first step retained. A per-contributor retention
+    /// grows with the contributor count and fails both.
+    #[test]
+    fn growing_merged_contributors_between_answers_retains_only_the_answers() {
+        assert_growing_contributors_retain_only_the_answers(64, 256);
     }
 }
