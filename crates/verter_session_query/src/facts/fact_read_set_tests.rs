@@ -1426,6 +1426,54 @@ fn an_edit_to_any_fact_including_the_last_invalidates() {
     }
 }
 
+/// A signature held in tree storage built by edits — an enclosing tracer
+/// absorbing a sealed wide witness and observing facts of its own, the
+/// production shape of a nested result — validates every fact: an edit to
+/// any fact, the witness's and its own, the last in canonical order
+/// included, makes it stale.
+#[test]
+fn a_tree_signature_built_by_edits_detects_an_edit_to_any_fact_including_the_last() {
+    let width = 2 * WIDE_SIGNATURE_WIDTH + 7;
+    let facts = wide_whole_hashes(width);
+    let (inner, outer) = facts.split_at(width - 40);
+    let witness = seal(inner).facts;
+    let mut read_set = FactReadSet::new();
+    read_set.absorb_canonical_signature(&witness);
+    for fact in outer.iter().rev() {
+        read_set.observe(fact.clone());
+    }
+    let FactReadSetFinalise::Ok(set) = read_set.finalise() else {
+        panic!("seals");
+    };
+    assert!(
+        set.tree_storage().is_some(),
+        "an extended wide set is held in tree storage"
+    );
+    assert!(
+        set.tree_footprint().nodes > 0,
+        "the extension built tree nodes"
+    );
+    assert_eq!(set.len(), width);
+    let signature = crate::facts::fact_cache::ReadSetSignature::new(set);
+    assert!(
+        signature.validates(&live_table(&facts)),
+        "the live view validates"
+    );
+    let mut probes: Vec<usize> = (0..width).step_by(97).collect();
+    probes.extend([0, inner.len() - 1, inner.len(), width - 1]);
+    for index in probes {
+        let mut live = live_table(&facts);
+        let FactVersionRef::FileWholeHash { canonical_id, .. } = &facts[index] else {
+            unreachable!("fixture holds whole-hash facts only");
+        };
+        live.0.insert(canonical_id.to_string(), hash16(2));
+        assert!(
+            !signature.validates(&live),
+            "an edit to fact {index} of a tree-backed signature must make it stale"
+        );
+    }
+}
+
 /// The same observed set always seals to the same set, whatever order it
 /// was observed in, and a sealed wide signature absorbed into an enclosing
 /// tracer is shared rather than copied: the enclosing set is built on its
@@ -1679,6 +1727,66 @@ fn a_retained_candidate_claims_its_receipts_once_into_its_refusable_reservation(
         (0, 0),
         "the last holder's drop drains every receipt charge"
     );
+}
+
+/// A claim is transactional: when the candidate's own hold refuses after
+/// its reservation was granted, nothing is committed — every receipt and
+/// tree node stays pinned and unclaimed, nothing is retained — so a later
+/// admission is still charged for all of it.
+#[test]
+fn a_refused_own_hold_commits_no_claim() {
+    use crate::retention::{ChargeClass, RetentionAdmission, RetentionLimits};
+    let account = isolated_account();
+    let receipts = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &account);
+    let receipt_bytes = account.snapshot().pinned_bytes;
+    assert!(receipt_bytes > 0);
+    // Tree storage built by edits that reaches the receipts.
+    let signature = FactSet::from_facts(wide_whole_hashes(64)).union_with_facts(receipts.iter());
+    let nodes = signature.tree_footprint();
+    assert!(nodes.nodes > 0 && nodes.pinned_bytes > 0);
+    assert_eq!(nodes.retained_bytes, 0);
+
+    let refusing = crate::retention::SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 0,
+        ..RetentionLimits::defaults()
+    });
+    let RetentionAdmission::Refused(refusal) = refusing.reserve(ChargeClass::Retained, 1) else {
+        panic!("a zero-byte entry limit refuses");
+    };
+    let outcome = crate::facts::receipt::reserve_retained_with_evidence_then(
+        &account,
+        10,
+        &[&signature],
+        |_own| Err::<(), _>(refusal),
+    );
+    assert!(
+        outcome.is_err(),
+        "the own hold's refusal refuses the admission"
+    );
+    let after = account.snapshot();
+    assert_eq!(
+        (after.pinned_bytes, after.retained_bytes),
+        (receipt_bytes, 0),
+        "the refused admission released its whole reservation"
+    );
+    assert!(receipt_classes(&receipts)
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Pinned)));
+    let footprint = signature.tree_footprint();
+    assert_eq!(footprint.retained_bytes, 0, "no tree node was claimed");
+    assert_eq!(footprint.pinned_bytes, nodes.pinned_bytes);
+    assert!(signature.has_unclaimed_storage());
+
+    let charge = crate::facts::receipt::reserve_retained_with_evidence(&account, 10, &[&signature])
+        .admitted()
+        .expect("admitted");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        10 + receipt_bytes + nodes.pinned_bytes,
+        "a later admission is charged for every receipt and node"
+    );
+    assert!(!signature.has_unclaimed_storage());
+    drop(charge);
 }
 
 /// A candidate is refused for the whole footprint it would retain — its

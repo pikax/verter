@@ -642,7 +642,6 @@ impl SemanticGraphStore {
         Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
     > {
-        use verter_session_query::retention::RetentionAdmission;
         let account = self.retention_account();
         let refuse = |refusal: verter_session_query::retention::RetentionRefusal| {
             crate::cache_runtime::admission::propagate_non_admission(
@@ -676,26 +675,27 @@ impl SemanticGraphStore {
             .iter()
             .map(|(_, entry)| &entry.read_set_signature.facts)
             .collect();
-        let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        // The carriers' storage is claimed only once every member's own
+        // names are held: a refused hold leaves it pinned and unclaimed.
+        let owned = verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
             account,
             own.iter().map(|footprint| footprint.bytes).sum(),
             &carriers,
-        ) {
-            RetentionAdmission::Admitted(charge) => charge,
-            RetentionAdmission::Refused(refusal) => return Err(refuse(refusal)),
-        };
-        shared
+            |mut batch| {
+                own.into_iter()
+                    .map(|own| {
+                        let charge = batch.split_off(own.bytes);
+                        own.handles.retained_with(charge, self.charge_ctx())
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            },
+        )
+        .map_err(refuse)?;
+        Ok(shared
             .into_iter()
-            .zip(own)
-            .map(|(holds, own)| {
-                let charge = batch.split_off(own.bytes);
-                let charge = own
-                    .handles
-                    .retained_with(charge, self.charge_ctx())
-                    .map_err(refuse)?;
-                Ok(Arc::new(holds.with_own(charge)))
-            })
-            .collect()
+            .zip(owned)
+            .map(|(holds, own)| Arc::new(holds.with_own(own)))
+            .collect())
     }
 
     /// Reserve the container charge of EVERY staged member's family, keyed

@@ -581,6 +581,24 @@ pub fn reserve_retained_with_evidence<S: SignatureFacts + ?Sized>(
     own_bytes: usize,
     signatures: &[&S],
 ) -> RetentionAdmission {
+    match reserve_retained_with_evidence_then(account, own_bytes, signatures, Ok) {
+        Ok(charge) => RetentionAdmission::Admitted(charge),
+        Err(refusal) => RetentionAdmission::Refused(refusal),
+    }
+}
+
+/// [`reserve_retained_with_evidence`] whose admission also needs the
+/// candidate's own charge finished (its owned names held, say) by `finish`.
+/// The claims are committed only once `finish` succeeds: a refusal from
+/// `finish` releases the whole reservation and leaves every receipt and
+/// tree node pinned and unclaimed, exactly as it found them, so a later
+/// admission is still charged and refused for them.
+pub fn reserve_retained_with_evidence_then<S: SignatureFacts + ?Sized, T>(
+    account: &Arc<SemanticRetentionAccount>,
+    own_bytes: usize,
+    signatures: &[&S],
+    finish: impl FnOnce(RetentionCharge) -> Result<T, RetentionRefusal>,
+) -> Result<T, RetentionRefusal> {
     use std::sync::atomic::Ordering;
     let mut seen: rustc_hash::FxHashSet<*const ResultEvidence> = rustc_hash::FxHashSet::default();
     let mut walked: Vec<&ResultEvidence> = Vec::new();
@@ -588,10 +606,12 @@ pub fn reserve_retained_with_evidence<S: SignatureFacts + ?Sized>(
     // A tree set's nodes: every node it reaches that no earlier admission
     // claimed, each once (a claimed node's subtree is claimed).
     let mut nodes: Vec<&Arc<super::fact_tree::Node>> = Vec::new();
+    let mut seen_nodes: rustc_hash::FxHashSet<*const super::fact_tree::Node> =
+        rustc_hash::FxHashSet::default();
     let mut stack: Vec<&[FactVersionRef]> = Vec::new();
     for signature in signatures {
         if let Some(root) = signature.fact_set().and_then(|set| set.tree_root()) {
-            super::fact_tree::unclaimed_nodes(root, &mut nodes);
+            super::fact_tree::unclaimed_nodes(root, &mut nodes, &mut seen_nodes);
         }
         signature.visit_receipt_candidates(&mut |fact| {
             let FactVersionRef::Receipt(receipt) = fact else {
@@ -651,25 +671,32 @@ pub fn reserve_retained_with_evidence<S: SignatureFacts + ?Sized>(
         own_bytes + evidence_bytes + node_bytes,
     ) {
         RetentionAdmission::Admitted(charge) => charge,
-        refused @ RetentionAdmission::Refused(_) => return refused,
+        RetentionAdmission::Refused(refusal) => return Err(refusal),
     };
     let ctx = crate::retention::owned::ChargeCtx::new(account);
     let mut names = Vec::with_capacity(claim.len());
     for (evidence, _) in &claim {
-        match evidence_names(&evidence.facts).hold(ctx) {
-            Ok(holds) => names.push(holds),
-            Err(refusal) => return RetentionAdmission::Refused(refusal),
-        }
+        names.push(evidence_names(&evidence.facts).hold(ctx)?);
     }
     let mut node_names = Vec::with_capacity(node_claims.len());
     for (node, _) in &node_claims {
-        match super::fact_tree::node_names(node).hold(ctx) {
-            Ok(holds) => node_names.push(holds),
-            Err(refusal) => return RetentionAdmission::Refused(refusal),
-        }
+        node_names.push(super::fact_tree::node_names(node).hold(ctx)?);
     }
-    for ((evidence, bytes), names) in claim.into_iter().zip(names) {
-        let share = charge.split_off(bytes).holding(names);
+    // Every share is split off before anything is committed, so the
+    // caller's own hold can still refuse with nothing claimed: dropping the
+    // shares releases the reservation whole.
+    let evidence_shares: Vec<_> = claim
+        .into_iter()
+        .zip(names)
+        .map(|((evidence, bytes), names)| (evidence, charge.split_off(bytes).holding(names)))
+        .collect();
+    let node_shares: Vec<_> = node_claims
+        .into_iter()
+        .zip(node_names)
+        .map(|((node, bytes), names)| (node, charge.split_off(bytes).holding(names)))
+        .collect();
+    let finished = finish(charge)?;
+    for (evidence, share) in evidence_shares {
         let cell = &evidence.retention;
         let mut held = cell.lock();
         let released = if held.class() == ChargeClass::Retained {
@@ -688,8 +715,7 @@ pub fn reserve_retained_with_evidence<S: SignatureFacts + ?Sized>(
     // Each unclaimed tree node exchanges its pin for its share, exactly as
     // an evidence does; a node another admission claimed meanwhile keeps
     // that claim and its share is released here.
-    for ((node, bytes), names) in node_claims.into_iter().zip(node_names) {
-        let share = charge.split_off(bytes).holding(names);
+    for (node, share) in node_shares {
         let mut held = node.charge().lock();
         let released = match held.as_mut() {
             Some(pinned) if pinned.class() != ChargeClass::Retained => {
@@ -705,7 +731,7 @@ pub fn reserve_retained_with_evidence<S: SignatureFacts + ?Sized>(
     for node in nodes.into_iter().rev() {
         node.mark_claimed();
     }
-    RetentionAdmission::Admitted(charge)
+    Ok(finished)
 }
 
 /// A signature a retaining admission reserves for: its facts (a consumed

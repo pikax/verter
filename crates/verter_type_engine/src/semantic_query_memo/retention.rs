@@ -214,16 +214,15 @@ impl SemanticGraphStore {
     ) -> Result<MemoRetention, RetentionRefusal> {
         let shared = self.hold_shared_allocations(SharedParts::of(entry))?;
         let own = own_reservation(entry, family, populated_slots, direct_edges);
-        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        // The signature's storage is claimed only once the candidate's own
+        // names are held: a refused hold leaves it pinned and unclaimed.
+        let own = verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
             self.retention_account(),
             own.bytes,
             &[&entry.read_set_signature.facts],
-        ) {
-            RetentionAdmission::Admitted(charge) => {
-                Ok(shared.with_own(own.handles.retained_with(charge, self.charge_ctx())?))
-            }
-            RetentionAdmission::Refused(refusal) => Err(refusal),
-        }
+            |charge| own.handles.retained_with(charge, self.charge_ctx()),
+        )?;
+        Ok(shared.with_own(own))
     }
 
     /// Hold a retained result's carrier and delivered allocations.

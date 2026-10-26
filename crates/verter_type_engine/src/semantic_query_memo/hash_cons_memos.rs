@@ -400,18 +400,17 @@ impl SemanticGraphStore {
             // by the entry.
             (bytes, aliases.take_handles())
         };
-        let retention = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
-            self.retention_account(),
-            own_bytes,
-            &[&evidence.0],
-        ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
-                match handles.retained_with(charge, self.charge_ctx()) {
-                    Ok(charge) => charge,
-                    Err(_) => return,
-                }
-            }
-            verter_session_query::retention::RetentionAdmission::Refused(_) => return,
+        // The proof's storage is claimed only once the entry's own names
+        // are held: a refused hold leaves it pinned and unclaimed.
+        let Ok(retention) =
+            verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
+                self.retention_account(),
+                own_bytes,
+                &[&evidence.0],
+                |charge| handles.retained_with(charge, self.charge_ctx()),
+            )
+        else {
+            return;
         };
         let entry = Arc::new(DeferredEvaluationMemoEntry {
             result,

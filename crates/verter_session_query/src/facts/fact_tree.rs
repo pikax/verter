@@ -430,10 +430,16 @@ pub(crate) fn seal(slot: &mut Arc<Node>) {
 
 /// Every node under `root` no earlier admission claimed, each once:
 /// the walk stops at a claimed node, whose subtree is claimed.
-pub(crate) fn unclaimed_nodes<'a>(root: &'a Arc<Node>, out: &mut Vec<&'a Arc<Node>>) {
+/// `seen` holds every node already collected (by address), so sets that
+/// share storage are walked once in total.
+pub(crate) fn unclaimed_nodes<'a>(
+    root: &'a Arc<Node>,
+    out: &mut Vec<&'a Arc<Node>>,
+    seen: &mut rustc_hash::FxHashSet<*const Node>,
+) {
     let mut stack: smallvec::SmallVec<[&'a Arc<Node>; 16]> = smallvec::smallvec![root];
     while let Some(node) = stack.pop() {
-        if node.is_claimed() || out.iter().any(|seen| Arc::ptr_eq(seen, node)) {
+        if node.is_claimed() || !seen.insert(Arc::as_ptr(node)) {
             continue;
         }
         out.push(node);
