@@ -2198,7 +2198,7 @@ where
             verter_execution::cancellation::CancellationToken::new(),
             compute,
             retain,
-            true,
+            owned_singleflight::FlightMode::Synchronous,
         );
         loop {
             match verter_execution::blocking::block_on_when_pending(
@@ -2238,7 +2238,7 @@ where
             verter_execution::cancellation::CancellationToken::new(),
             compute,
             retain,
-            true,
+            owned_singleflight::FlightMode::Pollable,
         );
         loop {
             match std::future::poll_fn(|cx| core.poll(cx.waker())).await {

@@ -452,9 +452,16 @@ fn composed_resolver_compatibility_uses_its_shared_task_authority() {
     let registry = TaskRegistry::default();
     let group = SingleflightGroup::<String, usize, ()>::default();
     group.bind_task_registry(registry.clone());
+    let caller = ExecutionScope::enter(&registry);
+    let caller_id = caller.task().id();
     let producer_task = group
         .run("key".into(), TOKEN, || {
             let task = ExecutionScope::current_task().expect("actual production task installed");
+            assert_ne!(
+                task.id(),
+                caller_id,
+                "producer owns a task independent of its waiter"
+            );
             let other = registry.register_task();
             let edge = other.wait_for(&task).expect("host authority must match");
             drop(edge);
@@ -462,6 +469,22 @@ fn composed_resolver_compatibility_uses_its_shared_task_authority() {
         })
         .unwrap();
     assert_eq!(*producer_task.value, 7);
+    let pollable_task = verter_execution::blocking::complete_now(std::pin::pin!(group
+        .run_retaining_pollable(
+            "pollable".into(),
+            TOKEN,
+            || async {
+                assert_eq!(
+                    ExecutionScope::current_task().unwrap().id(),
+                    caller_id,
+                    "pollable computation stays owned by the polling task"
+                );
+                Ok(8)
+            },
+            |_| true,
+        )));
+    assert_eq!(*pollable_task.value, 8);
+    drop(caller);
     assert_eq!(registry.active_task_count_for_tests(), 0);
     let mut foreign = group.begin_owned_retaining(
         "other".into(),

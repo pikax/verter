@@ -778,6 +778,8 @@ Its only advancing operation, `poll`, returns a complete
 `SingleflightRunResult` or transfers the sole `OwnedResolverProducer`.
 Polling does not compute or run the retention policy. `run_retaining` and
 `run` externally drive the same core with borrowed callbacks.
+Synchronous and transferred producers own distinct tasks. A pollable
+computation retains its polling root's task as the lane owner across suspension.
 
 - **Ownership:** host composition binds every resolver flight family to the
   host's existing registry. Production compatibility entries install that
