@@ -2912,6 +2912,55 @@ impl Default for ResolveCallDomainRuntime {
     }
 }
 
+/// Where a window over the undecided relation count opened: the count, how
+/// many discards had saturated, and the window's place among those open.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UndecidedWindowMark {
+    count: u64,
+    saturations: u64,
+    place: usize,
+}
+
+/// A window over the undecided relation count being measured
+/// ([`ResolveCallDomainRuntime::open_undecided_window`]). Dropped unclosed
+/// — an unwind — it closes unmeasured, with the windows opened inside it.
+pub(crate) struct UndecidedRelationWindow<'t> {
+    txn: &'t verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
+    mark: UndecidedWindowMark,
+    open: bool,
+}
+
+impl<'t> UndecidedRelationWindow<'t> {
+    /// Open a window over `txn`'s count.
+    pub(crate) fn open(
+        txn: &'t verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
+    ) -> Self {
+        let mark = txn.borrow_mut().call.open_undecided_window();
+        Self {
+            txn,
+            mark,
+            open: true,
+        }
+    }
+
+    /// Close it: how the count moved, `None` when it cannot be replayed.
+    pub(crate) fn close(mut self) -> Option<UndecidedRelationDelta> {
+        self.open = false;
+        self.txn.borrow_mut().call.close_undecided_window(self.mark)
+    }
+}
+
+impl Drop for UndecidedRelationWindow<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.txn
+                .borrow_mut()
+                .call
+                .abandon_undecided_window(self.mark);
+        }
+    }
+}
+
 /// How a measured stretch of work moved the undecided relation count: its
 /// net change, and how far below its starting value the count went on the
 /// way. Applying it to a count of at least `depth` gives exactly what doing
@@ -2935,24 +2984,37 @@ impl ResolveCallDomainRuntime {
     }
 
     /// Open a window measuring how the count moves.
-    pub(crate) fn open_undecided_window(&mut self) -> (u64, u64) {
+    pub(crate) fn open_undecided_window(&mut self) -> UndecidedWindowMark {
+        let mark = UndecidedWindowMark {
+            count: self.undecided_relations,
+            saturations: self.undecided_saturations,
+            place: self.undecided_lows.len(),
+        };
         self.undecided_lows.push(self.undecided_relations);
-        (self.undecided_relations, self.undecided_saturations)
+        mark
     }
 
-    /// Close the innermost window, opened when the count and the
-    /// saturation count stood at `opened`: how the count moved, or `None`
-    /// when a discard inside it asked for more than the count held.
+    /// Close the window `opened` marks, the innermost: how the count
+    /// moved, or `None` when a discard inside it asked for more than the
+    /// count held.
     pub(crate) fn close_undecided_window(
         &mut self,
-        opened: (u64, u64),
+        opened: UndecidedWindowMark,
     ) -> Option<UndecidedRelationDelta> {
-        let low = self.undecided_lows.pop().unwrap_or(opened.0);
-        (self.undecided_saturations == opened.1).then(|| UndecidedRelationDelta {
+        let low = self.undecided_lows.get(opened.place).copied();
+        self.undecided_lows.truncate(opened.place);
+        let low = low?;
+        (self.undecided_saturations == opened.saturations).then(|| UndecidedRelationDelta {
             net: i64::try_from(self.undecided_relations).unwrap_or(i64::MAX)
-                - i64::try_from(opened.0).unwrap_or(i64::MAX),
-            depth: opened.0 - low.min(opened.0),
+                - i64::try_from(opened.count).unwrap_or(i64::MAX),
+            depth: opened.count - low.min(opened.count),
         })
+    }
+
+    /// Drop the window `opened` marks unmeasured, with every window
+    /// opened inside it.
+    pub(crate) fn abandon_undecided_window(&mut self, opened: UndecidedWindowMark) {
+        self.undecided_lows.truncate(opened.place);
     }
 
     /// Move the count as `delta` measured, when it holds at least

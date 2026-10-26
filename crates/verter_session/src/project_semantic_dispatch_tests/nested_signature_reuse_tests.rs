@@ -298,15 +298,15 @@ fn with_dispatch_on<R>(
 }
 
 /// What one cold demand of `name`'s whole return answered — its print,
-/// degradation and provenance — the work units it charged, and how many
-/// nested signatures it reused, under a work allowance of `allowance`
-/// units when one is given.
+/// degradation and provenance — the work units and construction bytes it
+/// charged, and how many nested signatures it reused, under a work
+/// allowance of `allowance` units when one is given.
 fn whole_return(
     source: &str,
     name: &str,
     allowance: Option<usize>,
     skip_reuse: bool,
-) -> (String, usize, usize) {
+) -> (String, (usize, u64), usize) {
     use std::sync::atomic::Ordering;
     with_dispatch_on(
         source,
@@ -347,7 +347,10 @@ fn whole_return(
             };
             (
                 outcome,
-                dispatch.connected_demand().work_used_for_tests(),
+                (
+                    dispatch.connected_demand().work_used_for_tests(),
+                    dispatch.connected_demand().bytes_used_for_tests(),
+                ),
                 super::flow_return::nested_signature_reuses_for_tests() - reuses,
             )
         },
@@ -358,29 +361,31 @@ fn whole_return(
 /// body again would: under every work allowance, from one that refuses
 /// almost at once to one that completes, a demand reusing the loop's
 /// callback from its second pass answers what one evaluating it on every
-/// pass answers, and charges the same work.
+/// pass answers, and charges the same work and construction bytes.
 #[test]
 fn a_reused_signature_charges_the_demand_its_body_cost() {
     let source = format!(
         "{MARKER}{DEFINE_COMPONENT}declare function g<T>(cb: () => T): T;\n\
          declare function h(x: string): number;\n\
          export function lp(n: number) {{ let r = 0; for (let i = 0; i < n; i++) {{ r = g(() => h(\"a\") + h(\"b\")); }} return r; }}\n\
-         export function make() {{ return defineComponent({{ data() {{ return {{ d0: 0 as const, d1: 1 as const }}; }}, methods: {{ m0() {{ return this.d0; }}, m1() {{ return this.d1; }}, m2() {{ return this.m0(); }} }} }}); }}\n"
+         export function dl(n: number) {{ let r; for (let i = 0; i < n; i++) {{ const f = (x: {{ kind: \"a\" }} | {{ kind: \"b\" }}) => {{ if (x.kind === \"a\") return 1; return 2; }}; r = f; }} return r; }}
+\n         export function make() {{ return defineComponent({{ data() {{ return {{ d0: 0 as const, d1: 1 as const }}; }}, methods: {{ m0() {{ return this.d0; }}, m1() {{ return this.d1; }}, m2() {{ return this.m0(); }} }} }}); }}\n"
     );
-    for name in ["lp", "make"] {
+    for name in ["lp", "make", "dl"] {
         let (reused, full, reuses) = whole_return(&source, name, None, false);
         let (fresh, fresh_full, _) = whole_return(&source, name, None, true);
         assert!(reuses > 0, "{name}: a signature is reused");
         assert_eq!((&reused, full), (&fresh, fresh_full), "{name}");
         let steps = 10;
         for step in 0..=steps {
-            let allowance = 1 + full * step / steps;
+            let allowance = 1 + full.0 * step / steps;
             let (reused, work, _) = whole_return(&source, name, Some(allowance), false);
             let (fresh, fresh_work, _) = whole_return(&source, name, Some(allowance), true);
             assert_eq!(
                 (&reused, work),
                 (&fresh, fresh_work),
-                "{name} under {allowance} of {full} work units"
+                "{name} under {allowance} of {} work units",
+                full.0
             );
         }
     }
@@ -419,4 +424,30 @@ fn a_body_reading_a_frame_around_it_is_evaluated_again() {
         2,
         "the outer arrow is reused, its inner arrow with it"
     );
+}
+
+/// A computation that turned partial without tripping its demand never
+/// reuses a signature: the loop's second pass, after the first composed
+/// the callback's signature and the result was marked partial, evaluates
+/// the callback again. Left complete, the same loop reuses it.
+#[test]
+fn a_partial_computation_never_reuses_a_signature() {
+    use std::sync::atomic::Ordering;
+    let source = "declare function inner(x: number): number;\n\
+                  declare function g<T>(cb: () => T): T;\n\
+                  export function lp(n: number) { let r = 0; for (let i = 0; i < n; i++) { r = g(() => inner(1)); } return r; }\n";
+    let reuses = |partial: bool| {
+        let before = super::flow_return::nested_signature_reuses_for_tests();
+        let _ = evaluations_on(source, "ReturnType<typeof lp>", |host| {
+            host.flow_fault_injection
+                .partial_after_nested_signature
+                .store(partial, Ordering::Relaxed);
+        });
+        super::flow_return::nested_signature_reuses_for_tests() - before
+    };
+    assert!(
+        reuses(false) > 0,
+        "a complete computation reuses the callback"
+    );
+    assert_eq!(reuses(true), 0, "a partial computation evaluates it again");
 }

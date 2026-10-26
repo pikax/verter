@@ -1097,3 +1097,26 @@ fn an_undecided_relation_window_replays_only_what_it_measured() {
     call.undecided_relations += 1;
     assert_eq!(call.close_undecided_window(saturating), None);
 }
+
+/// Windows dropped unclosed, the outer first as an unwinding stack of them
+/// drops, close with every window opened inside them, and a window opened
+/// after them measures as if they had never opened.
+#[test]
+fn undecided_relation_windows_dropped_unclosed_close_with_their_inner_windows() {
+    let txn = verter_execution::sync_cell::SyncRefCell::new(CheckerDispatchTransaction::default());
+    txn.borrow_mut().call.undecided_relations = 1;
+    let windows = vec![
+        UndecidedRelationWindow::open(&txn),
+        UndecidedRelationWindow::open(&txn),
+    ];
+    txn.borrow_mut().call.discard_undecided_relations(1);
+    drop(windows);
+    assert!(txn.borrow().call.undecided_lows.is_empty());
+    txn.borrow_mut().call.undecided_relations += 1;
+    let window = UndecidedRelationWindow::open(&txn);
+    txn.borrow_mut().call.undecided_relations += 1;
+    assert_eq!(
+        window.close(),
+        Some(UndecidedRelationDelta { net: 1, depth: 0 })
+    );
+}

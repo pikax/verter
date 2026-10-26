@@ -409,9 +409,9 @@ pub(super) struct NestedSignatureRecording<'d> {
     probes_start: usize,
     circular_marks: u64,
     /// The window measuring how the undecided relation count moves.
-    undecided: (u64, u64),
-    /// The place of the measurement of its cost to the connected demand.
-    cost: usize,
+    undecided: super::super::dispatch_txn::UndecidedRelationWindow<'d>,
+    /// The measurement of its cost to the connected demand.
+    cost: super::super::connected_demand::InlineCostRecording<'d>,
     /// The enclosing evaluator's degradation when the recording began,
     /// given back, first-recorded first, when it ends.
     degradation_before: Option<crate::semantic_query::FlowReturnDegradation>,
@@ -1136,6 +1136,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         && nested_degradation.is_none()
                         && !nested_evaluator.executed_walk.aborted
                         && !nested_evaluator.executed_walk.local_aborted
+                        && !crate::request_context::current_cold_compute_completeness()
+                            .is_partial()
                         && crate::request_context::current_execution_abort().is_none();
                     recorded_effects = Some(NestedBodyEffects {
                         walk: nested_evaluator.executed_walk,
@@ -1293,6 +1295,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     ..effects
                 }),
             );
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dispatch
+            .observers
+            .flow
+            .partial_after_nested_signature
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            crate::request_context::mark_request_result_partial();
         }
         if constructive_signature && value == signature {
             self.constructive_signatures.insert(function, signature);
@@ -1512,8 +1524,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         } = recording;
         let degradation = self.degradation.take();
         self.degradation = degradation_before.or(degradation);
-        let cost = self.dispatch.close_inline_cost(cost);
-        let undecided = self.dispatch.close_undecided_relation_window(undecided);
+        let cost = cost.close();
+        let undecided = undecided.close();
         let receiver_reads = match receiver {
             Some((receiver, start)) => receiver.reads.finish(start),
             None => Some(Vec::new()),

@@ -363,6 +363,10 @@ pub mod flow_admission_fault_injection {
         /// the root evaluation composed: its body is evaluated again.
         #[cfg(any(test, feature = "test-support"))]
         pub skip_nested_signature_reuse: AtomicBool,
+        /// When armed, the request result is marked partial, without a
+        /// trip, once a nested function's signature has been composed.
+        #[cfg(any(test, feature = "test-support"))]
+        pub partial_after_nested_signature: AtomicBool,
         /// When armed, every call evidence a flow evaluation records is
         /// copied to `call_evidence` as whether its relations were decided.
         #[cfg(any(test, feature = "test-support"))]
@@ -11137,13 +11141,7 @@ pub(super) trait FlowDemandDriver {
     fn restore_call_relation_observations(&self, count: u64);
     /// Open a window measuring how the undecided relation count moves
     /// ([`super::dispatch_txn::ResolveCallDomainRuntime::open_undecided_window`]).
-    fn open_undecided_relation_window(&self) -> (u64, u64);
-    /// Close the innermost window [`Self::open_undecided_relation_window`]
-    /// opened: how the count moved, `None` when it cannot be replayed.
-    fn close_undecided_relation_window(
-        &self,
-        opened: (u64, u64),
-    ) -> Option<super::dispatch_txn::UndecidedRelationDelta>;
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_>;
     /// Move the count as `delta` measured; `false`, moving nothing, when
     /// it holds less than the delta took it down by.
     fn replay_undecided_relation_delta(
@@ -11152,15 +11150,15 @@ pub(super) trait FlowDemandDriver {
     ) -> bool;
     /// Measure the connected demand's charges apart until
     /// [`Self::close_inline_cost`]
-    /// ([`super::connected_demand::ConnectedDemandLedger::open_inline_cost`]),
-    /// returning its place.
-    fn open_inline_cost(&self) -> usize;
-    /// Close the measurement [`Self::open_inline_cost`] opened at `place`:
-    /// what it measured, kept by the computation around it.
-    fn close_inline_cost(&self, place: usize) -> Option<super::connected_demand::InlineCost>;
+    /// ([`super::connected_demand::ConnectedDemandLedger::open_inline_cost`]).
+    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_>;
     /// Charge a measured cost again, as performing its part again would;
     /// `false`, charging nothing, when the demand lacks the room.
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool;
+    /// Perform `part`, whose result every nested evaluation of the root
+    /// evaluation shares, charged past the measurements of nested bodies
+    /// ([`super::connected_demand::ConnectedDemandLedger::outside_inline_costs`]).
+    fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T;
     /// Open a window in which a contextual callback types while its call's
     /// collector waits ([`ProjectSemanticDispatch::open_contextual_window`]).
     fn open_contextual_window(&self) -> bool;
@@ -11922,17 +11920,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
     }
-    fn open_undecided_relation_window(&self) -> (u64, u64) {
-        self.dispatch_txn.borrow_mut().call.open_undecided_window()
-    }
-    fn close_undecided_relation_window(
-        &self,
-        opened: (u64, u64),
-    ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
-        self.dispatch_txn
-            .borrow_mut()
-            .call
-            .close_undecided_window(opened)
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_> {
+        super::dispatch_txn::UndecidedRelationWindow::open(&self.dispatch_txn)
     }
     fn replay_undecided_relation_delta(
         &self,
@@ -11943,17 +11932,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             .call
             .replay_undecided_delta(delta)
     }
-    fn open_inline_cost(&self) -> usize {
+    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_> {
         self.connected_demand().open_inline_cost()
-    }
-    fn close_inline_cost(&self, place: usize) -> Option<super::connected_demand::InlineCost> {
-        self.connected_demand().close_inline_cost(place)
     }
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
         self.connected_demand().replay_inline_cost(
             cost,
             crate::request_context::current_request_budget().as_deref(),
         )
+    }
+    fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        self.connected_demand().outside_inline_costs(part)
     }
     fn open_contextual_window(&self) -> bool {
         ProjectSemanticDispatch::open_contextual_window(self)
@@ -12801,14 +12790,8 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn restore_call_relation_observations(&self, count: u64) {
         self.driver.restore_call_relation_observations(count);
     }
-    fn open_undecided_relation_window(&self) -> (u64, u64) {
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_> {
         self.driver.open_undecided_relation_window()
-    }
-    fn close_undecided_relation_window(
-        &self,
-        opened: (u64, u64),
-    ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
-        self.driver.close_undecided_relation_window(opened)
     }
     fn replay_undecided_relation_delta(
         &self,
@@ -12816,14 +12799,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> bool {
         self.driver.replay_undecided_relation_delta(delta)
     }
-    fn open_inline_cost(&self) -> usize {
+    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_> {
         self.driver.open_inline_cost()
-    }
-    fn close_inline_cost(&self, place: usize) -> Option<super::connected_demand::InlineCost> {
-        self.driver.close_inline_cost(place)
     }
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
         self.driver.replay_inline_cost(cost)
+    }
+    fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        self.driver.outside_inline_costs(part)
     }
     fn open_contextual_window(&self) -> bool {
         self.driver.open_contextual_window()
@@ -19992,7 +19975,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(unwrap) = self.carrier_unwraps.borrow().get(&node) {
             return *unwrap;
         }
-        let unwrap = self.dispatch.unwrap_identity_carrier_for_relation(node);
+        let dispatch = self.dispatch;
+        let unwrap =
+            dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node));
         self.carrier_unwraps.borrow_mut().insert(node, unwrap);
         unwrap
     }
@@ -23391,7 +23376,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(read) = self.discriminant_members.borrow().get(&key) {
             return *read;
         }
-        let read = self.project_segments_navigate(arm, member);
+        let read = self
+            .dispatch
+            .outside_inline_costs(|| self.project_segments_navigate(arm, member));
         self.discriminant_members.borrow_mut().insert(key, read);
         read
     }
@@ -24622,7 +24609,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(known) = self.guard_relations.borrow().get(&pair) {
             return *known;
         }
-        let related = self.assignable(source, target);
+        let related = self
+            .dispatch
+            .outside_inline_costs(|| self.assignable(source, target));
         self.guard_relations.borrow_mut().insert(pair, related);
         related
     }
