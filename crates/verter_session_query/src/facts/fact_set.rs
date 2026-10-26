@@ -132,7 +132,7 @@ impl FactSet {
     /// when a wider set is built from it ([`FactSet::edit`]).
     #[must_use]
     pub fn from_canonical_vec(facts: Vec<FactVersionRef>) -> Self {
-        debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
+        verter_debug_assert::verter_debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
         Self(Repr::Flat(Arc::from(facts)))
     }
 
@@ -140,7 +140,7 @@ impl FactSet {
     /// shared slice.
     #[must_use]
     pub fn from_canonical_slice(facts: &[FactVersionRef]) -> Self {
-        debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
+        verter_debug_assert::verter_debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
         Self(Repr::Flat(Arc::from(facts)))
     }
 
