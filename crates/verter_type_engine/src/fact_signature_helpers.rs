@@ -1523,9 +1523,9 @@ fn whole_file_facts<'a>(
 /// witness, minted only after every root validates in the exact effective
 /// view, in place of every precise root fact, when its completion is what
 /// made it wide: the traced set alone is no wider than
-/// [`WIDE_SIGNATURE_WIDTH`], or the completion's own additions (its
-/// self-roots and the facts it adds) outnumber
-/// [`WIDE_SIGNATURE_WIDTH`]. A traced set already wider keeps its few
+/// [`WIDE_SIGNATURE_WIDTH`], or the facts the completion actually adds
+/// (the self-root facts the traced set lacked among them, each counted
+/// once) outnumber [`WIDE_SIGNATURE_WIDTH`]. A traced set already wider keeps its few
 /// precise roots: a precise root stays valid in any view that agrees on the
 /// root's content, where a witness is bound to the one view that minted it,
 /// so a wide read set is not made fragile by the roots it adds.
@@ -1539,7 +1539,9 @@ pub(crate) fn bound_completed_structural_carrier(
     self_root_canonicals.dedup();
 
     let mut facts = traced.edit();
-    let mut added = self_root_canonicals.len();
+    // Only the facts the completion actually adds count: a self-root the
+    // traced set lacks arrives in `extra` as its fact.
+    let mut added = 0;
     for fact in extra {
         added += usize::from(facts.insert(fact));
     }

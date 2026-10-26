@@ -1079,9 +1079,14 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
         carrier.facts.len()
     );
     let storage = carrier.facts.tree_footprint();
+    assert!(
+        storage.nodes > 0 && storage.charged_bytes > 0,
+        "the carrier completes a wide traced set, so it is held in tree storage: {storage:?}"
+    );
     assert_eq!(
-        storage.pinned_bytes, 0,
-        "sealing the refusal claimed any shared storage its carrier reaches"
+        (storage.pinned_bytes, storage.retained_bytes),
+        (0, storage.charged_bytes),
+        "sealing the refusal claimed every node of its carrier into a retained reservation"
     );
     let is_generation =
         |fact: &FactVersionRef| matches!(fact, FactVersionRef::ProjectGeneration { .. });
@@ -1126,9 +1131,10 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
     );
 
     store.invalidate_all();
+    let outliving = carrier.facts.tree_footprint();
     assert_eq!(
-        carrier.facts.tree_footprint().charged_bytes,
-        storage.charged_bytes,
+        (outliving.nodes, outliving.charged_bytes),
+        (storage.nodes, storage.charged_bytes),
         "storage outliving the refusal that claimed it stays charged while a holder lives"
     );
     drop(carriers);

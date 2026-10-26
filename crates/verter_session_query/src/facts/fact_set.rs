@@ -124,23 +124,31 @@ impl FactSet {
         Self::from_canonical_vec(facts)
     }
 
-    /// The set of `facts`, already strictly increasing (checked in debug
-    /// builds).
+    /// The set of `facts`, already strictly increasing: only this crate's
+    /// sealer, which sorts first, calls it (checked in debug builds only).
     ///
     /// A freshly sealed set is one shared slice whatever its width: a tree
     /// earns its nodes back only by being shared, so a set becomes a tree
     /// when a wider set is built from it ([`FactSet::edit`]).
     #[must_use]
-    pub fn from_canonical_vec(facts: Vec<FactVersionRef>) -> Self {
-        verter_debug_assert::verter_debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
+    pub(crate) fn from_canonical_vec(facts: Vec<FactVersionRef>) -> Self {
+        #[cfg(debug_assertions)]
+        assert!(
+            facts.windows(2).all(|pair| pair[0] < pair[1]),
+            "a canonical set is strictly increasing"
+        );
         Self(Repr::Flat(Arc::from(facts)))
     }
 
     /// The set of `facts`, already strictly increasing, copied into one
     /// shared slice.
     #[must_use]
-    pub fn from_canonical_slice(facts: &[FactVersionRef]) -> Self {
-        verter_debug_assert::verter_debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
+    pub(crate) fn from_canonical_slice(facts: &[FactVersionRef]) -> Self {
+        #[cfg(debug_assertions)]
+        assert!(
+            facts.windows(2).all(|pair| pair[0] < pair[1]),
+            "a canonical set is strictly increasing"
+        );
         Self(Repr::Flat(Arc::from(facts)))
     }
 
