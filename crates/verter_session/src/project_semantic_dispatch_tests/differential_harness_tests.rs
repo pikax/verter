@@ -641,6 +641,20 @@ impl<'a> Matrix<'a> {
         let binding_before =
             verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests();
         let connected_before = dispatch.connected_demand().work_used_for_tests();
+        // The read runs in a request of its own, under the production
+        // operation fuse, so the operations it charges are counted as the
+        // public route counts them.
+        let _request = verter_type_engine::request_context::RequestContextGuard::install(
+            verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                1,
+                Arc::from(canonical.as_str()),
+                verter_audit::RequestKind::TypeResolution,
+                false,
+                false,
+                None,
+                verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+            ),
+        );
         let (result, charged, _) =
             verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
                 dispatch.execute_read(
@@ -651,6 +665,10 @@ impl<'a> Matrix<'a> {
             !result.result_is_partial(),
             "{function}: {:?}",
             result.partial_reasons()
+        );
+        assert!(
+            charged > 0,
+            "{function}: the read charges the request it runs in, so the count is live"
         );
         let after = dispatch.graph().stats_snapshot();
         vec![
