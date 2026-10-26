@@ -1252,8 +1252,7 @@ fn forget_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str) {
 /// TSGO puts the file whose `didOpen` creates a configured project out of the
 /// project's own order in the program it builds (TypeScript 7.1.0-beta: with
 /// merged enum blocks in `a.ts` and `b.ts`, opening `a.ts` first moves TS2432
-/// onto `a.ts`, where `tsc` puts it on `b.ts`; 7.0.2 placed it as `tsc`
-/// does). A `custom/projectInfo` request for the document, read before the
+/// onto `a.ts`, where `tsc` puts it on `b.ts`). A `custom/projectInfo` request for the document, read before the
 /// `didOpen`, loads the project first, so no `didOpen` creates it and every
 /// diagnostic whose placement follows program order is placed as `tsc`
 /// places it, whatever order the editor opens files in.

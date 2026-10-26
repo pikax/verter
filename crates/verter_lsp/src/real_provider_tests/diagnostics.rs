@@ -1208,7 +1208,7 @@ fn merged_enum_declaration_anchors(source: &str) -> std::collections::HashMap<u3
 /// Placement: TS2432 lands on whichever `Two` block comes second in program
 /// order, which tsc puts on b.ts. A bare tsgo 7.1.0-beta LSP, no Verter in
 /// the loop, places it out of program order on the file whose `didOpen`
-/// creates the configured project; 7.0.2 always placed it on b.ts. The tsgo
+/// creates the configured project. The tsgo
 /// transport therefore asks for a document's project in front of its first
 /// open (`project_load_frame` in `verter_type_runtime::tsgo::ipc`), and the
 /// LSP forwards watched-file creations to the provider before anything else

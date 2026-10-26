@@ -166,7 +166,7 @@ describe("TypeScript >=7 authority control", { concurrent: false }, () => {
           output,
         };
         // TypeScript 7.1 exits 2 (diagnostics present) for a `--noEmit` run that
-        // reports errors; 7.0 exited 1. Re-measured on typescript@7.1.0-beta.
+        // reports errors. Re-measured on typescript@7.1.0-beta.
         expect(control.status, "the deliberate invalid-member control must fail typecheck").toBe(2);
         expect(diagnosticCodes, "the control must report exactly the anti-any diagnostic").toEqual([
           2339,

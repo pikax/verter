@@ -387,9 +387,9 @@ interface HoverTextExemption {
  * else is one analysable region.
  *
  * The obvious reading, "analyse only the contents of fenced blocks", is WRONG
- * against real output. tsgo and shared-tsgo on TypeScript 7.0 returned a hover whose
- * fence closes after the FIRST LINE, leaving the rest of the type — `$props`, `$emit`,
- * every member that matters — outside it (7.1 keeps the whole type inside):
+ * against real output. tsgo and shared-tsgo have returned a hover whose fence closes
+ * after the FIRST LINE, leaving the rest of the type — `$props`, `$emit`, every
+ * member that matters — outside it (the 7.1 pin keeps the whole type inside):
  *
  * ```text
  * ```typescript
