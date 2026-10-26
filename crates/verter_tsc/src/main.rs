@@ -42,6 +42,10 @@ use std::process;
 
 use clap::Parser;
 
+/// The process allocator (mimalloc on native targets): see `verter_alloc`.
+#[global_allocator]
+static GLOBAL: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
+
 #[derive(Parser)]
 #[command(
     name = "verter-tsc",
@@ -120,6 +124,7 @@ struct Cli {
 }
 
 fn main() {
+    verter_alloc::configure();
     let cli = Cli::parse();
 
     // Resolve project path: -p takes precedence, then -b positional, then default
@@ -406,5 +411,15 @@ mod tests {
             "build_projects should contain the positional path"
         );
         assert_eq!(cli.build_projects[0].to_str().unwrap(), "tsconfig.app.json");
+    }
+
+    /// The binary runs on the allocator `verter_alloc` selects for it: mimalloc
+    /// on a native build, so a block from the global heap is mimalloc's.
+    #[test]
+    fn the_selected_global_allocator_serves_this_binary() {
+        assert_eq!(
+            verter_alloc::mimalloc_serves_global_allocations(),
+            verter_alloc::SELECTED == verter_alloc::AllocatorKind::Mimalloc
+        );
     }
 }
