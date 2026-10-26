@@ -121,6 +121,8 @@ mod lower_locator_tests;
 #[cfg(test)]
 mod narrowed_scope_snapshot_generation_tests;
 #[cfg(test)]
+mod nextest_tier_policy_tests;
+#[cfg(test)]
 mod overlay_promotion_isolation_tests;
 #[cfg(test)]
 mod overlay_resolution_snapshot_tests;

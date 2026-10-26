@@ -455,7 +455,12 @@ fn match_arm_variants(file: &syn::File, fn_name: &str) -> (Vec<String>, bool) {
     let mut variants = Vec::new();
     let mut non_path = false;
     for arm in &m.arms {
-        match &arm.pat {
+        // A guard does not change which variant the arm names.
+        let pat = match &arm.pat {
+            syn::Pat::Guard(guarded) => &*guarded.pat,
+            pat => pat,
+        };
+        match pat {
             syn::Pat::Path(p) => {
                 variants.push(p.path.segments.last().unwrap().ident.to_string());
             }

@@ -72,7 +72,7 @@ pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     // INTO the chain, or the rewritten script's re-encoded map would
     // silently lose every ignore-listed source row.
     if !map.ignore_list().is_empty() {
-        source_map.set_x_google_ignore_list(
+        source_map.set_ignore_list(
             map.ignore_list()
                 .iter()
                 .map(|entry| *entry as u32)

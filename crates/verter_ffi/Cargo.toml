@@ -33,7 +33,7 @@ log = "0.4"
 
 [dev-dependencies]
 verter_audit = { path = "../verter_audit" }
-prost = "0.14.3"
+prost = "0.14.4"
 serde_json = { workspace = true }
 verter_session = { path = "../verter_session", features = ["test-util", "test-support"] }
 verter_macro_dto = { path = "../verter_macro_dto" }
