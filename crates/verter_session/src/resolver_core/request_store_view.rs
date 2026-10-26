@@ -981,7 +981,7 @@ impl KeptTypeBodies {
         let bytes = body
             .source_bytes()
             .saturating_mul(KEPT_TYPE_BODY_BYTES_PER_SOURCE_BYTE)
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES;
+            .saturating_add(verter_session_query::retention::ENTRY_OVERHEAD_BYTES);
         if let verter_session_query::retention::RetentionAdmission::Admitted(charge) = account
             .reserve(
                 verter_session_query::retention::ChargeClass::Retained,
