@@ -635,17 +635,18 @@ fn signature_chain_displays(depth: usize) -> [String; 2] {
     cold_and_warm_displays(&source, &probe)
 }
 
-/// Signature chains 200 deep, cold and warm alike, on a 576 KiB stack: the
-/// gate version of the 500-deep, 1 MiB test in the nightly scale tier.
-/// The chains need 320 to 352 KiB of fixed stack (measured at ten levels),
-/// so 576 KiB leaves at most 1.28 KiB a level over 200 levels, against at
-/// least 1.34 KiB over 500 levels on 1 MiB for the same fixed need: a level
-/// evaluated one native level deeper overflows here whenever it overflows
-/// there. The chains are still past the checker's instantiation depth.
+/// Signature chains 200 deep, cold and warm alike, on a 448 KiB stack: the
+/// gate version of the 500-deep, 1 MiB test in the nightly scale tier. The
+/// chains need 320 to 352 KiB of fixed stack (measured at ten levels), so
+/// 448 KiB leaves at most 0.64 KiB a level over 200 levels, against at least
+/// 1.34 KiB over 500 levels on 1 MiB. A signature chain's reads grow faster
+/// than its depth, so this bound is also chosen to overflow wherever the
+/// full-size test does when every read burns stack in proportion to the reads
+/// before it. The chains are still past the checker's instantiation depth.
 #[test]
 fn signature_chains_200_deep_answer_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let displays = on_a_stack_of(576 << 10, || signature_chain_displays(200));
+        let displays = on_a_stack_of(448 << 10, || signature_chain_displays(200));
         assert_eq!(displays[0], displays[1], "cold and warm answer alike");
     });
 }
