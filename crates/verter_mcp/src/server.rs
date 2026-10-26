@@ -3576,15 +3576,15 @@ const ADVERTISED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_
 
 #[tool_handler]
 impl ServerHandler for VerterMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        // `ServerInfo::new`/`InitializeResult::new` default `server_info` via
+    fn get_info(&self) -> ServerConfig {
+        // `ServerConfig::new`/`InitializeResult::new` default `server_info` via
         // `Implementation::from_build_env()`, whose `env!(...)` calls are
         // expanded where that function is DEFINED (inside the rmcp crate),
         // not where it's called — so the default silently reports rmcp's own
         // crate name/version ("rmcp" / the rmcp release) as the negotiated
         // server identity, not Verter's. Set it explicitly so a routine rmcp
         // bump can never change what identity Verter presents to clients.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("verter-mcp", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ADVERTISED_PROTOCOL_VERSION)
             .with_instructions(

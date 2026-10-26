@@ -183,18 +183,37 @@ A comment may supplement that durable explanation with a GitHub issue only when 
 
 ### Test Economy
 
-The recursive mapped-index regressions run on every ordinary debug run as
-three separately discoverable tests over one generator and one set of
-assertions: `recursive_mapped_index_publishes_dotted_paths_across_three_modules`
+The recursive mapped-index regressions share one generator and one set of
+assertions. The gate runs `recursive_mapped_index_publishes_dotted_paths_across_three_modules`
 (20 entities across three modules, under the default request fuse),
-`recursive_mapped_index_publishes_dotted_paths_across_five_modules` (100
-entities across five modules, under an explicit 50,000-operation allowance)
-and `recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts`
-(six entities across three modules and ten across five). Each asserts the
-exact dotted-path set and the instantiation bound through the public host
-resolver. No environment variable selects a population, and no layout moves
-out of the normal lane; the large-key mapped-value benchmark keeps its
-separate 1,000/3,000/10,000-key populations.
+`recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts` (six
+entities across three modules and ten across five) and
+`recursive_mapped_index_work_is_affine_and_fits_every_full_size_layout`. Each
+asserts the exact dotted-path set and the instantiation bound `15n + 20`
+through the public host resolver. The last is the gate version of the
+full-size layouts: at 5, 10 and 15 entities across five modules, the
+instantiations, the request operations charged against the allowance and the
+paid computations must each grow by exactly the same amount per five entities,
+and the affine work at 25, 75, 100 and 300 entities must meet the `15n + 20`
+bound, the 50,000-operation allowance and the 25-to-75 fourfold growth check;
+the proof work's second step stays within a sixteenth of its first. The
+100- and 300-entity layouts and the 25-to-75 growth test, unchanged, are in
+the `nightly_scale` module, in the nightly scale tier (CLAUDE.md, Test Speed).
+No environment variable selects a population; the large-key mapped-value
+benchmark keeps its separate 1,000/3,000/10,000-key populations.
+
+Gate versions of nightly scale tests use `crate::scale_gate` in
+`verter_session`: `affine` and `quadratic` require a counter's finite
+differences of the next order to vanish over equally spaced sizes and give
+its exact count at a full size, `measured_work` reads a host's deterministic
+counters (charged operations, connected work, relation checks, cold builds,
+instantiations, decided conditionals, substitutions) around a demand, and the
+gate version applies the full-size test's own bounds to the counts at its
+sizes. A counter that is not deterministic (a hash-collision count) is not
+fitted; its per-size bound runs at the gate sizes instead. A stack-bound test's
+gate version shrinks depth and stack together so the per-level stack it allows
+is no larger than the full-size test's, and stays past any depth limit the
+full-size test crosses.
 
 The Svelte projection profile gates run one solution build per pinned
 TypeScript engine. Every profile and corruption/publication twin remains a

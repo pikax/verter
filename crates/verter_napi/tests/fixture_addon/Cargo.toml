@@ -28,8 +28,9 @@ doctest = false
 
 [dependencies]
 verter_napi = { path = "../.." }
+verter_alloc = { path = "../../../verter_alloc" }
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 
 [build-dependencies]
-napi-build = "2.3"
+napi-build = "2.6"

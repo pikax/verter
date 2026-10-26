@@ -551,6 +551,14 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
 /// the host-coordinator pool whose workers register as `External`) must
 /// not starve the scheduler stage pool. The hard gate is "completes
 /// within the timeout".
+///
+/// The batch also guards against lost driver wakes. While the only host
+/// worker waits on a transferred producer it runs the next batch item, whose
+/// cache node the ledger refuses until that producer's flight returns its
+/// CPU permit outside any pump. Without the driver wake on that release
+/// each such hand-off stalled for the driver's 5 s idle re-pump, so the run
+/// took 5 to 20 s instead of a fraction of a second. Every hand-off is a
+/// chance to lose a wake, so the batch keeps its full size.
 #[test]
 fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     use std::sync::mpsc;

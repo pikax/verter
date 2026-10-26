@@ -2,7 +2,7 @@
 //! used by the inner component-meta caches.
 //!
 //! Every cache entry carries a [`ReadSetSignature`] whose `facts`
-//! rail is `Arc<[FactVersionRef]>` — the cold-compute observation set
+//! rail is `verter_session_query::facts::fact_set::FactSet` — the cold-compute observation set
 //! the producer recorded. It is the sole cache-validity rail. Warm-hit
 //! reads call [`validate_fact_signature`] which walks every fact
 //! through the current [`verter_session_query::facts::store_view::StoreView`] snapshot; a
@@ -78,16 +78,15 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{
-    fact_cache::signature_entries,
     fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::{seal_canonical_signature, FactReadSet, FactReadSetFinalise, FACT_PAGE_WIDTH},
+    fact_read_set::{seal_edit, FactReadSet, FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
 };
 
 /// Bracket one cold-compute closure with a push-style fact tracer.
 ///
 /// Installs a fresh [`verter_session_query::facts::fact_read_set::FactReadSetCell`] onto the
 /// TLS tracer stack, runs `f`, pops the tracer, and finalises the
-/// observation set into its complete (paged when wide) signature.
+/// observation set into its complete signature, whole at any width.
 ///
 /// Returns `(return_value, finalise_result, non_cacheable_read_observed)` so
 /// callers decide whether to admit the result to cache or treat it as
@@ -696,7 +695,8 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> Cacheabili
     /// Both are CACHE-ONLY: the value stays `Complete` and flows to the caller
     /// verbatim; only the shared-cache admission is refused (never
     /// `ResultCompleteness::Partial`). The NUMBER of facts the compute read is
-    /// never a condition: a wide observation set is paged, never refused.
+    /// never a condition: a wide observation set is sealed whole, never
+    /// refused.
     ///
     /// # Why MUTATION INSTABILITY refuses here too
     ///
@@ -788,7 +788,9 @@ where
 /// with a more intention-revealing name for callers in the
 /// fact-cache substrate.
 #[inline]
-pub fn observe_fact_signature(sig: &[FactVersionRef]) {
+pub fn observe_fact_signature<'s>(
+    sig: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
+) {
     crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
 }
 
@@ -892,10 +894,11 @@ pub fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef
 #[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 #[track_caller]
-pub fn validate_fact_signature(
+pub fn validate_fact_signature<'s>(
     ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
-    signature: &[FactVersionRef],
+    signature: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
 ) -> bool {
+    let signature = signature.into();
     signature.is_empty() || ctx.validates_fact_signature(signature)
 }
 
@@ -931,11 +934,12 @@ pub fn validate_fact_signature(
 /// validation strictly and the warm read recomputes.
 #[inline]
 #[track_caller]
-pub fn validate_fact_signature_with_self_roots(
+pub fn validate_fact_signature_with_self_roots<'s>(
     ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
-    signature: &[FactVersionRef],
+    signature: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
     self_root_canonicals: &[&str],
 ) -> bool {
+    let signature = signature.into();
     signature.is_empty()
         || ctx.validates_fact_signature_with_self_roots(signature, self_root_canonicals)
 }
@@ -945,10 +949,11 @@ pub fn validate_fact_signature_with_self_roots(
 /// paths so every outer tracer scope sees every transitive fact the
 /// inner cache hit / produced.
 #[inline]
-pub fn bubble_fact_signature(
+pub fn bubble_fact_signature<'s>(
     _ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
-    signature: &[FactVersionRef],
+    signature: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
 ) {
+    let signature = signature.into();
     if signature.is_empty() {
         return;
     }
@@ -960,7 +965,10 @@ pub fn bubble_fact_signature(
 /// graph store's fast-path warm hit). Fans into all active TLS
 /// tracer scopes when any are installed; no-op otherwise.
 #[inline]
-pub fn bubble_fact_signature_via_tls(signature: &[FactVersionRef]) {
+pub fn bubble_fact_signature_via_tls<'s>(
+    signature: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
+) {
+    let signature = signature.into();
     if signature.is_empty() {
         return;
     }
@@ -1293,12 +1301,12 @@ pub fn fact_signature_for_canonical_surface<C: crate::resolver_core::ResolverCap
 /// publish paths). Validator trivially accepts; readers fall back to
 /// the existing whole-hash regime in the legacy producer.
 #[inline]
-pub fn empty_fact_signature() -> Arc<[FactVersionRef]> {
-    Arc::from(Vec::<FactVersionRef>::new())
+pub fn empty_fact_signature() -> verter_session_query::facts::fact_set::FactSet {
+    verter_session_query::facts::fact_set::FactSet::empty()
 }
 
 /// Maps a `(canonical, DepVersion)` fence accumulator into the
-/// `Arc<[FactVersionRef]>` form a fact-signature carrier holds (the
+/// `verter_session_query::facts::fact_set::FactSet` form a fact-signature carrier holds (the
 /// owner-import-surface entry is the live consumer).
 ///
 /// Per-version mapping (no generation dep is silently dropped — a
@@ -1319,7 +1327,7 @@ pub fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 #[must_use]
 pub fn fact_signature_from_fence(
     fence: &[crate::semantic_query::DepEntry],
-) -> Option<Arc<[FactVersionRef]>> {
+) -> Option<verter_session_query::facts::fact_set::FactSet> {
     use crate::semantic_query::DepVersion;
     let mut out: Vec<FactVersionRef> = Vec::with_capacity(fence.len());
     for crate::semantic_query::DepEntry(canonical, version) in fence.iter() {
@@ -1343,7 +1351,9 @@ pub fn fact_signature_from_fence(
             }
         }
     }
-    Some(Arc::from(out))
+    Some(verter_session_query::facts::fact_set::FactSet::from_facts(
+        out,
+    ))
 }
 
 /// The pair a structural-carrier signature producer returns: the
@@ -1353,7 +1363,10 @@ pub fn fact_signature_from_fence(
 /// refusal modes (`SelfRootConflict`, `RouteGenerationDependency`) reach
 /// the caller verbatim; `ref_cycle_read_set` uses the same typed result for
 /// torn roots and unresolved strict-world provenance.
-pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
+pub type StructuralCarrierReadSet = (
+    verter_session_query::facts::fact_set::FactSet,
+    Arc<[Arc<str>]>,
+);
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
@@ -1371,43 +1384,28 @@ pub fn root_fact_visits_for_tests() -> usize {
     ROOT_FACT_VISITS.with(std::cell::Cell::get)
 }
 
-/// Finalize a structural cache carrier after every self-root, fence, prelude,
-/// and traced fact has been merged.
-///
-/// A carrier whose top level is wider than one evidence page carries its
-/// self-roots as one strict-world witness, minted only after every root
-/// validates in the exact effective view, and loses every precise root fact,
-/// a paged one included. A carrier whose width is already held by evidence
-/// pages keeps its precise roots: strict root validation reads through the
-/// pages, and a precise root stays valid in any view that agrees on the
-/// root's content, where a witness is bound to the one view that minted it.
-/// Every carrier, however wide, is then sealed whole (paged when wide) —
-/// width is never a refusal.
 /// The completed carrier of a sealed traced set that already holds every
 /// fact the completion would add — each fact of `fence`, and a
 /// `FileWholeHash` at its observed version for each observed self-root —
 /// shared rather than rebuilt: completing it would seal the same facts in
 /// the same order. `None` when the completion adds or rewrites anything (a
 /// missing fact, a self-root observed at two versions or traced at another,
-/// an evidence page, a set wide enough for the strict-root rewrite, or a
-/// set out of canonical order); the caller completes it in full.
+/// or a set wider than [`WIDE_SIGNATURE_WIDTH`], which the strict-root
+/// rewrite of [`bound_completed_structural_carrier`] may apply to); the
+/// caller completes it in full. Width is never a refusal: every carrier,
+/// however wide, is sealed whole.
 pub(crate) fn shared_completed_structural_carrier(
     observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
-    traced: &Arc<[FactVersionRef]>,
+    traced: &verter_session_query::facts::fact_set::FactSet,
     fence: &[FactVersionRef],
 ) -> Option<StructuralCarrierReadSet> {
-    if traced.len() > FACT_PAGE_WIDTH || traced.iter().any(is_paged_entry) {
+    // A sealed set is canonical by construction; it is read in place, never
+    // copied.
+    if traced.len() > WIDE_SIGNATURE_WIDTH {
         return None;
     }
-    let mut index = 1;
-    while index < traced.len() {
-        if traced[index - 1] >= traced[index] {
-            return None;
-        }
-        index += 1;
-    }
     for fact in fence {
-        if traced.binary_search(fact).is_err() {
+        if !traced.contains(fact) {
             return None;
         }
     }
@@ -1421,25 +1419,29 @@ pub(crate) fn shared_completed_structural_carrier(
             }
             other += 1;
         }
-        let mut named = false;
-        for fact in traced.iter() {
-            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if &**canonical_id == canonical.as_ref() {
-                    if hash != observed {
-                        return None;
-                    }
-                    named = true;
-                }
+        let mut named = None;
+        let from = FactVersionRef::FileWholeHash {
+            canonical_id: Arc::from(canonical.as_str()),
+            hash: [0; 16],
+        };
+        for fact in traced.iter_from(&from) {
+            let FactVersionRef::FileWholeHash { canonical_id, hash } = fact else {
+                break;
+            };
+            if &**canonical_id != canonical.as_ref() {
+                break;
             }
+            if hash != observed {
+                return None;
+            }
+            // The traced fact's own name: no new allocation.
+            named = Some(Arc::clone(canonical_id));
         }
-        if !named {
-            return None;
-        }
-        canonicals.push(Arc::from(canonical.as_str()));
+        canonicals.push(named?);
     }
     canonicals.sort();
     canonicals.dedup();
-    Some((Arc::clone(traced), Arc::from(canonicals)))
+    Some((traced.clone(), Arc::from(canonicals)))
 }
 
 /// [`shared_completed_structural_carrier`] for a completion whose
@@ -1450,30 +1452,23 @@ pub(crate) fn shared_completed_structural_carrier(
 /// the whole-read files, in canonical order.
 pub(crate) fn shared_completed_carrier_rooting_traced_files(
     observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
-    traced: &Arc<[FactVersionRef]>,
+    traced: &verter_session_query::facts::fact_set::FactSet,
 ) -> Option<StructuralCarrierReadSet> {
-    if traced.len() > FACT_PAGE_WIDTH {
+    if traced.len() > WIDE_SIGNATURE_WIDTH {
         return None;
     }
     // Canonical order puts one file's whole-file facts side by side, so a
     // file read at two versions shows as two adjacent facts of one file.
-    let mut files: Vec<(&str, &Hash16)> = Vec::new();
-    let mut index = 0;
-    while index < traced.len() {
-        let fact = &traced[index];
-        if (index > 0 && traced[index - 1] >= *fact) || is_paged_entry(fact) {
+    let mut files: Vec<(&Arc<str>, &Hash16)> = Vec::new();
+    // Whole-file facts sort first, so the walk stops at the first other one.
+    for fact in traced.iter() {
+        let FactVersionRef::FileWholeHash { canonical_id, hash } = fact else {
+            break;
+        };
+        if files.last().is_some_and(|(last, _)| *last == canonical_id) {
             return None;
         }
-        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-            if files
-                .last()
-                .is_some_and(|(last, _)| *last == &**canonical_id)
-            {
-                return None;
-            }
-            files.push((&**canonical_id, hash));
-        }
-        index += 1;
+        files.push((canonical_id, hash));
     }
     for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
         let mut other = 0;
@@ -1484,52 +1479,87 @@ pub(crate) fn shared_completed_carrier_rooting_traced_files(
             }
             other += 1;
         }
-        match files.iter().find(|(file, _)| *file == canonical.as_ref()) {
+        match files
+            .iter()
+            .find(|(file, _)| file.as_ref() == canonical.as_ref())
+        {
             Some((_, hash)) if *hash == observed => {}
             _ => return None,
         }
     }
-    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::from(*file)).collect();
-    Some((Arc::clone(traced), Arc::from(canonicals)))
+    // The traced facts' own names: no new allocation.
+    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::clone(file)).collect();
+    Some((traced.clone(), Arc::from(canonicals)))
 }
 
+/// The whole-file facts of `set` naming `canonical`, in order: the
+/// canonical order keeps one file's whole-file facts side by side, so they
+/// are read in place from the first one on.
+fn whole_file_facts<'a>(
+    set: &'a verter_session_query::facts::fact_set::FactSetEdit,
+    canonical: &'a Arc<str>,
+) -> impl Iterator<Item = &'a FactVersionRef> + 'a {
+    let from = FactVersionRef::FileWholeHash {
+        canonical_id: Arc::clone(canonical),
+        hash: [0; 16],
+    };
+    let facts: Vec<&'a FactVersionRef> = set
+        .iter_from(&from)
+        .take_while(move |fact| {
+            note_root_fact_visit();
+            matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if **canonical_id == **canonical)
+        })
+        .collect();
+    facts.into_iter()
+}
+
+/// Complete a structural carrier: `traced` (shared, never copied) with
+/// `extra` (the fence, the prelude and the self-roots the traced set does
+/// not name), and the strict-root rewrite of a wide carrier.
+///
+/// The rule reads logical widths alone — how many distinct facts a set
+/// holds — never how a set is stored. A completed carrier wider than
+/// [`WIDE_SIGNATURE_WIDTH`] carries its self-roots as one strict-world
+/// witness, minted only after every root validates in the exact effective
+/// view, in place of every precise root fact, when its completion is what
+/// made it wide: the traced set alone is no wider than
+/// [`WIDE_SIGNATURE_WIDTH`], or the facts the completion actually adds
+/// (the self-root facts the traced set lacked among them, each counted
+/// once) outnumber [`WIDE_SIGNATURE_WIDTH`]. A traced set already wider keeps its few
+/// precise roots: a precise root stays valid in any view that agrees on the
+/// root's content, where a witness is bound to the one view that minted it,
+/// so a wide read set is not made fragile by the roots it adds.
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
-    mut facts: Vec<FactVersionRef>,
+    traced: &verter_session_query::facts::fact_set::FactSet,
+    extra: Vec<FactVersionRef>,
     mut self_root_canonicals: Vec<Arc<str>>,
 ) -> Result<StructuralCarrierReadSet, NonAdmissionReason> {
     self_root_canonicals.sort();
     self_root_canonicals.dedup();
 
-    // The seal below sorts and deduplicates; only a set that may need the
-    // wide strict-root rewrite is canonicalised first, so its width is
-    // measured on distinct facts.
-    if facts.len() > FACT_PAGE_WIDTH {
-        facts.sort_unstable();
-        facts.dedup();
+    let mut facts = traced.edit();
+    // Only the facts the completion actually adds count: a self-root the
+    // traced set lacks arrives in `extra` as its fact.
+    let mut added = 0;
+    for fact in extra {
+        added += usize::from(facts.insert(fact));
     }
-    if facts.len() > FACT_PAGE_WIDTH && !self_root_canonicals.is_empty() {
-        // Index the requested roots once, including hashes held on evidence
-        // pages. Scanning from the beginning for each root is quadratic.
-        let mut root_hashes: rustc_hash::FxHashMap<&str, Option<Hash16>> = self_root_canonicals
-            .iter()
-            .map(|root| (root.as_ref(), None))
-            .collect();
-        for fact in signature_entries(&facts) {
-            note_root_fact_visit();
-            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if let Some(observed) = root_hashes.get_mut(&**canonical_id) {
-                    observed.get_or_insert(*hash);
-                }
-            }
-        }
+    let completion_made_it_wide =
+        traced.len() <= WIDE_SIGNATURE_WIDTH || added > WIDE_SIGNATURE_WIDTH;
+    if facts.len() > WIDE_SIGNATURE_WIDTH
+        && completion_made_it_wide
+        && !self_root_canonicals.is_empty()
+    {
         let mut roots: Vec<(Arc<str>, Hash16)> = Vec::with_capacity(self_root_canonicals.len());
         for canonical in &self_root_canonicals {
             note_root_fact_visit();
-            let Some(hash) = root_hashes[canonical.as_ref()] else {
+            let Some(FactVersionRef::FileWholeHash { hash, .. }) =
+                whole_file_facts(&facts, canonical).next()
+            else {
                 return Err(NonAdmissionReason::UnresolvedProvenance);
             };
-            roots.push((Arc::clone(canonical), hash));
+            roots.push((Arc::clone(canonical), *hash));
         }
         let root_refs: Vec<(&str, Hash16)> = roots
             .iter()
@@ -1539,40 +1569,20 @@ pub(crate) fn bound_completed_structural_carrier(
             .mint_strict_self_root_world(&root_refs)
             .ok_or(NonAdmissionReason::UnresolvedProvenance)?;
 
-        // The witness replaces every precise root fact, including one held
-        // on an evidence page; the remaining entries are sealed (and paged)
-        // again below.
-        let is_self_root = |fact: &FactVersionRef| {
-            note_root_fact_visit();
-            match fact {
-                FactVersionRef::FileWholeHash { canonical_id, .. } => {
-                    root_hashes.contains_key(&**canonical_id)
-                }
-                _ => false,
+        // The witness replaces every precise root fact; every other node of
+        // the traced set stays shared.
+        for canonical in &self_root_canonicals {
+            let precise: Vec<FactVersionRef> =
+                whole_file_facts(&facts, canonical).cloned().collect();
+            for fact in &precise {
+                facts.remove(fact);
             }
-        };
-        facts = if facts.iter().any(is_paged_entry) {
-            signature_entries(&facts)
-                .filter(|fact| !is_self_root(fact))
-                .cloned()
-                .collect()
-        } else {
-            facts.retain(|fact| !is_self_root(fact));
-            facts
-        };
-        facts.push(FactVersionRef::StrictSelfRootWorld(world));
+        }
+        facts.insert(FactVersionRef::StrictSelfRootWorld(world));
         self_root_canonicals.clear();
     }
 
-    Ok((
-        seal_canonical_signature(facts),
-        Arc::from(self_root_canonicals),
-    ))
-}
-
-/// Whether `fact` is an evidence page of a wide signature.
-fn is_paged_entry(fact: &FactVersionRef) -> bool {
-    matches!(fact, FactVersionRef::Receipt(receipt) if receipt.is_page())
+    Ok((seal_edit(facts), Arc::from(self_root_canonicals)))
 }
 
 /// A cache entry's dependency signature — the path-precise fact
@@ -1597,8 +1607,8 @@ fn is_paged_entry(fact: &FactVersionRef) -> bool {
 /// - `bubble(ctx)` fans `facts` into every active outer tracer on the
 ///   current TLS stack.
 /// - `canonical_ids()` returns the canonical IDs referenced by
-///   `facts` — every evidence page and consumed receipt read through to
-///   the canonicals it reaches — deduplicated by string identity. The
+///   `facts` — every consumed receipt read through to the canonicals it
+///   reaches — deduplicated by string identity. The
 ///   reverse index registers a (canonical → entry) mapping for each
 ///   yielded ID.
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -1667,11 +1677,11 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// discriminate a follower running under a different overlay: the
     /// validation passes regardless of the follower's view.
     ///
-    /// Returns `true` iff at least one `FileWholeHash` fact in `facts`
-    /// (evidence pages read through) has a canonical that appears in
-    /// `self_root_canonicals`. An empty `self_root_canonicals` slice can
-    /// never match, and a synthetic empty-fact carrier holds no
-    /// `FileWholeHash` at all — both return `false`.
+    /// Returns `true` iff at least one `FileWholeHash` fact in `facts` has a
+    /// canonical that appears in `self_root_canonicals`. An empty
+    /// `self_root_canonicals` slice can never match, and a synthetic
+    /// empty-fact carrier holds no `FileWholeHash` at all — both return
+    /// `false`.
     ///
     /// The in-flight joiner gate uses this to refuse cross-view reuse
     /// of ANY winner whose carrier could only ever validate vacuously —

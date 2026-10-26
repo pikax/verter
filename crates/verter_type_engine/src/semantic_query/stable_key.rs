@@ -367,13 +367,19 @@ construction_ordinal_seam! {
     }
 }
 
-// Test-only: classification frames opened, and key bytes written to hash a
-// class's fingerprint, on this thread.
+// Test-only: classification frames opened, key bytes written to hash a
+// class's fingerprint, class pairs compared by walking their streams, and
+// streams whose open-class stack outgrew its inline capacity, on this
+// thread.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub(crate) static CLASSIFICATION_FRAMES: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
     pub(crate) static FINGERPRINTED_BYTES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static STREAM_COMPARISONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static SPILLED_STREAMS: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -838,6 +844,12 @@ impl<'t> ClassTable<'t> {
                 }
             }
         };
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            STREAM_COMPARISONS.with(|count| count.set(count.get() + 1));
+            let spilled = u64::from(left.stack.spilled()) + u64::from(right.stack.spilled());
+            SPILLED_STREAMS.with(|count| count.set(count.get() + spilled));
+        }
         self.table.order.insert(class_pair(a, b), order);
         self.table.order.insert(class_pair(b, a), order.reverse());
         order
@@ -1112,17 +1124,26 @@ enum Event {
 
 /// A class's written-out-in-full byte stream, expanded on demand.
 struct FullStream {
-    /// Open classes with their next part and the offset within it.
-    stack: Vec<(ClassId, usize, u32)>,
+    /// Open classes with their next part and the offset within it: the
+    /// path from the compared class down to the child being read. Two
+    /// streams are opened for every comparison, which skips equal children
+    /// whole and descends only into differing ones, so the path is as deep
+    /// as the nesting at which the two classes first differ. That is a few
+    /// levels for the members a union orders, so the stack is kept inline
+    /// and such a comparison allocates nothing; a deeper path spills.
+    stack: smallvec::SmallVec<[(ClassId, usize, u32); FULL_STREAM_INLINE]>,
     /// A pending length prefix: its bytes, its length and how much of it is
     /// consumed.
     prefix: ([u8; 12], usize, usize),
 }
 
+/// Open classes a [`FullStream`] keeps inline before it spills.
+const FULL_STREAM_INLINE: usize = 8;
+
 impl FullStream {
     fn new(class: ClassId) -> Self {
         Self {
-            stack: vec![(class, 0, 0)],
+            stack: smallvec::smallvec![(class, 0, 0)],
             prefix: ([0; 12], 0, 0),
         }
     }

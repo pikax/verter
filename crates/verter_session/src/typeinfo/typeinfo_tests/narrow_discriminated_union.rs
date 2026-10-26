@@ -46,8 +46,18 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 
 fn resolve_switch(source: &str) -> TypeExpr {
     let host = make_host_with_footprint();
+    resolve_switch_on(&host, source)
+}
+
+/// [`resolve_switch`], with the work the switch's return and `Result` spend.
+fn resolve_switch_measured(source: &str) -> (TypeExpr, Vec<(&'static str, u64)>) {
+    let host = make_host_with_footprint();
+    crate::scale_gate::measured_work(&host, || resolve_switch_on(&host, source))
+}
+
+fn resolve_switch_on(host: &crate::VerterHost, source: &str) -> TypeExpr {
     let path = "/fixtures/switch.ts";
-    upsert_ts(&host, path, source);
+    upsert_ts(host, path, source);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: verter_type_expr::OwnedStr::from(path),
@@ -70,7 +80,7 @@ fn resolve_switch(source: &str) -> TypeExpr {
         ),
         "switch must be complete: {fact:?}"
     );
-    resolve_expr(&host, path, "Result", &[], ProjectionMode::Expanded).0
+    resolve_expr(host, path, "Result", &[], ProjectionMode::Expanded).0
 }
 
 fn assert_switch_literals(expr: TypeExpr, expected: &[i32], undefined: bool) {
@@ -96,6 +106,17 @@ fn assert_switch_literals(expr: TypeExpr, expected: &[i32], undefined: bool) {
 }
 
 fn assert_large_switch(count: i32) {
+    let source = large_switch_source(count);
+    assert_switch_literals(
+        resolve_switch(&source),
+        &(0..count).collect::<Vec<_>>(),
+        false,
+    );
+}
+
+/// A union of `count` tagged members and a switch returning each member's
+/// value from its case.
+fn large_switch_source(count: i32) -> String {
     let mut source = String::from("type U = ");
     for index in 0..count {
         if index != 0 {
@@ -108,11 +129,7 @@ fn assert_large_switch(count: i32) {
         write!(source, "case \"k{index}\": return x.v{index};").unwrap();
     }
     source.push_str("} } type Result = ReturnType<typeof f>;");
-    assert_switch_literals(
-        resolve_switch(&source),
-        &(0..count).collect::<Vec<_>>(),
-        false,
-    );
+    source
 }
 
 #[test]
@@ -130,9 +147,36 @@ fn switch_union_1000_cases() {
     assert_large_switch(1000);
 }
 
+/// The switch at 30, 60 and 90 cases: the gate version of the 3,000-case
+/// switch in the nightly scale tier. Each returns exactly its cases' values;
+/// the work it spends — charged operations, connected work, cold builds and
+/// the graph's other counters — grows by the same amount per step, so it is
+/// affine in the cases, and at 3,000 cases it stays within the request's
+/// operation fuse and connected-work budget.
 #[test]
-fn switch_union_3000_cases() {
-    assert_large_switch(3000);
+fn switch_union_work_is_affine_and_fits_three_thousand_cases() {
+    let sizes = [30, 60, 90];
+    let work: Vec<_> = sizes
+        .iter()
+        .map(|&count| {
+            let (answer, work) = resolve_switch_measured(&large_switch_source(count as i32));
+            assert_switch_literals(answer, &(0..count as i32).collect::<Vec<_>>(), false);
+            work
+        })
+        .collect();
+    let work = crate::scale_gate::affine("the switch", sizes, crate::scale_gate::counters(&work));
+    let operations = work.at("charged operations", 3000);
+    assert!(
+        operations <= verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET as u64,
+        "3,000 cases would charge {operations} operations"
+    );
+    let connected = work.at("connected work", 3000);
+    assert!(
+        connected
+            <= verter_type_engine::project_semantic_dispatch::connected_demand::MAX_CONNECTED_PROJECTION_WORK
+                as u64,
+        "3,000 cases would spend {connected} connected work"
+    );
 }
 
 #[test]
@@ -514,4 +558,15 @@ fn narrow_discriminated_union_du15_template_literal_discriminant() {
     let expr = resolve_alias("Du15Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn switch_union_3000_cases() {
+        assert_large_switch(3000);
+    }
 }

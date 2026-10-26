@@ -76,7 +76,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
         {
             return None;
         }
-        if view.validates_fact_signature(&candidate.read_set_signature.facts) {
+        if view.validates_fact_signature((&candidate.read_set_signature.facts).into()) {
             return Some(candidate);
         }
         None
@@ -165,18 +165,18 @@ impl<'a> OwnerImportRequestDriver<'a> {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
-        let rebind =
-            |surface: Arc<OwnerImportSurface>,
-             facts: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>| {
-                Arc::new(OwnerImportSurface {
-                    owner_canonical: Arc::clone(&surface.owner_canonical),
-                    owner_whole_hash: surface.owner_whole_hash,
-                    bindings: Arc::clone(&surface.bindings),
-                    read_set_signature:
-                        verter_session_query::facts::fact_cache::ReadSetSignature::new(facts),
-                    validated_at_generation: surface.validated_at_generation,
-                })
-            };
+        let rebind = |surface: Arc<OwnerImportSurface>,
+                      facts: verter_session_query::facts::fact_set::FactSet| {
+            Arc::new(OwnerImportSurface {
+                owner_canonical: Arc::clone(&surface.owner_canonical),
+                owner_whole_hash: surface.owner_whole_hash,
+                bindings: Arc::clone(&surface.bindings),
+                read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    facts,
+                ),
+                validated_at_generation: surface.validated_at_generation,
+            })
+        };
 
         match (decision, finalise) {
             (

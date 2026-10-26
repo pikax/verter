@@ -22,16 +22,7 @@ use verter_span::Span;
 /// per read. `Clone` (derived) performs a genuine field-by-field deep copy and
 /// is reserved for the rare caller that needs an owned copy; the hot read path
 /// `Arc::clone`s the shared handle instead, which is a refcount bump.
-#[derive(
-    Debug,
-    Default,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptAnalysisSnapshot {
     /// All import declarations found in the script block(s).
@@ -55,7 +46,6 @@ pub struct ScriptAnalysisSnapshot {
         serialize_with = "serialize_analysis_flags",
         deserialize_with = "deserialize_analysis_flags"
     )]
-    #[heap_size(inline)]
     pub flags: AnalysisFlags,
 
     /// Exported functions with return type analysis (when FUNC_RETURNS scope is active).

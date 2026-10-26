@@ -234,41 +234,31 @@ fn cacheable_admission_warms_exactly_one_entry() {
     assert_eq!(store.len(), 1, "a Cacheable admission warms one entry");
 }
 
-/// A cacheable signature wider than one page, sealed into pages none of
-/// which a cache admission has claimed yet.
+/// A cacheable signature wider than `WIDE_SIGNATURE_WIDTH`, built by
+/// extending another set, so it is held in shared tree storage no cache
+/// admission has claimed yet.
 fn wide_cacheable_admission() -> SignatureAdmission {
-    let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
-        .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/wide/{index:05}.ts").into(),
-            hash: [1u8; 16],
-        })
-        .collect();
+    let facts: Vec<FactVersionRef> =
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: format!("/wide/{index:05}.ts").into(),
+                hash: [1u8; 16],
+            })
+            .collect();
     SignatureAdmission::Cacheable(ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts[..1].to_vec())
+            .union_with_facts(&facts[1..]),
     ))
 }
 
-fn signature_pages(
-    signature: &ReadSetSignature,
-) -> Vec<verter_session_query::facts::receipt::ResultReceipt> {
-    signature
-        .facts
-        .iter()
-        .filter_map(|fact| match fact {
-            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// A cached wide entry owns its pages as refusable retained bytes; an
-/// account that refuses that footprint leaves the store empty while the
-/// caller still receives the complete payload, and the last holder's drop
-/// drains the pages.
+/// A cached wide entry owns its signature's shared storage as refusable
+/// retained bytes; an account that refuses that footprint leaves the store
+/// empty while the caller still receives the complete payload and
+/// signature, and the last holder's drop drains the storage.
 #[test]
-fn a_wide_cacheable_admission_claims_its_pages_and_is_refused_for_them() {
+fn a_wide_cacheable_admission_claims_its_shared_storage_and_is_refused_for_it() {
     use verter_session_query::retention::{
-        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
     };
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
     let store =
@@ -280,18 +270,18 @@ fn a_wide_cacheable_admission_claims_its_pages_and_is_refused_for_them() {
         5,
     );
     assert_eq!(store.len(), 1);
-    let pages = signature_pages(&stored.read_set_signature);
-    assert!(!pages.is_empty(), "premise: the signature is paged");
-    assert!(pages
-        .iter()
-        .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
-    let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-    assert_eq!(account.snapshot().retained_bytes, page_bytes);
-    drop((pages, stored, store));
+    let storage = stored.read_set_signature.facts.tree_footprint();
+    assert!(
+        storage.nodes > 0,
+        "premise: the signature has shared storage"
+    );
+    assert_eq!(storage.pinned_bytes, 0, "the admission claims every node");
+    assert_eq!(account.snapshot().retained_bytes, storage.retained_bytes);
+    drop((stored, store));
     assert_eq!(
         account.snapshot().retained_bytes,
         0,
-        "evicting the entry drains its pages"
+        "evicting the entry drains its storage"
     );
 
     let tight = SemanticRetentionAccount::new(RetentionLimits {
@@ -313,11 +303,17 @@ fn a_wide_cacheable_admission_claims_its_pages_and_is_refused_for_them() {
         .as_any()
         .downcast_ref::<fixtures::FixtureFactPayload>()
         .is_some());
-    let pages = signature_pages(&stored.read_set_signature);
-    assert!(!pages.is_empty(), "the delivered signature stays complete");
-    assert!(pages
-        .iter()
-        .all(|page| page.retained_charge_class() == Some(ChargeClass::Pinned)));
+    assert_eq!(
+        stored.read_set_signature.facts.len(),
+        2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3,
+        "the delivered signature stays complete"
+    );
+    let storage = stored.read_set_signature.facts.tree_footprint();
+    assert_eq!(storage.retained_bytes, 0);
+    assert_eq!(
+        storage.pinned_bytes, storage.charged_bytes,
+        "refused storage stays pinned"
+    );
     assert_eq!(tight.snapshot().retained_bytes, 0);
 }
 

@@ -93,14 +93,6 @@ use verter_session_query::facts::fact_cache::{
 use verter_session_query::facts::reuse::ReuseClass;
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CompletedSource {
-    whole_hash: Hash16,
-    // Required source-header evidence, admitted atomically with the hash.
-    // Artifact-only and session-overlay completions have no base version.
-    source_version: Option<verter_scheduler::node::SourceVersion>,
-}
-
 /// Per-request shadowing side maps recording additive loads that the
 /// request-entry [`HostStoreView`] does not track. Keys are retained for
 /// the request lifetime, while equal replacement is a no-op and changed
@@ -142,7 +134,7 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// shadowing state. The memo map below is deliberately excluded.
     overlay_id: OverlayId,
     revision: BracketedGeneration,
-    whole_hashes: RwLock<FxHashMap<String, CompletedSource>>,
+    whole_hashes: RwLock<FxHashMap<String, Hash16>>,
     /// Per-canonical derived hashes bundled by `DerivedFactKind` so a
     /// read can locate the entry with a `&str` lookup (no per-read
     /// owned tuple allocation).
@@ -175,7 +167,6 @@ pub(crate) struct CanonicalCompletionOverlay {
     whole_hashes_nonempty: AtomicBool,
     derived_hashes_nonempty: AtomicBool,
     file_facts_nonempty: AtomicBool,
-
     /// Request-scoped memo of prepared-decl bundles — the ONE
     /// request-world memo covering the base, session-overlay and
     /// `RequestOnly` worlds. See [`RequestBundleMemo`].
@@ -449,21 +440,6 @@ impl CanonicalCompletionOverlay {
     }
 
     fn write_whole_hash(&self, canonical: &str, whole_hash: Hash16) -> bool {
-        self.write_completed_source(canonical, |prior| {
-            prior
-                .filter(|entry| entry.whole_hash == whole_hash)
-                .unwrap_or(CompletedSource {
-                    whole_hash,
-                    source_version: None,
-                })
-        })
-    }
-
-    fn write_completed_source(
-        &self,
-        canonical: &str,
-        update: impl FnOnce(Option<CompletedSource>) -> CompletedSource,
-    ) -> bool {
         let mut whole = self.whole_hashes.write();
         self.whole_hashes_nonempty.store(true, Ordering::Release);
         #[cfg(test)]
@@ -474,8 +450,7 @@ impl CanonicalCompletionOverlay {
                 "the presence flag must be published while the map write lock is held"
             );
         }
-        let entry = update(whole.get(canonical).copied());
-        whole.insert(canonical.to_owned(), entry) != Some(entry)
+        whole.insert(canonical.to_owned(), whole_hash) != Some(whole_hash)
     }
 
     fn write_route_hash(&self, canonical: &str, route_hash: Hash16) -> bool {
@@ -679,12 +654,14 @@ impl CanonicalCompletionOverlay {
         // scheduler first, then the host's `effective_file_state`
         // fallback for canonicals that exist only in the artifact
         // store.
-        let source = host.scheduler().try_get_source(canonical);
-        let source_version = source.as_ref().map(|source| source.version());
-        let whole_hash = source.as_ref().map(|source| source.whole_hash).or_else(|| {
-            host.effective_file_state(canonical, None)
-                .map(|state| state.whole_hash)
-        });
+        let whole_hash = host
+            .scheduler()
+            .try_get_source(canonical)
+            .map(|source| source.whole_hash)
+            .or_else(|| {
+                host.effective_file_state(canonical, None)
+                    .map(|state| state.whole_hash)
+            });
 
         let Some(whole_hash) = whole_hash else {
             // No tracked content for this canonical — nothing to
@@ -695,7 +672,7 @@ impl CanonicalCompletionOverlay {
             return;
         };
 
-        self.write_completion_entry(host, canonical, whole_hash, source_version, None);
+        self.write_completion_entry(host, canonical, whole_hash, None);
     }
 
     /// Write the completion-overlay entries for a session-overlaid
@@ -712,7 +689,7 @@ impl CanonicalCompletionOverlay {
     ) {
         let overlay_identity = host.overlay_artifact_identity(canonical);
         let file_artifacts = overlay_identity.lookup_overlay_artifacts(host, view);
-        self.write_completion_entry(host, canonical, overlay_hash, None, file_artifacts);
+        self.write_completion_entry(host, canonical, overlay_hash, file_artifacts);
     }
 
     /// Write the completion-overlay entries for `(canonical, whole_hash)`.
@@ -724,13 +701,8 @@ impl CanonicalCompletionOverlay {
         host: &crate::VerterHost,
         canonical: &str,
         whole_hash: verter_session_query::analysis::types::Hash16,
-        source_version: Option<verter_scheduler::node::SourceVersion>,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
-        let completed = CompletedSource {
-            whole_hash,
-            source_version,
-        };
         // Per-canonical `IndexedReady` projection — populates `file_facts`
         // and the authored `Route` derived-hash entry. For a
         // session-overlaid canonical the caller passes the overlay
@@ -756,7 +728,7 @@ impl CanonicalCompletionOverlay {
         // wrote all three). Writing them again changes nothing, and would
         // compare the stored facts with these structurally — a walk over
         // every fact the file registers, on every serve of the file.
-        if self.lookup_completed_source(canonical) == Some(completed)
+        if self.lookup_whole_hash(canonical) == Some(whole_hash)
             && file_artifacts.as_ref().is_some_and(|file_artifacts| {
                 self.lookup_file_facts(canonical).is_some_and(|facts| {
                     Arc::ptr_eq(&facts, &file_artifacts.facts) || facts == file_artifacts.facts
@@ -786,7 +758,7 @@ impl CanonicalCompletionOverlay {
         // its effective shadowing spans three maps. A reader can therefore
         // never name a population for a partially-published completion.
         self.revision.mutate(|| {
-            let mut changed = self.write_completed_source(canonical, |_| completed);
+            let mut changed = self.write_whole_hash(canonical, whole_hash);
             if let Some(file_artifacts) = file_artifacts {
                 changed |= self.write_file_facts(canonical, Arc::clone(&file_artifacts.facts));
             }
@@ -800,11 +772,6 @@ impl CanonicalCompletionOverlay {
     }
 
     fn lookup_whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        self.lookup_completed_source(canonical_id)
-            .map(|entry| entry.whole_hash)
-    }
-
-    fn lookup_completed_source(&self, canonical_id: &str) -> Option<CompletedSource> {
         // Fast path: if no completion has written to this map within
         // the request, skip the `RwLock::read` + map lookup entirely.
         if !self.whole_hashes_nonempty.load(Ordering::Acquire) {
@@ -842,7 +809,7 @@ impl CanonicalCompletionOverlay {
     /// when `host.current_store_view_epoch() != base.mutation_epoch()`.
     #[cfg(test)]
     pub(crate) fn peek_whole_hash_for_tests(&self, canonical_id: &str) -> Option<Hash16> {
-        self.lookup_whole_hash(canonical_id)
+        self.whole_hashes.read().get(canonical_id).copied()
     }
 
     /// Test-only: directly insert a `(canonical, whole_hash)` entry into
@@ -968,6 +935,9 @@ pub(crate) struct RequestStoreView<'a> {
     /// The project environment this request read per canonical (see
     /// [`RequestProjectEnv`]).
     project_env: RequestProjectEnv,
+    /// The type declaration bodies this request's preparations kept for the
+    /// body reads that follow them ([`KeptTypeBodies`]).
+    kept_type_bodies: parking_lot::Mutex<KeptTypeBodies>,
     /// The request's ownership of the base's captured content generation in
     /// the workspace freshness history: from the moment the view is built,
     /// retiring history cannot raise the transition floor past the
@@ -981,6 +951,100 @@ pub(crate) struct RequestStoreView<'a> {
     /// Test-only: how many facts that are not receipts this view validated.
     #[cfg(test)]
     leaf_validations: AtomicUsize,
+}
+
+/// The bytes a kept type body is charged per byte of its declarations'
+/// authored source: an estimate of the owned typed IR lowered from it.
+const KEPT_TYPE_BODY_BYTES_PER_SOURCE_BYTE: usize = 16;
+
+/// The type declaration bodies one request's preparations kept for the
+/// body reads that follow them. Each is a retained, refusable reservation
+/// on the retention account while it waits: one the account declines is
+/// not kept, and its read lowers its body again. A read that takes a body
+/// takes its charge with it, and the rest are released when the request
+/// ends. Only this request's reads take them.
+#[derive(Default)]
+pub(crate) struct KeptTypeBodies(
+    std::collections::VecDeque<(
+        verter_semantic_source::decl_body_memo::KeptTypeBody,
+        verter_session_query::retention::RetentionCharge,
+    )>,
+);
+
+impl KeptTypeBodies {
+    /// Keep `body` when `account` admits its estimated bytes.
+    pub(crate) fn keep(
+        &mut self,
+        body: verter_semantic_source::decl_body_memo::KeptTypeBody,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        let bytes = body
+            .source_bytes()
+            .saturating_mul(KEPT_TYPE_BODY_BYTES_PER_SOURCE_BYTE)
+            .saturating_add(verter_session_query::retention::ENTRY_OVERHEAD_BYTES);
+        if let verter_session_query::retention::RetentionAdmission::Admitted(charge) = account
+            .reserve(
+                verter_session_query::retention::ChargeClass::Retained,
+                bytes,
+            )
+        {
+            self.0.push_back((body, charge));
+        }
+    }
+
+    /// Take the kept body parts of `name` declared by `owner` in `scope`
+    /// (the file scope when `None`) of `memo`'s source, with the charge
+    /// that covers them: the taker holds the charge for as long as it holds
+    /// the parts.
+    pub(crate) fn take(
+        &mut self,
+        memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<(
+        Arc<verter_session_query::source::transient_parts::TransientTypeParts>,
+        verter_session_query::retention::RetentionCharge,
+    )> {
+        let position = self
+            .0
+            .iter()
+            .position(|(body, _)| body.serves(memo, owner, name, scope))?;
+        let (body, charge) = self.0.remove(position)?;
+        Some((body.into_parts(), charge))
+    }
+}
+
+/// Deref `locator` through `memo`, reading a type body from the parts
+/// `take` hands over for it when it holds them. Returns the deref's result
+/// with the charges of the parts it took: the deref reads those parts
+/// until it returns, so the charges stay held until then, and the caller
+/// releases them when it drops them.
+pub(crate) fn deref_taking(
+    memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
+    locator: &verter_type_expr::locators::AuthoredBodyLocator,
+    take: impl Fn(
+        verter_type_expr::TopLevelOwnerId,
+        &str,
+        Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<(
+        Arc<verter_session_query::source::transient_parts::TransientTypeParts>,
+        verter_session_query::retention::RetentionCharge,
+    )>,
+) -> (
+    Result<
+        verter_session_query::source::deref::DerefedAuthoredBody,
+        verter_session_query::source::deref::LocatorBodyDerefError,
+    >,
+    Vec<verter_session_query::retention::RetentionCharge>,
+) {
+    let charges = std::cell::RefCell::new(Vec::new());
+    let derefed = memo.deref_locator_body_with(locator, &|owner, name, scope| {
+        let (parts, charge) = take(owner, name, scope)?;
+        charges.borrow_mut().push(charge);
+        Some(parts)
+    });
+    (derefed, charges.into_inner())
 }
 
 /// A settled validation answer: the answer itself, given at one exact
@@ -1067,7 +1131,7 @@ impl SignatureOutcome {
 /// (held alive, so its address names it alone), the strict self-roots and
 /// the completion state it was validated under, and its verdict.
 struct SettledSignature {
-    signature: Arc<[FactVersionRef]>,
+    signature: verter_session_query::facts::fact_set::FactSet,
     strict: Box<[Box<str>]>,
     state: CompletionOverlayState,
     verdict: Verdict,
@@ -1088,13 +1152,13 @@ struct SignatureVerdicts(
 );
 
 impl SignatureVerdicts {
-    fn address(signature: &Arc<[FactVersionRef]>) -> usize {
-        Arc::as_ptr(signature).cast::<FactVersionRef>() as usize
+    fn address(signature: &verter_session_query::facts::fact_set::FactSet) -> usize {
+        signature.address()
     }
 
     fn get(
         &self,
-        signature: &Arc<[FactVersionRef]>,
+        signature: &verter_session_query::facts::fact_set::FactSet,
         strict: &[&str],
         state: CompletionOverlayState,
     ) -> Option<Verdict> {
@@ -1103,7 +1167,7 @@ impl SignatureVerdicts {
             .get(&Self::address(signature))?
             .iter()
             .find(|entry| {
-                Arc::ptr_eq(&entry.signature, signature)
+                entry.signature.ptr_eq(signature)
                     && entry.state == state
                     && entry.strict.len() == strict.len()
                     && entry
@@ -1117,7 +1181,7 @@ impl SignatureVerdicts {
 
     fn insert(
         &self,
-        signature: &Arc<[FactVersionRef]>,
+        signature: &verter_session_query::facts::fact_set::FactSet,
         strict: &[&str],
         state: CompletionOverlayState,
         verdict: Verdict,
@@ -1127,7 +1191,7 @@ impl SignatureVerdicts {
             .entry(Self::address(signature))
             .or_default()
             .push(SettledSignature {
-                signature: Arc::clone(signature),
+                signature: signature.clone(),
                 strict: strict.iter().map(|root| Box::from(*root)).collect(),
                 state,
                 verdict,
@@ -1265,6 +1329,32 @@ impl ReceiptVerdicts {
 }
 
 impl<'a> RequestStoreView<'a> {
+    /// Keep `body` for the body read this request makes next, charged to
+    /// `account` ([`KeptTypeBodies::keep`]).
+    pub(crate) fn keep_type_body(
+        &self,
+        body: verter_semantic_source::decl_body_memo::KeptTypeBody,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        self.kept_type_bodies.lock().keep(body, account);
+    }
+
+    /// Take the kept body parts of `name` declared by `owner` in `scope` of
+    /// `memo`'s source, with their charge, if this request keeps them
+    /// ([`KeptTypeBodies::take`]).
+    pub(crate) fn take_kept_type_body(
+        &self,
+        memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<(
+        Arc<verter_session_query::source::transient_parts::TransientTypeParts>,
+        verter_session_query::retention::RetentionCharge,
+    )> {
+        self.kept_type_bodies.lock().take(memo, owner, name, scope)
+    }
+
     /// Construct a wrapper over `(base, overlay)` rooted on a
     /// proven-CURRENT base view. Every nested warm-cache probe may
     /// validate against it.
@@ -1277,6 +1367,7 @@ impl<'a> RequestStoreView<'a> {
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
+            kept_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,
@@ -1308,6 +1399,7 @@ impl<'a> RequestStoreView<'a> {
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
+            kept_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,
@@ -1324,7 +1416,7 @@ impl<'a> RequestStoreView<'a> {
     /// (see [`SignatureVerdicts`]).
     pub(crate) fn validates_retained_signature(
         &self,
-        sig: &Arc<[FactVersionRef]>,
+        sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
         if sig.is_empty() {
@@ -1342,7 +1434,10 @@ impl<'a> RequestStoreView<'a> {
                 return verdict == Verdict::Valid;
             }
         }
-        let (verdict, state) = match self.signature_outcome(sig, self_root_canonicals) {
+        let (verdict, state) = match self.signature_outcome(
+            verter_session_query::facts::fact_set::FactsRef::Set(sig),
+            self_root_canonicals,
+        ) {
             SignatureOutcome::Valid(state) => (Verdict::Valid, state),
             SignatureOutcome::Stale(_, state) => (Verdict::Stale, state),
             SignatureOutcome::Refused(_) => return false,
@@ -1500,7 +1595,7 @@ impl<'a> RequestStoreView<'a> {
     /// settling every receipt the answer proves something about.
     fn signature_outcome(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> SignatureOutcome {
         if !self.base_is_current {
@@ -1744,22 +1839,6 @@ impl<'a> RequestStoreView<'a> {
         if !self.base_is_current {
             return LeafCheck::Invalid;
         }
-        if matches!(
-            fact.key,
-            verter_session_query::facts::FactKey::DirectDeclarationExport { .. }
-        ) {
-            return match self.overlay.lookup_completed_source(&fact.canonical_id) {
-                Some(completed) => match completed.source_version {
-                    Some(version) => self.base.check_direct_declaration_export_for_content(
-                        fact,
-                        Some(completed.whole_hash),
-                        Some(version),
-                    ),
-                    None => LeafCheck::Invalid,
-                },
-                None => self.base.check_parse_domain(fact),
-            };
-        }
         match self.overlay.lookup_file_facts(&fact.canonical_id) {
             // Shadowing: overlay `FileFacts` are authoritative for the
             // canonical. A registered fact must match; an absent fact
@@ -1894,7 +1973,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
 
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         if sig.is_empty() {

@@ -490,24 +490,28 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))]
         use caller_kind::CallerKind;
         let mut pending = PendingSubmission::new(&self.inbox, Some(submission));
-        verter_execution::blocking::block_on(None, |waker| {
-            let polled = pending.poll(self, waker);
-            if polled.is_ready() {
-                return polled;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if !matches!(
-                CallerKind::current(),
-                CallerKind::Driver | CallerKind::Inline
-            ) && self.driver_handle.lock().is_some()
-            {
-                return std::task::Poll::Pending;
-            }
-            if let Ok(older) = self.inbox.receiver.try_recv() {
-                self.process_submission(older);
-            }
-            std::task::Poll::Pending
-        })
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerAdmission,
+            None,
+            |waker| {
+                let polled = pending.poll(self, waker);
+                if polled.is_ready() {
+                    return polled;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if !matches!(
+                    CallerKind::current(),
+                    CallerKind::Driver | CallerKind::Inline
+                ) && self.driver_handle.lock().is_some()
+                {
+                    return std::task::Poll::Pending;
+                }
+                if let Ok(older) = self.inbox.receiver.try_recv() {
+                    self.process_submission(older);
+                }
+                std::task::Poll::Pending
+            },
+        )
     }
 
     /// Drain all available submissions from the inbox.
@@ -590,7 +594,11 @@ impl Scheduler {
     pub(crate) fn drain_inbox_for_pump(&self) -> usize {
         let mut drained = 0;
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            self.process_submission(submission);
+            if self.shutdown.load(Ordering::Acquire) {
+                self.shutdown_drained_submission(submission);
+            } else {
+                self.process_submission(submission);
+            }
             drained += 1;
         }
         drained
@@ -638,6 +646,9 @@ impl Scheduler {
         };
 
         loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
             // Sample DAG depth under the lock so the audit figure
             // matches the depth observed by the entry that is about
             // to leave. Optional capture: without `semantic-observe` the
@@ -742,7 +753,7 @@ impl Scheduler {
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_for_cache);
+                let job = job.started();
                 let cancellation = job.cancellation.clone();
                 let completion = dispatch_ready_job_to_executor(
                     &job,
@@ -995,7 +1006,7 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_sender);
+                let job = job.started();
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
                 > = winner_ctx
@@ -1058,7 +1069,7 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_sender);
+                let job = job.started();
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
                 > = winner_ctx

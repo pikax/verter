@@ -221,6 +221,14 @@ pub(crate) trait Program {
     /// (cancellation). Checked before every step.
     fn stop(&self) -> Option<Self::Failure>;
 
+    /// Register `waker` to be woken when the drive's stop arrives, so a
+    /// pending drive observes it at its next poll instead of on a timer.
+    /// Called each time a poll returns `Pending`, after the subscription it
+    /// waits on registered; a stop that is already present wakes `waker`
+    /// at once. A program whose stop cannot change while it waits registers
+    /// nothing.
+    fn wake_on_stop(&mut self, waker: &Waker);
+
     /// Release a frame the execution abandons before it completed — after a
     /// stop, or when the execution is released while pending — together
     /// with whatever its program holds open on its behalf. A frame that
@@ -288,10 +296,6 @@ thread_local! {
     static DRIVES_RUNNING: Cell<u32> = const { Cell::new(0) };
 }
 
-/// How long a blocking drive parks before it looks for a stop again when
-/// no producer woke it.
-const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
-
 /// Marks a drive as running for its extent, unwinding included.
 struct DriveScope;
 
@@ -309,10 +313,13 @@ impl Drop for DriveScope {
 }
 
 /// Poll `poll` to completion on this thread, parking it whenever the poll is
-/// pending until the producer it waits on wakes it. Parking is timed so a
-/// stop stays observable while the producer has not woken this thread.
+/// pending until the producer it waits on, or its stop, wakes it.
 pub(crate) fn block_on<T>(poll: impl FnMut(&Waker) -> Poll<T>) -> T {
-    verter_execution::blocking::block_on(Some(PARK_SLICE), poll)
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SemanticDrive,
+        None,
+        poll,
+    )
 }
 
 /// Whether a drive is running on this thread: a synchronous entry reached
@@ -448,10 +455,9 @@ impl<P: Program> SemanticExecution<P> {
     /// producer that will wake `waker`. The only way an execution runs:
     /// frames never drive, and a poll never runs inside a frame's step.
     ///
-    /// The runtime registers producer wakes; its owner supplies stop wakes
-    /// (as `SemanticTask` does), or re-polls or drops a pending drive when
-    /// cancelled. The compatibility driver [`block_on`] bounds each park
-    /// by [`PARK_SLICE`] for owners without a stop subscription.
+    /// The producer wakes `waker`, and so does the drive's stop
+    /// ([`Program::wake_on_stop`]): a cancelled request's pending drive is
+    /// woken, and its next poll abandons it.
     pub(crate) fn poll(
         &mut self,
         program: &mut P,
@@ -513,6 +519,7 @@ impl<P: Program> SemanticExecution<P> {
                     {
                         self.counters.pending_polls += 1;
                     }
+                    program.wake_on_stop(waker);
                     return Poll::Pending;
                 }
                 Poll::Ready(external) => external,

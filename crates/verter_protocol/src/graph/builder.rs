@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 
@@ -220,170 +219,119 @@ pub struct GraphFunctionParam {
     pub rest: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ExprMemoKey {
+/// The address of an `Arc`'s allocation (the data pointer, without slice
+/// metadata).
+fn arc_addr<T: ?Sized>(value: &Arc<T>) -> usize {
+    Arc::as_ptr(value).cast::<()>() as usize
+}
+
+/// Deterministic hash used as the bucket key for every id-only index: the
+/// string and node tables and both expression memos. The hash only steers
+/// bucketing; dedup identity is decided by the entry's equality closure, so
+/// the id-assignment order is hasher-independent.
+#[inline]
+fn table_hash<T: std::hash::Hash + ?Sized>(value: &T) -> u64 {
+    rustc_hash::FxBuildHasher.hash_one(value)
+}
+
+/// An expression memo entry: the expression and its node id.
+///
+/// The entry owns its expression, and with it every allocation the
+/// expression's memo identity ([`AddressIdentity`] or [`ContentIdentity`])
+/// names by address. Identities are never stored: each probe recomputes the
+/// stored entry's identity from its expression, so an address compared is
+/// always one the table keeps allocated, and no other value can come to
+/// occupy it while the entry exists.
+struct MemoEntry {
+    expr: TypeExpr,
+    id: u32,
+}
+
+/// The allocation identity of a `TypeExpr` whose variant holds only `Arc`s
+/// and plain scalars, read off a borrowed expression without cloning.
+///
+/// Variants that carry owned data (`Literal`, `TypeParameter`, `TypeOf`,
+/// `Mapped`, `TemplateLiteral`, `Infer`, `ImportType`, `Unknown`) have no
+/// address identity and are memoised by [`ContentIdentity`] alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AddressIdentity {
     Primitive(verter_type_expr::PrimitiveName),
-    Literal(verter_type_expr::LiteralValue),
-    Union {
-        ptr: usize,
-        len: usize,
+    IntrinsicApplication {
+        op: u8,
+        arguments: usize,
     },
-    Intersection {
-        ptr: usize,
-        len: usize,
-    },
+    Union(usize),
+    Intersection(usize),
     Array {
-        element_ptr: usize,
+        element: usize,
         readonly: bool,
     },
     Tuple {
-        ptr: usize,
-        len: usize,
+        elements: usize,
         readonly: bool,
     },
-    Object {
-        ptr: usize,
-    },
-    Function {
-        ptr: usize,
-    },
-    /// Constructor type `new (...) => R`. A distinct memo variant from
-    /// [`Function`](Self::Function): a constructor type and a function type are
-    /// different types and must not share a memo entry even if they ever held
-    /// the same `Arc<FunctionExpr>` pointer.
-    ConstructorType {
-        ptr: usize,
-    },
+    Object(usize),
+    Function(usize),
+    /// A constructor type never shares a memo entry with a function type
+    /// holding the same `Arc<FunctionExpr>`.
+    ConstructorType(usize),
     Ref {
-        name: Arc<str>,
-        type_arguments_ptr: usize,
-        type_arguments_len: usize,
+        name: usize,
+        type_arguments: usize,
     },
-    TypeParameter(verter_type_expr::TypeParam),
-    KeyOf {
-        operand_ptr: usize,
-    },
-    TypeOf(verter_type_expr::ValueRef),
+    KeyOf(usize),
     IndexedAccess {
-        object_ptr: usize,
-        index_ptr: usize,
+        object: usize,
+        index: usize,
     },
     Conditional {
-        check_ptr: usize,
-        extends_ptr: usize,
-        true_ptr: usize,
-        false_ptr: usize,
+        check: usize,
+        extends: usize,
+        true_type: usize,
+        false_type: usize,
     },
-    Mapped {
-        parameter: String,
-        source_ptr: usize,
-        value_ptr: usize,
-        optional: MappedModifier,
-        readonly: MappedModifier,
-        name_type_ptr: usize,
-    },
-    TemplateLiteral {
-        quasis: Vec<String>,
-        expressions_ptr: usize,
-        expressions_len: usize,
-    },
-    Infer {
-        name: String,
-        constraint_ptr: usize,
-    },
-    Rest {
-        inner_ptr: usize,
-    },
-    Parenthesized {
-        inner_ptr: usize,
-    },
+    Rest(usize),
+    Parenthesized(usize),
     RecursiveRef {
-        name: Arc<str>,
-        type_arguments_ptr: usize,
-        type_arguments_len: usize,
-        conditional_context_ptr: usize,
-        conditional_context_len: usize,
+        name: usize,
+        type_arguments: usize,
+        conditional_context: usize,
     },
-    /// Synthetic slot-binding carrier — full structural identity. Two
-    /// physically distinct `Arc<SyntheticCarrierKey>` values that hold
-    /// the same logical key SHOULD share a memo entry, matching the
-    /// `PartialEq + Eq + Hash` derive on `SyntheticCarrierKey`.
-    SyntheticSlotBinding {
-        key: Arc<verter_type_expr::SyntheticCarrierKey>,
-    },
-    /// Dynamic-import type carrier — identity is the specifier + ordered
-    /// qualifier segments + typeof flag (all owned, by value) plus the
-    /// instantiation-argument slice pointer/len. Two import-types with a
-    /// different specifier or qualifier never share a memo entry.
-    ImportType {
-        specifier: Arc<str>,
-        qualifier: Arc<[Arc<str>]>,
-        typeof_query: bool,
-        type_arguments_ptr: usize,
-        type_arguments_len: usize,
-    },
-    IntrinsicApplication {
-        op: u8,
-        ptr: usize,
-        len: usize,
-    },
-    Unknown {
-        raw: String,
-    },
+    SyntheticSlotBinding(usize),
 }
 
-impl ExprMemoKey {
-    fn from_expr(expr: &TypeExpr) -> Self {
-        match expr {
+impl AddressIdentity {
+    fn of(expr: &TypeExpr) -> Option<Self> {
+        Some(match expr {
             TypeExpr::Primitive(name) => Self::Primitive(*name),
-            TypeExpr::Literal(value) => Self::Literal(value.clone()),
             TypeExpr::IntrinsicApplication { op, arguments } => Self::IntrinsicApplication {
                 op: op.stable_hash_tag(),
-                ptr: slice_ptr_id(arguments),
-                len: arguments.len(),
+                arguments: arc_addr(arguments),
             },
-            TypeExpr::Union(types) => Self::Union {
-                ptr: slice_ptr_id(types),
-                len: types.len(),
-            },
-            TypeExpr::Intersection(types) => Self::Intersection {
-                ptr: slice_ptr_id(types),
-                len: types.len(),
-            },
+            TypeExpr::Union(types) => Self::Union(arc_addr(types)),
+            TypeExpr::Intersection(types) => Self::Intersection(arc_addr(types)),
             TypeExpr::Array { element, readonly } => Self::Array {
-                element_ptr: arc_ptr_id(element),
+                element: arc_addr(element),
                 readonly: *readonly,
             },
             TypeExpr::Tuple { elements, readonly } => Self::Tuple {
-                ptr: slice_ptr_id(elements),
-                len: elements.len(),
+                elements: arc_addr(elements),
                 readonly: *readonly,
             },
-            TypeExpr::Object(object) => Self::Object {
-                ptr: arc_ptr_id(object),
-            },
-            TypeExpr::Function(function) => Self::Function {
-                ptr: arc_ptr_id(function),
-            },
-            TypeExpr::ConstructorType(function) => Self::ConstructorType {
-                ptr: arc_ptr_id(function),
-            },
+            TypeExpr::Object(object) => Self::Object(arc_addr(object)),
+            TypeExpr::Function(function) => Self::Function(arc_addr(function)),
+            TypeExpr::ConstructorType(function) => Self::ConstructorType(arc_addr(function)),
             TypeExpr::Ref {
                 name,
                 type_arguments,
             } => Self::Ref {
-                name: Arc::clone(name),
-                type_arguments_ptr: slice_ptr_id(type_arguments),
-                type_arguments_len: type_arguments.len(),
+                name: arc_addr(name),
+                type_arguments: arc_addr(type_arguments),
             },
-            TypeExpr::TypeParameter(param) => Self::TypeParameter(param.clone()),
-            TypeExpr::KeyOf(operand) => Self::KeyOf {
-                operand_ptr: arc_ptr_id(operand),
-            },
-            TypeExpr::TypeOf(value) => Self::TypeOf(value.clone()),
+            TypeExpr::KeyOf(operand) => Self::KeyOf(arc_addr(operand)),
             TypeExpr::IndexedAccess { object, index } => Self::IndexedAccess {
-                object_ptr: arc_ptr_id(object),
-                index_ptr: arc_ptr_id(index),
+                object: arc_addr(object),
+                index: arc_addr(index),
             },
             TypeExpr::Conditional {
                 check,
@@ -391,10 +339,101 @@ impl ExprMemoKey {
                 true_type,
                 false_type,
             } => Self::Conditional {
-                check_ptr: arc_ptr_id(check),
-                extends_ptr: arc_ptr_id(extends),
-                true_ptr: arc_ptr_id(true_type),
-                false_ptr: arc_ptr_id(false_type),
+                check: arc_addr(check),
+                extends: arc_addr(extends),
+                true_type: arc_addr(true_type),
+                false_type: arc_addr(false_type),
+            },
+            TypeExpr::Rest(inner) => Self::Rest(arc_addr(inner)),
+            TypeExpr::Parenthesized(inner) => Self::Parenthesized(arc_addr(inner)),
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => Self::RecursiveRef {
+                name: arc_addr(name),
+                type_arguments: arc_addr(type_arguments),
+                conditional_context: arc_addr(conditional_context),
+            },
+            TypeExpr::SyntheticSlotBinding(key) => Self::SyntheticSlotBinding(arc_addr(key)),
+            TypeExpr::Literal(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::Infer { .. }
+            | TypeExpr::ImportType { .. }
+            | TypeExpr::Unknown(_) => return None,
+        })
+    }
+}
+
+/// The content-aware memo identity of a `TypeExpr`, borrowed from the
+/// expression: names, literals and other owned data compare by content,
+/// shared sub-expressions by allocation address.
+///
+/// A variant whose identity is all addresses (every address-identified
+/// variant except `Ref`, `RecursiveRef` and `SyntheticSlotBinding`) has no
+/// content identity: two of them meet exactly when their
+/// [`AddressIdentity`] does, so a second memo layer could never hit.
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum ContentIdentity<'a> {
+    Literal(&'a LiteralValue),
+    TypeParameter(&'a TypeParam),
+    TypeOf(&'a ValueRef),
+    /// A reference whose name text equals another's meets it here even when
+    /// the two names live in distinct allocations.
+    Ref {
+        name: &'a str,
+        type_arguments: usize,
+    },
+    Mapped {
+        parameter: &'a str,
+        source: usize,
+        value: usize,
+        optional: MappedModifier,
+        readonly: MappedModifier,
+        name_type: Option<usize>,
+    },
+    TemplateLiteral {
+        quasis: &'a [String],
+        expressions: usize,
+    },
+    Infer {
+        name: &'a str,
+        constraint: Option<usize>,
+    },
+    RecursiveRef {
+        name: &'a str,
+        type_arguments: usize,
+        conditional_context: usize,
+    },
+    /// Structurally identical carriers held in distinct `Arc`s share an
+    /// entry, matching the `PartialEq + Eq + Hash` derive on
+    /// `SyntheticCarrierKey`.
+    SyntheticSlotBinding(&'a verter_type_expr::SyntheticCarrierKey),
+    /// The specifier, qualifier and typeof flag: everything its wire node
+    /// encodes. Its type arguments are not encoded, so they take no part.
+    ImportType {
+        specifier: &'a str,
+        qualifier: &'a [Arc<str>],
+        typeof_query: bool,
+    },
+    Unknown(&'a str),
+}
+
+impl<'a> ContentIdentity<'a> {
+    fn of(expr: &'a TypeExpr) -> Option<Self> {
+        Some(match expr {
+            TypeExpr::Literal(value) => Self::Literal(value),
+            TypeExpr::TypeParameter(param) => Self::TypeParameter(param),
+            TypeExpr::TypeOf(value) => Self::TypeOf(value),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => Self::Ref {
+                name,
+                type_arguments: arc_addr(type_arguments),
             },
             TypeExpr::Mapped {
                 parameter,
@@ -404,290 +443,102 @@ impl ExprMemoKey {
                 readonly,
                 name_type,
             } => Self::Mapped {
-                parameter: parameter.clone(),
-                source_ptr: arc_ptr_id(source),
-                value_ptr: arc_ptr_id(value),
+                parameter,
+                source: arc_addr(source),
+                value: arc_addr(value),
                 optional: *optional,
                 readonly: *readonly,
-                name_type_ptr: option_arc_ptr_id(name_type.as_ref()),
+                name_type: name_type.as_ref().map(arc_addr),
             },
             TypeExpr::TemplateLiteral {
                 quasis,
                 expressions,
             } => Self::TemplateLiteral {
-                quasis: quasis.clone(),
-                expressions_ptr: slice_ptr_id(expressions),
-                expressions_len: expressions.len(),
+                quasis,
+                expressions: arc_addr(expressions),
             },
             TypeExpr::Infer { name, constraint } => Self::Infer {
-                name: name.clone(),
-                constraint_ptr: option_arc_ptr_id(constraint.as_ref()),
-            },
-            TypeExpr::Rest(inner) => Self::Rest {
-                inner_ptr: arc_ptr_id(inner),
-            },
-            TypeExpr::Parenthesized(inner) => Self::Parenthesized {
-                inner_ptr: arc_ptr_id(inner),
+                name,
+                constraint: constraint.as_ref().map(arc_addr),
             },
             TypeExpr::RecursiveRef {
                 name,
                 type_arguments,
                 conditional_context,
             } => Self::RecursiveRef {
-                name: Arc::clone(name),
-                type_arguments_ptr: slice_ptr_id(type_arguments),
-                type_arguments_len: type_arguments.len(),
-                conditional_context_ptr: conditional_context.as_ptr() as usize,
-                conditional_context_len: conditional_context.len(),
+                name,
+                type_arguments: arc_addr(type_arguments),
+                conditional_context: arc_addr(conditional_context),
             },
-            TypeExpr::SyntheticSlotBinding(key) => Self::SyntheticSlotBinding {
-                key: Arc::clone(key),
-            },
+            TypeExpr::SyntheticSlotBinding(key) => Self::SyntheticSlotBinding(key),
             TypeExpr::ImportType {
                 specifier,
                 qualifier,
                 typeof_query,
-                type_arguments,
+                type_arguments: _,
             } => Self::ImportType {
-                specifier: Arc::clone(specifier),
-                qualifier: Arc::clone(qualifier),
+                specifier,
+                qualifier,
                 typeof_query: *typeof_query,
-                type_arguments_ptr: slice_ptr_id(type_arguments),
-                type_arguments_len: type_arguments.len(),
             },
-            TypeExpr::Unknown(value) => Self::Unknown {
-                raw: value.raw().to_string(),
-            },
-        }
-    }
-}
-
-fn arc_ptr_id<T>(value: &Arc<T>) -> usize {
-    Arc::as_ptr(value) as usize
-}
-
-fn slice_ptr_id<T>(value: &Arc<[T]>) -> usize {
-    value.as_ptr() as usize
-}
-
-fn option_arc_ptr_id<T>(value: Option<&Arc<T>>) -> usize {
-    value.map(arc_ptr_id).unwrap_or(0)
-}
-
-/// Deterministic hash used as the bucket key for the id-only reverse indices
-/// ([`GraphBuilder::string_ids`] / [`GraphBuilder::node_ids`]). The hash only
-/// steers bucketing; dedup identity is decided by the entry's equality
-/// closure comparing against the owning table, so the id-assignment order is
-/// hasher-independent.
-#[inline]
-fn table_hash<T: std::hash::Hash + ?Sized>(value: &T) -> u64 {
-    rustc_hash::FxBuildHasher.hash_one(value)
-}
-
-/// Compact pointer-based identity key for `TypeExpr` variants whose identity is
-/// fully determined by Arc pointers (no owned/cloned data). Used as a fast-path
-/// cache to avoid building the full `ExprMemoKey` and cloning value fields on
-/// cache hits.
-///
-/// Variants that carry owned data (`Literal`, `TypeParameter`, `TypeOf`, `Mapped`,
-/// `TemplateLiteral`, `Infer`, `Unknown`) are not eligible and fall through to
-/// the full `ExprMemoKey` path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ExprPtrKey {
-    /// Discriminant of the `TypeExpr` variant.
-    tag: u8,
-    /// Primary pointer (Arc::as_ptr or slice as_ptr). 0 when unused.
-    p0: usize,
-    /// Secondary pointer or small value. 0 when unused.
-    p1: usize,
-    /// Tertiary pointer. 0 when unused.
-    p2: usize,
-    /// Quaternary pointer. 0 when unused.
-    p3: usize,
-    /// Extra bits: readonly flag, len, etc. 0 when unused.
-    extra: usize,
-}
-
-impl ExprPtrKey {
-    /// Try to extract a pointer-based identity key from a `TypeExpr`.
-    /// Returns `None` for variants whose identity depends on owned/cloned data.
-    fn try_from_expr(expr: &TypeExpr) -> Option<Self> {
-        Some(match expr {
-            TypeExpr::Primitive(name) => Self {
-                tag: 0,
-                p0: *name as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            // Pointer-derivable: the op is a closed scalar and the operands
-            // are an owned slice, so identity needs no cloned data.
-            TypeExpr::IntrinsicApplication { op, arguments } => Self {
-                tag: 16,
-                p0: arguments.as_ptr() as usize,
-                p1: arguments.len(),
-                p2: 0,
-                p3: 0,
-                extra: op.stable_hash_tag() as usize,
-            },
-            TypeExpr::Union(types) => Self {
-                tag: 1,
-                p0: types.as_ptr() as usize,
-                p1: types.len(),
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::Intersection(types) => Self {
-                tag: 2,
-                p0: types.as_ptr() as usize,
-                p1: types.len(),
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::Array { element, readonly } => Self {
-                tag: 3,
-                p0: Arc::as_ptr(element) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: *readonly as usize,
-            },
-            TypeExpr::Tuple { elements, readonly } => Self {
-                tag: 4,
-                p0: elements.as_ptr() as usize,
-                p1: elements.len(),
-                p2: 0,
-                p3: 0,
-                extra: *readonly as usize,
-            },
-            TypeExpr::Object(object) => Self {
-                tag: 5,
-                p0: Arc::as_ptr(object) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::Function(function) => Self {
-                tag: 6,
-                p0: Arc::as_ptr(function) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            // Constructor type — pointer-based like `Function`, but a DISTINCT
-            // `tag` (15) so the fast-path ptr cache never aliases a constructor
-            // type with a function type.
-            TypeExpr::ConstructorType(function) => Self {
-                tag: 15,
-                p0: Arc::as_ptr(function) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => Self {
-                tag: 7,
-                p0: Arc::as_ptr(name) as *const u8 as usize,
-                p1: type_arguments.as_ptr() as usize,
-                p2: type_arguments.len(),
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::KeyOf(operand) => Self {
-                tag: 8,
-                p0: Arc::as_ptr(operand) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::IndexedAccess { object, index } => Self {
-                tag: 9,
-                p0: Arc::as_ptr(object) as usize,
-                p1: Arc::as_ptr(index) as usize,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => Self {
-                tag: 10,
-                p0: Arc::as_ptr(check) as usize,
-                p1: Arc::as_ptr(extends) as usize,
-                p2: Arc::as_ptr(true_type) as usize,
-                p3: Arc::as_ptr(false_type) as usize,
-                extra: 0,
-            },
-            TypeExpr::Rest(inner) => Self {
-                tag: 11,
-                p0: Arc::as_ptr(inner) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::Parenthesized(inner) => Self {
-                tag: 12,
-                p0: Arc::as_ptr(inner) as usize,
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            TypeExpr::RecursiveRef {
-                name,
-                type_arguments,
-                conditional_context,
-            } => Self {
-                tag: 13,
-                p0: Arc::as_ptr(name) as *const u8 as usize,
-                p1: type_arguments.as_ptr() as usize,
-                p2: type_arguments.len(),
-                p3: conditional_context.as_ptr() as usize,
-                extra: conditional_context.len(),
-            },
-            // Synthetic slot-binding carrier — pointer-only identity. Two
-            // physically identical Arcs are the same carrier (and share a
-            // graph-node id); structurally identical carriers held in
-            // distinct Arcs intentionally miss this fast path and fall
-            // through to the full `ExprMemoKey` (which deduplicates by
-            // structural equality on the `SyntheticCarrierKey` content).
-            TypeExpr::SyntheticSlotBinding(key) => Self {
-                tag: 14,
-                p0: arc_ptr_id(key),
-                p1: 0,
-                p2: 0,
-                p3: 0,
-                extra: 0,
-            },
-            // Value-based variants that require cloning — fall through to full ExprMemoKey.
-            TypeExpr::Literal(_)
-            | TypeExpr::TypeParameter(_)
-            | TypeExpr::TypeOf(_)
-            | TypeExpr::Mapped { .. }
-            | TypeExpr::TemplateLiteral { .. }
-            | TypeExpr::Infer { .. }
-            // Import-type identity depends on owned specifier / qualifier
-            // strings — fall back to the slower `ExprMemoKey` path.
-            | TypeExpr::ImportType { .. }
-            | TypeExpr::Unknown { .. } => return None,
+            TypeExpr::Unknown(value) => Self::Unknown(value.raw()),
+            TypeExpr::Primitive(_)
+            | TypeExpr::IntrinsicApplication { .. }
+            | TypeExpr::Union(_)
+            | TypeExpr::Intersection(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::Object(_)
+            | TypeExpr::Function(_)
+            | TypeExpr::ConstructorType(_)
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Rest(_)
+            | TypeExpr::Parenthesized(_) => return None,
         })
     }
 }
 
-#[derive(Debug, Default)]
+/// The bucket hash of a stored entry under one identity: `table_hash` of the
+/// identity its expression yields. A table stores only expressions that have
+/// that identity, so the fallback never applies.
+fn entry_hash<K: std::hash::Hash>(identity: Option<K>) -> u64 {
+    identity.map_or(0, |identity| table_hash(&identity))
+}
+
+/// Record `expr` in `table` unless an entry already `matches` it, cloning the
+/// expression into the new entry. `hash` is the bucket hash of `expr`'s
+/// identity and `rehash` recomputes a stored entry's from its expression.
+fn memo_insert(
+    table: &mut HashTable<MemoEntry>,
+    hash: u64,
+    matches: impl Fn(&TypeExpr) -> bool,
+    rehash: impl Fn(&TypeExpr) -> u64,
+    expr: &TypeExpr,
+    id: u32,
+) {
+    if let hashbrown::hash_table::Entry::Vacant(slot) = table.entry(
+        hash,
+        |entry| matches(&entry.expr),
+        |entry| rehash(&entry.expr),
+    ) {
+        slot.insert(MemoEntry {
+            expr: expr.clone(),
+            id,
+        });
+    }
+}
+
+/// Interns `TypeExpr`s into the wire graph's string and node tables.
+///
+/// The expression memos hold strong references to every expression they
+/// answer for, outside any retention account, until the builder is dropped
+/// or consumed by [`Self::into_tables`]. A builder is meant to live for one
+/// payload: every caller creates it locally for one conversion or snapshot
+/// capture (component-meta payload encoding, JSDoc type snapshots) and none
+/// keeps one beyond that.
+#[derive(Default)]
 pub struct GraphBuilder {
     /// The sole owner of every interned string (own-once). Ids are 1-based
     /// (id 0 = absent), assigned in first-encounter order.
@@ -703,15 +554,33 @@ pub struct GraphBuilder {
     /// [`Self::nodes`]. Stores ONLY ids and dedups by comparing against
     /// `nodes[id - 1]`, so it never owns a second (deep) copy of the node.
     node_ids: HashTable<u32>,
-    expr_ids: HashMap<ExprMemoKey, u32>,
-    /// Fast-path cache for pointer-based `TypeExpr` variants. Checked before
-    /// building the full `ExprMemoKey`, avoiding clones on cache hits for the
-    /// majority of expression types.
-    expr_ptr_ids: HashMap<ExprPtrKey, u32>,
+    /// Content-aware expression memo, keyed by [`ContentIdentity`]. A hit
+    /// means an expression whose names, literals and other owned data are
+    /// equal and whose shared sub-expressions are the same allocations; for
+    /// a variant with no shared sub-expression (a literal, type parameter,
+    /// `typeof`, synthetic carrier, import type or unknown) that is any
+    /// content-equal expression.
+    expr_ids: HashTable<MemoEntry>,
+    /// Address memo, keyed by [`AddressIdentity`] and checked first. A hit
+    /// means the same allocations, so the very expression that was encoded.
+    expr_ptr_ids: HashTable<MemoEntry>,
     #[cfg(test)]
     graph_node_build_count: usize,
     #[cfg(test)]
     expr_ptr_cache_hits: usize,
+}
+
+/// Table sizes only: the memo entries own whole expression trees, which a
+/// debug dump must not walk.
+impl std::fmt::Debug for GraphBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphBuilder")
+            .field("strings", &self.strings.len())
+            .field("nodes", &self.nodes.len())
+            .field("expr_ids", &self.expr_ids.len())
+            .field("expr_ptr_ids", &self.expr_ptr_ids.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl GraphBuilder {
@@ -752,40 +621,81 @@ impl GraphBuilder {
     }
 
     pub fn node_id(&mut self, expr: &TypeExpr) -> u32 {
-        // Fast path: for pointer-based variants, check the compact ptr cache
-        // before building the full ExprMemoKey (avoids cloning on cache hits).
-        let ptr_key = ExprPtrKey::try_from_expr(expr);
-        if let Some(pk) = &ptr_key {
-            if let Some(id) = self.expr_ptr_ids.get(pk) {
+        // Both memos are probed with identities borrowed from `expr`;
+        // nothing is cloned unless an entry is inserted.
+        let address = AddressIdentity::of(expr);
+        let address_hash = address.map(|identity| table_hash(&identity));
+        if let (Some(identity), Some(hash)) = (address, address_hash) {
+            if let Some(entry) = self.expr_ptr_ids.find(hash, |entry| {
+                AddressIdentity::of(&entry.expr) == Some(identity)
+            }) {
                 #[cfg(test)]
                 {
                     self.expr_ptr_cache_hits += 1;
                 }
-                return *id;
+                return entry.id;
             }
         }
 
-        // Slow path: build the full memo key (may clone value fields).
-        let memo_key = ExprMemoKey::from_expr(expr);
-        if let Some(id) = self.expr_ids.get(&memo_key) {
-            // Populate the ptr cache so future hits for the same Arc take
-            // the fast path.
-            if let Some(pk) = ptr_key {
-                self.expr_ptr_ids.insert(pk, *id);
+        let content = ContentIdentity::of(expr);
+        let content_hash = content.as_ref().map(table_hash);
+        if let (Some(identity), Some(hash)) = (&content, content_hash) {
+            if let Some(id) = self
+                .expr_ids
+                .find(hash, |entry| {
+                    ContentIdentity::of(&entry.expr).as_ref() == Some(identity)
+                })
+                .map(|entry| entry.id)
+            {
+                // Remember this allocation too, so its next lookup hits the
+                // address memo.
+                if let (Some(identity), Some(hash)) = (address, address_hash) {
+                    self.remember_address(identity, hash, expr, id);
+                }
+                return id;
             }
-            return *id;
         }
 
         // Terminal value-level dedup + own-once push (no `GraphNode` clone).
-        // The memo maps update identically whether the node was already
-        // interned or freshly pushed, so both cases share one tail.
+        // The memos update identically whether the node was already interned
+        // or freshly pushed, so both cases share one tail.
         let node = self.graph_node(expr);
         let id = self.intern_node(node);
-        self.expr_ids.insert(memo_key, id);
-        if let Some(pk) = ptr_key {
-            self.expr_ptr_ids.insert(pk, id);
+        if let (Some(identity), Some(hash)) = (&content, content_hash) {
+            memo_insert(
+                &mut self.expr_ids,
+                hash,
+                |stored| ContentIdentity::of(stored).as_ref() == Some(identity),
+                |stored| entry_hash(ContentIdentity::of(stored)),
+                expr,
+                id,
+            );
+        }
+        if let (Some(identity), Some(hash)) = (address, address_hash) {
+            self.remember_address(identity, hash, expr, id);
         }
         id
+    }
+
+    fn remember_address(&mut self, identity: AddressIdentity, hash: u64, expr: &TypeExpr, id: u32) {
+        memo_insert(
+            &mut self.expr_ptr_ids,
+            hash,
+            |stored| AddressIdentity::of(stored) == Some(identity),
+            |stored| entry_hash(AddressIdentity::of(stored)),
+            expr,
+            id,
+        );
+    }
+
+    /// The function node of a member signature (a method, call or construct
+    /// signature). The signature lives inline in its member, in no `Arc` of
+    /// its own, so it has no allocation to memoise on: its node is built and
+    /// interned by value, which yields the same id a `TypeExpr::Function`
+    /// holding an equal signature gets.
+    fn signature_function_id(&mut self, function: &FunctionExpr) -> u32 {
+        let node = self.function_node(function);
+        self.intern_node(node)
     }
 
     pub fn strings(&self) -> &[String] {
@@ -891,6 +801,17 @@ impl GraphBuilder {
         self.expr_ptr_cache_hits
     }
 
+    /// How many entries in either expression memo are for a
+    /// `TypeExpr::Function`.
+    #[cfg(test)]
+    pub(crate) fn debug_function_memo_entries(&self) -> usize {
+        self.expr_ptr_ids
+            .iter()
+            .chain(self.expr_ids.iter())
+            .filter(|entry| matches!(entry.expr, TypeExpr::Function(_)))
+            .count()
+    }
+
     fn graph_node(&mut self, expr: &TypeExpr) -> GraphNode {
         #[cfg(test)]
         {
@@ -953,7 +874,7 @@ impl GraphBuilder {
             // new wire kind is required. The erasure is pinned (not accidental)
             // by `constructor_type_serialises_to_function_wire_node` below, which
             // also asserts the memo identity stays DISTINCT from a plain
-            // function (`ExprMemoKey::ConstructorType`).
+            // function (`AddressIdentity::ConstructorType`).
             TypeExpr::ConstructorType(function) => self.function_node(function),
             TypeExpr::Ref {
                 name,
@@ -1203,7 +1124,7 @@ impl GraphBuilder {
             key_name: 0,
             key_type: 0,
             value_type: 0,
-            function: self.node_id(&TypeExpr::Function(std::sync::Arc::new(function.clone()))),
+            function: self.signature_function_id(function),
             method_kind: 0,
             has_implementation_body: false,
         }
@@ -1219,9 +1140,7 @@ impl GraphBuilder {
             key_name: 0,
             key_type: 0,
             value_type: 0,
-            function: self.node_id(&TypeExpr::Function(std::sync::Arc::new(
-                method.function.clone(),
-            ))),
+            function: self.signature_function_id(&method.function),
             method_kind: match method.method_kind {
                 verter_type_expr::ObjectMethodKind::Method => 0,
                 verter_type_expr::ObjectMethodKind::Get => 1,

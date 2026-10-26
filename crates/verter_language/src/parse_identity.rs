@@ -52,7 +52,7 @@ pub const FRAMEWORK_SYNTAX_COMPATIBILITY_EPOCH: CompatibilityEpoch = Compatibili
 /// cannot honor. Fields are mandatory, not `Option`: the constructor
 /// decides what "unspecified" means. Consumers never substitute a default
 /// for an absent value.
-#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParseOptions {
     /// Custom interpolation delimiters (Vue-only; ignored by Svelte).
     pub delimiters: (String, String),

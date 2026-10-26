@@ -617,7 +617,9 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
          source-env identity"
     );
     assert!(
-        !p1_view.validates_fact_signature(std::slice::from_ref(&source_env_fact)),
+        !p1_view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::from(
+            std::slice::from_ref(&source_env_fact)
+        )),
         "the recorded read-set must reject as a whole on the contributor source-env move"
     );
 }
@@ -1799,7 +1801,6 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     // fingerprint a one-augmenter set would produce, so the assertion above is
     // not satisfied by an all-zero / constant hash.
     let one_augmenter = [AugmenterEntry {
-        population_hash: [0; 16],
         artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0u8; 16]),
         parse_stable_hash: [7u8; 16],
     }];

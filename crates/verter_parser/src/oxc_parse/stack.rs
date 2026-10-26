@@ -188,22 +188,58 @@ thread_local! {
 /// returns, and so is every operation enclosing it that records its
 /// refusals.
 pub fn refusals_within<R>(operation: impl FnOnce() -> R) -> (R, Option<StackUnavailable>) {
-    /// Restores the enclosing operation's record, on return and on unwind
-    /// alike, carrying this operation's refusal into it.
-    struct Recording(Option<Option<StackUnavailable>>);
-    impl Drop for Recording {
-        fn drop(&mut self) {
-            let inner = REFUSALS.with(|refusals| refusals.replace(self.0)).flatten();
-            if let (Some(refused), Some(None)) = (inner, self.0) {
-                REFUSALS.with(|refusals| refusals.set(Some(Some(refused))));
-            }
-        }
-    }
     let recording = Recording(REFUSALS.with(|refusals| refusals.replace(Some(None))));
     let result = operation();
     let refused = REFUSALS.with(Cell::get).flatten();
     drop(recording);
     (result, refused)
+}
+
+/// Restores the enclosing operation's record, on return and on unwind
+/// alike, carrying the recording operation's refusal into it.
+struct Recording(Option<Option<StackUnavailable>>);
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        let inner = REFUSALS.with(|refusals| refusals.replace(self.0)).flatten();
+        if let (Some(refused), Some(None)) = (inner, self.0) {
+            REFUSALS.with(|refusals| refusals.set(Some(Some(refused))));
+        }
+    }
+}
+
+/// [`refusals_within`] for an operation that may suspend: each poll records
+/// the refusals made on the polling thread into the operation's own record,
+/// which it carries across its suspensions and answers with its result.
+/// Every poll also carries a refusal into the operation recording on the
+/// polling thread, as the synchronous form does when it returns.
+pub fn refusals_within_pollable<F: std::future::Future>(operation: F) -> RefusalsWithin<F> {
+    RefusalsWithin {
+        operation: Box::pin(operation),
+        refused: None,
+    }
+}
+
+/// An operation recording its stack refusals ([`refusals_within_pollable`]).
+pub struct RefusalsWithin<F> {
+    operation: std::pin::Pin<Box<F>>,
+    refused: Option<StackUnavailable>,
+}
+
+impl<F: std::future::Future> std::future::Future for RefusalsWithin<F> {
+    type Output = (F::Output, Option<StackUnavailable>);
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = &mut *self;
+        let recording = Recording(REFUSALS.with(|refusals| refusals.replace(Some(this.refused))));
+        let polled = this.operation.as_mut().poll(cx);
+        this.refused = REFUSALS.with(Cell::get).flatten();
+        drop(recording);
+        polled.map(|value| (value, this.refused))
+    }
 }
 
 /// Whether an operation records its refusals on this thread
@@ -1120,5 +1156,49 @@ mod handoff_tests {
         serve_once(data, 0);
         drop(moved);
         assert_eq!(count, 1);
+    }
+}
+
+#[cfg(test)]
+mod refusal_recording_tests {
+    use super::*;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    /// Refuses its stack on its second poll, after suspending once.
+    struct RefusesAfterSuspending(bool);
+
+    impl Future for RefusesAfterSuspending {
+        type Output = u8;
+
+        fn poll(mut self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<u8> {
+            if !std::mem::replace(&mut self.0, true) {
+                return Poll::Pending;
+            }
+            record_refusal(StackUnavailable { needed: 64 });
+            Poll::Ready(9)
+        }
+    }
+
+    /// A suspending operation records the refusal it makes after resuming
+    /// and answers it, carries it into the recording that encloses the poll
+    /// that made it, and leaves the polling thread's record as it was.
+    #[test]
+    fn a_suspending_operation_answers_the_refusal_it_made_after_resuming() {
+        let waker = Waker::noop();
+        let mut operation = std::pin::pin!(refusals_within_pollable(RefusesAfterSuspending(false)));
+        let (first, before) =
+            refusals_within(|| operation.as_mut().poll(&mut Context::from_waker(waker)));
+        assert!(first.is_pending());
+        assert_eq!(before, None);
+        let (second, enclosing) =
+            refusals_within(|| operation.as_mut().poll(&mut Context::from_waker(waker)));
+        let refused = StackUnavailable { needed: 64 };
+        match second {
+            Poll::Ready((answer, recorded)) => assert_eq!((answer, recorded), (9, Some(refused))),
+            Poll::Pending => panic!("the operation answers on its second poll"),
+        }
+        assert_eq!(enclosing, Some(refused));
+        assert_eq!(REFUSALS.with(Cell::get), None);
     }
 }

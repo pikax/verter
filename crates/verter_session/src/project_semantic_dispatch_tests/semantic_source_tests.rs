@@ -1201,3 +1201,110 @@ fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
          the authored lowering of the same union"
     );
 }
+
+#[test]
+fn a_reused_indexed_serve_delivers_its_version_into_a_fresh_consumer() {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    let host = host();
+    let canonical = "/sg_self_root/indexed_serve.ts";
+    upsert_ts(&host, canonical, "export interface Box { value: 'before' }");
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let (reused, first, first_proof) = dispatch.indexed_serve_probe_for_tests(canonical);
+    assert!(
+        !reused,
+        "the first consumer materializes the transaction serve"
+    );
+    let version = FactVersionRef::Parse(
+        host.syntactic_route_interface_fact_for_indexed(
+            canonical,
+            &host.ensure_indexed_ready(canonical).unwrap(),
+        )
+        .expect("the served interface has a parse-owned route fact"),
+    );
+    assert!(
+        first_proof.reads.facts.contains(&version),
+        "the cold serve observes its route version"
+    );
+    let (reused, second, second_proof) = dispatch.indexed_serve_probe_for_tests(canonical);
+    assert!(
+        reused,
+        "the fresh consumer must exercise the transaction hit"
+    );
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the hit serves the same indexed record"
+    );
+    assert!(
+        second_proof.reads.facts.contains(&version),
+        "a reused indexed serve must replay its file version into the fresh consumer"
+    );
+    assert_eq!(second_proof.reads.facts, first_proof.reads.facts);
+    assert_eq!(
+        second_proof.observed_self_roots,
+        first_proof.observed_self_roots
+    );
+    assert_eq!(
+        second_proof.canonical_evidence_deposited,
+        first_proof.canonical_evidence_deposited
+    );
+
+    upsert_ts(
+        &host,
+        canonical,
+        "export interface Changed { value: 'after' }",
+    );
+    let (reused, edited, edited_proof) = dispatch.indexed_serve_probe_for_tests(canonical);
+    assert!(
+        !reused,
+        "a dependency edit invalidates the transaction's recorded serve"
+    );
+    assert_ne!(first.whole_hash, edited.whole_hash);
+    let edited_version = FactVersionRef::Parse(
+        host.syntactic_route_interface_fact_for_indexed(
+            canonical,
+            &host.ensure_indexed_ready(canonical).unwrap(),
+        )
+        .expect("the edited interface has a route fact"),
+    );
+    assert_ne!(version, edited_version);
+    assert!(edited_proof.reads.facts.contains(&edited_version));
+    assert!(
+        !edited_proof.reads.facts.contains(&version),
+        "the fresh serve must not replay the prior version"
+    );
+}
+
+// Reads actual arena interning counters: instrumentation lane only.
+#[cfg(feature = "semantic-observe")]
+#[test]
+fn an_unbounded_header_parameter_interns_its_binder_once() {
+    let host = host();
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
+    let _builder = dispatch.enter_construction_scope();
+    let before = host.provenance_snapshot();
+    let binder = dispatch.unbounded_header_binder_for_tests();
+    let after = host.provenance_snapshot();
+    assert_eq!(
+        after.node_arena_intern_miss - before.node_arena_intern_miss,
+        1
+    );
+    assert_eq!(
+        after.node_arena_pushes - before.node_arena_pushes,
+        1,
+        "the unbounded final binder must reuse its predeclared shell"
+    );
+    let repeated = dispatch.unbounded_header_binder_for_tests();
+    let repeated_counts = host.provenance_snapshot();
+    assert_eq!(binder, repeated);
+    assert_eq!(
+        repeated_counts.node_arena_intern_miss,
+        after.node_arena_intern_miss
+    );
+    assert_eq!(
+        repeated_counts.node_arena_pushes - after.node_arena_pushes,
+        1
+    );
+}

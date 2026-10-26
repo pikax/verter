@@ -78,8 +78,12 @@ fn owned_load_transfers_integration_and_rejects_another_host() {
     let scope = host.scheduler.enter_execution_scope();
     let before = host.current_validation_token();
     let mut load = host.begin_load("/cold.ts", scope.task().clone(), CancellationToken::new());
-    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
-        .expect("scheduler dependency completes");
+    let commit = verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        None,
+        |waker| load.poll(waker),
+    )
+    .expect("scheduler dependency completes");
     assert!(
         !host.dependency_cache().contains_key("/cold.ts"),
         "polling never integrates host state"
@@ -89,7 +93,12 @@ fn owned_load_transfers_integration_and_rejects_another_host() {
     assert_ne!(before, host.current_validation_token());
 
     let mut warm = host.begin_load("/cold.ts", scope.task().clone(), CancellationToken::new());
-    let commit = verter_execution::blocking::block_on(None, |waker| warm.poll(waker)).unwrap();
+    let commit = verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        None,
+        |waker| warm.poll(waker),
+    )
+    .unwrap();
     let other = standalone_host();
     assert!(matches!(
         commit.apply(&other),
@@ -142,7 +151,7 @@ fn owned_load_rechecks_cancellation_after_a_continuing_yield() {
     loader.insert("/yield.ts".into(), Arc::from("export const n = 1;"));
     // This discriminator controls stage execution itself. A threaded driver
     // could execute Source independently of the adapter's yield decision.
-    host.scheduler = Scheduler::new_sync_with_executor_and_registry(
+    host.scheduler = Scheduler::new_sync_with_executor_and_task_registry(
         config.clone(),
         loader,
         Arc::new(DefaultExecutor),
@@ -193,8 +202,12 @@ fn owned_load_commit_rejects_eviction_before_external_integration() {
             scope.task().clone(),
             CancellationToken::new(),
         );
-        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
-            .expect("Analysis completes");
+        let commit = verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+            None,
+            |waker| load.poll(waker),
+        )
+        .expect("Analysis completes");
         host.evict("/evicted.ts");
         assert!(
             matches!(commit.apply(&host), Err(crate::HostLoadError::Superseded)),
@@ -224,8 +237,12 @@ fn owned_load_commit_survives_unrelated_eviction() {
         }
         let scope = host.scheduler.enter_execution_scope();
         let mut load = host.begin_load("/kept.ts", scope.task().clone(), CancellationToken::new());
-        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
-            .expect("Analysis completes");
+        let commit = verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+            None,
+            |waker| load.poll(waker),
+        )
+        .expect("Analysis completes");
         host.evict("/other.ts");
         assert!(commit
             .apply(&host)
@@ -246,8 +263,12 @@ fn owned_reload_commit_distinguishes_its_original_eviction_from_a_later_one() {
         let scope = host.scheduler.enter_execution_scope();
         let mut load =
             host.begin_load("/reload.ts", scope.task().clone(), CancellationToken::new());
-        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
-            .expect("reload completes");
+        let commit = verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+            None,
+            |waker| load.poll(waker),
+        )
+        .expect("reload completes");
         if evict_again {
             host.evict("/reload.ts");
         }
@@ -272,8 +293,12 @@ fn owned_reload_commit_observes_cancellation_at_the_visibility_write() {
     let scope = host.scheduler.enter_execution_scope();
     let stop = CancellationToken::new();
     let mut load = host.begin_load("/cancelled.ts", scope.task().clone(), stop.clone());
-    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
-        .expect("reload completes");
+    let commit = verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        None,
+        |waker| load.poll(waker),
+    )
+    .expect("reload completes");
     *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || stop.cancel()));
     assert!(matches!(
         commit.apply(&host),
@@ -301,7 +326,12 @@ fn cancelled_cold_load_does_not_publish_an_integrated_marker() {
     let scope = host.scheduler.enter_execution_scope();
     let stop = CancellationToken::new();
     let mut load = host.begin_load("/cold.ts", scope.task().clone(), stop.clone());
-    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker)).unwrap();
+    let commit = verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        None,
+        |waker| load.poll(waker),
+    )
+    .unwrap();
     *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || stop.cancel()));
     assert!(matches!(
         commit.apply(&host),
@@ -332,7 +362,12 @@ fn superseded_load_preserves_replacement_dependencies_and_aliases() {
         scope.task().clone(),
         CancellationToken::new(),
     );
-    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker)).unwrap();
+    let commit = verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        None,
+        |waker| load.poll(waker),
+    )
+    .unwrap();
     let weak = Arc::downgrade(&host);
     *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || {
         let host = weak.upgrade().unwrap();
@@ -394,8 +429,12 @@ fn owned_load_commit_rechecks_its_fence_at_the_visibility_write() {
             scope.task().clone(),
             CancellationToken::new(),
         );
-        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
-            .expect("Analysis completes");
+        let commit = verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+            None,
+            |waker| load.poll(waker),
+        )
+        .expect("Analysis completes");
         let weak = Arc::downgrade(&host);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fired_hook = fired.clone();
@@ -517,7 +556,7 @@ fn owned_load_driver_pumps_a_dependency_on_the_only_cpu_worker() {
     let slot = Arc::new(parking_lot::Mutex::new(None));
     let stop = CancellationToken::new();
     let (send, receive) = std::sync::mpsc::channel();
-    host.scheduler = Scheduler::with_executor_and_registry(
+    host.scheduler = Scheduler::with_executor_and_task_registry(
         config.clone(),
         loader,
         Arc::new(NestedLoad {

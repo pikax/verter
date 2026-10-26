@@ -26,7 +26,7 @@ use crate::shared::default_shared;
 use crate::types::{HostConfig, HostMetrics};
 use crate::{host_executor, VerterHost};
 
-pub(crate) fn is_ambient_declaration_canonical(canonical: &str) -> bool {
+fn is_ambient_declaration_canonical(canonical: &str) -> bool {
     canonical.starts_with("ambient:/")
         || canonical.ends_with(".d.ts")
         || canonical.ends_with(".d.tsx")
@@ -50,6 +50,21 @@ enum HostWorkerPoolSource {
     Fresh,
     #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     Shared(Arc<crate::TestHostWorkerPools>),
+}
+
+/// Who advances the native scheduler's dispatch.
+///
+/// `Thread` is every production constructor: the scheduler's own driver
+/// thread dispatches admitted work as soon as it arrives. `Caller` starts no
+/// driver thread, so work dispatches only where the calling thread pumps (a
+/// root's dispatch step, an inline drive). A test that drives roots on one
+/// thread needs that: with a driver thread beside it, the interleaving it
+/// asserts and the wakes it counts depend on how that thread is scheduled.
+#[derive(Clone, Copy)]
+enum SchedulerDriver {
+    Thread,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    Caller,
 }
 
 pub(crate) fn next_host_instance_id() -> u64 {
@@ -129,6 +144,7 @@ impl HostResolverState {
         let runtime = crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
             routes,
             imported_roots,
+            registry.clone(),
         );
         runtime.bind_task_registry(registry);
         Self { runtime }
@@ -375,6 +391,7 @@ impl VerterHost {
             scheduler_config,
             HostWorkerPoolSource::Fresh,
             MemoFamilyBound::Production,
+            SchedulerDriver::Thread,
         )
     }
 
@@ -398,6 +415,7 @@ impl VerterHost {
             scheduler_config,
             HostWorkerPoolSource::Shared(worker_pools),
             MemoFamilyBound::Production,
+            SchedulerDriver::Thread,
         )
     }
 
@@ -407,6 +425,7 @@ impl VerterHost {
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
         worker_pool_source: HostWorkerPoolSource,
         memo_family_bound: MemoFamilyBound,
+        scheduler_driver: SchedulerDriver,
     ) -> Self {
         // A build without optional capture cannot record audits, timings or
         // footprints: the request-time flags would carry nothing.
@@ -571,14 +590,29 @@ impl VerterHost {
                         Arc::clone(&worker_pools.scheduler_io_pool),
                     ),
                 };
-                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor_and_registry(
-                    scheduler_config,
-                    loader,
-                    executor,
-                    scheduler_cpu_pool,
-                    scheduler_io_pool,
-                    task_registry.clone(),
-                );
+                let scheduler = match scheduler_driver {
+                    SchedulerDriver::Thread => {
+                        verter_scheduler::scheduler::Scheduler::with_executor_and_task_registry(
+                            scheduler_config,
+                            loader,
+                            executor,
+                            scheduler_cpu_pool,
+                            scheduler_io_pool,
+                            task_registry.clone(),
+                        )
+                    }
+                    #[cfg(test)]
+                    SchedulerDriver::Caller => {
+                        verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_task_registry(
+                            scheduler_config,
+                            loader,
+                            executor,
+                            scheduler_cpu_pool,
+                            scheduler_io_pool,
+                            task_registry.clone(),
+                        )
+                    }
+                };
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::ThreadedSchedulerPools,
@@ -592,13 +626,13 @@ impl VerterHost {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let scheduler =
-                    verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_registry(
-                        scheduler_config,
-                        loader,
-                        executor,
-                        task_registry.clone(),
-                    );
+                let _ = scheduler_driver;
+                let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_task_registry(
+                    scheduler_config,
+                    loader,
+                    executor,
+                    task_registry.clone(),
+                );
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::InlineDriveScheduler,
@@ -718,6 +752,7 @@ impl VerterHost {
                 envelope_ingest: registered_envelope_ingest,
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
+            task_registry: task_registry.clone(),
             language_classifier,
             workspace: workspace_lock,
             workspace_services,
@@ -733,7 +768,11 @@ impl VerterHost {
             platform_services,
             cooperative_drive,
             provenance,
-            resolver: HostResolverState::new(routes_handle, imported_roots_handle, task_registry),
+            resolver: HostResolverState::new(
+                routes_handle,
+                imported_roots_handle,
+                task_registry.clone(),
+            ),
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
@@ -833,6 +872,25 @@ impl VerterHost {
             verter_scheduler::scheduler::SchedulerConfig::default(),
             HostWorkerPoolSource::Fresh,
             MemoFamilyBound::ForTest(memo_family_cap),
+            SchedulerDriver::Thread,
+        )
+    }
+
+    /// TEST-ONLY: a standalone host whose scheduler starts no driver thread
+    /// ([`SchedulerDriver::Caller`]). Its worker pools are the production
+    /// ones; admitted work dispatches only where the calling thread pumps.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn new_standalone_caller_driven_for_test(config: HostConfig) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig::default(),
+            HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::Production,
+            SchedulerDriver::Caller,
         )
     }
 
@@ -1924,7 +1982,8 @@ mod fact_validation_authority {
                 verter_type_expr::OwnedStr,
                 verter_session_query::analysis::types::Hash16,
             )],
-            facts: Vec<FactVersionRef>,
+            traced: &verter_session_query::facts::fact_set::FactSet,
+            extra: Vec<FactVersionRef>,
         ) -> Result<
             verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
             verter_audit::NonAdmissionReason,
@@ -1933,7 +1992,9 @@ mod fact_validation_authority {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
-            verter_type_engine::semantic_query_memo::semantic_graph_carrier(&view, roots, facts)
+            verter_type_engine::semantic_query_memo::semantic_graph_carrier(
+                &view, roots, traced, extra,
+            )
         }
         fn tracer_forcing(&self) -> bool {
             self.test_force
@@ -2085,7 +2146,10 @@ mod fact_validation_authority {
         ) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
             verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched
         }
-        fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+        fn validates_fact_signature(
+            &self,
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
+        ) -> bool {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
@@ -2095,7 +2159,7 @@ mod fact_validation_authority {
         }
         fn validate_fact_signature(
             &self,
-            sig: &[FactVersionRef],
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
             self_root_canonicals: &[&str],
         ) -> Result<(), usize> {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
@@ -2107,7 +2171,7 @@ mod fact_validation_authority {
         }
         fn validates_fact_signature_with_self_roots(
             &self,
-            sig: &[FactVersionRef],
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
             self_root_canonicals: &[&str],
         ) -> bool {
             let view = match crate::VerterHost::resolver_store_view_read(self) {

@@ -10,7 +10,8 @@ description = "Scheduler-independent execution primitives for Verter: task ident
 publish = false
 
 [features]
-# Exposes the task registry's test-only inspectors to cross-crate test code.
+# Exposes the task registry's test-only inspectors and the blocking-wait
+# probe (`blocking::WaitProbe`) to cross-crate test code.
 # Production binaries MUST NOT enable this feature; downstream crates that
 # need it for their own tests add `features = ["test-support"]` only in
 # `[dev-dependencies]` or forward it from their own `test-support` feature.
@@ -26,6 +27,6 @@ semantic-observe = []
 # depends on none of them.
 [dependencies]
 verter_debug_assert = { workspace = true }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 rustc-hash = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"

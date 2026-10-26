@@ -49,7 +49,7 @@ use super::SymbolSpace;
 /// answer demanded live from the workspace resolution authority; baking
 /// it into a route fact made the fact go stale whenever the dependency
 /// file set moved, without the owner's own bytes changing.
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportRouteTarget {
     /// The authored import specifier (e.g. `./types`, `reka-ui`).
     pub source_specifier: Arc<str>,

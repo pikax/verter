@@ -33,15 +33,16 @@ pub trait FactValidation: Sync {
         &self,
         key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> verter_session_query::source::env_identity::SourceEnvIdentity;
-    /// The carrier `facts` and the observed `roots` seal into. The facts
-    /// are taken by value: the carrier is built from them in place.
+    /// The carrier the traced set, the `extra` facts and the observed
+    /// `roots` seal into. The traced set is shared, never copied.
     fn complete_graph_signature(
         &self,
         roots: &[(
             verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: Vec<FactVersionRef>,
+        traced: &verter_session_query::facts::fact_set::FactSet,
+        extra: Vec<FactVersionRef>,
     ) -> Result<
         crate::fact_signature_helpers::StructuralCarrierReadSet,
         crate::cache_runtime::NonAdmissionReason,
@@ -103,6 +104,13 @@ pub trait FactValidation: Sync {
         crate::count_resolver_context_call!("FactValidation::observe_borrowed_signature");
         crate::fact_tracing::tracing::observe_fan_out_borrowed(sig);
     }
+    /// [`Self::observe_borrowed_signature`] for a sealed set: every tracer
+    /// retains it as one shared run, read in place.
+    #[inline]
+    fn observe_sealed_signature(&self, sig: &verter_session_query::facts::fact_set::FactSet) {
+        crate::count_resolver_context_call!("FactValidation::observe_sealed_signature");
+        crate::fact_tracing::tracing::observe_fan_out_canonical(sig);
+    }
     fn compat_token(&self) -> StoreViewCompatToken;
     fn validates(&self, fact: &FactVersionRef) -> bool;
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool;
@@ -129,15 +137,18 @@ pub trait FactValidation: Sync {
     fn derived_hash_for(&self, canonical_id: &str, kind: DerivedFactKind)
         -> Option<ResolverHash16>;
     fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed;
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool;
+    fn validates_fact_signature(
+        &self,
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
+    ) -> bool;
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize>;
     fn validates_fact_signature_with_self_roots(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> bool;
     /// [`Self::validates_fact_signature_with_self_roots`] for a signature a
@@ -146,10 +157,13 @@ pub trait FactValidation: Sync {
     /// again.
     fn validates_retained_signature_with_self_roots(
         &self,
-        sig: &std::sync::Arc<[FactVersionRef]>,
+        sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
-        self.validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+        self.validates_fact_signature_with_self_roots(
+            verter_session_query::facts::fact_set::FactsRef::Set(sig),
+            self_root_canonicals,
+        )
     }
     fn promote_route_completion(
         &self,
@@ -238,19 +252,22 @@ impl StoreView for FactValidationView<'_> {
     fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
         self.port.aggregate_basis_seed()
     }
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(
+        &self,
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
+    ) -> bool {
         self.port.validates_fact_signature(sig)
     }
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         self.port.validate_fact_signature(sig, self_root_canonicals)
     }
     fn validates_fact_signature_with_self_roots(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> bool {
         self.port

@@ -123,6 +123,24 @@ intern_domain!(Tree {
     }
 });
 
+/// A second parent kind, for the charge test: it drains its index to
+/// empty and reads the index's backing, so it must not share an index with
+/// the nesting test, which counts the records its own index holds.
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum ChargedTree {
+    Leaf(u64),
+    Node(Vec<Interned<ChargedTree>>),
+}
+intern_domain!(ChargedTree {
+    /// A node's child list; each child is its own record.
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
+        match self {
+            ChargedTree::Leaf(_) => 0,
+            ChargedTree::Node(children) => verter_session_query::retention::allocation::vec_bytes(children),
+        }
+    }
+});
+
 #[test]
 fn content_equal_values_share_one_record() {
     let a = Interned::new(Plain(7));
@@ -294,34 +312,35 @@ fn occupancy_reports_held_records_and_both_backing_capacities_until_owners_drain
 fn a_record_and_its_index_backing_are_charged_until_the_last_handle_drops() {
     use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
     const CHILDREN: usize = 4_096;
-    let children: Vec<Interned<Tree>> = (0..CHILDREN as u64)
-        .map(|leaf| Interned::new(Tree::Leaf(leaf + 1_000_000)))
+    let children: Vec<Interned<ChargedTree>> = (0..CHILDREN as u64)
+        .map(|leaf| Interned::new(ChargedTree::Leaf(leaf + 1_000_000)))
         .collect();
     let list = vec_bytes(&children);
-    let parent = Interned::new(Tree::Node(children));
-    let record = arc_block_bytes(std::mem::size_of::<super::InternRecord<Tree>>());
+    let parent = Interned::new(ChargedTree::Node(children));
+    let record = arc_block_bytes(std::mem::size_of::<super::InternRecord<ChargedTree>>());
     assert_eq!(
         parent.record_charge_bytes(),
         record + list,
         "the parent is charged its block and its child list"
     );
-    let leaf = Interned::new(Tree::Leaf(1_000_000));
+    let leaf = Interned::new(ChargedTree::Leaf(1_000_000));
     assert_eq!(
         leaf.record_charge_bytes(),
         record,
         "a leaf is only its block"
     );
-    let backing = Tree::index().backing_charge_bytes();
+    let backing = ChargedTree::index().backing_charge_bytes();
     assert!(
         backing
-            >= Tree::index().capacity() * (std::mem::size_of::<(u64, super::Bucket<Tree>)>() + 1),
+            >= ChargedTree::index().capacity()
+                * (std::mem::size_of::<(u64, super::Bucket<ChargedTree>)>() + 1),
         "the index's table is charged by capacity: {backing}"
     );
     drop(leaf);
     drop(parent);
-    assert!(Tree::index().is_empty());
+    assert!(ChargedTree::index().is_empty());
     assert_eq!(
-        Tree::index().backing_charge_bytes(),
+        ChargedTree::index().backing_charge_bytes(),
         0,
         "a drained index keeps no backing charge"
     );

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use verter_type_expr::TopLevelOwnerId;
 
 /// TypeScript script vs external-module classification of one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileModuleKind {
     /// No import/export syntax: top-level interfaces and namespaces
     /// contribute to the global object.
@@ -108,7 +108,7 @@ impl ContributorEntry {
 }
 
 pub fn fingerprint_of(entries: &[ContributorEntry]) -> Hash16 {
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::{BuildHasher, Hasher};
     let salt_lo = rustc_hash::FxBuildHasher;
     let salt_hi = rustc_hash::FxBuildHasher;
     let mut h_lo = salt_lo.build_hasher();
@@ -117,18 +117,12 @@ pub fn fingerprint_of(entries: &[ContributorEntry]) -> Hash16 {
     h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
     for entry in entries {
         h_lo.write(entry.artifact_key.canonical.as_bytes());
-        entry.owner.hash(&mut h_lo);
-        entry.symbol.hash(&mut h_lo);
-        entry.specifier.hash(&mut h_lo);
-        entry.is_automatic_lib.hash(&mut h_lo);
+        h_lo.write(&entry.contribution_fingerprint);
         h_lo.write_u8(entry.space.tag());
         h_lo.write_u8(entry.module_kind as u8);
         h_lo.write_u8(entry.origin as u8);
         h_hi.write(entry.artifact_key.canonical.as_bytes());
-        entry.owner.hash(&mut h_hi);
-        entry.symbol.hash(&mut h_hi);
-        entry.specifier.hash(&mut h_hi);
-        entry.is_automatic_lib.hash(&mut h_hi);
+        h_hi.write(&entry.contribution_fingerprint);
         h_hi.write_u8(entry.space.tag());
         h_hi.write_u8(entry.module_kind as u8);
         h_hi.write_u8(entry.origin as u8);

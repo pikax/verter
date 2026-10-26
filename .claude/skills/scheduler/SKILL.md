@@ -31,6 +31,16 @@ reset additionally defers them through its serialization hold and driver join.
 Directly owned standalone DAGs deliver immediately. A reset already joining
 its own driver permits that driver's callback to return instead of waiting
 for its joiner; another scheduler's driver retains the normal reset barrier.
+An own-driver reset that acquires the lifecycle hold clears state, retains
+the driver's identity and join handle, and leaves shutdown set until the
+loop exits. External restart joins that outgoing driver before reopening
+work. Reset followed by restart on the driver itself reuses the same loop;
+it never spawns an overlapping driver. A healthy restart's serialization
+hold cannot swallow an own-driver reset: reset parks in bounded slices until
+it acquires the hold or observes another lifecycle owner's shutdown. Startup
+is gated until identity/handle publication and lifecycle unlock, so an
+immediate completion wake can safely reset. `scheduler::reset_tests` covers
+exit, retained-handle recovery, startup, and same-driver reset/restart.
 
 `Scheduler::begin_scoped_cache_node<T>` similarly exposes a poll-only
 `ScopedCacheNodeHandoff<T>`. Admission/result waits yield; dispatch transfers
@@ -38,18 +48,48 @@ exactly one `ScopedCacheNodeProducer<T>` for the external driver to run before
 resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
 the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
+Aggregate cancellation uses that same rail, including last-owner teardown,
+token probes and DAG cancellation; its latch changes immediately but callbacks
+wait for unlock. Transferred producers install their captured request context
+or clear every request slot when absent, restoring the driver's slots on exit.
 Dropping a producer settles cancellation; dropping a subscriber detaches only
-its own owner. Request stops wake the subscriber without timer polling.
-Scoped flights retain a producer task from the host's shared registry and
-install it while running, including after thread migration. Pending subscribers
-register wait edges; cycles return `Reentrant`. The waiter keeps its edge
-while the transferred producer runs under a separate task; terminalizing
-withdraws that edge. The host injects the same registry into
-the scheduler and semantic store through the registry-aware constructors.
-`CompletionSubscription::owned` also binds a poll-only completion to explicit
-producer/waiter tasks and a stop token. DAG cancellation and scoped owner
-withdrawal defer cancellation wakes through the same lifecycle rail as normal
-completion wakes. See the root-continuations reference for the full contract.
+its own owner. The host supplies its existing `TaskRegistry` through
+`with_executor_and_task_registry` / `new_sync_with_executor_and_task_registry`,
+sharing the semantic store's cycle authority. Handoffs capture their execution
+task, transferred producers install it on their running thread, and followers
+hold RAII wait edges until terminal/drop. Election wakes pre-existing followers
+to register their edges; self-dependency and mixed semantic/cache task cycles
+take the existing `Reentrant` refusal without cancelling siblings.
+The DAG uses that same injected registry. Producer election replaces its
+admission-time task stamp with the transferred task, provided the aggregate
+cancellation source still identifies the same incarnation. Owned completion
+subscribers therefore follow the task that actually executes the producer.
+Pending scoped handoffs subscribe to their request's cancellation. Scheduler
+`CompletionSubscription::owned` binds completion waits to explicit producer
+and waiter tasks plus a stop token, and `begin_owned_request` follows the
+scheduler-stamped prerequisite task through admission and completion. See the root-continuations reference for the full contract.
+
+Capacity return is a scheduler progress transition. Each dispatched permit
+carries a weak notification to the lifecycle delivery rail; its final shared
+release posts a nonblocking inbox wake and wakes cooperative drivers, even
+when the release happens outside a DAG operation. A full inbox already gives
+the driver work to drain. Completion/cancellation also notifies when it makes
+dependent nodes ready. Callbacks wait until DAG, flight, incarnation and reset
+holds release. Reset replaces the CPU and I/O counter allocations: even
+an eligibility decision made before reset can debit only its original
+ledger. A release selecting after reset does not notify; a wake selected
+before reset remains advisory and may be delivered afterward. `ReadyJob::started` simply drops its permit share through this common
+rail.
+
+A cooperative driver owns a `SchedulerProgressSubscription` from
+`Scheduler::subscribe_progress`, registering its waker **before** polling its
+dependency and rechecking dispatch readiness. Drop withdraws that driver's
+interest. Both synchronous scoped execution and host-root driving use this
+subscription. `dispatch_for_pending_dependency` pumps with the caller's actual
+active path so a saturated worker can loan its own resource capacity to a
+nested dependency. Neither polling nor notification executes a producer; the
+driver runs a transferred producer outside the root poll. Progress does not
+depend on periodic repumping.
 
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that
@@ -503,8 +543,10 @@ is a future sub-block.
 `CancellationToken` (`cancellation.rs`, LANDED) is a cheap, clonable,
 thread-safe one-shot latch — a transparent `Arc<AtomicBool>`. `clone()`
 is a refcount bump, `cancel()` a single `Release` store, `is_cancelled()`
-a single `Acquire` load; all clones share one flag and `cancel()` is
-idempotent. It is the substrate the un-landed DAG design uses for
+a single `Acquire` load for a request token and for a latched aggregate;
+only an unlatched aggregate token opens a probe of its owners (every
+semantic checkpoint asks, so the request-token path builds no probe
+state). All clones share one flag and `cancel()` is idempotent. It is the substrate the un-landed DAG design uses for
 per-node cancellation propagation
 (`CacheNodeDagNode.cancellation_token`), but on the current tree it is
 UNWIRED — no submission path or work node carries one yet.

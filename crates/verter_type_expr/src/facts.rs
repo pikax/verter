@@ -800,17 +800,7 @@ mod top_level_owner_identity_tests {
 /// member path remain structurally distinct until routing; dotted text is only
 /// exposed for legacy compatibility surfaces.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    NoTypeExpr,
-    NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan,
 )]
 pub struct TypeDependencyPathFact {
     segments: Arc<[String]>,
@@ -1044,7 +1034,6 @@ pub struct VueIgnoredHeritageFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum ClosednessFollowRole {
     /// The subject type whose closedness is being decided.
@@ -1069,7 +1058,6 @@ pub enum ClosednessFollowRole {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct SymbolicBinding {
     /// The bound type-parameter name.
@@ -1089,7 +1077,6 @@ pub struct SymbolicBinding {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct SymbolicBindingLocator {
     /// Ordered bindings (type-param name → authored-argument locator).
@@ -1109,7 +1096,6 @@ pub struct SymbolicBindingLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct FollowLocatorPayload {
     /// The authored body to follow.
@@ -1277,7 +1263,6 @@ pub struct KeyDomainClosednessFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum KeyDomainFact {
     /// The key domain is open.
@@ -1392,7 +1377,6 @@ pub enum NarrowFrontierBody {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum MemberNamesRoute {
     /// A closed enumeration of object member names.
@@ -1408,17 +1392,7 @@ pub enum MemberNamesRoute {
 /// the pre-collapse pair carried (order-sensitive derived `Eq` combined with
 /// sort-before-hash `Hash` — two values could hash equal while comparing
 /// unequal). Membership semantics only — Pick/Omit key ORDER is not semantic.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    NoTypeExpr,
-    NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
 pub struct RouteKeySet(Arc<[FactPropertyKey]>);
 
 impl RouteKeySet {
@@ -1498,7 +1472,6 @@ impl<'de> serde::Deserialize<'de> for RouteKeySet {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum RouteDemand {
     /// Full export — all dependencies.
@@ -1653,7 +1626,6 @@ pub fn merge_route_demands(a: &RouteDemand, b: &RouteDemand) -> RouteDemand {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct ExternalRouteRefFact {
     /// The local import name in the owning file.
@@ -1681,7 +1653,6 @@ pub struct ExternalRouteRefFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum RouteDependencyRefFact {
     /// A same-file local dependency, by name, with the route demanded of it
@@ -1709,7 +1680,6 @@ pub enum RouteDependencyRefFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct MemberDependencyEdge {
     /// The member whose dependencies these are.
@@ -1742,7 +1712,6 @@ pub struct MemberDependencyEdge {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum WholeRouteContextFact {
     /// The emitting root context (also recorded for sites reachable only
@@ -1768,7 +1737,6 @@ pub enum WholeRouteContextFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum DeferredKeyUtilityKind {
     /// `Pick<Base, KeySource>`.
@@ -1799,7 +1767,6 @@ pub enum DeferredKeyUtilityKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct DeferredKeyUtilityEdge {
     /// Which utility family defers its keys.
@@ -1844,7 +1811,6 @@ pub struct DeferredKeyUtilityEdge {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum WholeRouteEdgeFact {
     /// A same-file local reference to follow downstream: `route` is `Whole`
@@ -1891,7 +1857,6 @@ pub enum WholeRouteEdgeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub enum MemberPathSeedTarget {
     /// `path` is a terminal property (non-ref-carrier position): its direct
@@ -1924,7 +1889,6 @@ pub enum MemberPathSeedTarget {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct MemberPathSeedEdge {
     /// The property path within the owning decl (empty = the decl's own body
@@ -1949,7 +1913,6 @@ pub struct MemberPathSeedEdge {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct ShallowRouteFacts {
     /// Object-member-names route: `Closed(names)` for a direct-object body
@@ -1999,7 +1962,6 @@ impl ShallowRouteFacts {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct MemberHeaderFact {
     /// The statically known member key. Computed keys remain on the full object
@@ -2041,7 +2003,6 @@ impl MemberHeaderFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumMemberNamesFact {
     /// The ordered enum member names (the full statically-named superset).
@@ -2390,7 +2351,6 @@ pub enum TypeParamVariance {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
-    verter_retention::heap_size::HeapSize,
 )]
 pub struct TypeParamDeclFact {
     /// The ordered type parameters.

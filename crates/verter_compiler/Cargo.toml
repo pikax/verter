@@ -75,7 +75,6 @@ hotpath-alloc = ["semantic-observe", "verter_parser/hotpath-alloc", "hotpath/hot
 test-support = []
 
 [dependencies]
-verter_retention = { path = "../verter_retention" }
 verter_session_query = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_ecma = { workspace = true }
@@ -91,19 +90,19 @@ verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 hotpath = { version = "0.23", optional = true }
 blake3 = { workspace = true }
-bitflags = "2.11"
-memchr = "2.8.0"
+bitflags = "2.13"
+memchr = "2.8.3"
 # Arbitrary-precision integers for the Svelte client const-fold evaluator's BigInt
 # values (a faithful port of official `scope.evaluate`, where `NUMBER` includes
 # BigInt). Already a transitive dep via `oxc_ecmascript`; pinned directly here so
 # the fold evaluator can name the type.
-num-bigint = "0.4"
+num-bigint = "0.5"
 # IEEE-754 half-precision for the const-fold evaluator's `Math.f16round` global —
 # an EXACT round-to-nearest-even f64→f16→f64 round-trip matching JS. Already a
 # transitive dev-dep via criterion; pinned directly so the fold matches official.
 half = "2"
 rustc-hash = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
@@ -114,8 +113,8 @@ oxc_syntax = { workspace = true }
 oxc_diagnostics = "0.151.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
-oxc_sourcemap = "7.0.0"
-base64 = "0.22.1"
+oxc_sourcemap = "9.0.0"
+base64 = "0.23.1"
 sha2 = { workspace = true }
 hex = "0.4.3"
 # Regular dependency, not dev-dependency: `assert_not_impl_any!` guards the

@@ -33,8 +33,10 @@ fn file(canonical: &str) -> FactVersionRef {
     }
 }
 
-fn carrier(receipt: &ResultReceipt) -> Arc<[FactVersionRef]> {
-    Arc::from(vec![FactVersionRef::Receipt(receipt.clone())])
+fn carrier(receipt: &ResultReceipt) -> verter_session_query::facts::fact_set::FactSet {
+    verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::Receipt(
+        receipt.clone(),
+    )])
 }
 
 /// `n` results, each reading its own file and consuming the one before.
@@ -67,7 +69,12 @@ impl Measured {
     fn new(owner_charges_candidates: bool) -> Self {
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
         let warm = ReceiptReverseIndex::<u32, ()>::charging_registrations(&account);
-        warm.register(0, (), &Arc::from(Vec::new()), ["/w/warm.ts"]);
+        warm.register(
+            0,
+            (),
+            &verter_session_query::facts::fact_set::FactSet::empty(),
+            ["/w/warm.ts"],
+        );
         assert_eq!(warm.unregister(&0), Some(()));
         drop(warm);
         let index = if owner_charges_candidates {
@@ -91,7 +98,12 @@ impl Measured {
         }
     }
 
-    fn register(&mut self, key: u32, carrier: &Arc<[FactVersionRef]>, extras: &[&str]) {
+    fn register(
+        &mut self,
+        key: u32,
+        carrier: &verter_session_query::facts::fact_set::FactSet,
+        extras: &[&str],
+    ) {
         self.index
             .register(key, (), carrier, extras.iter().copied());
         self.owner_reserved += self.owner_share(extras.len(), usize::from(!carrier.is_empty()));
@@ -154,7 +166,7 @@ fn reverse_index_singleton_extras_and_holder_sets_are_charged_by_their_blocks() 
     const N: u32 = 4096;
     for owner_charges_candidates in [false, true] {
         let names: Vec<String> = (0..N).map(|i| format!("/w/extra{i}.ts")).collect();
-        let empty: Arc<[FactVersionRef]> = Arc::from(Vec::new());
+        let empty = verter_session_query::facts::fact_set::FactSet::empty();
         let mut measured = Measured::new(owner_charges_candidates);
         reset_live_block_bytes();
         for (key, name) in names.iter().enumerate() {
@@ -181,7 +193,7 @@ fn reverse_index_singleton_extras_and_holder_sets_are_charged_by_their_blocks() 
 fn reverse_index_singleton_parent_sets_are_charged_by_their_blocks() {
     const N: u32 = 2048;
     for owner_charges_candidates in [false, true] {
-        let carriers: Vec<Arc<[FactVersionRef]>> = (0..N)
+        let carriers: Vec<verter_session_query::facts::fact_set::FactSet> = (0..N)
             .map(|i| carrier(&ResultReceipt::new(vec![file(&format!("/w/own{i}.ts"))])))
             .collect();
         let mut measured = Measured::new(owner_charges_candidates);
@@ -209,7 +221,7 @@ fn reverse_index_singleton_parent_sets_are_charged_by_their_blocks() {
 fn reverse_index_drain_through_tombstones_stays_covered_and_releases_everything() {
     const N: u32 = 3500;
     for owner_charges_candidates in [false, true] {
-        let empty: Arc<[FactVersionRef]> = Arc::from(Vec::new());
+        let empty = verter_session_query::facts::fact_set::FactSet::empty();
         let mut random = 0x1234_5678_u64;
         let fences: Vec<&str> = (0..N)
             .map(|_| {
@@ -248,7 +260,8 @@ fn reverse_index_repeated_churn_accumulates_no_phantom_charge() {
     const PER_ROUND: u32 = 600;
     for owner_charges_candidates in [false, true] {
         let receipts = chain(40);
-        let carriers: Vec<Arc<[FactVersionRef]>> = receipts.iter().map(carrier).collect();
+        let carriers: Vec<verter_session_query::facts::fact_set::FactSet> =
+            receipts.iter().map(carrier).collect();
         let names: Vec<String> = (0..PER_ROUND).map(|i| format!("/w/self{i}.ts")).collect();
         let mut measured = Measured::new(owner_charges_candidates);
         reset_live_block_bytes();
@@ -279,7 +292,8 @@ fn reverse_index_repeated_churn_accumulates_no_phantom_charge() {
 #[test]
 fn reverse_index_clear_and_drop_restore_the_account_baseline() {
     let receipts = chain(64);
-    let carriers: Vec<Arc<[FactVersionRef]>> = receipts.iter().map(carrier).collect();
+    let carriers: Vec<verter_session_query::facts::fact_set::FactSet> =
+        receipts.iter().map(carrier).collect();
     let names: Vec<String> = (0..256).map(|i| format!("/w/kept{i}.ts")).collect();
 
     let measured = Measured::new(false);

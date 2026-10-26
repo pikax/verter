@@ -20,7 +20,6 @@
 //! subsequent phases of the project-global overhaul — this module introduces
 //! the foundation without rewiring the hot path yet.
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -142,7 +141,6 @@ pub struct AnalysisArtifactKey {
 /// materialise closure is its single producer.
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
-    pub(crate) storage: verter_retention::pinned_heap::StoragePin,
     pub whole_hash: Hash16,
     /// Runtime-authoritative language this exact source was parsed under.
     ///
@@ -248,41 +246,37 @@ pub struct IndexedReady {
 }
 
 /// An artifact's source parse identity, derived once ([`IndexedReady::source_parse_key`]).
-#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
-pub(crate) struct SourceParseKey(
-    verter_retention::pinned_heap::PinnedOnce<Option<verter_language::ParseKey>>,
-);
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
+
+impl SourceParseKey {
+    /// An identity already derived for the artifact's exact source revision
+    /// (its source snapshot's, [`crate::host_executor::HostSourceData::source_parse_key`]),
+    /// so the artifact never hashes its source for it. `None` records the
+    /// same refusal a derivation would reach.
+    pub(crate) fn derived(parse_key: Option<verter_language::ParseKey>) -> Self {
+        Self(std::sync::OnceLock::from(parse_key))
+    }
+}
 
 impl IndexedReady {
-    pub(crate) fn pin_storage(&self) {
-        self.storage.ensure(
-            self,
-            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
-            &Default::default(),
-        );
-    }
-    pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
-        self.source_parse_key.0.get().cloned()
-    }
-
     /// The exact parse identity of this artifact's source under its
     /// runtime language: its framework parse's key, or a plain script's,
-    /// derived from the whole source the first time it is asked for. The
-    /// same identity [`verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity`]
+    /// derived from the whole source the first time it is asked for unless
+    /// the artifact was seeded with it. The identity
+    /// [`verter_session_query::source::framework_parse::exact_source_parse_key`]
     /// derives (`None` where that refuses).
     pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
         self.source_parse_key
             .0
             .get_or_init(|| {
-                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                    Arc::from(""),
-                    self.whole_hash,
+                verter_session_query::source::framework_parse::exact_source_parse_key(
                     self.raw_source.as_ref(),
-                    self.file_language.clone(),
-                    self.framework_parse.as_deref(),
-                    self.parse_env_hash,
+                    &self.file_language,
+                    self.framework_parse
+                        .as_deref()
+                        .map(crate::parse::carrier_parse_key),
                 )
-                .map(|key| key.parse_key)
             })
             .clone()
     }
@@ -324,7 +318,6 @@ impl IndexedReady {
     ) -> Self {
         let route_inventory = Arc::clone(&shallow_state.route_inventory);
         Self {
-            storage: Default::default(),
             whole_hash,
             file_language: verter_language::FileLanguage::script_ts(),
             shallow_state,
@@ -366,7 +359,6 @@ impl IndexedReady {
                 Arc::clone(&route_inventory),
             );
         Self {
-            storage: Default::default(),
             whole_hash,
             file_language: verter_language::FileLanguage::script_ts(),
             shallow_state: Arc::new(shallow),
@@ -387,48 +379,6 @@ impl IndexedReady {
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
-    }
-}
-
-impl verter_retention::heap_size::HeapSize for IndexedReady {
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        let Self {
-            storage: _,
-            whole_hash: _,
-            file_language,
-            shallow_state,
-            built_at_content_generation: _,
-            parse_env_hash: _,
-            raw_source,
-            eval_source,
-            framework_parse,
-            script_analysis,
-            export_signatures,
-            snapshot,
-            route_inventory,
-            declares_interface_app_config: _,
-            macro_hot_mirror,
-            source_parse_key,
-            input_projection: _,
-        } = self;
-        file_language.heap_size(meter)
-            + shallow_state.heap_size(meter)
-            + raw_source.heap_size(meter)
-            + eval_source.heap_size(meter)
-            + framework_parse.heap_size(meter)
-            + script_analysis.heap_size(meter)
-            + export_signatures.heap_size(meter)
-            + snapshot.heap_size(meter)
-            + route_inventory.heap_size(meter)
-            + source_parse_key.heap_size(meter)
-            + macro_hot_mirror.heap_size(meter)
-    }
-    fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
-        self.pin_storage();
-        true
     }
 }
 
@@ -1367,7 +1317,7 @@ impl ProjectTypeStore {
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
-                task_registry,
+                task_registry.clone(),
                 memo_family_bound,
             );
         // The production semantic context is a process-permanent record.
@@ -1398,7 +1348,7 @@ impl ProjectTypeStore {
             indexed,
             analysis,
             routes: Arc::new(RouteDb::new()),
-            imported_roots: Arc::new(ImportedRootDb::new()),
+            imported_roots: Arc::new(ImportedRootDb::with_task_registry(task_registry)),
             semantic_graph,
             construction,
             owner_import_surfaces,
@@ -2374,7 +2324,6 @@ mod tests {
         db.insert(
             Arc::from("/w/a.ts"),
             Arc::new(IndexedReady {
-                storage: Default::default(),
                 whole_hash: hash_v1,
                 file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: shallow,
@@ -2428,7 +2377,6 @@ mod tests {
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
-                storage: Default::default(),
                 whole_hash: hash,
                 file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: Arc::new(

@@ -174,7 +174,7 @@ fn is_carrier_membership_committer_impl(im: &syn::ItemImpl) -> bool {
     let trait_ok = im
         .trait_
         .as_ref()
-        .and_then(|(_, path, _)| path.segments.last())
+        .and_then(|(path, _)| path.segments.last())
         .map(|seg| seg.ident == "CarrierMembershipCommitter")
         .unwrap_or(false);
     let self_ok = match &*im.self_ty {

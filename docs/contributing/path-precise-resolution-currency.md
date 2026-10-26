@@ -701,9 +701,9 @@ There is no sibling resolution signature, cache, validator, overflow
 convention, or empty-signature fallback. `ResolvedImportFactsDb` moves onto
 this existing bounded multi-candidate substrate during the cutover.
 
-Signature width is never a refusal. A canonical set wider than
-`FACT_PAGE_WIDTH = 1_024` is sealed into immutable, retention-charged evidence
-pages and validated in full. Empty means dependency-free and cacheable; a
+Signature width is never a refusal. A signature is one canonical `FactSet`
+however wide: retention-charged (a wide set's shared tree nodes each charge
+exactly their own allocation) and validated in full. Empty means dependency-free and cacheable; a
 refusal is never represented as an empty signature.
 
 `FactReadSet::finalise` is the single canonicaliser: it sorts + dedups the
@@ -715,14 +715,13 @@ across processes (every leaf is a `str`/byte/integer comparison; interned ids
 order by `Arc<str>` content, never by address or intern-table insertion order).
 
 A warm-reuse attempt does not rebuild the signature. `ResolutionTransaction::absorb`
-retains the reused candidate's already-canonical witness by `Arc` as a run;
-finalisation sorts only the small attempt-local observation set and merges each
-run in linearly. The finalised witness is exactly the union of the absorbed runs
-and the attempt-local observations — the attempt's own observations, which make
-the witness path-precise for THIS demand, always survive the merge. Because an
-`Arc<[FactVersionRef]>` carries no proof of canonicality, absorption verifies the
-run is strictly increasing and routes a non-canonical input through the ordinary
-sort; there is no second canonicalisation path.
+retains the reused candidate's sealed witness — a `FactSet`, canonical by
+construction — as a shared run; finalisation builds the new set on the widest
+run, sharing its storage, and inserts only what it lacks: the other runs' facts
+and the attempt-local observations. The finalised witness is exactly the union
+of the absorbed runs and the attempt-local observations — the attempt's own
+observations, which make the witness path-precise for THIS demand, always
+survive. There is no second canonicalisation path.
 
 `SignatureAdmission` is:
 

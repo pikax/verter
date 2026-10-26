@@ -867,3 +867,13 @@ mod framework_options_carrier_tests {
         assert_eq!(config.framework, vue_only);
     }
 }
+
+/// The binary runs on the allocator `verter_alloc` selects for it: mimalloc
+/// on a native build, so a block from the global heap is mimalloc's.
+#[test]
+fn the_selected_global_allocator_serves_this_binary() {
+    assert_eq!(
+        verter_alloc::mimalloc_serves_global_allocations(),
+        verter_alloc::SELECTED == verter_alloc::AllocatorKind::Mimalloc
+    );
+}

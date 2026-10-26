@@ -732,7 +732,7 @@ struct CompositeReduction {
 /// a later demand on the same union replays its roots instead of reducing
 /// it again: a distributive conditional demands its `extends` operand once
 /// per member. The outermost dispatch operation releases the table.
-pub(super) type CompositeFixedPoints = std::cell::RefCell<
+pub(super) type CompositeFixedPoints = verter_execution::sync_cell::SyncRefCell<
     rustc_hash::FxHashMap<SemanticNodeId, Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>>,
 >;
 
@@ -2179,6 +2179,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) => true,
             Some(SemanticNodeData::InstantiationRef { base, .. }) => {
                 self.runtime_nominal_identity(base).is_some()
+                    || matches!(
+                        self.prepared_decl_kind(base),
+                        Some(
+                            verter_session_query::declarations::TypeDeclKind::Interface
+                                | verter_session_query::declarations::TypeDeclKind::Class
+                        )
+                    )
             }
             _ => false,
         }
@@ -2190,7 +2197,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// arguments as types, resolving the operators they write
     /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
     /// argument that does not settle stays as written.
-    fn application_over_printed_arguments(
+    pub(super) fn application_over_printed_arguments(
         &self,
         application: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -2226,7 +2233,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// supplied arguments followed by every omitted defaulted one
     /// ([`Self::declared_application_arguments`]). The carrier itself when
     /// nothing is omitted or the defaults cannot be recovered.
-    fn declared_application(
+    pub(super) fn declared_application(
         &self,
         carrier: SemanticNodeId,
         identity: &crate::semantic_query::DeclIdentity,
@@ -2312,29 +2319,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
-        finalise: FactReadSetFinalise,
+        finalise: impl Into<FactReadSetFinalise>,
     ) -> EvaluateDeferredOutcome {
+        let finalise = finalise.into();
         let mutation_unstable = matches!(&finalise, FactReadSetFinalise::MutationUnstable);
         let evidence = match finalise {
             FactReadSetFinalise::Ok(facts) => {
-                use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
+                use verter_session_query::facts::fact_cache::FactVersionRef;
 
                 let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
-                // including whole-file facts retained on evidence pages.
+                // including whole-file facts of a wide traced set.
                 crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
                     &roots, &facts,
                 )
                 .map(Ok)
                 .unwrap_or_else(|| {
-                    roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                    roots.extend(facts.iter().filter_map(|fact| match fact {
                         FactVersionRef::FileWholeHash { canonical_id, hash } => {
                             Some((verter_type_expr::OwnedStr::from(&**canonical_id), *hash))
                         }
                         _ => None,
                     }));
-                    self.ctx.complete_graph_signature(&roots, facts.to_vec())
+                    self.ctx
+                        .complete_graph_signature(&roots, &facts, Vec::new())
                 })
                 .ok()
             }
@@ -2400,13 +2409,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let (true, false, Some(receipt), Some(evidence)) =
             (complete, frame.cache_suppress, receipt, evidence)
         {
-            self.graph().evaluate_deferred_memo_publish(
-                frame.entry_node,
-                frame.context,
-                frame.demand,
-                result,
-                receipt,
-                evidence,
+            self.graph().evaluate_deferred_memo_publish_completed(
+                crate::semantic_query_memo::CompletedDeferredEvaluation::new(
+                    frame.entry_node,
+                    frame.context,
+                    frame.demand,
+                    result,
+                    receipt,
+                    evidence,
+                ),
             );
         }
         let availability = if !frame.completeness.is_partial() {

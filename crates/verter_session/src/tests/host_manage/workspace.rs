@@ -1429,11 +1429,10 @@ export interface Props { label: string }
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact)
-                if fact.canonical_id.as_ref() == "/src/types.vue"
-                    && matches!(&fact.key, verter_session_query::facts::FactKey::DirectDeclarationExport { name } if name.as_ref() == "Props")
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if &**canonical_id == "/src/types.vue"
         )),
-        "the direct-local proof must certify the exact declaration/export header",
+        "the direct-local proof must track the provider content hash",
     );
     assert_eq!(
         host.provenance().snapshot().indexed_ready_materializes,

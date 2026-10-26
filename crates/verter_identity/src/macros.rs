@@ -8,7 +8,7 @@
 macro_rules! digest_identity {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(verter_retention::heap_size::HeapSize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name($crate::canonical::Canonical);
 
         impl $name {
@@ -27,6 +27,12 @@ macro_rules! digest_identity {
             /// on a suspected collision.
             pub fn canonical_bytes(&self) -> &[u8] {
                 self.0.bytes()
+            }
+
+            /// The one allocation every clone shares, for a measurement
+            /// that counts each distinct allocation once.
+            pub fn canonical_shared_bytes(&self) -> &std::sync::Arc<[u8]> {
+                self.0.shared_bytes()
             }
         }
 

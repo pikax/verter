@@ -508,6 +508,18 @@ impl SemanticGraphStore {
         }
     }
 
+    /// Give up the store's hold on its global primitive vocabulary, the one
+    /// set of permanent slots: an unheld vocabulary node is destroyed now
+    /// (its sidecars join the destroyed log), a held one lives until its last
+    /// owner drops, and the next intern of a vocabulary node makes it
+    /// permanent again. Never revokes a node a reader or cache still owns.
+    /// A host close calls it after its caches have released their owners,
+    /// so the vocabulary a first workload interned is not left behind.
+    /// Returns the vocabulary slots unpinned.
+    pub fn release_vocabulary(&self) -> usize {
+        self.arena.release_vocabulary()
+    }
+
     /// Mark `node` as described by a sidecar entry just written, draining
     /// the destroyed log first when it has grown past
     /// [`DESTROYED_DRAIN_THRESHOLD`]. `false` when `node` was already

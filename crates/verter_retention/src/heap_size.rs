@@ -35,12 +35,6 @@ use super::owned::{Measured, Owned, OwnedSlice, OwnedStr};
 pub trait HeapSize {
     /// Heap this value keeps reachable beyond its inline bytes.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize;
-
-    /// A mutable storage owner carries its own pin, including its outer
-    /// allocation. Immutable parents then pay only for the owning handle.
-    fn pin_storage(&self, _context: &crate::pinned_heap::PinContext) -> bool {
-        false
-    }
 }
 
 /// One node of a recursive tree, measured from an explicit work-list rather
@@ -60,7 +54,6 @@ pub struct HeapMeter<'h, 't> {
     raw: WordSet,
     pending: Vec<&'t dyn IterativeNode>,
     walking: bool,
-    pins: Option<&'h std::cell::RefCell<crate::pinned_heap::Collector>>,
 }
 
 impl<'h, 't> HeapMeter<'h, 't> {
@@ -71,55 +64,7 @@ impl<'h, 't> HeapMeter<'h, 't> {
             raw: WordSet::new(),
             pending: Vec::new(),
             walking: false,
-            pins: None,
         }
-    }
-
-    pub(crate) fn pinning(
-        handles: &'h mut AliasSet,
-        pins: &'h std::cell::RefCell<crate::pinned_heap::Collector>,
-    ) -> Self {
-        Self {
-            pins: Some(pins),
-            ..Self::new(handles)
-        }
-    }
-
-    /// Measure a foreign shared allocation using its owner's exhaustive
-    /// walker. In a pinned measurement it is charged once across owners.
-    pub fn shared_arc<T: ?Sized + Send + Sync + 'static>(
-        &mut self,
-        value: &'t Arc<T>,
-        measure: impl FnOnce(&'t T, &mut HeapMeter<'_, 't>) -> usize,
-    ) -> usize {
-        self.try_shared_arc(value, measure).unwrap_or(0)
-    }
-
-    /// As [`Self::shared_arc`], distinguishing an already visited block so
-    /// an iterative shared chain can stop at its previously measured suffix.
-    pub fn try_shared_arc<T: ?Sized + Send + Sync + 'static>(
-        &mut self,
-        value: &'t Arc<T>,
-        measure: impl FnOnce(&'t T, &mut HeapMeter<'_, 't>) -> usize,
-    ) -> Option<usize> {
-        if !self.first(value) {
-            return None;
-        }
-        let inline = arc_block_bytes(std::mem::size_of_val(&**value));
-        let Some(pins) = self.pins else {
-            return Some(inline + measure(value, self));
-        };
-        let context = pins.borrow().context.clone();
-        let mut handles = AliasSet::collecting();
-        let bytes = inline + measure(value, &mut HeapMeter::pinning(&mut handles, pins));
-        handles
-            .take_handles()
-            .pin(super::owned::ChargeCtx::new(context.account()));
-        let hold = context
-            .aliases
-            .pin_caller(context.account(), value, |_| bytes);
-        pins.borrow_mut().pins.push(hold);
-        Some(0)
     }
 
     /// `true` the first time the raw allocation of `arc` is offered.
@@ -134,11 +79,13 @@ impl<'h, 't> HeapMeter<'h, 't> {
              delivered value must be an owned handle charged by itself",
             std::any::type_name::<T>()
         );
-        let address = Arc::as_ptr(arc).cast::<()>() as u64;
-        match self.pins {
-            Some(pins) => pins.borrow_mut().seen.insert(address),
-            None => self.raw.insert(address),
-        }
+        self.raw.insert(Arc::as_ptr(arc).cast::<()>() as u64)
+    }
+
+    /// Bytes an immutable shared encoding keeps alive, once per measurement
+    /// (see [`super::allocation::shared_encoding_bytes`]).
+    pub fn shared_encoding_bytes(&mut self, value: &Arc<[u8]>) -> usize {
+        super::allocation::shared_encoding_bytes(value, self.handles)
     }
 
     /// The handle set owned allocations are offered to.
@@ -151,11 +98,6 @@ impl<'h, 't> HeapMeter<'h, 't> {
     /// shared empty text ([`crate::allocation::is_shared_empty_str`]).
     pub fn arc_str_bytes(&mut self, value: &Arc<str>) -> usize {
         if crate::allocation::is_shared_empty_str(value) || !self.first(value) {
-            0
-        } else if let Some(pins) = self.pins {
-            let context = pins.borrow().context.clone();
-            let hold = context.aliases.pin_leaf(context.account(), value);
-            pins.borrow_mut().pins.push(hold);
             0
         } else {
             arc_block_bytes(value.len())
@@ -313,18 +255,6 @@ impl<T: HeapSize> HeapSize for Option<T> {
     }
 }
 
-impl<T: HeapSize> HeapSize for std::sync::OnceLock<T> {
-    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        self.get().map_or(0, |value| value.heap_size(meter))
-    }
-}
-
-impl<T: HeapSize> HeapSize for std::ops::Range<T> {
-    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        self.start.heap_size(meter) + self.end.heap_size(meter)
-    }
-}
-
 impl<T: HeapSize, E: HeapSize> HeapSize for Result<T, E> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         match self {
@@ -352,23 +282,22 @@ impl HeapSize for Arc<str> {
     }
 }
 
-impl<T: HeapSize + Send + Sync + 'static> HeapSize for Arc<[T]> {
+impl<T: HeapSize> HeapSize for Arc<[T]> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        meter.shared_arc(self, |items, meter| {
-            items.iter().map(|item| item.heap_size(meter)).sum()
-        })
+        if !meter.first(self) {
+            return 0;
+        }
+        arc_block_bytes(std::mem::size_of_val::<[T]>(self))
+            + self.iter().map(|item| item.heap_size(meter)).sum::<usize>()
     }
 }
 
-impl<T: HeapSize + Send + Sync + 'static> HeapSize for Arc<T> {
+impl<T: HeapSize> HeapSize for Arc<T> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        if let Some(pins) = meter.pins {
-            let context = pins.borrow().context.clone();
-            if (**self).pin_storage(&context) {
-                return 0;
-            }
+        if !meter.first(self) {
+            return 0;
         }
-        meter.shared_arc(self, |value, meter| value.heap_size(meter))
+        arc_block_bytes(std::mem::size_of::<T>()) + (**self).heap_size(meter)
     }
 }
 

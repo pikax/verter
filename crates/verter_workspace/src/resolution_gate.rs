@@ -74,8 +74,12 @@ impl PublicationGate {
     }
     pub(crate) fn lock(&self) -> PublicationGuard {
         let mut subscription = self.subscribe(self.authority.current());
-        verter_execution::blocking::block_on(None, |waker| subscription.poll(waker))
-            .expect("publication writers do not recursively acquire their gate")
+        verter_execution::blocking::block_on_when_pending_with_interval(
+            verter_execution::blocking::WaitFamily::WorkspaceResolution,
+            None,
+            |waker| subscription.poll(waker),
+        )
+        .expect("publication writers do not recursively acquire their gate")
     }
     pub(crate) fn subscribe(&self, waiter: ExecutionTask) -> GateSubscription {
         GateSubscription {

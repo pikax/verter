@@ -17,6 +17,8 @@ pub mod corender;
 pub mod css;
 pub mod fact_cache;
 pub mod fact_read_set;
+pub mod fact_set;
+pub mod fact_tree;
 pub mod hashing;
 pub mod reactivity;
 pub mod receipt;
@@ -32,10 +34,10 @@ pub mod symbol;
 pub mod version;
 
 pub use crate::facts::hashing::{
-    compute_class_member_read_hash, compute_display_hash, compute_member_presence_hash,
-    compute_member_shape_hash, compute_semantic_hash, type_body_fingerprint,
-    value_body_fingerprint, CrossDeclLens, CrossDeclRef, HashOutcome, TransientTypeBody,
-    UnresolvedLens, ValueBodyFingerprintInput, MAX_HASH_DEPTH,
+    compute_class_member_read_hash, compute_member_presence_hash, compute_member_shape_hash,
+    compute_semantic_hash, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
+    CrossDeclRef, HashOutcome, TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput,
+    MAX_HASH_DEPTH,
 };
 pub use crate::facts::registry::{
     AugmentationScopeKindTag, AugmentationTargetKindTag, Fact, FactDomain, FactHash, FactKey,

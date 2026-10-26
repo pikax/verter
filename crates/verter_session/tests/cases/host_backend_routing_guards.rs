@@ -118,6 +118,7 @@ fn index_free_fns(file: &File) -> std::collections::HashMap<String, ItemFn> {
                                 ItemFn {
                                     attrs: m.attrs.clone(),
                                     vis: syn::Visibility::Inherited,
+                                    modifiers: m.modifiers.clone(),
                                     sig: m.sig.clone(),
                                     block: Box::new(m.block.clone()),
                                 },
@@ -273,6 +274,7 @@ fn dispatch_variant_of_pattern(pat: &syn::Pat, dispatch_enum: &str) -> Option<St
         syn::Pat::TupleStruct(t) => &t.path,
         syn::Pat::Path(p) => &p.path,
         syn::Pat::Struct(s) => &s.path,
+        syn::Pat::Guard(g) => return dispatch_variant_of_pattern(&g.pat, dispatch_enum),
         _ => return None,
     };
     let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();

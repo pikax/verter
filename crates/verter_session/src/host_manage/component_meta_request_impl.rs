@@ -50,13 +50,13 @@ fn component_meta_outcome_from_tracer(
     let cache_refusal = match finalise {
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
             if let Some(resolved) = value.as_mut() {
-                resolved.fact_versions = facts.to_vec();
+                resolved.fact_versions = facts.iter().cloned().collect();
             }
             None
         }
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) => {
             if let Some(resolved) = value.as_mut() {
-                resolved.fact_versions = facts.to_vec();
+                resolved.fact_versions = facts.iter().cloned().collect();
             }
             Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
@@ -246,15 +246,15 @@ impl ComponentMetaRequestHost for VerterHost {
         resolved_meta_cache_key(canonical, mode)
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-        self.resolver_store_view_with_currentness()
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.resolver_store_view_with_currentness_pollable().await
     }
 
     fn current_view_supersession_fingerprint(&self) -> u64 {
         self.current_external_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         _view: &Self::View,
@@ -266,7 +266,7 @@ impl ComponentMetaRequestHost for VerterHost {
             "capture_component_meta_inputs",
             format!("owner={} store_view=true", canonical),
         );
-        let snapshot = self.get_raw_analysis_snapshot(canonical)?;
+        let snapshot = self.get_raw_analysis_snapshot_pollable(canonical).await?;
         component_meta_trace_custom!(
             "capture_component_meta_snapshot",
             format!(
@@ -278,7 +278,10 @@ impl ComponentMetaRequestHost for VerterHost {
                 snapshot.template.is_some(),
             ),
         );
-        let facts = self.ensure_indexed_ready_serve(canonical)?.indexed;
+        let facts = self
+            .ensure_indexed_ready_serve_pollable(canonical)
+            .await?
+            .indexed;
         let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -294,8 +297,11 @@ impl ComponentMetaRequestHost for VerterHost {
         );
         let owner_eval_source = Arc::clone(&facts.eval_source);
         let direct_import_started = audit_enabled.then(Instant::now);
-        let direct_dependency_candidates =
-            self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
+        let direct_dependency_candidates = self.cache_dependency_candidates_from_captured_snapshot(
+            canonical,
+            &snapshot,
+            Some(&facts),
+        );
         let direct_import_proof_ms = direct_import_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -461,7 +467,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         resolved_meta_cache_key_with_view_fingerprint(canonical, mode, self.view.fingerprint())
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
         // Overlay-root the per-attempt snapshot ONCE here so the view the
         // executor hands to `try_get_cached` / `compute` is already
         // overlay-aware. This is the NON-fixed (interactive, N=1) path: the
@@ -472,7 +478,10 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // copy-on-write per snapshot, and makes the `compute_component_meta`
         // `Some(view)` arm uniform: the view is overlay-aware whether it came
         // from the per-attempt read or the shared fixed view.
-        let (base, is_current) = self.host.resolver_store_view_with_currentness();
+        let (base, is_current) = self
+            .host
+            .resolver_store_view_with_currentness_pollable()
+            .await;
         (base.with_session_overlay(self.host, self.view), is_current)
     }
 
@@ -480,7 +489,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         self.host.current_external_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         _view: &Self::View,
@@ -497,6 +506,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // snapshot.
         self.host
             .capture_component_meta_inputs_with_view(canonical, self.view)
+            .await
     }
 
     fn try_get_cached_component_meta(

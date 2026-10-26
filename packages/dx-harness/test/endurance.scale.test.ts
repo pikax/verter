@@ -35,7 +35,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const config = loadEnduranceConfig();
 const SCALE_ENABLED = config.corpusDir !== null || config.syntheticScale;
 
-describe.sequential(`endurance: scale lane [${config.route}]`, () => {
+describe(`endurance: scale lane [${config.route}]`, { concurrent: false }, () => {
   if (!SCALE_ENABLED) {
     it.skip("scale lane disabled (set VERTER_ENDURANCE_CORPUS_DIR or VERTER_ENDURANCE_SYNTHETIC_SCALE=1)", () => {});
     return;

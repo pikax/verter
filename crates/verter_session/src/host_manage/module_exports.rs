@@ -10,9 +10,7 @@ use verter_session_query::analysis::route_inventory::RouteCapability;
 use verter_session_query::declarations::module_exports::{
     ModuleExportBinding, ModuleExportBindings, ModuleExportRetention, ModuleExportTable,
 };
-use verter_session_query::facts::fact_cache::{
-    signature_entries, FactVersionRef, ResultReceipt, SignatureAdmission,
-};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt, SignatureAdmission};
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::inputs::shallow::{ExportTarget, LexicalValueBinding};
@@ -356,7 +354,7 @@ impl VerterHost {
         let mut inputs = inputs?;
         match &signature {
             FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts) => {
-                inputs.facts.extend(signature_entries(facts).cloned());
+                inputs.facts.extend(facts.iter().cloned());
             }
             FactReadSetFinalise::MutationUnstable => {}
         }
@@ -505,7 +503,10 @@ impl VerterHost {
                 let receipt = match input.evidence.as_ref() {
                     Some(
                         FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts),
-                    ) => ResultReceipt::retained_signature(facts, db.module_export_account.get()),
+                    ) => ResultReceipt::retained_signature(
+                        facts.into(),
+                        db.module_export_account.get(),
+                    ),
                     _ => ResultReceipt::new_on(
                         input.facts.iter().cloned().collect(),
                         db.module_export_account.get(),
@@ -607,7 +608,7 @@ impl VerterHost {
                         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
                             db.module_export_account.get(),
                             own_bytes,
-                            &[&facts],
+                            &[&**facts],
                         ) {
                             RetentionAdmission::Admitted(charge) => {
                                 Some(Arc::new(ModuleExportRetention {

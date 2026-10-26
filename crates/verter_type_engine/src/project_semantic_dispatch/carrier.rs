@@ -1079,7 +1079,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // ONLY the fan-out tracer, never the `CacheRead` funnel. The
                 // `IndexedReadyServe` is retained (not immediately `.is_some()`)
                 // so the test seam can consult it before presence collapses.
-                let available = self.ctx.source_is_available(identity.canonical_id.as_ref());
+                let serve = self
+                    .ctx
+                    .ensure_indexed_ready_serve(identity.canonical_id.as_ref());
                 // Test-only: an armed fence treats a present serve as
                 // `store_published == false` and fans a non-cacheable read onto
                 // every active tracer — the deterministic in-process equivalent
@@ -1089,7 +1091,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // injection AT the probe proves the direct serve lies inside the
                 // evaluator's nested-tracer scope.
                 #[cfg(any(test, feature = "test-support"))]
-                if available
+                if serve.is_some()
                     && self
                         .binding
                         .observers
@@ -1101,7 +1103,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                 }
-                available
+                serve.is_some()
             }
             _ => false,
         };
@@ -1202,8 +1204,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             let whole_hash = self
                 .ctx
-                .authoritative_current_content_hash(resolved_root.canonical_id.as_ref())
-                .unwrap_or_default();
+                .shallow_file_state(resolved_root.canonical_id.as_ref())
+                .map_or(HashValue::default(), |s| s.whole_hash);
             return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
                     canonical_id: resolved_root.canonical_id.clone(),
@@ -1217,8 +1219,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         let whole_hash = self
             .ctx
-            .authoritative_current_content_hash(resolved_root.canonical_id.as_ref())
-            .unwrap_or_default();
+            .shallow_file_state(resolved_root.canonical_id.as_ref())
+            .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
             canonical_id: resolved_root.canonical_id.clone(),
             owner: resolved_root.owner,

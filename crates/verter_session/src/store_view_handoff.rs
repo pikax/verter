@@ -650,6 +650,32 @@ impl<H: HostRef> Producer<H> {
     }
 }
 
+pub(super) async fn pollable(host: &VerterHost) -> StoreViewRead {
+    let scope = host.scheduler.enter_execution_scope();
+    let mut core = Core::new(host, scope.task().clone(), CancellationToken::new(), true);
+    drop(scope);
+    loop {
+        match std::future::poll_fn(|cx| core.poll(cx.waker())).await {
+            Ok(Step::Produce(producer)) => producer.run(),
+            Ok(Step::Value(value)) => return value.into_read(),
+            Ok(Step::Reentrant(read)) => return report_reentrant(read),
+            Err(_) => {
+                let view = host
+                    .store_view_manager()
+                    .state
+                    .lock()
+                    .cached
+                    .as_ref()
+                    .map_or_else(HostStoreView::default, |(_, view)| view.clone());
+                return StoreViewRead::ReturnOnly {
+                    view,
+                    reason: StoreViewReturnOnlyReason::ReentrantBuildClaim,
+                };
+            }
+        }
+    }
+}
+
 pub(super) fn drive(manager: &StoreViewManager, host: &VerterHost) -> StoreViewRead {
     let scope = host.scheduler.enter_execution_scope();
     let mut core = Core::new(host, scope.task().clone(), CancellationToken::new(), true);
@@ -659,7 +685,11 @@ pub(super) fn drive(manager: &StoreViewManager, host: &VerterHost) -> StoreViewR
         &core.manager.as_ref().expect("manager").state
     ));
     loop {
-        match verter_execution::blocking::block_on(None, |waker| core.poll(waker)) {
+        match verter_execution::blocking::block_on_when_pending_with_interval(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+            None,
+            |waker| core.poll(waker),
+        ) {
             Ok(Step::Produce(producer)) => producer.run(),
             Ok(Step::Value(value)) => {
                 let read = value.into_read();

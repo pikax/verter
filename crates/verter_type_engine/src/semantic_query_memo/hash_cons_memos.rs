@@ -10,8 +10,9 @@
 //! an explicit graph invalidation also clears both stores.
 //!
 //! First insertions enter a bounded FIFO. Replacing an evaluation candidate
-//! does not add another FIFO entry. Evaluation receipts, proof pages and
-//! entry storage reserve the shared retention account before publication.
+//! does not add another FIFO entry. Evaluation receipts, the shared storage
+//! a proof reaches and entry storage reserve the shared retention account
+//! before publication.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -39,8 +40,9 @@ pub(crate) struct SubstituteMemoEntry {
 #[path = "hash_cons_memos_tests.rs"]
 mod tests;
 
-/// The bytes one memo entry keeps: its map slot and FIFO record, its value
-/// inline, and the root owner it keeps.
+/// The bytes one memo entry keeps: its map slot and FIFO record, and its
+/// value inline with the root set it embeds; a root set's shared block is
+/// offered as the handle it is.
 fn hash_cons_entry_bytes<V>(
     roots: &super::node_roots::NodeRootSet,
     aliases: &mut verter_session_query::retention::allocation::AliasSet,
@@ -48,6 +50,37 @@ fn hash_cons_entry_bytes<V>(
     std::mem::size_of::<V>()
         + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
         + roots.owned_heap_bytes(aliases)
+}
+
+/// The completed cold evaluation handed to admission. The producer creates
+/// this only after all completeness, refusal and mutation checks have run.
+pub(crate) struct CompletedDeferredEvaluation {
+    node: SemanticNodeId,
+    context: ProjectionReductionContext,
+    demand: DeferredEvaluationDemand,
+    result: SemanticNodeId,
+    receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
+}
+
+impl CompletedDeferredEvaluation {
+    pub(crate) fn new(
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+        result: SemanticNodeId,
+        receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
+    ) -> Self {
+        Self {
+            node,
+            context,
+            demand,
+            result,
+            receipt,
+            evidence,
+        }
+    }
 }
 
 pub(crate) struct DeferredEvaluationMemoEntry {
@@ -101,21 +134,30 @@ impl SemanticGraphStore {
         SemanticNodeId,
         Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     )> {
-        let hit =
-            self.substitute_memo
-                .get(&(node, parameter, arg))
-                .map(|entry| {
-                    let SubstituteMemoEntry {
-                        result,
-                        receipt,
-                        roots,
-                        ..
-                    } = entry.value();
-                    super::node_roots::NodeRootScope::capture(
-                        super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
-                    );
-                    (*result, Arc::clone(receipt))
-                });
+        // Under the map's shard guard the roots are shared without being
+        // counted: counting takes the arena's lock, which is never taken
+        // under a cache table's guard.
+        let shared = self
+            .substitute_memo
+            .get(&(node, parameter, arg))
+            .map(|entry| {
+                let SubstituteMemoEntry {
+                    result,
+                    receipt,
+                    roots,
+                    ..
+                } = entry.value();
+                (*result, Arc::clone(receipt), roots.share())
+            });
+        // An entry whose nodes a release destroyed once the guard was gone
+        // is a miss.
+        let hit = shared.and_then(|(result, receipt, roots)| {
+            let roots = roots.into_set().ok()?;
+            super::node_roots::NodeRootScope::capture(super::node_roots::NodeRoot::from_roots(
+                result, roots,
+            ));
+            Some((result, receipt))
+        });
         if super::records_telemetry::<M>() {
             let counter = if hit.is_some() {
                 &self.stats.substitute_memo_hits
@@ -168,59 +210,70 @@ impl SemanticGraphStore {
             return;
         }
         let key = (value_expr, parameter_node, arg);
-        match self.substitute_memo.entry(key) {
-            Entry::Occupied(_) => {
-                // First-writer-wins: another thread already
-                // published. No FIFO bookkeeping required.
-            }
+        if self.substitute_memo.contains_key(&key) {
+            // First-writer-wins: another thread already published.
+            return;
+        }
+        // The entry is rooted and charged before the map's shard is locked:
+        // rooting takes the arena's lock and charging the account's, and
+        // neither is taken under a cache table's guard.
+        let Ok(roots) = self.root_nodes([value_expr, parameter_node, arg, result]) else {
+            return;
+        };
+        // Charged like every retained answer; one the account refuses is
+        // computed again on demand.
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let bytes = hash_cons_entry_bytes::<(
+            (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+            SubstituteMemoEntry,
+        )>(&roots, &mut aliases);
+        // A root set's shared block is an owned allocation, charged by its
+        // own cell and held by the entry.
+        let handles = aliases.take_handles();
+        let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
+            self.retention_account().reserve(
+                verter_session_query::retention::ChargeClass::Retained,
+                bytes,
+            )
+        else {
+            return;
+        };
+        let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
+            return;
+        };
+        let entry = SubstituteMemoEntry {
+            result,
+            receipt,
+            roots,
+            _retention: retention,
+        };
+        // A losing publication's entry — its roots and its charge — is
+        // released only once the shard's guard is gone.
+        let lost = match self.substitute_memo.entry(key) {
+            Entry::Occupied(_) => Some(entry),
             Entry::Vacant(slot) => {
-                let Ok(roots) = self.root_nodes([value_expr, parameter_node, arg, result]) else {
-                    return;
-                };
-                // Charged like every retained answer; one the account
-                // refuses is computed again on demand.
-                let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
-                let bytes = hash_cons_entry_bytes::<(
-                    (SemanticNodeId, SemanticNodeId, SemanticNodeId),
-                    SubstituteMemoEntry,
-                )>(&roots, &mut aliases);
-                // The root owner is an owned allocation, charged by its
-                // own cell and held by the entry.
-                let handles = aliases.take_handles();
-                let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
-                    self.retention_account().reserve(
-                        verter_session_query::retention::ChargeClass::Retained,
-                        bytes,
-                    )
-                else {
-                    return;
-                };
-                let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
-                    return;
-                };
-                slot.insert(SubstituteMemoEntry {
-                    result,
-                    receipt,
-                    roots,
-                    _retention: retention,
-                });
-                let mut fifo = self.substitute_memo_fifo.lock();
-                fifo.push_back(key);
-                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
-                    if let Some(victim) = fifo.pop_front() {
-                        // Drop the FIFO lock BEFORE touching
-                        // `substitute_memo` to avoid blocking
-                        // concurrent publishers while DashMap's
-                        // shard lock is taken; re-acquire on the
-                        // next loop iteration if we still need
-                        // to evict.
-                        drop(fifo);
-                        self.substitute_memo.remove(&victim);
-                        fifo = self.substitute_memo_fifo.lock();
-                    } else {
-                        break;
-                    }
-                }
+                slot.insert(entry);
+                None
+            }
+        };
+        if lost.is_some() {
+            return;
+        }
+        let mut fifo = self.substitute_memo_fifo.lock();
+        fifo.push_back(key);
+        while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+            if let Some(victim) = fifo.pop_front() {
+                // Drop the FIFO lock BEFORE touching
+                // `substitute_memo` to avoid blocking
+                // concurrent publishers while DashMap's
+                // shard lock is taken; re-acquire on the
+                // next loop iteration if we still need
+                // to evict.
+                drop(fifo);
+                self.substitute_memo.remove(&victim);
+                fifo = self.substitute_memo_fifo.lock();
+            } else {
+                break;
             }
         }
     }
@@ -235,9 +288,9 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<DeferredEvaluationRead> {
         self.read_deferred_evaluation::<M>(node, context, demand, |entry| {
-            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
-                &entry.evidence.0,
-            ))
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                verter_session_query::facts::fact_set::FactSet::clone(&entry.evidence.0),
+            )
             .validate_with_self_roots(ctx, &entry.evidence.1)
         })
     }
@@ -267,6 +320,9 @@ impl SemanticGraphStore {
             })
             .map(|entry| {
                 crate::fact_tracing::tracing::observe_fan_out_canonical(&entry.evidence.0);
+                // Capture both before releasing the entry. The memo owns the
+                // result, and its receipt independently owns the input.
+                entry.receipt.operand_roots().retain_for_delivery();
                 entry.roots.retain_for_delivery();
                 DeferredEvaluationRead {
                     value: entry.result,
@@ -289,6 +345,7 @@ impl SemanticGraphStore {
 
     /// Publish the complete evaluation and the facts it actually read.
     /// A new view replaces a stale candidate under the content-free key.
+    #[cfg(test)]
     pub(crate) fn evaluate_deferred_memo_publish(
         &self,
         node: SemanticNodeId,
@@ -298,16 +355,37 @@ impl SemanticGraphStore {
         receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
     ) {
+        self.evaluate_deferred_memo_publish_completed(CompletedDeferredEvaluation::new(
+            node, context, demand, result, receipt, evidence,
+        ));
+    }
+
+    pub(crate) fn evaluate_deferred_memo_publish_completed(
+        &self,
+        completed: CompletedDeferredEvaluation,
+    ) {
+        let CompletedDeferredEvaluation {
+            node,
+            context,
+            demand,
+            result,
+            receipt,
+            evidence,
+        } = completed;
         if receipt.reserve_retention(self.retention_account()).is_err() {
             return;
         }
-        let Ok(roots) = self.root_nodes([node, result]) else {
+        let Ok(roots) = receipt
+            .operand_roots()
+            .retain_evaluation_result(self, node, result)
+        else {
             return;
         };
         // The entry's block, slot and FIFO record and its proof (its
-        // root owner's own charge is held with the entry): the fact slice with every fact's owned text and the
-        // self-root list. A page of a wide proof is claimed into the same
-        // reservation and charged once wherever it is shared.
+        // root owner's own charge is held with the entry): the fact set with
+        // every fact's owned text and the self-root list. A receipt or tree
+        // node a wide proof reaches is claimed into the same reservation and
+        // charged once wherever it is shared.
         let (own_bytes, handles) = {
             use verter_session_query::retention::allocation::{
                 arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
@@ -322,18 +400,17 @@ impl SemanticGraphStore {
             // by the entry.
             (bytes, aliases.take_handles())
         };
-        let retention = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
-            self.retention_account(),
-            own_bytes,
-            &[&evidence.0],
-        ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
-                match handles.retained_with(charge, self.charge_ctx()) {
-                    Ok(charge) => charge,
-                    Err(_) => return,
-                }
-            }
-            verter_session_query::retention::RetentionAdmission::Refused(_) => return,
+        // The proof's storage is claimed only once the entry's own names
+        // are held: a refused hold leaves it pinned and unclaimed.
+        let Ok(retention) =
+            verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
+                self.retention_account(),
+                own_bytes,
+                &[&evidence.0],
+                |charge| handles.retained_with(charge, self.charge_ctx()),
+            )
+        else {
+            return;
         };
         let entry = Arc::new(DeferredEvaluationMemoEntry {
             result,
@@ -343,9 +420,12 @@ impl SemanticGraphStore {
             _retention: retention,
         });
         let key = (node, context, demand);
+        // A replaced entry — its delivery and the roots that delivery holds —
+        // is released only once the shard's guard is gone.
+        let mut replaced = None;
         match self.evaluate_deferred_memo.entry(key) {
             Entry::Occupied(mut slot) => {
-                slot.insert(entry);
+                replaced = Some(slot.insert(entry));
             }
             Entry::Vacant(slot) => {
                 slot.insert(entry);
@@ -362,6 +442,7 @@ impl SemanticGraphStore {
                 }
             }
         }
+        drop(replaced);
     }
 
     /// Inspect admission under the shell demand; selected values have a
@@ -389,17 +470,41 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
-    /// Exact nonpermanent topology retained by the hash-cons caches. This
-    /// fixture probe distinguishes cache residue from a live dispatcher's
-    /// operation attachments without clearing either owner first.
+    /// Nonpermanent topology reached by the caches' explicit graph-root
+    /// attachments, including receipt prerequisites. Signature-epoch leases
+    /// have separate store ownership. This fixture probe distinguishes cache
+    /// residue from live dispatcher attachments without clearing either owner.
     #[cfg(any(test, feature = "test-support"))]
     pub fn hash_cons_retained_nodes_for_tests(&self) -> rustc_hash::FxHashSet<SemanticNodeId> {
         let mut pending = Vec::new();
+        let mut receipts = Vec::new();
         for entry in &self.substitute_memo {
             pending.extend_from_slice(entry.value().roots.operands());
+            receipts.push(Arc::clone(&entry.value().receipt));
         }
         for entry in &self.evaluate_deferred_memo {
             pending.extend_from_slice(entry.value().roots.operands());
+            receipts.push(Arc::clone(&entry.value().receipt));
+        }
+        // Keep visited receipts alive: address deduplication must remain valid
+        // even if a concurrent eviction drops the store's last other owner.
+        let mut visited = rustc_hash::FxHashMap::default();
+        while let Some(receipt) = receipts.pop() {
+            if visited.contains_key(&Arc::as_ptr(&receipt)) {
+                continue;
+            }
+            receipt.identity().for_each_owned_root_for_tests(|roots| {
+                if roots.belongs_to(&self.arena.core) {
+                    pending.extend_from_slice(roots.operands());
+                }
+            });
+            receipts.extend(
+                receipt
+                    .prerequisites()
+                    .iter()
+                    .map(|dependency| Arc::clone(&dependency.receipt)),
+            );
+            visited.insert(Arc::as_ptr(&receipt), receipt);
         }
         let mut retained = rustc_hash::FxHashSet::default();
         while let Some(node) = pending.pop() {

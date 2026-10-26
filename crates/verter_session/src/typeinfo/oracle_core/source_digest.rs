@@ -179,7 +179,7 @@ pub(crate) fn build_source_digest(
             "symbol_space": space_tag,
             "decl_kind": raw_decl_kind_tag(c.raw_surface.decl_kind),
             "raw_surface": raw_surface_to_json(&c.raw_surface),
-            "lowered_body": c.lowered_body.to_json_value(),
+            "lowered_body": &c.lowered_body,
             "verdict": "Admit",
         }));
     }

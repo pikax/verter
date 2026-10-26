@@ -58,7 +58,7 @@
         "kind": "train"
       },
       "responsibility": [
-        "language routing authority and framework-neutral parse payload with shared retention measurement"
+        "zero-dependency language routing authority and framework-neutral parse payload"
       ],
       "evidence": [
         "documented: architecture skill",

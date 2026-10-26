@@ -11,12 +11,12 @@ use crate::analysis::file_analysis::FileAnalysisSnapshot;
 use crate::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use crate::analysis::types::Hash16;
 use crate::inputs::shallow::ShallowInputRecord;
-use crate::source::framework_parse::{exact_source_parse_key, FrameworkParseFacts};
+use crate::source::framework_parse::FrameworkParseFacts;
 use crate::source::snapshot::SnapshotKey;
 
 /// Identity of one observed indexed input: the snapshot it was read from, a
 /// per-observation id, and its language / parse identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexedInputIdentity {
     pub source: SnapshotKey,
     pub observation_id: u64,
@@ -25,7 +25,7 @@ pub struct IndexedInputIdentity {
 }
 
 /// The owned record of one served post-parse artifact.
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub struct IndexedInputRecord {
     pub identity: IndexedInputIdentity,
     pub whole_hash: Hash16,
@@ -47,13 +47,11 @@ pub struct IndexedInputRecord {
     #[cfg(feature = "test-support")]
     pub declares_interface_app_config: bool,
     route_surface_hash: OnceLock<Option<Hash16>>,
-    source_parse_identity: OnceLock<Option<ParseKey>>,
 }
 
 impl IndexedInputRecord {
-    /// Assemble a record. `cached_source_parse_key` is the artifact's already
-    /// derived exact parse identity, when it has one (`Some(None)` caches a
-    /// refusal); otherwise the identity is derived on first demand.
+    /// Assemble a record. Its exact parse identity is the one
+    /// `identity.parse_key` carries.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         identity: IndexedInputIdentity,
@@ -66,12 +64,7 @@ impl IndexedInputRecord {
         framework_parse: Option<FrameworkParseFacts>,
         script_analysis: Option<Arc<ScriptAnalysisSnapshot>>,
         snapshot: Arc<FileAnalysisSnapshot>,
-        cached_source_parse_key: Option<Option<ParseKey>>,
     ) -> Self {
-        let source_parse_identity = OnceLock::new();
-        if let Some(key) = cached_source_parse_key {
-            let _ = source_parse_identity.set(key);
-        }
         Self {
             identity,
             whole_hash,
@@ -86,7 +79,6 @@ impl IndexedInputRecord {
             #[cfg(feature = "test-support")]
             declares_interface_app_config: false,
             route_surface_hash: OnceLock::new(),
-            source_parse_identity,
         }
     }
 
@@ -99,21 +91,10 @@ impl IndexedInputRecord {
     }
 
     /// The exact parse identity of this record's source under its runtime
-    /// language, derived at most once: a carrier reads the key its framework
-    /// parse recorded; only a plain script derives one from its source. A
-    /// refusal is cached as `None`.
+    /// language (the artifact's, which its identity carries); `None` where
+    /// the language has none.
     pub fn source_parse_key(&self) -> Option<ParseKey> {
-        self.source_parse_identity
-            .get_or_init(|| {
-                exact_source_parse_key(
-                    &self.raw_source,
-                    &self.file_language,
-                    self.framework_parse
-                        .as_ref()
-                        .map(FrameworkParseFacts::carrier_parse_key),
-                )
-            })
-            .clone()
+        self.identity.parse_key.clone()
     }
 
     /// The legacy route-surface digest of this record, computed at most once;

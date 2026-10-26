@@ -7,6 +7,21 @@
 use super::*;
 use verter_execution::wake::WakerSet;
 
+/// The flight and its DAG token share one callback rail. Keep a weak link:
+/// the DAG itself owns the aggregate, so a strong link would form a cycle.
+#[derive(Debug)]
+struct ScopedCancellationDelivery(std::sync::Weak<DagMutex>);
+
+impl verter_execution::cancellation::CancellationWakeDelivery for ScopedCancellationDelivery {
+    fn deliver(&self, wakers: verter_execution::wake::TakenWakers) {
+        if let Some(delivery) = self.0.upgrade() {
+            delivery.deliver(vec![wakers]);
+        } else {
+            wakers.wake();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum ScopedCacheTerminal {
     Value(Arc<dyn Any + Send + Sync>),
@@ -25,7 +40,9 @@ pub(super) struct ScopedCacheFlightState {
     pub(super) owners: HashMap<u64, ScopedFlightOwner>,
     pub(super) aggregate: Option<CancellationToken>,
     pub(super) dispatched: bool,
-    pub(super) builder_claimed: bool,
+    /// The transferred producer's execution task and the handoff that claimed
+    /// it. Followers retain their own tasks and register edges to this one.
+    pub(super) producer: Option<(ExecutionTask, u64)>,
     pub(super) terminal: Option<ScopedCacheTerminal>,
     pub(super) wakers: WakerSet,
 }
@@ -43,6 +60,7 @@ impl ScopedCacheFlight {
     }
 
     fn clear_owners(&self, state: &mut ScopedCacheFlightState) {
+        state.producer = None;
         for owner in state.owners.values() {
             if let Some(registration) = &owner.aggregate_registration {
                 self.delivery.deliver(vec![registration.detach_deferred()]);
@@ -98,6 +116,9 @@ impl ScopedCacheFlight {
         if state.aggregate.is_some() {
             return true;
         }
+        aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
+            &self.delivery,
+        ))));
         // These owners already coexist. Keep initialization live while attaching
         // them so a cancelled first entry cannot retire an existing sibling.
         let (initializing, wakes) = aggregate.register_owner_deferred(None);

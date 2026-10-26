@@ -435,6 +435,71 @@ fn selected_query(
 }
 
 #[test]
+fn call_site_indexed_version_conflicting_with_a_retained_operand_refuses_carrier() {
+    for edited in [false, true] {
+        let host = host();
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let _builder = graph.enter_node_root_scope();
+        let observed_hash = host.ensure_indexed_ready(CANONICAL).unwrap().whole_hash;
+        let (callee, number) = {
+            let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+            let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            let signature = anonymous_signature(&dispatch, Vec::new(), Vec::new(), number);
+            let callee = callable(&dispatch, vec![signature], Vec::new());
+            let data = graph.node_data(callee).unwrap();
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                panic!("callable fixture")
+            };
+            (
+                graph.intern_node_with_scope(
+                    SemanticNodeData::Object(surface.copy_for_tests()),
+                    verter_type_engine::semantic_query::NodeScopeId::File {
+                        canonical_id: CANONICAL.into(),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        whole_hash: observed_hash,
+                        local_scope: None,
+                    },
+                ),
+                number,
+            )
+        };
+        if edited {
+            upsert_source(&host, CANONICAL, "export const marker = 1;\n");
+        }
+        let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+        let key = call_key(&dispatch, callee, CallKind::Call, None, Vec::new());
+        assert!(matches!(
+            selected_query(&dispatch, key.clone()),
+            ResolvedCallResult::Selected { return_type, .. } if return_type == number
+        ));
+        let roots = dispatch.resolve_call_pending_self_roots_for_tests(&key);
+        let view = host.resolver_store_view_read().into_owned_view();
+        let carrier = verter_type_engine::semantic_query_memo::semantic_graph_carrier(
+            &view,
+            &roots,
+            &verter_session_query::facts::fact_set::FactSet::empty(),
+            Vec::new(),
+        );
+        if edited {
+            assert!(
+                matches!(
+                    carrier,
+                    Err(verter_audit::NonAdmissionReason::SelfRootConflict)
+                ),
+                "the pending call must retain both the operand and indexed call-site versions"
+            );
+        } else {
+            assert!(carrier.is_ok(), "same-version roots remain admissible");
+        }
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(key))),
+            usize::from(!edited),
+            "only the same-version call may serve warm"
+        );
+    }
+}
+
+#[test]
 fn ordinary_nested_call_does_not_consume_a_suspended_contextual_candidate() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());

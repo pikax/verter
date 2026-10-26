@@ -18,7 +18,7 @@ use verter_session_query::facts::{CrossDeclLens, CrossDeclRef, SymbolSpace};
 /// Resolve `name` against the shallow state's local-symbol +
 /// import-binding tables (header data). Falls back to `Unresolved` for
 /// free references.
-#[derive(Debug, verter_retention::heap_size::HeapSize)]
+#[derive(Debug)]
 pub struct ShallowLens {
     locals: FxHashSet<verter_type_expr::DeclBindingKey>,
     value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
@@ -135,7 +135,7 @@ impl CrossDeclLens for OwnedShallowLens<'_> {
 /// NOT a fingerprint-lens widening: this lens never feeds a hash. Both views
 /// are pure parse domain; no resolved canonical is retained anywhere on the
 /// artifact.
-#[derive(Debug, verter_retention::heap_size::HeapSize)]
+#[derive(Debug)]
 pub struct RouteLens {
     canonical_id: Arc<str>,
     type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,

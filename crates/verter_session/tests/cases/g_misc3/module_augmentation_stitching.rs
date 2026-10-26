@@ -79,7 +79,6 @@ fn insert_artifact_from_fixture(
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
-        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
@@ -102,7 +101,6 @@ fn insert_artifact_with_raw_source(
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
-        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
@@ -121,7 +119,6 @@ fn build_filler_artifacts(raw: &str, content_hash: [u8; 16]) -> Arc<FileArtifact
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     Arc::new(FileArtifacts {
-        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
@@ -247,7 +244,6 @@ pub(crate) fn session_overlay_augmenter_isolated_from_base_index() {
     store.insert_artifacts(
         overlay_key,
         Arc::new(FileArtifacts {
-            storage: Default::default(),
             indexed,
             facts: Arc::new(emission.facts),
             parse_stable_hash,
@@ -340,7 +336,6 @@ fn seed_base_and_overlay_augmenters(
     store.insert_artifacts(
         overlay_key,
         Arc::new(FileArtifacts {
-            storage: Default::default(),
             indexed,
             facts: Arc::new(emission.facts),
             parse_stable_hash,
@@ -1009,7 +1004,6 @@ fn insert_artifact_at_build_fingerprint(
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
-        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,

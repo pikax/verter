@@ -16,37 +16,137 @@
 
 use super::differential_harness_tests::{Matrix, Read};
 
+/// `callbacks` contravariant callback parameters of one binder, each given
+/// the same literal callback.
+fn contravariant_callbacks(callbacks: usize) -> String {
+    let parameters = (0..callbacks)
+        .map(|i| format!("f{i}: (x: T) => void"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = vec![r#"(x: "a") => {}"#; callbacks].join(", ");
+    format!(
+        "declare function co<T>({parameters}): T;\nexport function result() {{ return co({arguments}); }}"
+    )
+}
+
+/// The callbacks at 8, 16 and 24: the gate version of the 128-, 256- and
+/// 512-callback test in the nightly scale tier. Each infers `"a"`; its
+/// relation checks, cold builds, connected work, charged operations and
+/// argument and binding work grow by the same amount per step, so they are
+/// affine in the callbacks, and at 128, 256 and 512 callbacks they meet the
+/// full-size test's check on each axis: non-decreasing, and the second
+/// doubling at most twice the first plus eight.
 #[test]
-fn repeated_contravariant_callbacks_charge_linear_work() {
-    let mut counts = Vec::new();
-    for callbacks in [128, 256, 512] {
-        let parameters = (0..callbacks)
-            .map(|i| format!("f{i}: (x: T) => void"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let arguments = vec![r#"(x: "a") => {}"#; callbacks].join(", ");
-        let source = format!(
-            "declare function co<T>({parameters}): T;\nexport function result() {{ return co({arguments}); }}"
-        );
-        let matrix = Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
-        let failures = matrix.returns(&[("result", "\"a\"")]);
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-        counts.push(matrix.return_relation_work("result"));
-    }
-    eprintln!("callback (relation, argument/parameter, binding) work: {counts:?}");
-    for axis in 0..3 {
-        let work = |count: &(u64, usize, usize)| match axis {
-            0 => count.0,
-            1 => count.1 as u64,
-            _ => count.2 as u64,
-        };
-        let small = work(&counts[0]);
-        let medium = work(&counts[1]);
-        let large = work(&counts[2]);
-        assert!(small > 0 && small <= medium && medium <= large);
+fn repeated_contravariant_callback_work_is_affine_and_meets_the_full_size_check() {
+    let sizes = [8, 16, 24];
+    let work: Vec<_> = sizes
+        .iter()
+        .map(|&callbacks| {
+            let source = contravariant_callbacks(callbacks);
+            let matrix =
+                Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+            let failures = matrix.returns(&[("result", "\"a\"")]);
+            assert!(failures.is_empty(), "{callbacks}: {}", failures.join("\n"));
+            matrix.return_work_counters("result")
+        })
+        .collect();
+    let work = crate::scale_gate::affine(
+        "contravariant callbacks",
+        sizes,
+        crate::scale_gate::counters(&work),
+    );
+    for axis in ["relation checks", "argument work", "binding work"] {
+        let [small, medium, large] = [128, 256, 512].map(|callbacks| work.at(axis, callbacks));
+        assert!(small > 0 && small <= medium && medium <= large, "{axis}");
         assert!(
             large - medium <= 2 * (medium - small) + 8,
-            "doubling callbacks repeats earlier work on axis {axis}: {small}, {medium}, {large}"
+            "doubling callbacks repeats earlier work on {axis}: {small}, {medium}, {large}"
+        );
+    }
+}
+
+/// Typing each element of an array literal against a contextual tuple
+/// reads the tuple's shape once per literal, not once per element: the
+/// contextual tuple elements read grow with the element count, and
+/// doubling it doubles them, for a call argument and for a literal a
+/// `satisfies` types alike, by its fixed prefix, by its fixed suffix after
+/// a rest element, or, after a spread, by its middle.
+#[test]
+fn tuple_element_contexts_charge_linear_work() {
+    /// A call argument literal against a tuple parameter, and its answer.
+    fn argument(elements: usize) -> (String, String) {
+        let parameters = vec!["T"; elements].join(", ");
+        let arguments = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "declare function f<T>(xs: [{parameters}]): T;\nexport function result() {{ return f([{arguments}]); }}"
+            ),
+            "number".to_owned(),
+        )
+    }
+    /// A literal a `satisfies` tuple types, and its answer.
+    fn satisfied(elements: usize) -> (String, String) {
+        let tuple = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!("export function result() {{ return [{literal}] satisfies [{tuple}]; }}"),
+            format!("[{literal}]"),
+        )
+    }
+    /// A literal a tuple with a rest element and a fixed suffix types: every
+    /// element is typed by the suffix element at its distance from the end.
+    fn suffixed(elements: usize) -> (String, String) {
+        let suffix = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "export function result() {{ return [{literal}] satisfies [...(1 | 2)[], {suffix}]; }}"
+            ),
+            format!("[{literal}]"),
+        )
+    }
+    /// A literal led by a spread that a tuple with a fixed prefix types:
+    /// every element after the spread is typed by the tuple's middle.
+    fn spread_led(elements: usize) -> (String, String) {
+        let prefix = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "declare const ys: (1 | 2)[];\nexport function result() {{ return [...ys, {literal}] satisfies [{prefix}, ...(1 | 2)[]]; }}"
+            ),
+            format!("[...(1 | 2)[], {literal}]"),
+        )
+    }
+    type Fixture = fn(usize) -> (String, String);
+    let fixtures: [(&str, Fixture); 4] = [
+        ("argument", argument),
+        ("satisfied", satisfied),
+        ("suffixed", suffixed),
+        ("spread-led", spread_led),
+    ];
+    for (label, fixture) in fixtures {
+        let mut counts = Vec::new();
+        for elements in [64, 128, 256] {
+            let (source, answer) = fixture(elements);
+            let matrix =
+                Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+            let failures = matrix.returns(&[("result", &answer)]);
+            assert!(failures.is_empty(), "{label}: {}", failures.join("\n"));
+            let (_, [work]) = matrix.return_work(
+                "result",
+                [verter_type_engine::project_semantic_dispatch::call_resolve::tuple_context_work_for_tests],
+            );
+            counts.push(work);
+        }
+        eprintln!("contextual tuple element work ({label}): {counts:?}");
+        let (small, medium, large) = (counts[0], counts[1], counts[2]);
+        assert!(
+            small > 0 && small <= medium && medium <= large,
+            "{label}: {counts:?}"
+        );
+        assert!(
+            large - medium <= 2 * (medium - small) + 8,
+            "{label}: doubling the elements repeats earlier work: {small}, {medium}, {large}"
         );
     }
 }
@@ -1770,4 +1870,46 @@ fn function_bind_and_generic_calls_close_with_their_proof() {
         "nestedDecl",
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn repeated_contravariant_callbacks_charge_linear_work() {
+        let mut counts = Vec::new();
+        for callbacks in [128, 256, 512] {
+            let parameters = (0..callbacks)
+                .map(|i| format!("f{i}: (x: T) => void"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let arguments = vec![r#"(x: "a") => {}"#; callbacks].join(", ");
+            let source = format!(
+                "declare function co<T>({parameters}): T;\nexport function result() {{ return co({arguments}); }}"
+            );
+            let matrix =
+                Matrix::new(&source).settings(&super::super::differential_harness_tests::ALL[..1]);
+            let failures = matrix.returns(&[("result", "\"a\"")]);
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+            counts.push(matrix.return_relation_work("result"));
+        }
+        eprintln!("callback (relation, argument/parameter, binding) work: {counts:?}");
+        for axis in 0..3 {
+            let work = |count: &(u64, usize, usize)| match axis {
+                0 => count.0,
+                1 => count.1 as u64,
+                _ => count.2 as u64,
+            };
+            let small = work(&counts[0]);
+            let medium = work(&counts[1]);
+            let large = work(&counts[2]);
+            assert!(small > 0 && small <= medium && medium <= large);
+            assert!(
+                large - medium <= 2 * (medium - small) + 8,
+                "doubling callbacks repeats earlier work on axis {axis}: {small}, {medium}, {large}"
+            );
+        }
+    }
 }

@@ -83,6 +83,23 @@ fn carrier_manifest_strict(ws_root: &str) -> Option<crate::external_ts::Manifest
     })
 }
 
+/// Whether the store's manifest advertises a `.vue.tsx` companion for the
+/// configured project — the project ROW, not manifest existence. A wait that
+/// polls only manifest existence can observe the freshly written manifest
+/// before its `projects` map carries the row, and a follow-up
+/// `.projects.get(&tsconfig)` then blames the publish for the row's
+/// not-yet-landed write. Poll THIS for the fills these tests assert on.
+fn carrier_manifest_advertises_vue_companion(ws_root: &str, tsconfig: &str) -> bool {
+    carrier_manifest_strict(ws_root).is_some_and(|manifest| {
+        manifest.projects.get(tsconfig).is_some_and(|project| {
+            project
+                .ready_files
+                .keys()
+                .any(|provider| provider.ends_with(".vue.tsx"))
+        })
+    })
+}
+
 #[derive(Default)]
 struct SlowConfigurePathsProvider {
     configure_paths_started: AtomicUsize,

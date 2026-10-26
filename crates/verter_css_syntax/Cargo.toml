@@ -21,13 +21,12 @@ publish = false
 test-support = []
 
 [dependencies]
-verter_retention = { path = "../verter_retention" }
 verter_audit = { path = "../verter_audit" }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }
 bumpalo = { version = "3.20.3", features = ["collections"] }
-memchr = "2.8.0"
-smallvec = "1.15"
+memchr = "2.8.3"
+smallvec = "1.16"
 
 [[test]]
 name = "main"

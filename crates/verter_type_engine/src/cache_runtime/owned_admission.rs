@@ -386,7 +386,11 @@ pub(super) fn drive<K: Eq + Hash + Clone, V, P: AdmissionPolicy<V>>(
     mut core: AdmissionCore<K, V, P>,
 ) -> Option<V> {
     loop {
-        match verter_execution::blocking::block_on(None, |waker| core.poll(waker)) {
+        match verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::CacheFlight,
+            None,
+            |waker| core.poll(waker),
+        ) {
             Ok(AdmissionStep::Produce(producer)) => producer.run(),
             Ok(AdmissionStep::Value(value)) => return value,
             Err(_) => return None,

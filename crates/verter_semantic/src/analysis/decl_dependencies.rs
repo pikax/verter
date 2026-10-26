@@ -14,17 +14,7 @@ use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 /// Owner-qualified declaration path. The lexical root and namespace members
 /// remain separate structural segments; consumers never split dotted text.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct DeclarationPath {
     pub root: DeclBindingKey,
     members: Arc<[String]>,

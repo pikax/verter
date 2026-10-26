@@ -118,6 +118,7 @@ pub mod build;
 pub mod canonical_algebra;
 pub mod carrier;
 mod conditional_decision;
+mod contextual_tuple;
 // The operational budget owner: work units, query-boundary depth, and the
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
@@ -460,12 +461,12 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The request's host attachment, selected once at construction. The
     /// engine never reads it; host facades borrow it beside the dispatch.
     host_attachment: &'a C::HostAttachment,
-    pub(super) instantiate_active: std::cell::RefCell<ActiveInstantiations>,
+    pub(super) instantiate_active: verter_execution::sync_cell::SyncRefCell<ActiveInstantiations>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
     /// it reaches, its query-free tail steps included, and pops them when
     /// it ends (`build::AwaitedPathGuard`).
-    pub(super) awaited_active: std::cell::RefCell<build::AwaitedPath>,
+    pub(super) awaited_active: verter_execution::sync_cell::SyncRefCell<build::AwaitedPath>,
     /// Carrier-normalization visited set — the small PRE-MEMO cycle guard for
     /// carrier-subject head resolution at the canonical query entry.
     ///
@@ -480,10 +481,11 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// downstream `ResolveDecl` / `Instantiate` / `ProjectPath` memo sentinels +
     /// the active-instantiation back-edge are the PRIMARY termination mechanism,
     /// this is only the pre-memo guard). NOT an arbitrary depth budget.
-    pub(super) carrier_normalizing: std::cell::RefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
+    pub(super) carrier_normalizing:
+        verter_execution::sync_cell::SyncRefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
     /// The closed operators the open demand's answer has read
     /// ([`locator_view_worklist::AnswerReads`]).
-    answer_reads: std::cell::RefCell<locator_view_worklist::AnswerReads>,
+    answer_reads: verter_execution::sync_cell::SyncRefCell<locator_view_worklist::AnswerReads>,
     /// The KEY-DOMAIN closedness proofs in flight on this dispatcher — the
     /// DISPATCH-WIDE cycle guard of the fact-native closedness evaluator
     /// (`raise::prepared_decl_body_is_closed` /
@@ -494,11 +496,16 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// (entries pop on exit); the chain also records which in-flight proofs
     /// each refusal depended on, so a completed proof is reused only while
     /// those proofs are still in flight (see `raise::ClosednessChain`).
-    closedness: std::cell::RefCell<raise::ClosednessChain>,
+    closedness: verter_execution::sync_cell::SyncRefCell<raise::ClosednessChain>,
     /// The binder-aware free-type-variable summary of every node a
     /// conditional decision or relation asked about, kept for this
     /// dispatcher's lifetime ([`conditional_decision::FreeTypeVariables`]).
-    free_type_variables: std::cell::RefCell<conditional_decision::FreeTypeVariableSummaries>,
+    free_type_variables:
+        verter_execution::sync_cell::SyncRefCell<conditional_decision::FreeTypeVariableSummaries>,
+    /// The contextual tuples array literal elements read in this
+    /// dispatcher's lifetime, each tuple's shape and middle ranges read
+    /// once ([`contextual_tuple::TupleContexts`]).
+    tuple_contexts: verter_execution::sync_cell::SyncRefCell<contextual_tuple::TupleContexts>,
     /// Memoized transitive CLASS ANCESTRY, keyed by the rooted declaration
     /// identity ([`build::ClassAncestryReading`],
     /// [`Self::class_heritage_ancestry`]).
@@ -556,19 +563,21 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// a benign non-cacheable nested read taints only THIS build's
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
-    pub build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    pub build_local_taint:
+        verter_execution::sync_cell::SyncRefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
     /// Whether each alias the printing walk asked about declares a
     /// homomorphic mapped type. REQUEST-SCOPED: it lives and dies with the
     /// dispatch, and every entry is a pure function of declarations the
     /// request's view pins.
-    pub(super) homomorphic_aliases:
-        std::cell::RefCell<rustc_hash::FxHashMap<crate::semantic_query::DeclIdentity, bool>>,
+    pub(super) homomorphic_aliases: verter_execution::sync_cell::SyncRefCell<
+        rustc_hash::FxHashMap<crate::semantic_query::DeclIdentity, bool>,
+    >,
     /// How many type-level reads this dispatch made of a member's
     /// body-derived return whose evaluation closed degraded
     /// (`ReturnType<typeof C.m>`). REQUEST-SCOPED: it lives and dies with
     /// the dispatch the request builds, and the host flow-return boundary
     /// reads it around its one evaluation.
-    pub(super) degraded_member_reads: std::cell::Cell<u32>,
+    pub(super) degraded_member_reads: verter_execution::sync_cell::SyncU32,
     /// Owned class headers whose signature sources are being published before
     /// their value consumers run. Entries have no enclosing substitution.
     pub(super) signature_source_headers: flow_return_fact::SignatureSourceHeaders,
@@ -577,7 +586,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// leaks into a transitively nested build the target key's own
     /// construction triggers (a substitution-independent `LowerLocator` or
     /// other child candidate must not inherit the operand's roots).
-    pub active_operand_evidence: std::cell::RefCell<
+    pub active_operand_evidence: verter_execution::sync_cell::SyncRefCell<
         smallvec::SmallVec<
             [(
                 SemanticQueryKey,
@@ -597,8 +606,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// nothing scoped through this stack is ever admitted to a shared
     /// cache. Empty when no member-access/call site is on the stack — a
     /// rootless apparent demand then fails closed (`Miss`).
-    pub lexical_demand_scope:
-        std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
+    pub lexical_demand_scope: verter_execution::sync_cell::SyncRefCell<
+        smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>,
+    >,
     /// The transient per-obligation-root cold-compute frame (design
     /// `.claude/skills/type-resolution/SKILL.md` §2.1): the ONE shared
     /// tagged re-entry / cycle-id space with its generic frame /
@@ -606,13 +616,14 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// session stack, and the deferred-admission ledger. TRANSIENT, never
     /// a cache key, never thread-local — it rides this dispatch exactly
     /// like the other cold-compute cycle guards above.
-    pub dispatch_txn: std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    pub dispatch_txn:
+        verter_execution::sync_cell::SyncRefCell<dispatch_txn::CheckerDispatchTransaction>,
     /// The relation environment of the project owning the request's
     /// canonical, resolved lazily ONCE per dispatch
     /// ([`Self::relation_environment`]): the `R/T/L/J` env every relation
     /// key carries and the strict-family configuration the reducer
     /// branches on — two projections of the one effective option set.
-    pub(super) relation_env: std::cell::OnceCell<dispatch_txn::RelationEnvironment>,
+    pub(super) relation_env: std::sync::OnceLock<dispatch_txn::RelationEnvironment>,
     /// The relation environments of the answers currently being decided,
     /// innermost last: a flow-return frame pushes the environment of its
     /// function's OWN file for the length of its evaluation, so every
@@ -622,14 +633,16 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// frame, where [`Self::relation_environment`] falls back to the
     /// request environment. Pushed and popped only through
     /// [`RelationEnvironmentScope`].
-    pub(super) relation_env_scope:
-        std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    pub(super) relation_env_scope: verter_execution::sync_cell::SyncRefCell<
+        smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>,
+    >,
     /// The relation environment of each file a flow-return frame has been
     /// decided under in this dispatch — resolved once per file, like
     /// [`Self::relation_env`] for the request, since every frame of a
     /// function in that file asks again.
-    pub(super) relation_env_by_file:
-        std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
+    pub(super) relation_env_by_file: verter_execution::sync_cell::SyncRefCell<
+        rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>,
+    >,
     /// The relation explanations this request captured, in decision order
     /// ([`relation_explanation`]). Optional observation state: it exists
     /// only under `semantic-observe`, is `Some` only when the request
@@ -637,8 +650,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// root entry's one selection, carried to every task dispatcher), and is
     /// dropped with the request.
     #[cfg(feature = "semantic-observe")]
-    pub(super) relation_explanations:
-        Option<std::cell::RefCell<Vec<relation_explanation::RelationExplanation>>>,
+    pub(super) relation_explanations: Option<
+        verter_execution::sync_cell::SyncRefCell<Vec<relation_explanation::RelationExplanation>>,
+    >,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -648,18 +662,19 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// request that would then skip the deposit — the epoch advancing
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
-    pub canonical_evidence_epoch: std::cell::Cell<u64>,
+    pub canonical_evidence_epoch: verter_execution::sync_cell::SyncU64,
     /// The current semantic demand's checking site, exchanged with a lent
     /// task and explicitly installed by each resumed frame.
-    pub(super) checking_site:
-        std::cell::Cell<crate::semantic_query::checker_policy::TupleSplicePosition>,
+    pub(super) checking_site: verter_execution::sync_cell::SyncCell<
+        crate::semantic_query::checker_policy::TupleSplicePosition,
+    >,
     /// Monotonic count of operation-budget recoveries this dispatcher
     /// folded ([`PartialReasonSet::OPERATION_BUDGET`](crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)).
     /// A structural-fact demand snapshots it and compares at its settle, so
     /// a recovery made anywhere under the demand — inside a relation, a
     /// nested build or a canonical construction — leaves the demand a
     /// resource partial even where no read carried the reason to it.
-    pub(super) operation_budget_epoch: std::cell::Cell<u64>,
+    pub(super) operation_budget_epoch: verter_execution::sync_cell::SyncU64,
     /// Operational work/depth/cancellation accounting for the connected
     /// demands rooted at this dispatcher. The dispatcher holds the ledger but
     /// owns none of its logic — see [`connected_demand`].
@@ -684,7 +699,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// completion runs is the same-path recursion a family-memo claim would
     /// answer with its recursion carrier. A read at the other site is a
     /// distinct demand and never closes a cycle through it.
-    request_local_open: std::cell::RefCell<RequestLocalOpenSet>,
+    request_local_open: verter_execution::sync_cell::SyncRefCell<RequestLocalOpenSet>,
     /// The receipt of each root evaluation this dispatcher admitted as
     /// finishing as itself ([`Self::admit_self_evaluation`]): one step under
     /// the evaluation's own identity, a pure function of that identity, so
@@ -697,28 +712,29 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     composite_fixed_points: evaluate::CompositeFixedPoints,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
-    driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
+    driven_root_traced: verter_execution::sync_cell::SyncRefCell<Option<TracedFacts>>,
     /// The seam of the conditional decision a frame's step is running: the
     /// answers its frame has received, the first read they do not answer,
     /// and how many queries the decision is evaluating in place, which read
     /// only those answers.
-    decision_seam: std::cell::RefCell<Option<query_frames::DecisionSeam>>,
+    decision_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::DecisionSeam>>,
     /// The call resolution whose frame is stepping, while its walk runs:
     /// the walk it resumes and the answers its operand demands read.
-    call_seam: std::cell::RefCell<Option<query_frames::CallSeam>>,
+    call_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::CallSeam>>,
     /// The flow evaluation whose frame is stepping, while its run lasts:
     /// the answers its frame received, the contextual callbacks typing now
     /// and the contextual calls held across its runs.
-    flow_seam: std::cell::RefCell<Option<query_frames::FlowSeam>>,
+    flow_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::FlowSeam>>,
     /// The binder the running substitution walk replaces, classified once
     /// for every node the walk visits ([`Self::substitution_binder`]).
     /// Emptied at each walk's entry, so it never outlives the hold the
     /// walk's caller keeps on the binder.
-    substitution_binder: std::cell::RefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
+    substitution_binder:
+        verter_execution::sync_cell::SyncRefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
     /// How many of this dispatcher's operations are open on its thread
     /// ([`DispatchOperation`]). When the outermost one ends, the receipts
     /// the dispatcher held for it are released, whatever owner stays open.
-    operation_depth: std::cell::Cell<u32>,
+    operation_depth: verter_execution::sync_cell::SyncU32,
 }
 
 /// A dispatcher on the thread that created it, holding its share of its
@@ -744,6 +760,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
     }
 }
 
+/// A dispatcher a suspendable computation owns
+/// ([`ProjectSemanticDispatch::suspendable`]). Unlike a [`ThreadDispatch`]
+/// it is bound to no thread: the computation it runs ([`Self::run`]) holds
+/// its graph's construction lane on the polling thread for each poll alone.
+/// A lane owns nothing, so between polls nothing of the dispatcher stays on
+/// any thread, and each of its operations ends within the poll that
+/// entered it.
+pub struct SuspendableDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
+    /// Taken only to drop it inside its lane.
+    dispatch: Option<ProjectSemanticDispatch<'a, C>>,
+    arena: Arc<crate::semantic_query_memo::arena::NodeArenaCore>,
+}
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> SuspendableDispatch<'a, C> {
+    /// The dispatcher, for the computation [`Self::run`] polls.
+    pub fn dispatch(&self) -> &ProjectSemanticDispatch<'a, C> {
+        self.dispatch
+            .as_ref()
+            .expect("a suspendable dispatcher holds its dispatcher until it drops")
+    }
+
+    /// Poll `computation` to its answer, holding the dispatcher's
+    /// construction lane on the polling thread for each poll.
+    pub async fn run<F: std::future::Future>(&self, computation: F) -> F::Output {
+        let mut computation = std::pin::pin!(computation);
+        std::future::poll_fn(|cx| {
+            let _lane = crate::semantic_query_memo::node_roots::DispatchConstructionLane::enter(
+                &self.arena,
+            );
+            computation.as_mut().poll(cx)
+        })
+        .await
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> Drop for SuspendableDispatch<'_, C> {
+    fn drop(&mut self) {
+        let _lane =
+            crate::semantic_query_memo::node_roots::DispatchConstructionLane::enter(&self.arena);
+        drop(self.dispatch.take());
+    }
+}
+
 /// The connected-demand entry of a query decided in place
 /// ([`ProjectSemanticDispatch::enter_in_place_query`]): its nested level
 /// is released before its demand, as a query's are.
@@ -766,7 +825,7 @@ pub(super) struct InPlaceQuery<'g> {
 /// what the returned carrier owns, what an explicit builder owner the caller
 /// holds keeps, or what a charged cache retains.
 pub(crate) struct DispatchOperation<'g> {
-    depth: &'g std::cell::Cell<u32>,
+    depth: &'g verter_execution::sync_cell::SyncU32,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
     literal_union_indexes: &'g relation::LiteralUnionIndexes,
     composite_fixed_points: &'g evaluate::CompositeFixedPoints,
@@ -793,7 +852,7 @@ impl Drop for DispatchOperation<'_> {
 
 /// The receipt of each root evaluation a dispatcher admitted as finishing
 /// as itself ([`ProjectSemanticDispatch::admit_self_evaluation`]).
-type SelfEvaluationReceipts = std::cell::RefCell<
+type SelfEvaluationReceipts = verter_execution::sync_cell::SyncRefCell<
     rustc_hash::FxHashMap<
         (
             SemanticNodeId,
@@ -968,13 +1027,15 @@ pub(crate) fn extend_unique_self_roots(
 /// dropping the installation — unwinding included — takes it back into the
 /// frame.
 pub(super) struct StepTaint<'g, 'f> {
-    stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    stack: &'g verter_execution::sync_cell::SyncRefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
     slot: &'f mut BuildLocalTaint,
 }
 
 impl<'g, 'f> StepTaint<'g, 'f> {
     pub(super) fn install(
-        stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+        stack: &'g verter_execution::sync_cell::SyncRefCell<
+            smallvec::SmallVec<[BuildLocalTaint; 8]>,
+        >,
         slot: &'f mut BuildLocalTaint,
     ) -> Self {
         stack.borrow_mut().push(std::mem::take(slot));
@@ -989,13 +1050,17 @@ impl Drop for StepTaint<'_, '_> {
 }
 
 pub struct BuildLocalTaintGuard<'g> {
-    stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    stack: &'g verter_execution::sync_cell::SyncRefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
     finished: bool,
 }
 
 impl<'g> BuildLocalTaintGuard<'g> {
     /// Push a fresh taint frame and return a guard that pops it on drop.
-    pub fn push(stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>) -> Self {
+    pub fn push(
+        stack: &'g verter_execution::sync_cell::SyncRefCell<
+            smallvec::SmallVec<[BuildLocalTaint; 8]>,
+        >,
+    ) -> Self {
         stack.borrow_mut().push(BuildLocalTaint::default());
         Self {
             stack,
@@ -1067,12 +1132,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// so an unwinding evaluation can never leak its scope onto a later
 /// build's rootless apparent lookup.
 pub struct LexicalDemandScopeGuard<'g> {
-    stack: &'g std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
+    stack: &'g verter_execution::sync_cell::SyncRefCell<
+        smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>,
+    >,
 }
 
 impl<'g> LexicalDemandScopeGuard<'g> {
     pub fn push(
-        stack: &'g std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
+        stack: &'g verter_execution::sync_cell::SyncRefCell<
+            smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>,
+        >,
         canonical: impl Into<verter_type_expr::OwnedStr>,
     ) -> Self {
         stack.borrow_mut().push(canonical.into());
@@ -1092,15 +1161,19 @@ impl<'g> Drop for LexicalDemandScopeGuard<'g> {
 /// in force until the scope drops, which restores the outer snapshot
 /// (panic-safe).
 pub(super) struct RelationEnvironmentScope<'g> {
-    stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
-    txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    stack: &'g verter_execution::sync_cell::SyncRefCell<
+        smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>,
+    >,
+    txn: &'g verter_execution::sync_cell::SyncRefCell<dispatch_txn::CheckerDispatchTransaction>,
     outer_strict: Option<dispatch_txn::StrictFamilyConfig>,
 }
 
 impl<'g> RelationEnvironmentScope<'g> {
     pub(super) fn push(
-        stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
-        txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+        stack: &'g verter_execution::sync_cell::SyncRefCell<
+            smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>,
+        >,
+        txn: &'g verter_execution::sync_cell::SyncRefCell<dispatch_txn::CheckerDispatchTransaction>,
         environment: dispatch_txn::RelationEnvironment,
     ) -> Self {
         stack.borrow_mut().push(environment);
@@ -1143,6 +1216,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     )]
     pub fn new(ctx: &'a dyn ResolverContext<C>) -> ThreadDispatch<'a, C> {
         Self::bind(ctx, None)
+    }
+
+    /// Create a dispatcher bound to a sealed request context for a
+    /// computation that may suspend and resume on another thread
+    /// ([`SuspendableDispatch`]).
+    #[must_use]
+    pub fn suspendable(ctx: &'a dyn ResolverContext<C>) -> SuspendableDispatch<'a, C> {
+        let ThreadDispatch {
+            dispatch,
+            _construction: lane,
+        } = Self::bind(ctx, None);
+        let arena = Arc::clone(dispatch.binding.construction.arena());
+        let dispatch = SuspendableDispatch {
+            dispatch: Some(dispatch),
+            arena,
+        };
+        drop(lane);
+        dispatch
     }
 
     fn bind(
@@ -1222,45 +1313,72 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             host_attachment:
                 crate::resolver_core::request_ports::HostAttachmentPort::host_attachment(ctx),
             ctx,
-            instantiate_active: std::cell::RefCell::new(ActiveInstantiations::default()),
-            awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
-            carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            answer_reads: std::cell::RefCell::default(),
-            closedness: std::cell::RefCell::default(),
-            free_type_variables: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
-            heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
-            build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            homomorphic_aliases: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
-            degraded_member_reads: std::cell::Cell::new(0),
-            signature_source_headers: std::cell::RefCell::new(Vec::new()),
-            active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            dispatch_txn: std::cell::RefCell::new(
+            instantiate_active: verter_execution::sync_cell::SyncRefCell::new(
+                ActiveInstantiations::default(),
+            ),
+            awaited_active: verter_execution::sync_cell::SyncRefCell::new(
+                build::AwaitedPath::default(),
+            ),
+            carrier_normalizing: verter_execution::sync_cell::SyncRefCell::new(
+                smallvec::SmallVec::new(),
+            ),
+            answer_reads: verter_execution::sync_cell::SyncRefCell::default(),
+            closedness: verter_execution::sync_cell::SyncRefCell::default(),
+            free_type_variables: verter_execution::sync_cell::SyncRefCell::new(
+                rustc_hash::FxHashMap::default(),
+            ),
+            tuple_contexts: verter_execution::sync_cell::SyncRefCell::default(),
+            heritage_ancestry: verter_execution::sync_cell::SyncRefCell::new(
+                rustc_hash::FxHashMap::default(),
+            ),
+            build_local_taint: verter_execution::sync_cell::SyncRefCell::new(
+                smallvec::SmallVec::new(),
+            ),
+            homomorphic_aliases: verter_execution::sync_cell::SyncRefCell::new(
+                rustc_hash::FxHashMap::default(),
+            ),
+            degraded_member_reads: verter_execution::sync_cell::SyncU32::new(0),
+            signature_source_headers: verter_execution::sync_cell::SyncRefCell::new(Vec::new()),
+            active_operand_evidence: verter_execution::sync_cell::SyncRefCell::new(
+                smallvec::SmallVec::new(),
+            ),
+            lexical_demand_scope: verter_execution::sync_cell::SyncRefCell::new(
+                smallvec::SmallVec::new(),
+            ),
+            dispatch_txn: verter_execution::sync_cell::SyncRefCell::new(
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
-            relation_env: std::cell::OnceCell::new(),
-            relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            relation_env: std::sync::OnceLock::new(),
+            relation_env_scope: verter_execution::sync_cell::SyncRefCell::new(
+                smallvec::SmallVec::new(),
+            ),
+            relation_env_by_file: verter_execution::sync_cell::SyncRefCell::new(
+                rustc_hash::FxHashMap::default(),
+            ),
             #[cfg(feature = "semantic-observe")]
             relation_explanations: <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
-                .then(|| std::cell::RefCell::new(Vec::new())),
-            canonical_evidence_epoch: std::cell::Cell::new(0),
-            checking_site: std::cell::Cell::new(Default::default()),
-            operation_budget_epoch: std::cell::Cell::new(0),
+                .then(|| verter_execution::sync_cell::SyncRefCell::new(Vec::new())),
+            canonical_evidence_epoch: verter_execution::sync_cell::SyncU64::new(0),
+            checking_site: verter_execution::sync_cell::SyncCell::new(Default::default()),
+            operation_budget_epoch: verter_execution::sync_cell::SyncU64::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_flags(snapshot.flags()),
             ),
             completions,
-            request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
-            self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            request_local_open: verter_execution::sync_cell::SyncRefCell::new(
+                rustc_hash::FxHashSet::default(),
+            ),
+            self_evaluation_receipts: verter_execution::sync_cell::SyncRefCell::new(
+                rustc_hash::FxHashMap::default(),
+            ),
             literal_union_indexes: Default::default(),
             composite_fixed_points: Default::default(),
-            driven_root_traced: std::cell::RefCell::new(None),
-            decision_seam: std::cell::RefCell::new(None),
-            call_seam: std::cell::RefCell::new(None),
-            flow_seam: std::cell::RefCell::new(None),
-            substitution_binder: std::cell::RefCell::new(None),
-            operation_depth: std::cell::Cell::new(0),
+            driven_root_traced: verter_execution::sync_cell::SyncRefCell::new(None),
+            decision_seam: verter_execution::sync_cell::SyncRefCell::new(None),
+            call_seam: verter_execution::sync_cell::SyncRefCell::new(None),
+            flow_seam: verter_execution::sync_cell::SyncRefCell::new(None),
+            substitution_binder: verter_execution::sync_cell::SyncRefCell::new(None),
+            operation_depth: verter_execution::sync_cell::SyncU32::new(0),
         }
     }
 
@@ -1307,6 +1425,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             answer_reads,
             closedness,
             free_type_variables,
+            tuple_contexts,
             heritage_ancestry,
             build_local_taint,
             homomorphic_aliases,
@@ -1342,6 +1461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         answer_reads.swap(&other.answer_reads);
         closedness.swap(&other.closedness);
         free_type_variables.swap(&other.free_type_variables);
+        tuple_contexts.swap(&other.tuple_contexts);
         heritage_ancestry.swap(&other.heritage_ancestry);
         build_local_taint.swap(&other.build_local_taint);
         homomorphic_aliases.swap(&other.homomorphic_aliases);
@@ -1429,7 +1549,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Arc::clone(self.binding.construction.arena()),
             operands,
         )
-        .capture_in_scope();
+        .capture_into_scope();
         // Receipts end with this operation, before the sink closes. The
         // carrier keeps the result's explicit roots, including reused nodes.
         drop(operation);
@@ -3378,10 +3498,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
         let project_gen = self.snapshot.current_project_generation();
-        DepSignature::new(vec![crate::semantic_query::DepEntry::new(
-            "<project>",
-            DepVersion::ProjectGeneration(project_gen),
-        )])
+        DepSignature::new(vec![self
+            .graph()
+            .project_dep_entry(DepVersion::ProjectGeneration(project_gen))])
     }
 
     /// Emit a `ProjectMember` origin-graph edge tagged
@@ -4149,12 +4268,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         build_local: BuildLocalTaint,
-        finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+        finalise: impl Into<verter_session_query::facts::fact_read_set::FactReadSetFinalise>,
         carrier_prelude: &CarrierNormalizationPrelude,
     ) -> (
         crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         Option<CompletedSelfRoots>,
     ) {
+        let finalise = finalise.into();
         // A declaration/locator wrapper may return an adopted child unchanged.
         // Only that actual terminal and a locally complete output retain its
         // interpretation; another partial dependency blocks this transfer.
@@ -5755,7 +5875,7 @@ type RequestLocalOpenSet = rustc_hash::FxHashSet<(
 /// closed when dropped (including on unwind) so a later read of the key is
 /// never mistaken for a same-path re-entry.
 struct RequestLocalOpen<'d> {
-    open: &'d std::cell::RefCell<RequestLocalOpenSet>,
+    open: &'d verter_execution::sync_cell::SyncRefCell<RequestLocalOpenSet>,
     demand: (
         SemanticQueryKey,
         crate::semantic_query::checker_policy::TupleSplicePosition,
@@ -5764,7 +5884,7 @@ struct RequestLocalOpen<'d> {
 
 impl<'d> RequestLocalOpen<'d> {
     fn enter(
-        open: &'d std::cell::RefCell<RequestLocalOpenSet>,
+        open: &'d verter_execution::sync_cell::SyncRefCell<RequestLocalOpenSet>,
         key: &SemanticQueryKey,
         site: crate::semantic_query::checker_policy::TupleSplicePosition,
     ) -> Self {
@@ -5931,7 +6051,7 @@ pub(super) enum ServedAdmission {
 /// fenced-serve prelude) forces the entry out of the memo.
 #[derive(Clone)]
 pub struct CarrierNormalizationPrelude {
-    facts: Option<Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>>,
+    facts: Option<verter_session_query::facts::fact_set::FactSet>,
     cache_suppress: bool,
     partial_reasons: crate::semantic_query::PartialReasonSet,
     normalized_source: Option<carrier::CarrierResolution>,
@@ -5994,12 +6114,13 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
 fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
-    finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+    finalise: impl Into<verter_session_query::facts::fact_read_set::FactReadSetFinalise>,
     carrier_prelude: &CarrierNormalizationPrelude,
 ) -> (
     crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     Option<CompletedSelfRoots>,
 ) {
+    let finalise = finalise.into();
     let mut output = output;
     let mut rooting = None;
     let finalised_cleanly = matches!(
@@ -6053,29 +6174,18 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             // any of them misses the warm read — without them a memoized resolved
             // key could be admitted whose rewrite depended on untracked indexed /
             // augmentation state (cache poisoning).
-            let prelude_facts: &[verter_session_query::facts::fact_cache::FactVersionRef] =
-                carrier_prelude.facts.as_deref().unwrap_or(&[]);
-            // Built once for the carrier; built again only when the entry
-            // cannot be rooted and the facts ride a non-admitted carrier.
-            let merged_facts =
-                || -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
-                    if fence_facts.is_empty() && prelude_facts.is_empty() {
-                        traced_facts.iter().cloned().collect()
-                    } else {
-                        let mut merged: Vec<
-                            verter_session_query::facts::fact_cache::FactVersionRef,
-                        > = Vec::with_capacity(
-                            traced_facts.len() + fence_facts.len() + prelude_facts.len(),
-                        );
-                        merged.extend(traced_facts.iter().cloned());
-                        for fact in fence_facts.iter().chain(prelude_facts.iter()) {
-                            if !merged.iter().any(|existing| existing == fact) {
-                                merged.push(fact.clone());
-                            }
-                        }
-                        merged
-                    }
-                };
+            let empty_prelude = verter_session_query::facts::fact_set::FactSet::empty();
+            let prelude_facts = carrier_prelude.facts.as_ref().unwrap_or(&empty_prelude);
+            // What the carrier adds to the traced set, which it shares: the
+            // fence and the prelude.
+            let extra_facts = || -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+                fence_facts
+                    .iter()
+                    .chain(prelude_facts.iter())
+                    .filter(|fact| !traced_facts.contains(fact))
+                    .cloned()
+                    .collect()
+            };
             // A traced set that already holds the fence and every observed
             // self-root is its own completed carrier.
             let shared = if prelude_facts.is_empty() {
@@ -6089,7 +6199,11 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             };
             let completed = match shared {
                 Some(completed) => Ok(completed),
-                None => ctx.complete_graph_signature(&output.observed_self_roots, merged_facts()),
+                None => ctx.complete_graph_signature(
+                    &output.observed_self_roots,
+                    &traced_facts,
+                    extra_facts(),
+                ),
             };
             match completed {
                 Ok((facts, self_root_canonicals)) => {
@@ -6147,8 +6261,9 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                     output.cache_suppress = true;
                     output.graph_carrier = Some(Box::new(
                         verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                            verter_session_query::facts::fact_read_set::seal_canonical_signature(
-                                merged_facts(),
+                            verter_session_query::facts::fact_read_set::seal_onto(
+                                &traced_facts,
+                                extra_facts(),
                             ),
                         ),
                     ));

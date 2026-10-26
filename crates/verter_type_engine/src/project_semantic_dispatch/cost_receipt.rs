@@ -84,6 +84,14 @@ impl CostIdentity {
         }
     }
 
+    /// Whether this identifies a computation keyed by a `K` ([`Self::of_key`]).
+    pub(crate) fn is_keyed_by<K>(&self) -> bool
+    where
+        K: Hash + Eq + Send + Sync + 'static,
+    {
+        self.key.downcast_ref::<KeyedIdentity<K>>().is_some()
+    }
+
     pub(crate) fn with_roots(
         mut self,
         roots: crate::semantic_query_memo::node_roots::NodeRootSet,
@@ -94,6 +102,18 @@ impl CostIdentity {
 }
 
 impl CostIdentity {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_each_owned_root_for_tests(
+        &self,
+        mut visit: impl FnMut(&crate::semantic_query_memo::node_roots::NodeRootSet),
+    ) {
+        visit(&self.roots);
+        crate::semantic_query_memo::prepared::PreparedKeyHandle::producer_roots_for_tests(
+            self.key.as_ref(),
+            &mut visit,
+        );
+    }
+
     /// What the identity keeps reachable, once per `aliases`: its operand
     /// roots and its producer key's block, with the heap that key reaches.
     /// An encoded key owns its bytes; a prepared query identity owns its
@@ -532,6 +552,12 @@ impl DemandCostReceipt {
     /// The deepest logical nesting it needs below its own entry.
     pub fn depth(&self) -> u16 {
         self.footprint.query_depth
+    }
+
+    /// The input ownership already attached to this receipt's cost identity.
+    /// A memo borrows it; evaluated results never become receipt operands.
+    pub(crate) fn operand_roots(&self) -> &crate::semantic_query_memo::node_roots::NodeRootSet {
+        &self.identity.roots
     }
 
     /// The allowances its closure's cold run needed.

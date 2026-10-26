@@ -1560,6 +1560,25 @@ impl HostStoreView {
     /// that falls to the cold path.
     #[track_caller]
     pub(crate) fn from_host_read(host: &VerterHost) -> StoreViewRead {
+        Self::record_host_read(host);
+        host.store_view_manager().base_view(host)
+    }
+
+    /// [`Self::from_host_read`] as a pollable computation: it returns
+    /// `Pending` where the read would wait behind another thread's
+    /// store-view build, with its waker registered for that build's
+    /// release.
+    #[track_caller]
+    pub(crate) fn from_host_read_pollable(
+        host: &VerterHost,
+    ) -> impl std::future::Future<Output = StoreViewRead> + Send + '_ {
+        Self::record_host_read(host);
+        host.store_view_manager().base_view_pollable(host)
+    }
+
+    /// Count one host store-view read, by call site and per host.
+    #[track_caller]
+    fn record_host_read(host: &VerterHost) {
         record_from_host_call(Location::caller());
         // Per-host measurement rail: hermetic counterpart of the
         // process-global per-call-site attribution table above. O(1)-read
@@ -1576,7 +1595,6 @@ impl HostStoreView {
                 .host_store_view_from_host_builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         });
-        host.store_view_manager().base_view(host)
     }
 
     /// Build a coherent root-backed base snapshot or report supersession
@@ -1622,6 +1640,7 @@ impl HostStoreView {
             // "built token" that could straddle a mid-build mutation.
             let pre = PreBuildTokenInputs::capture(host);
             let pre_token = pre.token();
+            let artifact_root_settled = pre.root_capture.artifact_root_is_settled();
             // Test-only: if a test armed the build gate, park HERE (holding
             // the singleflight claim, having already captured `pre` at the
             // pre-bump token) until the test releases. The test uses this to
@@ -1692,8 +1711,17 @@ impl HostStoreView {
             // that moved WITHOUT bumping `store_view_epoch` — and forces a
             // retry / `Superseded` rather than publishing a torn view whose
             // snapshot maps and token straddle the mutation.
+            //
+            // The token alone cannot vouch for the artifact root: an
+            // artifact publication that finished above a mutation still in
+            // flight has already advanced the captured artifact generation,
+            // yet the root, held back below the in-flight epoch, omits it.
+            // Both tokens then agree while the view lacks that artifact, and
+            // caching it as current would refuse every fact recorded against
+            // the artifact until some later mutation moved the token. Such a
+            // capture retries like a superseded one.
             let live_token = capture_store_view_validation_token(host);
-            if pre_token == live_token {
+            if pre_token == live_token && artifact_root_settled {
                 return SnapshotBuildOutcome::Coherent {
                     view,
                     token: pre_token,
@@ -2896,54 +2924,6 @@ pub(crate) fn syntactic_route_interface_hash(
     })
 }
 
-/// Exact owner and content-free proof of one direct declaration export.
-/// Source spans establish containment, but neither offsets nor declaration
-/// body hashes enter the proof. Local export lists require canonical routing.
-pub(crate) fn direct_declaration_export_proof(
-    parse: &crate::types::ParseSnapshot,
-    name: &str,
-) -> Option<(verter_type_expr::TopLevelOwnerId, Hash16)> {
-    let mut exports = parse
-        .export_signatures
-        .iter()
-        .filter(|export| export.name == name);
-    let export = exports.next()?;
-    if exports.next().is_some() || export.reexport_source.is_some() {
-        return None;
-    }
-    let mut exact_owner = None;
-    let mut capabilities = 0u8;
-    for declaration in parse
-        .script_analysis
-        .declaration_entries
-        .iter()
-        .filter(|declaration| {
-            declaration.name == name
-                && declaration.span.start <= export.span.start
-                && export.span.end <= declaration.span.end
-        })
-    {
-        match exact_owner {
-            Some(owner) if owner != declaration.owner => return None,
-            _ => exact_owner = Some(declaration.owner),
-        }
-        capabilities |= match declaration.kind {
-            verter_session_query::analysis::types::LocalDeclarationKind::Type => 1,
-            verter_session_query::analysis::types::LocalDeclarationKind::Value => 2,
-            verter_session_query::analysis::types::LocalDeclarationKind::TypeAndValue => 3,
-        };
-    }
-    let owner = exact_owner?;
-    let hash = hash16_from_sorted(|hasher| {
-        b"verter:direct-declaration-export:v1".hash(hasher);
-        name.hash(hasher);
-        owner.hash(hasher);
-        capabilities.hash(hasher);
-        export.is_type.hash(hasher);
-    });
-    Some((owner, hash))
-}
-
 /// Rebuild an [`AugmentationTargetKind`](crate::file_artifact_store::AugmentationTargetKind)
 /// from the parallel-fields shape the parse-domain
 /// `FactKey::ModuleAugmentationIndexShape` carries.
@@ -2955,7 +2935,7 @@ pub(crate) fn direct_declaration_export_proof(
 ///
 /// Returns `None` when the payload does not match the tag — a malformed
 /// shape names no entry, and the validator fails closed on it.
-pub(crate) fn augmentation_target_kind_from_shape(
+fn augmentation_target_kind_from_shape(
     tag: verter_session_query::facts::registry::AugmentationTargetKindTag,
     external_specifier: Option<&str>,
     resolved_relative_canonical: Option<&str>,
@@ -3456,16 +3436,6 @@ impl HostStoreView {
         &self,
         fact: &verter_session_query::facts::fact_cache::ParseFactRef,
     ) -> LeafCheck {
-        if matches!(
-            fact.key,
-            verter_session_query::facts::FactKey::DirectDeclarationExport { .. }
-        ) {
-            return self.check_direct_declaration_export_for_content(
-                fact,
-                self.whole_hash(&fact.canonical_id),
-                None,
-            );
-        }
         const ZERO_HASH: Hash16 = [0u8; 16];
         let resolved = self.canonical_view(&fact.canonical_id);
         let facts = match resolved.file_facts.as_ref() {
@@ -3482,34 +3452,6 @@ impl HostStoreView {
         // (the side-store is Arc-shared with the snapshot's `FileFacts`
         // clone).
         check_parse_fact(facts.lookup_or_compute_read(&fact.key), fact)
-    }
-
-    /// A source-header fact is available without an indexed artifact, but
-    /// only for content established by this view or its completion overlay.
-    pub(crate) fn check_direct_declaration_export_for_content(
-        &self,
-        fact: &verter_session_query::facts::fact_cache::ParseFactRef,
-        whole_hash: Option<Hash16>,
-        admitted_version: Option<verter_scheduler::node::SourceVersion>,
-    ) -> LeafCheck {
-        let verter_session_query::facts::FactKey::DirectDeclarationExport { name } = &fact.key
-        else {
-            return LeafCheck::Invalid;
-        };
-        if self.is_tombstoned(&fact.canonical_id) {
-            return LeafCheck::Invalid;
-        }
-        let current = whole_hash.and_then(|hash| {
-            self.snapshot
-                .roots
-                .direct_declaration_export_hash_for_content(
-                    &fact.canonical_id,
-                    hash,
-                    admitted_version,
-                    name.as_ref(),
-                )
-        });
-        LeafCheck::of(current == Some(fact.expected_hash))
     }
 
     /// [`StoreView::validates_program_analysis_domain`], telling a fact
@@ -3762,6 +3704,9 @@ impl BuildRelease {
             return std::task::Poll::Ready(());
         }
         state.build_waiters.register(&mut self.registration, waker);
+        verter_execution::blocking::note_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+        );
         std::task::Poll::Pending
     }
 }
@@ -3822,6 +3767,10 @@ impl StoreViewManager {
                 reason: StoreViewReturnOnlyReason::Superseded,
             })
         }
+    }
+
+    pub(crate) async fn base_view_pollable(&self, host: &VerterHost) -> StoreViewRead {
+        build_claim::pollable(host).await
     }
 
     /// Publish a freshly-built coherent base view into `cached` under the
@@ -3974,6 +3923,12 @@ impl StoreViewManager {
     pub(crate) fn parked_waiters(&self) -> usize {
         self.state.lock().parked_waiters
     }
+
+    /// Test-only: the wakers registered for the in-flight build's release.
+    #[cfg(test)]
+    pub(crate) fn build_release_registrations(&self) -> usize {
+        self.state.lock().build_waiters.len()
+    }
 }
 
 impl crate::resolver_core::ResolverStore for VerterHost {
@@ -3991,6 +3946,14 @@ impl crate::resolver_core::ResolverStore for VerterHost {
             StoreViewRead::Current(current) => current.view().clone(),
             StoreViewRead::ReturnOnly { view, .. } => view,
         }
+    }
+}
+
+/// A store-view read as its view and whether the manager proved it current.
+fn view_with_currentness(read: StoreViewRead) -> (HostStoreView, bool) {
+    match read {
+        StoreViewRead::Current(current) => (current.view().clone(), true),
+        StoreViewRead::ReturnOnly { view, .. } => (view, false),
     }
 }
 
@@ -4061,6 +4024,15 @@ impl VerterHost {
         HostStoreView::from_host_read(self)
     }
 
+    /// [`Self::resolver_store_view_read`] as a pollable computation: it
+    /// suspends where the read would wait behind another thread's build.
+    #[track_caller]
+    pub(crate) fn resolver_store_view_read_pollable(
+        &self,
+    ) -> impl std::future::Future<Output = StoreViewRead> + Send + '_ {
+        HostStoreView::from_host_read_pollable(self)
+    }
+
     /// Read the host's base store view together with the manager's
     /// currentness proof, for the stable-request executors whose warm
     /// preflight peek must be suppressed on a known-stale snapshot.
@@ -4068,10 +4040,21 @@ impl VerterHost {
     /// [`StoreViewRead::Current`] read.
     #[track_caller]
     pub(crate) fn resolver_store_view_with_currentness(&self) -> (HostStoreView, bool) {
-        match HostStoreView::from_host_read(self) {
-            StoreViewRead::Current(current) => (current.view().clone(), true),
-            StoreViewRead::ReturnOnly { view, .. } => (view, false),
-        }
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+            std::pin::pin!(self.resolver_store_view_with_currentness_pollable()),
+        )
+    }
+
+    /// [`Self::resolver_store_view_with_currentness`] without driving a
+    /// pending build. Both forms preserve the same current/return-only
+    /// distinction; callers apply session overlays after this one read.
+    #[track_caller]
+    pub(crate) fn resolver_store_view_with_currentness_pollable(
+        &self,
+    ) -> impl std::future::Future<Output = (HostStoreView, bool)> + Send + '_ {
+        let read = self.resolver_store_view_read_pollable();
+        async move { view_with_currentness(read.await) }
     }
 
     /// Capture ONE coherent [`BatchFixedView`] for a whole component-meta
@@ -4129,6 +4112,34 @@ impl VerterHost {
         // request, including imported files omitted by files/include.
         self.ingest_configured_programs();
         let (base_view, is_current) = self.resolver_store_view_with_currentness();
+        self.fixed_view_from_capture(view, base_view, is_current)
+    }
+
+    /// [`Self::capture_batch_fixed_view`] as a pollable computation: where
+    /// the store-view read would wait behind another thread's build it
+    /// returns `Pending`, with its waker registered for that build's
+    /// release, and resumes the same read once woken.
+    #[track_caller]
+    pub(crate) fn capture_batch_fixed_view_pollable<'s>(
+        &'s self,
+        view: &'s dyn crate::session_view::SessionView,
+    ) -> impl std::future::Future<Output = BatchFixedView> + Send + 's {
+        self.ingest_configured_programs();
+        let read = HostStoreView::from_host_read_pollable(self);
+        async move {
+            let (base_view, is_current) = view_with_currentness(read.await);
+            self.fixed_view_from_capture(view, base_view, is_current)
+        }
+    }
+
+    /// The [`BatchFixedView`] of one store-view read under `view`'s session
+    /// overlay.
+    fn fixed_view_from_capture(
+        &self,
+        view: &dyn crate::session_view::SessionView,
+        base_view: HostStoreView,
+        is_current: bool,
+    ) -> BatchFixedView {
         // Base-external fence token: the captured view's token with
         // `overlay_identity` cleared. The base read's token already carries
         // `overlay_identity: None`, so this IS the base view's token; it is
@@ -4670,6 +4681,13 @@ impl HostStoreView {
     /// per distinct canonical a validator demands.
     pub(crate) fn memo_len_for_tests(&self) -> usize {
         self.memo.len()
+    }
+
+    /// Test-only: whether the view holds a canonical's parse facts — the
+    /// artifact its parse-domain validator reads — through the captured
+    /// roots exactly as that validator does.
+    pub(crate) fn tracks_file_facts_for_tests(&self, canonical: &str) -> bool {
+        self.canonical_view(canonical).file_facts.is_some()
     }
 
     /// Test-only: the view's tracked whole hash for a canonical, resolved

@@ -510,12 +510,6 @@ pub enum FactKey {
     /// an import added to a non-contributor can place a contributor
     /// earlier. `program` names the program by its project config path.
     ProgramFileOrder { program: Arc<str> },
-
-    /// Parse-owned proof that a unique direct export occurs inside a
-    /// declaration in one exact lexical owner. Computed from the source
-    /// snapshot's headers without requiring an indexed artifact. A separate
-    /// local export specifier cannot establish this proof.
-    DirectDeclarationExport { name: InternedName },
 }
 
 /// Tag-only representation of
@@ -627,7 +621,6 @@ impl FactKey {
             | Self::ExportAlias { .. }
             | Self::SyntacticExportSet
             | Self::SyntacticRouteInterface
-            | Self::DirectDeclarationExport { .. }
             | Self::LocalDecl { .. }
             | Self::Member { .. }
             | Self::MemberPresence { .. }
@@ -721,16 +714,7 @@ pub struct ObservedFact {
 ///
 /// **Lookup cost contract.** All `FactKey::domain() == ParseFile`
 /// lookups MUST be O(1). The registry is backed by an `FxHashMap`.
-#[derive(
-    Debug,
-    Default,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FactRegistry {
     /// Parse-domain facts. Key uniqueness is guaranteed by R10:
     /// `FactKey` is stable across file edits that preserve the
@@ -890,9 +874,6 @@ mod registry_tests {
             },
             FactKey::SyntacticExportSet,
             FactKey::SyntacticRouteInterface,
-            FactKey::DirectDeclarationExport {
-                name: InternedName::from("X"),
-            },
             FactKey::LocalDecl {
                 name: InternedName::from("X"),
                 space: SymbolSpace::Type,

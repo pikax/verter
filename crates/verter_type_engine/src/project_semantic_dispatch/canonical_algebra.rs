@@ -906,7 +906,8 @@ pub fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
 }
 
 /// Whether an intersection's object-type arms declare one property whose
-/// types intersect to `never` while some of them is a literal — the
+/// types intersect to `never` while some of them is a literal (including
+/// `boolean`, the implicit union of `false` and `true`) — the
 /// checker's `isNeverReducedProperty` (`isDiscriminantWithNeverType`),
 /// which reduces the whole intersection to `never` (`{ a: 1 } & { a: 2 }`,
 /// `{ k: "x" } & { k: "y" }`). A property optional in some arm is left to
@@ -932,7 +933,11 @@ pub(crate) fn object_arms_conflict_on_a_literal_property<M: verter_audit::observ
     let is_literal = |value: SemanticNodeId| {
         matches!(
             graph.node_data(value).as_deref(),
-            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+            Some(
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Primitive(PrimitiveKind::Boolean)
+            )
         )
     };
     for (index, view) in views.iter().enumerate() {
@@ -1678,9 +1683,28 @@ fn canonicalize_with<M: verter_audit::observe::ObserveExec>(
     //    computed in O(n) over the childless scalar domain.
     if !is_union
         && (scalar_domain_provably_empty(graph.store(), &kept)
-            || nullable_beside_object_type(graph.store(), &kept, &mut evidence)
-            || object_arms_conflict_on_a_literal_property(graph, &kept, meter, &mut evidence))
+            || (nullability.is_strict()
+                && nullable_beside_object_type(graph.store(), &kept, &mut evidence)))
     {
+        return CanonicalComposite {
+            node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            evidence,
+        };
+    }
+
+    if !is_union && !nullability.is_strict() {
+        if let Some(nullish) = kept
+            .iter()
+            .copied()
+            .find(|arm| peek_nullable_via_graph(graph.store(), *arm, &mut evidence).is_some())
+        {
+            return CanonicalComposite {
+                node: nullish,
+                evidence,
+            };
+        }
+    }
+    if !is_union && object_arms_conflict_on_a_literal_property(graph, &kept, meter, &mut evidence) {
         return CanonicalComposite {
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             evidence,

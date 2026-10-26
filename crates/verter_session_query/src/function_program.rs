@@ -46,7 +46,7 @@ pub struct FunctionDeclarationRef {
 /// One ordinal step from a contributing top-level statement down to the
 /// function node. Named positions / small ordinals only — never a byte
 /// span, never a lowered type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionDescentStep {
     /// The statement IS the function declaration.
     FunctionDeclaration,
@@ -88,7 +88,7 @@ pub enum FunctionDescentStep {
 
 /// Arena-free locator for one function's body inside the retained parse
 /// snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionBodyLocator {
     /// The contributing top-level statement.
     pub contributor: DeclContributorAnchor,
@@ -104,28 +104,6 @@ pub struct FunctionBodyLocator {
 #[derive(Clone, Default)]
 pub struct FunctionDescent(Option<Arc<DescentLink>>);
 
-#[cfg(test)]
-#[test]
-fn deep_function_descent_measurement_uses_constant_stack_and_releases_its_pin() {
-    use verter_retention::pinned_heap::{PinContext, PinnedHeap};
-    let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
-        verter_retention::RetentionLimits::defaults(),
-    ));
-    let mut descent = FunctionDescent::new();
-    for ordinal in 0..16_384 {
-        descent = descent.then(FunctionDescentStep::NamespaceMember {
-            statement_ordinal: ordinal,
-        });
-    }
-    let pin = PinnedHeap::measure(&descent, 0, &context);
-    assert!(
-        context.account().snapshot().pinned_bytes >= 16_384 * std::mem::size_of::<DescentLink>()
-    );
-    drop(pin);
-    drop(descent);
-    assert_eq!(context.account().snapshot().total_bytes(), 0);
-}
-
 /// One step of a [`FunctionDescent`] and the descent it extends.
 struct DescentLink {
     step: FunctionDescentStep,
@@ -136,33 +114,6 @@ struct DescentLink {
     /// Whether any step of the whole descent enters a namespace block.
     namespace_member: bool,
     parent: FunctionDescent,
-}
-
-impl verter_retention::heap_size::HeapSize for FunctionDescent {
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        let mut next = self.0.as_ref();
-        let mut total = 0;
-        while let Some(link) = next {
-            let Some(bytes) = meter.try_shared_arc(link, |link, meter| {
-                let DescentLink {
-                    step,
-                    len: _,
-                    hash: _,
-                    namespace_member: _,
-                    parent: _,
-                } = link;
-                step.heap_size(meter)
-            }) else {
-                break;
-            };
-            total += bytes;
-            next = link.parent.0.as_ref();
-        }
-        total
-    }
 }
 
 impl FunctionDescent {
@@ -320,7 +271,7 @@ pub struct FunctionProgramKey {
 }
 
 /// One formal parameter's binding fact.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionParamRecord {
     /// The binding name (`None` for a destructured parameter).
     pub name: Option<Arc<str>>,
@@ -377,7 +328,7 @@ pub enum FunctionBindingKind {
 /// name deduplication and no reordering, so two same-name bindings in
 /// different lexical scopes of one frame stay distinct entries at distinct
 /// slots.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionBindingRecord {
     /// The binding name.
     pub name: Arc<str>,
@@ -444,7 +395,7 @@ pub fn canonical_runtime_binding_slots(bindings: &[FunctionBindingRecord]) -> Ve
 
 /// One identifier reference in the current function body (nested function
 /// bodies excluded — their references resolve in their own frames).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionReferenceRecord {
     /// The referenced name.
     pub name: Arc<str>,
@@ -461,7 +412,7 @@ pub struct FunctionReferenceRecord {
 
 /// A whole authored `typeof name` result consumed by indexed call lowering.
 /// Separate from runtime reads: it neither executes nor captures its operand.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSourceTypeQuery {
     pub name: Arc<str>,
     pub span: verter_span::Span,
@@ -474,7 +425,7 @@ pub struct FunctionSourceTypeQuery {
 /// arguments). Only a bare identifier without type arguments is recorded.
 /// Like [`FunctionSourceTypeQuery`], it neither executes nor captures its
 /// operand; it names the value whose type the position reads.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionTypeQuery {
     pub name: Arc<str>,
     pub span: verter_span::Span,
@@ -484,7 +435,7 @@ pub struct FunctionTypeQuery {
 
 /// Where a [`FunctionTypeQuery`] sits, which decides when the frame's
 /// evaluation reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionTypeQueryPosition {
     /// The frame's own parameter list: read whenever the frame evaluates.
     Parameter,
@@ -496,7 +447,7 @@ pub enum FunctionTypeQueryPosition {
 }
 
 /// The exact lexical answer for an indexed occurrence.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionReferenceBinding {
     Resolved(FlowBindingIdentity),
     Free,
@@ -514,9 +465,7 @@ impl FunctionReferenceBinding {
 }
 
 /// A value read may also govern control or supply a call's callee/arguments.
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionReadRole {
     #[default]
     Value,
@@ -546,7 +495,7 @@ impl FunctionReadRole {
 }
 
 /// One `return` site of the current function, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionReturnSite {
     /// Source-order ordinal among the function's return sites.
     pub ordinal: u32,
@@ -558,7 +507,7 @@ pub struct FunctionReturnSite {
 }
 
 /// The authored literal shape of one call argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionCallArgLiteralMode {
     /// An ordinary (widened) argument position.
     Widened,
@@ -568,7 +517,7 @@ pub enum FunctionCallArgLiteralMode {
 }
 
 /// One argument of an indexed call site, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionCallArgRecord {
     /// The argument expression's program point.
     pub point: u32,
@@ -587,7 +536,7 @@ pub struct FunctionCallArgRecord {
 /// the callee carrier, the exact same-file target, and the per-argument
 /// facts. This is the unified call record every call-shaped consumer
 /// reads — never a raw-string reparse, never a synthesized call type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionCallSiteRecord {
     /// The call expression's span (the program point's offset identity).
     pub span: verter_span::Span,
@@ -605,7 +554,7 @@ pub struct FunctionCallSiteRecord {
 }
 
 /// How one indexed expression supplies its value.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProgramExpressionSource {
     /// A call-free value expression, lowered lazily from the retained AST.
     Value,
@@ -631,14 +580,14 @@ pub enum ProgramExpressionSource {
     UnsupportedCall,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProgramExpressionCallKind {
     Call,
     Construct,
 }
 
 /// One declaration/callback expression indexed by content-free program point.
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramExpressionRecord {
     pub point: ProgramExpressionIdentity,
     pub span: verter_span::Span,
@@ -690,11 +639,11 @@ impl std::hash::Hash for FlowBindingIdentity {
 /// only. Until non-empty narrowing lands, a capture whose type cannot be
 /// reconstructed from the indexed binding / reaching-definition facts is
 /// a typed ReturnOnly, never guessed or separately keyed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct CanonicalCaptureIdentity(pub Arc<[FlowBindingIdentity]>);
 
 /// The callee shape of one evaluation-effect call site.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionEffectCallee {
     /// A bare identifier callee (`g()`).
     Identifier(Arc<str>),
@@ -705,7 +654,7 @@ pub enum FunctionEffectCallee {
 }
 
 /// One evaluation-effect call site in the current function body.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionEffectRecord {
     /// The call expression's span.
     pub span: verter_span::Span,
@@ -714,7 +663,7 @@ pub struct FunctionEffectRecord {
 }
 
 /// One write site (assignment or update) in the current function body.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionWriteRecord {
     /// The write expression's span.
     pub span: verter_span::Span,
@@ -723,14 +672,14 @@ pub struct FunctionWriteRecord {
 }
 
 /// Whether a write replaces the variable or mutates one of its members.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionWriteKind {
     Whole,
     Member,
 }
 
 /// Exact write-root evidence. A computed key is a read, never the target root.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionWriteTarget {
     Binding {
         reference: FunctionReferenceRecord,
@@ -742,14 +691,14 @@ pub enum FunctionWriteTarget {
 }
 
 /// The served expression-body position of a contextual-call declarator.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProgramInitializerSource {
     pub function: verter_type_expr::facts::FlowFunctionReturnIdentity,
     pub preserve_literals: bool,
 }
 
 /// A captured value dependency, retaining its exact root and static path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionCapturedRead {
     pub binding: FlowBindingIdentity,
     pub path: Arc<[Arc<str>]>,
@@ -760,7 +709,7 @@ pub struct FunctionCapturedRead {
 /// frame's PARAMETER LIST (`cb = () => a`): no index entry serves it, but
 /// the frame's own resolution names everything it reads and writes from
 /// around it, so its capture set is exact.
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParameterCallableCaptures {
     pub span: verter_span::Span,
     pub bindings: CanonicalCaptureIdentity,
@@ -768,7 +717,7 @@ pub struct FunctionParameterCallableCaptures {
 }
 
 /// The control-region kind of one skeleton region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionControlKind {
     /// A block statement.
     Block,
@@ -786,7 +735,7 @@ pub enum FunctionControlKind {
 
 /// One control-region skeleton entry (the current function's statement
 /// tree, nested function bodies excluded).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionControlRegion {
     /// The region kind.
     pub kind: FunctionControlKind,
@@ -802,7 +751,7 @@ pub struct FunctionControlRegion {
 /// One exact direct local call: the callee is a bare identifier bound to a
 /// function in the same index (a same-file, syntactically exact target —
 /// direct same-slot recursion included).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionDirectCall {
     /// The call expression's span.
     pub span: verter_span::Span,
@@ -819,7 +768,7 @@ pub struct FunctionDirectCall {
 /// a caller that needs the default's meaning demands it through the
 /// shared lazy body service, and pays for it only on the clauses that
 /// have one.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionProgramTypeParam {
     /// The type-parameter name.
     pub name: Arc<str>,
@@ -1011,7 +960,7 @@ pub struct FunctionProgramDiscovery {
 /// public, so any caller can seal discovery data of its own. What binds an
 /// entry to an actual served source is the [`FunctionProgramMatch`]
 /// witness, which records the index that answered the lookup.
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionProgramEntry {
     key: FunctionProgramKey,
     span: verter_span::Span,
@@ -1438,7 +1387,7 @@ impl<'a> FunctionProgramMatch<'a> {
 /// — the shape a callee-lookup miss actually fell back to — does not
 /// exist to be written, and neither does any spelling that reaches an
 /// entry without naming its function first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionProgramIndex {
     /// Every served function position, in source order.
     entries: Arc<[FunctionProgramEntry]>,
@@ -1569,7 +1518,7 @@ std::thread_local! {
 
 /// Expression-point map key. Equality is the only way a lookup decides a
 /// record is the requested one, so each comparison is the unit of lookup work.
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub(crate) struct ExpressionPointKey(ProgramExpressionIdentity);
 
 impl PartialEq for ExpressionPointKey {

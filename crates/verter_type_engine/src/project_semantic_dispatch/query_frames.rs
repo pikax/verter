@@ -137,6 +137,9 @@ pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabili
     /// production poll's drive. The synchronous entry's drive loads the
     /// file where the frame reads it, as its external driver.
     suspends_loads: bool,
+    /// The pending drive's wait on the cancellation that stops it, so the
+    /// cancellation wakes the drive instead of a timer re-polling it.
+    stop_wake: Option<verter_execution::cancellation::CancellationSubscription>,
     /// Test-only: the demands a call's walk suspends on are claimed by
     /// another task first, and held until released.
     #[cfg(any(test, feature = "test-support"))]
@@ -405,7 +408,10 @@ pub(super) enum JoinSeam {
 }
 
 pub(super) struct ConditionalChildQueries<'d> {
-    restore: Option<(&'d std::cell::RefCell<Option<DecisionSeam>>, bool)>,
+    restore: Option<(
+        &'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>,
+        bool,
+    )>,
 }
 
 impl Drop for ConditionalChildQueries<'_> {
@@ -421,8 +427,8 @@ impl Drop for ConditionalChildQueries<'_> {
 /// A query the running decision reached, evaluating in place; the seam is
 /// the decision's own again when it returns.
 pub(super) struct NestedDecisionQuery<'d> {
-    seam: Option<&'d std::cell::RefCell<Option<DecisionSeam>>>,
-    flow: Option<&'d std::cell::RefCell<Option<FlowSeam>>>,
+    seam: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>>,
+    flow: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<FlowSeam>>>,
 }
 
 impl Drop for NestedDecisionQuery<'_> {
@@ -886,6 +892,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             retries: FxHashMap::default(),
             child_depth: ROOT_FRAME_DEPTH,
             suspends_loads,
+            stop_wake: None,
             #[cfg(any(test, feature = "test-support"))]
             held_call_needs: None,
         };
@@ -1796,6 +1803,24 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
 
     fn stop(&self) -> Option<()> {
         self.dispatch.cancellation.is_cancelled().then_some(())
+    }
+
+    fn wake_on_stop(&mut self, waker: &std::task::Waker) {
+        // The token `stop` selects on this poll's thread, with the task's job
+        // and request installed: the same selection decides the stop.
+        let Some(token) =
+            crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+        else {
+            self.stop_wake = None;
+            return;
+        };
+        let subscription = match &mut self.stop_wake {
+            Some(held) if held.token().same_source(&token) => held,
+            slot => slot.insert(token.subscribe()),
+        };
+        if subscription.poll(waker).is_ready() {
+            waker.wake_by_ref();
+        }
     }
 
     fn abandon(&mut self, frame: QueryFrame<'p, 'a, C>) {
@@ -3380,6 +3405,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(seam) = self.flow_seam.borrow_mut().as_mut() {
             seam.windows = seam.windows.saturating_sub(1);
         }
+    }
+
+    /// Whether a window [`Self::open_contextual_window`] opened is open: a
+    /// read made inside it may stop the run instead of completing.
+    pub(super) fn contextual_window_open(&self) -> bool {
+        self.flow_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| seam.windows > 0)
     }
 
     /// Whether the stepping flow evaluation's run waits on a need: what is

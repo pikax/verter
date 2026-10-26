@@ -33,8 +33,8 @@ verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" 
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
-prost = "0.14.3"
-wasm-bindgen = "0.2.122"
+prost = "0.14.4"
+wasm-bindgen = "0.2.129"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde-wasm-bindgen = "0.6.5"
@@ -49,7 +49,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 js-sys = "0.3"
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.72"
+wasm-bindgen-test = "0.3.79"
 verter_identity = { path = "../verter_identity" }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }

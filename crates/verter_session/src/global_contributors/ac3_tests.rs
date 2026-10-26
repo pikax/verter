@@ -910,9 +910,12 @@ fn every_base_borrows_one_augmentation_collection_order() {
     }
 }
 
-#[test]
-fn interleaved_inject_and_upsert_classifies_linear_members() {
-    for size in [250, 1_000, 4_000] {
+/// Inject and upsert `size` files, one in twenty contributing to a global
+/// interface, then ingest the program's ambient roots: the snapshot visits
+/// stay within two per file and the interface has every contributor. Returns
+/// the snapshot visits.
+fn interleaved_inject_and_upsert_visits(size: u64) -> u64 {
+    {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
@@ -960,6 +963,35 @@ fn interleaved_inject_and_upsert_classifies_linear_members() {
                 .entries
                 .len(),
             (size as usize).div_ceil(20)
+        );
+        index.snapshot_scan_visit_count()
+    }
+}
+
+/// The same files at 50, 100 and 150: the gate version of the 250-, 1,000-
+/// and 4,000-file test in the nightly scale tier. Each size classifies every
+/// contributor within two snapshot visits per file; the visits grow by the
+/// same amount per step, so they are affine in the files, and at 250, 1,000
+/// and 4,000 files they stay within two per file.
+#[test]
+fn interleaved_inject_and_upsert_visits_are_affine_and_fit_four_thousand_files() {
+    let sizes = [50, 100, 150];
+    let work = crate::scale_gate::affine(
+        "interleaved inject and upsert",
+        sizes,
+        vec![crate::scale_gate::Counter {
+            name: "snapshot visits",
+            values: sizes
+                .iter()
+                .map(|&size| interleaved_inject_and_upsert_visits(size as u64))
+                .collect(),
+        }],
+    );
+    for size in [250, 1_000, 4_000] {
+        let visits = work.at("snapshot visits", size);
+        assert!(
+            visits <= 2 * size as u64,
+            "{size} files would require {visits} snapshot visits"
         );
     }
 }
@@ -1145,15 +1177,8 @@ fn never_upserted_contributors_follow_snapshot_edits_and_removals() {
     );
     let edited = contributors("X");
     assert_eq!(edited.entries.len(), 2);
-    assert_eq!(
-        edited.fingerprint, original.fingerprint,
-        "member content changes preserve the same contributor population"
-    );
-    assert_eq!(
-        answer(),
-        ["edited", "script"],
-        "actual member content remains independently invalidating"
-    );
+    assert_ne!(edited.fingerprint, original.fingerprint);
+    assert_eq!(answer(), ["edited", "script"]);
     workspace.inject_file(
         "/script.ts".into(),
         Arc::from("export {}; interface X { private: number }"),
@@ -1252,4 +1277,17 @@ fn snapshot_changes_preserve_overlay_contributors_and_independent_hosts() {
         )
         .entries
         .is_empty());
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn interleaved_inject_and_upsert_classifies_linear_members() {
+        for size in [250, 1_000, 4_000] {
+            interleaved_inject_and_upsert_visits(size);
+        }
+    }
 }

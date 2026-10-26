@@ -108,7 +108,7 @@ fn family_c_entries_carry_fact_carrier() {
 }
 
 /// Family D: AppConfigNoOverrideProofEntry carries
-/// `fact_dep_signature: Arc<[FactVersionRef]>` as its path-precise
+/// `fact_dep_signature: FactSet` (its sealed read set) as its path-precise
 /// cache-validity rail and no legacy `dep_signature` field.
 #[test]
 fn family_d_app_config_proof_entry_uses_fact_signature_only() {
@@ -123,9 +123,9 @@ fn family_d_app_config_proof_entry_uses_fact_signature_only() {
         .expect("expected struct close for AppConfigNoOverrideProofEntry");
     let window = &after[..end];
     assert!(
-        window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
-            || window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "AppConfigNoOverrideProofEntry must carry `fact_dep_signature: Arc<[FactVersionRef]>` \
+        window.contains("fact_dep_signature: verter_session_query::facts::fact_set::FactSet")
+            || window.contains("fact_dep_signature: FactSet"),
+        "AppConfigNoOverrideProofEntry must carry its sealed `fact_dep_signature: FactSet` \
          as its path-precise cache-validity rail. Window:\n{window}"
     );
     assert!(

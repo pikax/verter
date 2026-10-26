@@ -51,11 +51,6 @@ pub(crate) fn flow_bound_graph_for_tests(
 pub struct HostExpressionDemand(IndexedExpressionDemand);
 
 impl HostExpressionDemand {
-    fn observe_content(&self) {
-        let source = self.0.source_identity();
-        crate::resolver_core::observe_whole_content(&source.canonical, source.whole_hash);
-    }
-
     pub(crate) fn new(source: IndexedExpressionDemand) -> Self {
         Self(source)
     }
@@ -65,7 +60,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
     fn function_program_index(
         &self,
     ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
-        self.observe_content();
         consume_walked_read(self.0.function_program_index())
     }
 
@@ -73,7 +67,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         &self,
         record: &verter_session_query::function_program::ProgramExpressionRecord,
     ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
-        self.observe_content();
         self.0.indexed_program_expression_ir(record)
     }
 
@@ -82,7 +75,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         span: verter_span::Span,
         frame_lowered: Arc<[bool]>,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
-        self.observe_content();
         consume_walked_read(
             self.0
                 .indexed_call_expression_over_frame_at(span, frame_lowered),
@@ -93,7 +85,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
     ) -> Option<Vec<verter_session_query::flow::slice::SliceTypeParam>> {
-        self.observe_content();
         consume_walked_read(self.0.function_type_param_clause(matched))
     }
 
@@ -104,7 +95,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
-        self.observe_content();
         consume_walked_read(self.0.flow_slice_content(matched, selection, bound, policy))
     }
 
@@ -116,7 +106,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
-        self.observe_content();
         consume_walked_read(
             self.0
                 .flow_slice_content_with_context(matched, selection, bound, context, policy),
@@ -127,7 +116,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         &self,
         locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
     ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
-        self.observe_content();
         consume_walked_read(self.0.flow_capture_authorities(locators))
     }
 
@@ -135,7 +123,6 @@ impl ExpressionSourceDemand for HostExpressionDemand {
         &self,
         macro_span: verter_span::Span,
     ) -> DemandOutcome<TypeExpr> {
-        self.observe_content();
         self.0.transient_macro_type_argument(macro_span)
     }
 }

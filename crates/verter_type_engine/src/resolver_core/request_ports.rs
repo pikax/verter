@@ -184,10 +184,6 @@ pub trait IndexedInputs {
     /// still reaches every enclosing traced admission point through the
     /// `note_non_cacheable_read_fan_out` chokepoint flag).
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
-    /// File loading and source environment only; exposes no content payload.
-    fn source_is_available(&self, canonical_id: &str) -> bool {
-        self.ensure_indexed_ready_serve(canonical_id).is_some()
-    }
 
     /// The canonical's post-parse artifact read through the **base-store**
     /// pin rather than the request view's overlay-priority read.
@@ -515,6 +511,22 @@ impl CancellationCheckpoint {
         cancelled
     }
 
+    /// The token [`Self::is_cancelled`] selects on this thread now, for a
+    /// pending poll to subscribe to its cancellation: the job token when it
+    /// accepted a request owner, else the installed request's token, else
+    /// the ownerless job token. `None` when nothing can cancel the work.
+    #[must_use]
+    pub fn selected_token() -> Option<verter_execution::cancellation::CancellationToken> {
+        verter_execution::cancellation::with_current_job_cancellation_token(|job| {
+            if let Some(token) = job {
+                if token.has_registered_owners() {
+                    return Some(token.clone());
+                }
+            }
+            crate::request_context::current_request_cancellation_token().or_else(|| job.cloned())
+        })
+    }
+
     /// The selection [`Self::is_cancelled`] makes, given the job token
     /// installed on this thread. Written as plain matches: every semantic
     /// checkpoint runs it, and a debug build calls out for each combinator.
@@ -614,18 +626,6 @@ pub trait ExpressionSourceSelection: OwnedLowering {
 }
 
 pub trait OwnedLowering {
-    /// A source-owned selected member with complete narrow dependency proof.
-    /// Unsupported sources retain the ordinary whole-content read.
-    fn class_member_input(
-        &self,
-        _canonical: &str,
-        _owner: verter_type_expr::TopLevelOwnerId,
-        _class: &str,
-        _name: &str,
-    ) -> Option<verter_session_query::source::deref::ClassMemberInput> {
-        None
-    }
-
     fn member_presence_for_observed_content(
         &self,
         canonical: &str,

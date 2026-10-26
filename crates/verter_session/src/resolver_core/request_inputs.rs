@@ -2,7 +2,7 @@
 //! records of `verter_session_query::inputs` from host artifacts, and the
 //! request leases that keep the source behind every served record alive.
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use verter_session_query::inputs::indexed::{
     IndexedInputIdentity, IndexedInputRecord, IndexedInputServe,
 };
@@ -10,10 +10,10 @@ use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 #[derive(Debug)]
-pub(crate) struct CachedProjection<T>(verter_retention::pinned_heap::PinnedOnce<Arc<T>>);
+pub(crate) struct CachedProjection<T>(OnceLock<Arc<T>>);
 impl<T> Default for CachedProjection<T> {
     fn default() -> Self {
-        Self(Default::default())
+        Self(OnceLock::new())
     }
 }
 impl<T> Clone for CachedProjection<T> {
@@ -21,7 +21,7 @@ impl<T> Clone for CachedProjection<T> {
         Self::default()
     }
 }
-impl<T: verter_retention::heap_size::HeapSize + Send + Sync + 'static> CachedProjection<T> {
+impl<T> CachedProjection<T> {
     pub(crate) fn get_or_init(&self, build: impl FnOnce() -> T) -> Arc<T> {
         Arc::clone(self.0.get_or_init(|| Arc::new(build())))
     }
@@ -40,7 +40,9 @@ impl crate::project_type_store::IndexedReady {
                         NEXT_ARTIFACT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     },
                     file_language: self.file_language.clone(),
-                    parse_key: self.cached_source_parse_key().flatten(),
+                    // Always the artifact's parse identity (seeded, or
+                    // derived here once per artifact).
+                    parse_key: self.source_parse_key(),
                 },
                 self.whole_hash,
                 self.file_language.clone(),
@@ -53,7 +55,6 @@ impl crate::project_type_store::IndexedReady {
                     .map(crate::parse::framework_parse_facts),
                 self.script_analysis.clone(),
                 Arc::clone(&self.snapshot),
-                self.cached_source_parse_key(),
             );
             #[cfg(any(test, feature = "test-support"))]
             let record =
@@ -269,20 +270,29 @@ impl InputArtifactLeases {
         &self,
         serve: crate::host_manage::prepared_decl::IndexedReadyServe,
     ) -> IndexedInputServe {
-        super::owned_lowering_port::observe_whole_content(
-            &serve.indexed.shallow_state.source_identity.canonical,
-            serve.indexed.whole_hash,
-        );
         let input = serve.indexed.input_record();
-        let mut retained = self.retained.write();
-        retained
-            .sources
-            .entry(input.shallow_state.observation_id())
-            .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
-        retained
-            .indexed
-            .entry(input.identity.clone())
-            .or_insert(serve.indexed);
+        let observation = input.shallow_state.observation_id();
+        // A request serves one artifact many times: a repeat serve finds it
+        // retained under the read lock, and only the first serve takes the
+        // write lock and copies the identity (whose parse key owns its
+        // encoded bytes) into the map.
+        let retained_already = {
+            let retained = self.retained.read();
+            retained.sources.contains_key(&observation)
+                && retained.indexed.contains_key(&input.identity)
+        };
+        if !retained_already {
+            let mut retained = self.retained.write();
+            retained
+                .sources
+                .entry(observation)
+                .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
+            if !retained.indexed.contains_key(&input.identity) {
+                retained
+                    .indexed
+                    .insert(input.identity.clone(), serve.indexed);
+            }
+        }
         IndexedInputServe {
             indexed: input,
             store_published: serve.store_published,
@@ -292,10 +302,6 @@ impl InputArtifactLeases {
         &self,
         source: Arc<super::ShallowFileState>,
     ) -> Arc<ShallowInputRecord> {
-        super::owned_lowering_port::observe_whole_content(
-            &source.source_identity.canonical,
-            source.whole_hash,
-        );
         let input = source.input_record();
         self.retained
             .write()
@@ -317,12 +323,7 @@ impl InputArtifactLeases {
         &self,
         input: &IndexedInputRecord,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        let indexed = self.retained.read().indexed.get(&input.identity).cloned()?;
-        super::owned_lowering_port::observe_whole_content(
-            &indexed.shallow_state.source_identity.canonical,
-            indexed.whole_hash,
-        );
-        Some(indexed)
+        self.retained.read().indexed.get(&input.identity).cloned()
     }
     pub(crate) fn source(
         &self,
@@ -334,14 +335,7 @@ impl InputArtifactLeases {
             .sources
             .get(&input.observation_id())
             .cloned()?;
-        if source.source_identity != input.source_identity {
-            return None;
-        }
-        super::owned_lowering_port::observe_whole_content(
-            &source.source_identity.canonical,
-            source.whole_hash,
-        );
-        Some(source)
+        (source.source_identity == input.source_identity).then_some(source)
     }
 }
 
@@ -360,7 +354,6 @@ impl InputArtifactLeases {
         &self,
         bundle: crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>,
     ) -> verter_session_query::inputs::prepared::PreparedInputRef {
-        bundle.observe_read();
         let input = bundle.input_record();
         self.retained
             .write()
@@ -379,11 +372,7 @@ impl InputArtifactLeases {
             .prepared
             .get(&input.observation_id)
             .cloned()?;
-        if bundle.owner_whole_hash != input.owner_whole_hash {
-            return None;
-        }
-        bundle.observe_read();
-        Some(bundle)
+        (bundle.owner_whole_hash == input.owner_whole_hash).then_some(bundle)
     }
 }
 
@@ -391,7 +380,6 @@ impl verter_type_engine::resolver_core::bare_name_resolve::PreparedInputSource
     for super::prepared_decl::PreparedDeclBundle
 {
     fn scope_inputs(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
-        self.observe_read();
         self.input_record()
     }
 }

@@ -30,7 +30,6 @@ parser_cache_audit = []
 stack-fault-injection = []
 
 [dependencies]
-verter_retention = { path = "../verter_retention" }
 verter_session_query = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
@@ -38,9 +37,9 @@ verter_language = { path = "../verter_language", version = "0.0.1-beta.3" }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 hotpath = { version = "0.23", optional = true }
-memchr = "2.8.0"
+memchr = "2.8.3"
 rustc-hash = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
@@ -52,7 +51,7 @@ oxc_syntax = { workspace = true }
 oxc_diagnostics = "0.151.0"
 bumpalo = { version = "3.20.3", features = ["collections"] }
 serde = { workspace = true }
-phf = { version = "0.13.1", features = ["macros"] }
+phf = { version = "0.14.0", features = ["macros"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }

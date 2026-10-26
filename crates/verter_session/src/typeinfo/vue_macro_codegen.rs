@@ -354,13 +354,13 @@ pub(crate) struct VueMacroCodegenOutput {
 /// read, including the transitively reached ones no direct import names.
 #[derive(Debug, Clone)]
 pub(crate) enum MacroFactFootprint {
-    /// The complete observation set (paged when wide), built only from
+    /// The complete observation set (every fact, however wide), built only from
     /// publishable reads.
-    Rooted(Arc<[FactVersionRef]>),
+    Rooted(verter_session_query::facts::fact_set::FactSet),
     /// The complete observation set of a compute that also consumed a read
     /// these facts cannot validate. The facts still bubble into enclosing
     /// scopes; they must never authorize shared-cache admission.
-    RootedNonCacheable(Arc<[FactVersionRef]>),
+    RootedNonCacheable(verter_session_query::facts::fact_set::FactSet),
     /// The producer's aggregate basis moved while its tracer was open.
     /// No fact set can validate that mixed world, so the consumer must
     /// refuse even though the producer did run.
@@ -380,20 +380,25 @@ impl MacroFactFootprint {
             FactReadSetFinalise::NonCacheable(facts) => Self::RootedNonCacheable(facts),
             FactReadSetFinalise::MutationUnstable => Self::MutationUnstable,
         };
-        let canonicals: BTreeSet<String> =
-            verter_session_query::facts::fact_cache::signature_entries(footprint.facts())
-                .filter_map(FactVersionRef::canonical_id)
-                .map(ToOwned::to_owned)
-                .collect();
+        let canonicals: BTreeSet<String> = footprint
+            .facts()
+            .iter()
+            .filter_map(FactVersionRef::canonical_id)
+            .map(ToOwned::to_owned)
+            .collect();
         (canonicals.into_iter().collect(), footprint)
     }
 
     /// The surviving observations. Every factless arm yields an empty slice —
     /// they carry a refusal, never a signature.
-    fn facts(&self) -> &[FactVersionRef] {
+    fn facts(&self) -> verter_session_query::facts::fact_set::FactsRef<'_> {
         match self {
-            Self::Rooted(facts) | Self::RootedNonCacheable(facts) => facts,
-            Self::MutationUnstable | Self::Unobserved => &[],
+            Self::Rooted(facts) | Self::RootedNonCacheable(facts) => {
+                verter_session_query::facts::fact_set::FactsRef::Set(facts)
+            }
+            Self::MutationUnstable | Self::Unobserved => {
+                verter_session_query::facts::fact_set::FactsRef::Slice(&[])
+            }
         }
     }
 
@@ -618,6 +623,68 @@ fn record_unresolved_surface_arms(
 /// on this production: an aborted production observed nothing a consumer
 /// could validate against, so a consumer that did not itself abort must
 /// still not publish a slot rooted only on its own direct reads.
+/// The scoped cache node one macro codegen demand produces: keyed by the
+/// demand's schedule identity under `ctx`, for the request installed here.
+fn vue_macro_codegen_request<M: verter_audit::observe::ObserveExec>(
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
+    owner_canonical: &str,
+    demand: VueMacroCodegenDemand,
+) -> ScopedCacheNodeRequest {
+    let identity = vue_macro_codegen_schedule_identity(ctx, owner_canonical, demand);
+    ScopedCacheNodeRequest {
+        cache_id: VUE_MACRO_CODEGEN_CACHE_ID,
+        key_hash: identity.key_hash,
+        view_epoch: identity.input_pin.view_epoch,
+        snapshot_pin_id: identity.input_pin.snapshot_pin_id,
+        priority: Priority::Interactive,
+        request_context: verter_execution::request_context::current_context(),
+    }
+}
+
+/// The macro codegen bundle a scoped cache node `produced`, delivered to
+/// this thread: an abort refuses rooting, a scheduler fault answers the
+/// terminal partial bundle, and the producer's observations replay into
+/// the tracers active here.
+fn finish_vue_macro_codegen<M: verter_audit::observe::ObserveExec>(
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
+    owner_canonical: &str,
+    demand: VueMacroCodegenDemand,
+    produced: Result<Arc<Result<VueMacroCodegenOutput, ExecutionAbort>>, ScopedCacheNodeError>,
+) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
+    let output = match produced {
+        Ok(output) => match output.as_ref() {
+            Ok(output) => output.clone(),
+            Err(abort) => return Err(refuse_rooting_on_abort(*abort)),
+        },
+        Err(ScopedCacheNodeError::Cancelled) => {
+            return Err(refuse_rooting_on_abort(ExecutionAbort::Cancelled))
+        }
+        Err(ScopedCacheNodeError::Shutdown) => {
+            return Err(refuse_rooting_on_abort(ExecutionAbort::Shutdown))
+        }
+        Err(
+            ScopedCacheNodeError::Panicked
+            | ScopedCacheNodeError::TypeMismatch
+            | ScopedCacheNodeError::Reentrant,
+        ) => terminal_partial_vue_macro_codegen_output(
+            ctx,
+            owner_canonical,
+            demand,
+            PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            MacroPartialReason::IncompleteTraversal,
+        ),
+    };
+    // The ONLY point at which the producer's observations reach this
+    // thread. The build ran where its driver runs producers (a scheduler
+    // CPU-pool worker, or the driver of a host root), or, for a caller that
+    // joined the in-flight rendezvous, did not run here at all; the tracer
+    // stack is thread-local — so without this the enclosing compute roots on
+    // nothing the macro traversal read past its direct imports, and any
+    // refusal the producer raised is lost.
+    output.fact_footprint.replay();
+    Ok(output)
+}
+
 fn refuse_rooting_on_abort(abort: ExecutionAbort) -> ExecutionAbort {
     MacroFactFootprint::Unobserved.replay();
     abort
@@ -813,61 +880,128 @@ impl VerterHost {
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
-        let identity = vue_macro_codegen_schedule_identity(ctx, owner_canonical, demand);
-        let request = ScopedCacheNodeRequest {
-            cache_id: VUE_MACRO_CODEGEN_CACHE_ID,
-            key_hash: identity.key_hash,
-            view_epoch: identity.input_pin.view_epoch,
-            snapshot_pin_id: identity.input_pin.snapshot_pin_id,
-            priority: Priority::Interactive,
-            request_context: verter_execution::request_context::current_context(),
-        };
-
-        let output = match self
+        let request = vue_macro_codegen_request(ctx, owner_canonical, demand);
+        let produced = self
             .scheduler()
             .execute_scoped_cache_node(request, |job_cancellation| {
-                if job_cancellation.is_cancelled() {
-                    return Err(ExecutionAbort::Cancelled);
+                self.build_vue_macro_codegen(ctx, owner_canonical, demand, job_cancellation)
+            });
+        finish_vue_macro_codegen(ctx, owner_canonical, demand, produced)
+    }
+
+    /// [`Self::produce_vue_macro_codegen`] as a pollable computation, for a
+    /// host root.
+    ///
+    /// Its store-view read suspends behind another thread's build. Its
+    /// scoped cache node suspends while another caller produces it, and
+    /// while the node waits for dispatch, handing the root's driver one
+    /// dispatch step through `work`. When the node elects this caller its
+    /// producer, the root hands the producer to its driver through `work`
+    /// instead of running it: the driver runs the macro traversal — over a
+    /// request context of its own on the same seed and completion overlay
+    /// — wherever it runs producers, then polls the root again for the
+    /// value.
+    pub(crate) async fn produce_vue_macro_codegen_pollable<'h>(
+        &'h self,
+        owner_canonical: &str,
+        demand: VueMacroCodegenDemand,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
+    ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
+        let cold_seed = crate::resolver_store::HostStoreView::from_host_read_pollable(self)
+            .await
+            .into_cold_seed_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let request = {
+                let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                    self,
+                    &cold_seed,
+                    Arc::clone(&overlay),
+                );
+                vue_macro_codegen_request(&ctx, owner_canonical, demand)
+            };
+            let build = {
+                let (cold_seed, overlay) = (cold_seed.clone(), Arc::clone(&overlay));
+                let owner_canonical = owner_canonical.to_owned();
+                move |job_cancellation: &verter_execution::cancellation::CancellationToken| {
+                    let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                        self,
+                        &cold_seed,
+                        overlay,
+                    );
+                    self.build_vue_macro_codegen(&ctx, &owner_canonical, demand, job_cancellation)
                 }
-                let output = self.compute_vue_macro_codegen_output(ctx, owner_canonical, demand);
-                if job_cancellation.is_cancelled() {
-                    return Err(ExecutionAbort::Cancelled);
-                }
-                match ExecutionAbort::observed_in(output.completeness) {
-                    Some(abort) => Err(abort),
-                    None => Ok(output),
-                }
-            }) {
-            Ok(output) => match output.as_ref() {
-                Ok(output) => output.clone(),
-                Err(abort) => return Err(refuse_rooting_on_abort(*abort)),
-            },
-            Err(ScopedCacheNodeError::Cancelled) => {
-                return Err(refuse_rooting_on_abort(ExecutionAbort::Cancelled))
+            };
+            let produced = self.scoped_cache_node_pollable(request, work, build).await;
+            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                &cold_seed,
+                overlay,
+            );
+            finish_vue_macro_codegen(&ctx, owner_canonical, demand, produced)
+        })
+    }
+
+    /// Await the scoped cache node `request` names. While another caller
+    /// produces it, suspend; while it waits for dispatch, hand the root's
+    /// driver one dispatch step through `work` and suspend; once this caller
+    /// is elected its producer, hand the driver that producer running
+    /// `build` and suspend until the driver has run it and polls again.
+    async fn scoped_cache_node_pollable<'h, T>(
+        &'h self,
+        request: ScopedCacheNodeRequest,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
+        build: impl FnOnce(&verter_execution::cancellation::CancellationToken) -> T + Send + 'h,
+    ) -> Result<Arc<T>, ScopedCacheNodeError>
+    where
+        T: Send + Sync + 'static,
+    {
+        use verter_scheduler::scheduler::ScopedCacheNodeStep;
+        let mut handoff = self.scheduler().begin_scoped_cache_node::<T>(request)?;
+        let mut build = Some(build);
+        std::future::poll_fn(|cx| match handoff.poll(cx.waker()) {
+            std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
+                std::task::Poll::Ready(Ok(value))
             }
-            Err(ScopedCacheNodeError::Shutdown) => {
-                return Err(refuse_rooting_on_abort(ExecutionAbort::Shutdown))
+            std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
+                let build = build.take().expect("only one producer is transferred");
+                work.offer(crate::root_continuation::RootWork::produce(move || {
+                    producer.run(build);
+                }));
+                std::task::Poll::Pending
             }
-            Err(
-                ScopedCacheNodeError::Panicked
-                | ScopedCacheNodeError::TypeMismatch
-                | ScopedCacheNodeError::Reentrant,
-            ) => terminal_partial_vue_macro_codegen_output(
-                ctx,
-                owner_canonical,
-                demand,
-                PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                MacroPartialReason::IncompleteTraversal,
-            ),
-        };
-        // The ONLY point at which the producer's observations reach this
-        // thread. The build ran on a scheduler CPU-pool worker (or, for a
-        // caller that joined the in-flight rendezvous, did not run here at
-        // all), and the tracer stack is thread-local — so without this the
-        // enclosing compute roots on nothing the macro traversal read past its
-        // direct imports, and any refusal the producer raised is lost.
-        output.fact_footprint.replay();
-        Ok(output)
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => {
+                let scheduler = Arc::clone(self.scheduler());
+                work.offer(crate::root_continuation::RootWork::dispatch(move || {
+                    scheduler.dispatch_for_pending_dependency()
+                }));
+                std::task::Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// The scoped cache node's producer: the macro traversal under `ctx`,
+    /// refused when the job is cancelled before or after it.
+    fn build_vue_macro_codegen<M: verter_audit::observe::ObserveExec>(
+        &self,
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
+        owner_canonical: &str,
+        demand: VueMacroCodegenDemand,
+        job_cancellation: &verter_execution::cancellation::CancellationToken,
+    ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
+        if job_cancellation.is_cancelled() {
+            return Err(ExecutionAbort::Cancelled);
+        }
+        let output = self.compute_vue_macro_codegen_output(ctx, owner_canonical, demand);
+        if job_cancellation.is_cancelled() {
+            return Err(ExecutionAbort::Cancelled);
+        }
+        match ExecutionAbort::observed_in(output.completeness) {
+            Some(abort) => Err(abort),
+            None => Ok(output),
+        }
     }
 
     /// Published-fact summary, plus an abort the active compute scope

@@ -11,7 +11,7 @@
 //! `admission_refused_count()` counter advances, and a
 //! `FactSignatureAdmissionRefused { cache_kind: <kind> }` structured
 //! audit event fires). Signature width is never refused: a signature
-//! wider than one evidence page is paged and admitted.
+//! wider than `WIDE_SIGNATURE_WIDTH` is admitted whole.
 //!
 //! The loose `insert_value` and `insert` (which falls through to
 //! `insert_value`) paths bypass this gate.

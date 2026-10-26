@@ -124,17 +124,7 @@ impl std::fmt::Display for StableDeclarationId {
 }
 
 /// Kind of declaration in the local namespace.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LocalDeclarationKind {
     /// Type-only: `interface Foo`, `type Foo = ...`
@@ -150,15 +140,7 @@ pub enum LocalDeclarationKind {
 /// Represents a single type or value declaration in a file's top-level scope.
 /// Used by the resolver to construct stable cross-file declaration identifiers
 /// and to detect when a declaration's content has changed.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalDeclarationEntry {
     /// Declaration name.
@@ -223,15 +205,7 @@ bitflags::bitflags! {
 
 /// A Vue compiler macro call found inside a nested scope (not at the root level of `<script setup>`).
 /// These are invalid — macros like `defineProps`, `defineEmits`, etc. must be at the top level.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NestedMacroCall {
     /// The macro name as written in source (e.g., `"defineProps"`).
@@ -2161,15 +2135,7 @@ pub struct ImportSourceInfo {
 
 /// Analyzed exported function from a non-SFC file.
 /// Used for composable return type analysis and function parameter info.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedExportedFunction {
     /// Function name.
@@ -2187,15 +2153,7 @@ pub struct AnalyzedExportedFunction {
 
 /// First-class composable info (functions following the `useXxx` convention).
 /// Composables are Vue's primary code reuse pattern and warrant dedicated tracking.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComposableInfo {
     /// Composable name (e.g., `"useCounter"`, `"useFetch"`).
@@ -2215,15 +2173,7 @@ pub struct ComposableInfo {
 }
 
 /// What a composable returns.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ComposableReturn {
     /// Returns a single ref/reactive value.
@@ -2237,15 +2187,7 @@ pub enum ComposableReturn {
 }
 
 /// A field in a composable return object.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComposableReturnField {
     /// Field name.
@@ -2257,15 +2199,7 @@ pub struct ComposableReturnField {
 }
 
 /// A function parameter with optional type annotation.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionParam {
     /// Parameter name.
@@ -2315,15 +2249,7 @@ pub enum ReturnReactivity {
 /// TODO(type-provider): Script-level type enhancements.
 /// Populated by external type providers (TS language service, TSGO, etc.).
 /// Enhances `ScriptAnalysisSnapshot` with resolved type info.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptTypeEnhancements {
     /// Resolved return types for functions (keyed by function name).

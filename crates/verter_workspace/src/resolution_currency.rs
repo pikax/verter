@@ -974,7 +974,7 @@ impl RequestOverlayRoot {
     /// roots.
     fn build(world: &CapturedResolutionWorld, overlay: &ResolutionOverlaySnapshot) -> Option<Self> {
         let base_key = |canonical: &str, make: fn(CanonicalResolutionId) -> ResolutionFactKey| {
-            make(CanonicalResolutionId::new(canonical.to_owned()))
+            make(CanonicalResolutionId::new(canonical))
         };
         let mut primitive = rustc_hash::FxHashMap::default();
         // parent directory -> the paths under it whose existence moves.
@@ -3364,7 +3364,7 @@ impl ResolutionTransaction {
     /// read precisely, before any aggregate compaction: an aggregate stamp
     /// cannot prove an unrelated advance harmless, the observations can.
     pub(crate) fn observations_hold_in(&self, world: &CapturedResolutionWorld) -> bool {
-        world.validates_fact_signature(&self.observations)
+        world.validates_fact_signature((&self.observations).into())
     }
 
     /// Every canonical an observation of this attempt reads, possibly
@@ -3435,8 +3435,8 @@ impl ResolutionTransaction {
         &mut self,
         witness: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) {
-        // Read through the witness's evidence pages: a wide witness restates
-        // exactly the facts a narrow one would.
+        // Every fact of the witness, in canonical order: a wide witness
+        // restates exactly the facts a narrow one would.
         for fact in witness.entries() {
             if let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) =
                 fact
@@ -3515,7 +3515,7 @@ impl ResolutionTransaction {
             .path_probes
             .push((canonical.to_string(), outcome));
         self.observe(ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(canonical.to_string()),
+            canonical: CanonicalResolutionId::new(canonical),
             population: self.population(),
         });
         self.observe_recovery_chain(canonical);
@@ -3545,7 +3545,7 @@ impl ResolutionTransaction {
             .manifests
             .push((canonical.to_string(), fingerprint));
         self.observe(ResolutionFactKey::Manifest {
-            canonical: CanonicalResolutionId::new(canonical.to_string()),
+            canonical: CanonicalResolutionId::new(canonical),
             population: self.population(),
         });
     }
@@ -3561,7 +3561,7 @@ impl ResolutionTransaction {
             .realpaths
             .push((requested.to_string(), resolved.map(str::to_string)));
         self.observe(ResolutionFactKey::Realpath {
-            requested: CanonicalResolutionId::new(requested.to_string()),
+            requested: CanonicalResolutionId::new(requested),
             population: self.population(),
         });
         self.observe_recovery_chain(requested);
@@ -3572,7 +3572,7 @@ impl ResolutionTransaction {
 
     fn observe_canonical_recovery_scope(&mut self, canonical_prefix: &str) {
         self.observe(ResolutionFactKey::RecoveryScope {
-            canonical_prefix: CanonicalResolutionId::new(canonical_prefix.to_string()),
+            canonical_prefix: CanonicalResolutionId::new(canonical_prefix),
             population: self.population(),
         });
     }
@@ -3587,7 +3587,7 @@ impl ResolutionTransaction {
     }
 
     fn observe_recovery_chain(&mut self, canonical: &str) {
-        for prefix in ancestor_scopes(canonical) {
+        for prefix in verter_session_query::resolution::ancestor_scope_prefixes(canonical) {
             self.observe(ResolutionFactKey::RecoveryScope {
                 canonical_prefix: CanonicalResolutionId::new(prefix),
                 population: self.population(),
@@ -3629,17 +3629,9 @@ impl ResolutionTransaction {
 }
 
 pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = path;
-    while let Some(index) = current.rfind('/') {
-        let prefix = if index == 0 { "/" } else { &current[..index] };
-        out.push(prefix.to_owned());
-        if prefix == "/" {
-            break;
-        }
-        current = prefix;
-    }
-    out
+    verter_session_query::resolution::ancestor_scope_prefixes(path)
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
@@ -3938,7 +3930,7 @@ mod transaction_contract_tests {
             signature.facts
         );
         assert!(matches!(
-            &signature.facts[0],
+            signature.facts.first().expect("one fact"),
             FactVersionRef::DomainGeneration(fact)
                 if fact.domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
         ));
@@ -4043,7 +4035,7 @@ mod transaction_contract_tests {
 
     fn path_probe(name: &str) -> ResolutionFactKey {
         ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(name.to_string()),
+            canonical: CanonicalResolutionId::new(name),
             population: ResolutionPopulation::Base,
         }
     }
@@ -4142,8 +4134,8 @@ mod transaction_contract_tests {
         decision_last.observe(ResolutionFactKey::decision(child.clone()));
 
         assert_eq!(
-            finished_signature(decision_first).facts.as_ref(),
-            finished_signature(decision_last).facts.as_ref()
+            finished_signature(decision_first).facts.to_vec(),
+            finished_signature(decision_last).facts.to_vec()
         );
     }
 
@@ -4291,8 +4283,8 @@ mod transaction_contract_tests {
         let repeated = finished_signature(repeated);
 
         assert_eq!(
-            repeated.facts.as_ref(),
-            once.facts.as_ref(),
+            repeated.facts.to_vec(),
+            once.facts.to_vec(),
             "repeating an observation must change neither the witness contents nor its order"
         );
 
@@ -4345,7 +4337,7 @@ mod root_graph_tests {
 
     fn leaf(name: &str) -> ResolutionFactKey {
         ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(name.to_string()),
+            canonical: CanonicalResolutionId::new(name),
             population: ResolutionPopulation::Base,
         }
     }

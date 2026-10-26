@@ -352,16 +352,41 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
     observe_signature_consumers(sig, |cell| cell.observe_borrowed_signature(sig));
 }
 
+/// Fan a run of facts into every active tracer: a sealed set is retained
+/// as one shared run, a plain list is observed fact by fact.
+#[inline]
+pub(crate) fn observe_fan_out_facts(facts: verter_session_query::facts::fact_set::FactsRef<'_>) {
+    match facts {
+        verter_session_query::facts::fact_set::FactsRef::Set(set) => observe_fan_out_canonical(set),
+        verter_session_query::facts::fact_set::FactsRef::Slice(facts) => {
+            observe_fan_out_borrowed(facts)
+        }
+    }
+}
+
 /// Replay a completed compute's canonical witness to every active consumer.
 /// The read set verifies its order and falls back for an unordered witness.
 #[inline]
-pub(crate) fn observe_fan_out_canonical(sig: &std::sync::Arc<[FactVersionRef]>) {
-    // The witness's order is verified once for every consumer, by the
-    // first that does not already hold it.
-    let verified = std::cell::OnceCell::new();
-    observe_signature_consumers(sig, |cell| {
-        cell.absorb_canonical_signature_verified_once(sig, &verified);
-    });
+pub(crate) fn observe_fan_out_canonical(sig: &verter_session_query::facts::fact_set::FactSet) {
+    // A sealed set is canonical by construction: every consumer retains it
+    // as one shared run, read in place.
+    if sig.is_empty() {
+        return;
+    }
+    verter_audit::attribute_n!(FactObserve, sig.len());
+    for recorder in active_recorders() {
+        // SAFETY: see `ACTIVE_RECORDERS`.
+        unsafe { &*recorder }
+            .facts
+            .borrow_mut()
+            .extend(sig.iter().cloned());
+    }
+    for ptr in observing_cells() {
+        if !ptr.is_null() {
+            // SAFETY: see module-level SAFETY contract.
+            unsafe { &*ptr }.absorb_canonical_signature(sig);
+        }
+    }
 }
 
 #[inline]
@@ -558,7 +583,7 @@ mod fan_out_tests {
             assert_eq!(facts, signature);
         }
         let (facts, non_cacheable) = recorder.into_parts();
-        assert_eq!(facts.as_slice(), signature.as_ref());
+        assert_eq!(signature, facts);
         assert!(non_cacheable);
         assert!(
             work <= 16 * signature.len(),
@@ -624,8 +649,8 @@ mod fan_out_tests {
         assert!(outer.non_cacheable_read_observed());
         // The delivering scope completes: its owner hands its set down.
         clear();
-        let delivered: std::sync::Arc<[FactVersionRef]> =
-            std::sync::Arc::from([fact("/borrowed.ts"), fact("/inner.ts")]);
+        let delivered: verter_session_query::facts::fact_set::FactSet =
+            [fact("/borrowed.ts"), fact("/inner.ts")].into();
         observe_fan_out_canonical(&delivered);
         clear();
         assert_eq!(outer.len(), 2, "the delivered set reaches the scope below");

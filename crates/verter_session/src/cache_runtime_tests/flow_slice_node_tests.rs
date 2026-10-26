@@ -335,7 +335,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
             serve
@@ -458,7 +458,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
             serve
@@ -1172,7 +1172,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .expect("myType is a served function position");
     let env = host.host_view_env_hashes_for(canonical);
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
             serve
@@ -1804,7 +1804,6 @@ fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
     for source in [small_source, large_source.as_str()] {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 0,
-            active_ceiling_bytes: 0,
             max_entry_bytes: 0,
             pin_threshold_bytes: 0,
         });
@@ -1842,7 +1841,6 @@ fn a_graph_reader_keeps_its_payload_charge_after_store_teardown() {
     for reader_first in [false, true] {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 0,
-            active_ceiling_bytes: 0,
             max_entry_bytes: 0,
             pin_threshold_bytes: 0,
         });
@@ -1908,7 +1906,6 @@ fn a_kept_bundle_part_stays_charged_after_store_teardown() {
         for part_first in [false, true] {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             });
@@ -1975,7 +1972,6 @@ fn a_kept_nested_bundle_leaf_stays_charged_after_store_teardown() {
         for leaf_first in [false, true] {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             });
@@ -2059,7 +2055,6 @@ fn a_kept_lowered_slice_leaf_stays_charged_after_store_teardown() {
         for leaf_first in [false, true] {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             });
@@ -2174,12 +2169,22 @@ fn graph_publication_charges_independently_allocated_equal_key_backing() {
         drop(key);
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
+    // Independently built keys also hold separate parse-identity encodings;
+    // a cloned key shares its one encoding, counted once.
+    let parse_key = verter_session_query::retention::allocation::arc_block_bytes(
+        function_key(&canonical, "myType", 4, source)
+            .parse_key
+            .canonical_bytes()
+            .len(),
+    );
     assert_eq!(
         charges[1] - charges[0],
-        OwnedStr::charge_for_len(canonical.len()) + OwnedStr::charge_for_len("myType".len())
+        OwnedStr::charge_for_len(canonical.len())
+            + OwnedStr::charge_for_len("myType".len())
+            + parse_key
     );
     assert_eq!(
         charges[2] - charges[0],
-        OwnedStr::charge_for_len(canonical.len())
+        OwnedStr::charge_for_len(canonical.len()) + parse_key
     );
 }

@@ -72,9 +72,7 @@ impl ProjectIdentity {
 /// augmenter (`declare module "./local" {}`, or `declare module "pkg" {}`
 /// in a module), wildcard ambients (`declare module "*.css" {}`), and the
 /// global block (`declare global {}`).
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AugmentationTargetKind {
     /// `declare module "vue" {}` — bare specifier resolved through the
     /// project's module resolver under the resolve env.
@@ -101,9 +99,7 @@ pub enum AugmentationTargetKind {
 /// discriminant carries the overlay-set CONTENT fingerprint (the session
 /// view's `fingerprint()`) — not a raw session id — so this stays a
 /// content-addressed identity dimension, never a live session handle.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AugmentationPopulation {
     /// Base resolve-domain population — base artifacts only.
     Base,
@@ -122,9 +118,7 @@ pub enum AugmentationPopulation {
 /// R21 scoping rule: this key carries `lib_env_hash` because module
 /// augmentations live inside libs / ambient corpora — a lib update CAN
 /// change which augmenters are visible.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AugmentationTargetKey {
     pub project_identity: ProjectIdentity,
     pub resolve_env_hash: Hash16,
@@ -137,22 +131,30 @@ pub struct AugmentationTargetKey {
 
 /// One augmenter file's contribution identity inside an [`AugmenterSet`].
 ///
-/// Carries the exact content-addressed artifact locator captured at population
-/// time. The stitcher obtains the source owner's current served identity and
-/// reads that exact artifact, observing its content before exposing facts.
-/// A canonical-only artifact search cannot substitute for that authority.
+/// Carries the **exact** [`FileArtifactKey`](crate::source::artifact_key::FileArtifactKey) of the augmenter artifact
+/// scanned at index-population time — the full content-addressed
+/// identity, not just the canonical id. The augmentation-stitching
+/// semantic augmentation stitcher re-fetches the augmenter's `.augmentations` through
+/// the artifact store's exact-key read keyed by this exact key — never
+/// a content-agnostic canonical-only scan, which (with lazy cache
+/// invalidation) could surface a different content version of the
+/// augmenter than the one the fingerprint was computed over.
 ///
-/// The key is a locator, not population evidence: body and member-header
-/// edits preserve a slot's membership. Consumers obtain the current exact
-/// artifact for the served content, observe that content, and may refresh the
-/// locator without moving the population fingerprint.
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+/// The captured key can itself go stale: the augmenter-set fingerprint
+/// folds over `parse_stable_hash` (the decl skeleton), so a member-body
+/// edit that leaves the skeleton intact reparses the augmenter under a
+/// new `FileArtifactKey` (new `content_hash`) WITHOUT moving the
+/// fingerprint — the cached `AugmenterSet` is not invalidated and this
+/// `artifact_key` keeps pointing at the drained pre-edit version. The
+/// stitch consumer self-heals that exact-key miss by re-deriving the
+/// augmenter's current key from the scheduler-authoritative content
+/// hash and writing the refreshed key back here.
+#[derive(Debug, Clone)]
 pub struct AugmenterEntry {
     /// Exact content-addressed key of the augmenter artifact.
     pub artifact_key: crate::source::artifact_key::FileArtifactKey,
-    /// Required content-free matching binding membership and exact owners.
-    pub population_hash: Hash16,
-    /// Structural content metadata of the captured artifact; not population evidence.
+    /// `parse_stable_hash` of the augmenter artifact — the structural
+    /// hash that the augmenter-set fingerprint folds in (R29).
     pub parse_stable_hash: Hash16,
 }
 
@@ -165,10 +167,12 @@ impl AugmenterEntry {
 }
 
 /// The set of augmenter files that contribute to a given
-/// [`AugmentationTargetKey`], sorted by canonical.
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+/// [`AugmentationTargetKey`], sorted by `(augmenter_canonical,
+/// augmenter_parse_stable_hash)`.
+#[derive(Debug, Clone)]
 pub struct AugmenterSet {
-    /// Per-augmenter contribution identities, sorted by canonical.
+    /// Per-augmenter contribution identities, sorted by
+    /// `(canonical, parse_stable_hash)`.
     pub entries: smallvec::SmallVec<[AugmenterEntry; 2]>,
     /// Cached `stable_hash(entries)` — the basis of
     /// `ModuleAugmentationIndexShape`.

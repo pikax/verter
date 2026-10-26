@@ -51,6 +51,11 @@ intern_domain!(ResolveCallKey {
 });
 
 impl InternedRelateKey {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn roots_for_tests(&self) -> super::node_roots::NodeRootSet {
+        self.1.to_set_for_tests()
+    }
+
     /// Intern `key`; its operands are owned in `arena`, the graph that
     /// issued them, or not at all when `None` (a lookup witness).
     pub(super) fn intern(arena: Option<&IssuingArena>, key: RelateMemoKey) -> Self {
@@ -73,7 +78,7 @@ impl InternedRelateKey {
         arena: &IssuingArena,
         nodes: &[crate::semantic_query::SemanticNodeId],
     ) -> bool {
-        let roots = &self.1 .0;
+        let roots = &self.1;
         !roots.operands().is_empty()
             && roots.belongs_to(arena)
             && nodes.iter().all(|node| roots.operands().contains(node))
@@ -81,6 +86,11 @@ impl InternedRelateKey {
 }
 
 impl InternedResolveCallKey {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn roots_for_tests(&self) -> super::node_roots::NodeRootSet {
+        self.1.to_set_for_tests()
+    }
+
     /// Intern `key`; its operands are owned in `arena`, the graph that
     /// issued them, or not at all when `None` (a lookup witness).
     pub(super) fn intern(arena: Option<&IssuingArena>, key: ResolveCallKey) -> Self {
@@ -106,7 +116,7 @@ macro_rules! interned_key_heap_bytes {
                 &self,
                 aliases: &mut verter_session_query::retention::allocation::AliasSet,
             ) -> usize {
-                self.1 .0.owned_heap_bytes(aliases)
+                self.1.owned_heap_bytes(aliases)
             }
         }
     };

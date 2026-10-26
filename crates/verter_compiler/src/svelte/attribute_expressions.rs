@@ -16,7 +16,7 @@ use super::parser::{ParsedSvelte, SvelteAttributeKind, SvelteAttributeValue, Sve
 
 /// The lowered plain-attribute values of one parsed component, keyed by the
 /// interpolation's inner span and ordered by that span's start.
-#[derive(Debug, Default, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Default, Clone)]
 pub struct SvelteAttributeExpressions {
     records: Vec<(Span, IndexedValueExpression)>,
 }

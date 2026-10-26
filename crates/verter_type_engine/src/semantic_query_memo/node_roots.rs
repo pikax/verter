@@ -7,63 +7,329 @@ use std::sync::Arc;
 use super::arena::NodeArenaCore;
 use crate::semantic_query::{QueryError, SemanticNodeId};
 
-struct RootOwner {
+#[cfg(test)]
+thread_local! {
+    static ROOT_OWNER_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Shared root-set blocks allocated on this thread.
+#[cfg(test)]
+pub(crate) fn root_owner_constructions_for_tests() -> usize {
+    ROOT_OWNER_CONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
+/// Operands a root set keeps in place before its list moves to a shared
+/// block.
+const INLINE_ROOTS: usize = 4;
+
+/// An unused inline operand slot. Never a live ordinal: ids are handed out
+/// from zero up and never reach it.
+const NO_ROOT: SemanticNodeId = SemanticNodeId(u64::MAX);
+
+/// The operands one root set is formed from. Most sets hold a node or two,
+/// so they are collected in place rather than in an allocation of their
+/// own.
+pub(crate) type RootIds = smallvec::SmallVec<[SemanticNodeId; INLINE_ROOTS]>;
+
+/// The counts one root set holds in its arena.
+///
+/// A set of up to [`INLINE_ROOTS`] operands keeps them in place, inside
+/// whatever holds the set: it allocates nothing, so it has no charge of its
+/// own beyond its holder's block, and a clone takes counts of its own in the
+/// arena's slot table. A longer list lives in one shared block that holds
+/// the counts once: clones share the block, its counts and its charge, so
+/// cloning one never touches the arena, and the block is an owned
+/// allocation charged by its own cell, once, however many holders reach it.
+/// An empty set is a shared block that is absent. The inline variant's
+/// arena pointer tells the variants apart, so on a 64-bit target a set is
+/// five words.
+#[derive(Clone)]
+enum RootOwner {
+    Inline(InlineRoots),
+    Shared(Option<verter_session_query::retention::owned::Owned<SpilledRoots>>),
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<RootOwner>() == 5 * std::mem::size_of::<usize>());
+
+/// A short operand list kept in place, with one count per operand. Unused
+/// slots, all after the used ones, hold [`NO_ROOT`].
+struct InlineRoots {
     arena: Arc<NodeArenaCore>,
-    ids: RootIds,
+    ids: [SemanticNodeId; INLINE_ROOTS],
 }
 
-/// The operands one root set holds. Most sets hold a node or two, so they
-/// are stored in place rather than in an allocation of their own.
-pub(crate) type RootIds = smallvec::SmallVec<[SemanticNodeId; 4]>;
+impl InlineRoots {
+    /// The owner of up to [`INLINE_ROOTS`] `ids`, whose counts the caller
+    /// has already taken.
+    fn new(arena: Arc<NodeArenaCore>, ids: &[SemanticNodeId]) -> Self {
+        let mut inline = [NO_ROOT; INLINE_ROOTS];
+        inline[..ids.len()].copy_from_slice(ids);
+        Self { arena, ids: inline }
+    }
 
-/// Storage acquired for a freshly interned node's construction root: the
-/// Arc owner and its one-element operand allocation, plus the scope vector's
-/// entry and geometric growth slack.
-pub(crate) fn construction_root_bytes() -> usize {
-    std::mem::size_of::<RootOwner>()
-        + 2 * std::mem::size_of::<usize>()
-        + std::mem::size_of::<SemanticNodeId>()
-        + 2 * std::mem::size_of::<NodeRoot>()
+    fn ids(&self) -> &[SemanticNodeId] {
+        let len = self
+            .ids
+            .iter()
+            .position(|id| *id == NO_ROOT)
+            .unwrap_or(INLINE_ROOTS);
+        &self.ids[..len]
+    }
+
+    /// Hand this set's counts to `batch`, whose owner releases them: the
+    /// set then holds none, so its drop releases nothing.
+    fn hand_counts_to(&mut self, batch: &mut Vec<SemanticNodeId>) {
+        batch.extend_from_slice(self.ids());
+        self.ids = [NO_ROOT; INLINE_ROOTS];
+    }
 }
 
-impl verter_session_query::retention::owned::Measured for RootOwner {
+impl Clone for InlineRoots {
+    fn clone(&self) -> Self {
+        self.arena.retain_held(self.ids());
+        Self {
+            arena: Arc::clone(&self.arena),
+            ids: self.ids,
+        }
+    }
+}
+
+impl Drop for InlineRoots {
+    fn drop(&mut self) {
+        let ids = self.ids();
+        if !ids.is_empty() {
+            self.arena.release_roots(ids);
+        }
+    }
+}
+
+/// A long operand list in its block, holding one count per operand for
+/// every holder of the block.
+struct SpilledRoots {
+    arena: Arc<NodeArenaCore>,
+    ids: Box<[SemanticNodeId]>,
+}
+
+impl Drop for SpilledRoots {
+    fn drop(&mut self) {
+        self.arena.release_roots(&self.ids);
+    }
+}
+
+impl SpilledRoots {
+    /// The heap its operand list occupies.
+    fn list_bytes(&self) -> usize {
+        verter_session_query::retention::allocation::heap_block_bytes(std::mem::size_of_val::<
+            [SemanticNodeId],
+        >(&self.ids))
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for SpilledRoots {
     /// Its operand list. The arena it roots in is the graph's storage,
     /// charged with it.
     fn heap_bytes(
         &self,
         _aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        root_ids_bytes(&self.ids)
+        self.list_bytes()
     }
 }
 
-/// The heap an operand list holds once it spills past its inline ids.
-fn root_ids_bytes(ids: &RootIds) -> usize {
-    if ids.spilled() {
-        verter_session_query::retention::allocation::heap_block_bytes(
-            ids.capacity() * std::mem::size_of::<SemanticNodeId>(),
-        )
-    } else {
+impl RootOwner {
+    /// The owner of `ids`, whose counts the caller has already taken.
+    fn new(arena: Arc<NodeArenaCore>, ids: RootIds) -> Self {
+        if ids.is_empty() {
+            Self::Shared(None)
+        } else if ids.len() <= INLINE_ROOTS {
+            Self::Inline(InlineRoots::new(arena, &ids))
+        } else {
+            #[cfg(test)]
+            ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+            Self::Shared(Some(verter_session_query::retention::owned::Owned::new(
+                SpilledRoots {
+                    arena,
+                    ids: ids.into_vec().into_boxed_slice(),
+                },
+            )))
+        }
+    }
+
+    fn arena(&self) -> Option<&Arc<NodeArenaCore>> {
+        match self {
+            Self::Inline(inline) => Some(&inline.arena),
+            Self::Shared(spilled) => spilled.as_ref().map(|spilled| &spilled.arena),
+        }
+    }
+
+    fn ids(&self) -> &[SemanticNodeId] {
+        match self {
+            Self::Inline(inline) => inline.ids(),
+            Self::Shared(Some(spilled)) => &spilled.ids,
+            Self::Shared(None) => &[],
+        }
+    }
+}
+
+/// Bytes a set of `operands` operands is charged beyond its holder's block:
+/// nothing for an inline list, the shared block's cell and list for a
+/// longer one.
+pub(crate) fn root_set_charge_bytes(operands: usize) -> usize {
+    if operands <= INLINE_ROOTS {
         0
+    } else {
+        verter_session_query::retention::owned::Owned::<SpilledRoots>::cell_block_bytes()
+            + verter_session_query::retention::allocation::heap_block_bytes(
+                operands * std::mem::size_of::<SemanticNodeId>(),
+            )
     }
 }
 
-impl Drop for RootOwner {
-    fn drop(&mut self) {
-        self.arena.release_roots(&self.ids);
+/// Bytes an ownership attachment of `operands` operands is charged: its one
+/// cell, and the block of a list too long to keep in place.
+pub(crate) fn attachment_charge_bytes(operands: usize) -> usize {
+    verter_session_query::retention::owned::Owned::<AttachedRoots>::cell_block_bytes()
+        + if operands <= INLINE_ROOTS {
+            0
+        } else {
+            verter_session_query::retention::allocation::heap_block_bytes(
+                operands * std::mem::size_of::<SemanticNodeId>(),
+            )
+        }
+}
+
+/// [`root_set_charge_bytes`] for a test measuring a holder against the
+/// account.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn root_set_charge_bytes_for_tests(operands: usize) -> usize {
+    root_set_charge_bytes(operands)
+}
+
+/// Storage acquired for a freshly interned node's construction root: the
+/// construction owner's entry for it — its ordinal, or a root holding its
+/// one operand in place — with geometric growth slack. The count itself
+/// lives in the arena's slot table.
+pub(crate) fn construction_root_bytes() -> usize {
+    std::mem::size_of::<SemanticNodeId>() + 2 * std::mem::size_of::<NodeRoot>()
+}
+
+impl verter_retention::heap_size::HeapSize for RootOwner {
+    /// Nothing for an inline list; a shared block is charged by its own
+    /// cell and offered to the measurement.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        match self {
+            Self::Shared(Some(spilled)) => spilled.offer(meter.handles()),
+            _ => 0,
+        }
     }
 }
 
-/// One immutable retained operand multiset. Clones share one root reservation;
-/// separate owners acquire separate counts, including repeated operands.
-#[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
-pub struct NodeRootSet(Option<verter_session_query::retention::owned::Owned<RootOwner>>);
+/// One immutable retained operand multiset. Each operand is counted once
+/// per holder, repeated operands included: an inline set's every clone
+/// holds counts of its own, a shared block holds one set of counts for all
+/// its holders, and the last holder releases them.
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
+pub struct NodeRootSet(RootOwner);
+
+impl Default for NodeRootSet {
+    fn default() -> Self {
+        Self(RootOwner::Shared(None))
+    }
+}
+
+/// A second handle on a root set taken where no lock may be acquired —
+/// under a cache table's guard. A shared block is shared outright; an
+/// inline set's operands are copied and counted only once the guard is
+/// released ([`Self::into_set`]).
+pub struct RootShare(ShareRepr);
+
+enum ShareRepr {
+    Set(NodeRootSet),
+    Operands(Arc<NodeArenaCore>, RootIds),
+}
+
+impl RootShare {
+    /// The set this share names, counted now. An operand a release
+    /// destroyed after the share was taken refuses the whole set as stale.
+    pub(crate) fn into_set(self) -> Result<NodeRootSet, QueryError> {
+        match self.0 {
+            ShareRepr::Set(set) => Ok(set),
+            ShareRepr::Operands(arena, ids) => NodeRootSet::acquire(arena, ids),
+        }
+    }
+
+    /// Keep the shared operands alive in the active issuing graph
+    /// construction scope, counting them now. `false` when a release
+    /// destroyed an operand after the share was taken: the caller treats
+    /// the cache entry it came from as a miss.
+    pub fn retain_for_construction(self) -> bool {
+        match self.into_set() {
+            Ok(set) => {
+                set.capture_into_scope();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// The roots one ownership attachment keeps, in the one cell its key's
+/// clones share: up to [`INLINE_ROOTS`] operands in place, or a longer
+/// list in a block the cell owns alone. Either way the cell is the
+/// attachment's only allocation with a charge of its own.
+enum AttachedRoots {
+    Inline(InlineRoots),
+    Spilled(SpilledRoots),
+}
+
+impl AttachedRoots {
+    fn arena(&self) -> &Arc<NodeArenaCore> {
+        match self {
+            Self::Inline(inline) => &inline.arena,
+            Self::Spilled(spilled) => &spilled.arena,
+        }
+    }
+
+    fn ids(&self) -> &[SemanticNodeId] {
+        match self {
+            Self::Inline(inline) => inline.ids(),
+            Self::Spilled(spilled) => &spilled.ids,
+        }
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for AttachedRoots {
+    /// A longer list's block; an inline list keeps no heap. The arena it
+    /// roots in is the graph's storage, charged with it.
+    fn heap_bytes(
+        &self,
+        _aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        match self {
+            Self::Inline(_) => 0,
+            Self::Spilled(spilled) => spilled.list_bytes(),
+        }
+    }
+}
 
 /// An ownership attachment is transport, never semantic key identity.
 /// Each wrapper holds its issuing arena's reservation even when the weak
 /// process-wide interner shares equal content with another arena.
+///
+/// The roots live in one shared owned cell: an attachment rides inside
+/// memo keys and records that are copied and hashed on every lookup, so it
+/// stays one word there, and a key clone shares the one cell and its one
+/// charge rather than taking counts of its own. An attachment that roots
+/// nothing allocates nothing.
 #[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
-pub(crate) struct IdentityNodeRoots(pub(crate) NodeRootSet);
+pub(crate) struct IdentityNodeRoots(
+    Option<verter_session_query::retention::owned::Owned<AttachedRoots>>,
+);
 
 impl IdentityNodeRoots {
     /// Root operands in the innermost construction scope on this thread.
@@ -71,7 +337,7 @@ impl IdentityNodeRoots {
     /// whose graph is known roots there ([`Self::in_graph`]), because the
     /// innermost scope may belong to another graph's dispatcher.
     pub(crate) fn scoped(ids: impl IntoIterator<Item = SemanticNodeId>) -> Self {
-        Self(NodeRootScope::root_current(ids))
+        Self::from_set(NodeRootScope::root_current(ids))
     }
 
     /// Root a record's operands in the graph that issued it, whatever
@@ -88,7 +354,7 @@ impl IdentityNodeRoots {
         arena: &Arc<NodeArenaCore>,
         ids: impl IntoIterator<Item = SemanticNodeId>,
     ) -> Self {
-        Self(root_in_arena(Arc::clone(arena), ids))
+        Self::from_set(root_in_arena(Arc::clone(arena), ids))
     }
 
     /// Root a record derived from `sources` in the graph that issued them:
@@ -100,8 +366,104 @@ impl IdentityNodeRoots {
     ) -> Self {
         sources
             .into_iter()
-            .find_map(|source| source.0.arena())
+            .find_map(|source| source.0.as_ref().map(|roots| Arc::clone(roots.arena())))
             .map_or_else(Self::default, |arena| Self::in_arena(&arena, ids))
+    }
+
+    /// The attachment owning a freshly formed `set`'s counts: they move into
+    /// the attachment's cell, an inline list in place and a longer one with
+    /// its block.
+    fn from_set(set: NodeRootSet) -> Self {
+        let attached = match set.0 {
+            RootOwner::Inline(inline) => AttachedRoots::Inline(inline),
+            RootOwner::Shared(None) => return Self::default(),
+            RootOwner::Shared(Some(shared)) => {
+                match verter_session_query::retention::owned::Owned::try_unwrap(shared) {
+                    Ok(spilled) => AttachedRoots::Spilled(spilled),
+                    // Another holder shares the block: the attachment takes
+                    // counts of its own over a copy of the list.
+                    Err(shared) => {
+                        shared.arena.retain_held(&shared.ids);
+                        AttachedRoots::Spilled(SpilledRoots {
+                            arena: Arc::clone(&shared.arena),
+                            ids: shared.ids.clone(),
+                        })
+                    }
+                }
+            }
+        };
+        Self(Some(verter_session_query::retention::owned::Owned::new(
+            attached,
+        )))
+    }
+
+    /// The operands this attachment roots.
+    pub(crate) fn operands(&self) -> &[SemanticNodeId] {
+        self.0.as_ref().map_or(&[], |roots| roots.ids())
+    }
+
+    /// Whether this attachment roots its operands in `arena`; one that
+    /// roots nothing belongs anywhere.
+    pub(crate) fn belongs_to(&self, arena: &Arc<NodeArenaCore>) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|roots| Arc::ptr_eq(roots.arena(), arena))
+    }
+
+    /// Borrow one operand this attachment roots (see [`NodeRootSet::node_ref`]).
+    pub(crate) fn node_ref(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
+        let roots = self.0.as_ref().ok_or(QueryError::ForeignSemanticOperand)?;
+        if !roots.ids().contains(&id) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        Ok(NodeRef {
+            id,
+            arena: roots.arena(),
+        })
+    }
+
+    /// A root set of its own over this attachment's operands, for a test
+    /// that inspects what an identity roots.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn to_set_for_tests(&self) -> NodeRootSet {
+        let Some(roots) = self.0.as_ref() else {
+            return NodeRootSet::default();
+        };
+        roots.arena().retain_held(roots.ids());
+        NodeRootSet(RootOwner::new(
+            Arc::clone(roots.arena()),
+            RootIds::from_slice(roots.ids()),
+        ))
+    }
+
+    /// Keep the rooted operands alive in the active construction scope.
+    pub(crate) fn retain_for_construction(&self) {
+        let Some(roots) = self.0.as_ref() else {
+            return;
+        };
+        roots.arena().retain_held(roots.ids());
+        NodeRootSet(RootOwner::new(
+            Arc::clone(roots.arena()),
+            RootIds::from_slice(roots.ids()),
+        ))
+        .capture_into_scope();
+    }
+
+    /// The cell's block and a longer list's block, counted without alias
+    /// tracking: for a holder that is the attachment's only charged owner.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.0
+            .as_ref()
+            .map_or(0, |owned| attachment_charge_bytes(owned.ids().len()))
+    }
+
+    /// The cell, once per `aliases`: an owned allocation charged by itself,
+    /// offered to the measurement as a handle.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.0.as_ref().map_or(0, |owned| owned.offer(aliases))
     }
 }
 impl PartialEq for IdentityNodeRoots {
@@ -116,7 +478,7 @@ impl std::hash::Hash for IdentityNodeRoots {
 impl std::fmt::Debug for IdentityNodeRoots {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdentityNodeRoots")
-            .field("operands", &self.0.operands().len())
+            .field("operands", &self.operands().len())
             .finish()
     }
 }
@@ -130,27 +492,28 @@ impl std::fmt::Debug for NodeRootSet {
 }
 
 impl NodeRootSet {
-    /// The root owner's block and operand list this set holds, counted
-    /// without alias tracking: for a holder that is the set's only charged
-    /// owner.
+    /// The heap this set keeps beyond its inline bytes, counted without
+    /// alias tracking: for a holder that is the set's only charged owner.
+    /// Nothing for an inline list; a shared block's cell and list. The
+    /// rooted nodes themselves are the arena's.
     pub(crate) fn heap_bytes(&self) -> usize {
-        use verter_session_query::retention::allocation::heap_block_bytes;
-        self.0.as_ref().map_or(0, |owner| {
-            verter_session_query::retention::owned::Owned::<RootOwner>::cell_block_bytes()
-                .max(heap_block_bytes(0))
-                + root_ids_bytes(&owner.ids)
-        })
+        match &self.0 {
+            RootOwner::Shared(Some(spilled)) => root_set_charge_bytes(spilled.ids.len()),
+            _ => 0,
+        }
     }
 
-    /// The root owner's block and operand list, once per `aliases`: the
-    /// ownership metadata a retained holder of this set keeps alive. The
-    /// rooted nodes themselves are the arena's.
+    /// The shared block, once per `aliases`: an owned allocation charged by
+    /// its own cell, offered to the measurement as a handle. An inline list
+    /// keeps no heap.
     pub(crate) fn owned_heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        // The root owner is an owned allocation, charged by its own cell.
-        self.0.as_ref().map_or(0, |owner| owner.offer(aliases))
+        match &self.0 {
+            RootOwner::Shared(Some(spilled)) => spilled.offer(aliases),
+            _ => 0,
+        }
     }
 
     /// Keep a cache hit alive in the active issuing graph construction scope.
@@ -159,10 +522,10 @@ impl NodeRootSet {
     }
 
     /// An internal memo's delivery of these roots. It follows the same
-    /// task, carrier and nested-scope lifetime as a public delivery without
-    /// allocating another owner around an already shared root owner.
+    /// task, carrier and nested-scope lifetime as a public delivery; a long
+    /// set's delivery shares its block rather than counting again.
     pub(crate) fn retain_for_delivery(&self) {
-        if self.0.is_some() {
+        if !self.operands().is_empty() {
             NodeRootScope::capture_construction_delivery(
                 ConstructionDelivery::Roots(self.clone()),
                 self.arena_identity(),
@@ -170,59 +533,129 @@ impl NodeRootSet {
         }
     }
 
-    fn arena(&self) -> Option<Arc<NodeArenaCore>> {
-        self.0.as_ref().map(|owner| Arc::clone(&owner.arena))
+    /// What an inline set roots — its arena's address and its operand
+    /// slots — which every clone of it shares; `None` for a shared block or
+    /// an empty set.
+    fn inline_identity(&self) -> Option<InlineIdentity> {
+        match &self.0 {
+            RootOwner::Inline(inline) => Some((Arc::as_ptr(&inline.arena) as usize, inline.ids)),
+            RootOwner::Shared(_) => None,
+        }
+    }
+
+    /// The address of this set's shared block, which every clone of a long
+    /// set names; `None` for an inline or empty set.
+    fn shared_block_identity(&self) -> Option<usize> {
+        match &self.0 {
+            RootOwner::Shared(Some(spilled)) => {
+                Some(verter_session_query::retention::owned::Owned::addr(spilled))
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn arena_identity(&self) -> Option<usize> {
-        self.0
-            .as_ref()
-            .map(|owner| Arc::as_ptr(&owner.arena) as usize)
+        self.0.arena().map(|arena| Arc::as_ptr(arena) as usize)
     }
 
     pub(crate) fn capture_in_scope(&self) {
+        if self.operands().is_empty() {
+            return;
+        }
+        self.clone().capture_into_scope();
+    }
+
+    /// Hand this set to the active issuing graph construction scope, which
+    /// keeps its operands alive until it closes.
+    pub(crate) fn capture_into_scope(self) {
         let Some(id) = self.operands().first().copied() else {
             return;
         };
-        NodeRootScope::capture(NodeRoot::from_roots(id, self.clone()));
+        NodeRootScope::capture(NodeRoot::from_roots(id, self));
     }
+
+    /// A second handle on this set that takes no lock: see [`RootShare`].
+    pub fn share(&self) -> RootShare {
+        RootShare(match &self.0 {
+            RootOwner::Inline(inline) => {
+                ShareRepr::Operands(Arc::clone(&inline.arena), RootIds::from_slice(inline.ids()))
+            }
+            RootOwner::Shared(_) => ShareRepr::Set(self.clone()),
+        })
+    }
+
+    /// Hand this set's counts on `arena` to `batch`, whose owner releases
+    /// them in one pass, and drop the rest: a shared block, or a set of
+    /// another arena, releases its own counts as it drops.
+    fn hand_counts_to(self, arena: &Arc<NodeArenaCore>, batch: &mut Vec<SemanticNodeId>) {
+        if let RootOwner::Inline(mut inline) = self.0 {
+            if Arc::ptr_eq(&inline.arena, arena) {
+                inline.hand_counts_to(batch);
+            }
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn live_nodes(&self) -> usize {
         self.0
-            .as_ref()
-            .map_or(0, |owner| owner.arena.ownership_counts().live_nodes)
+            .arena()
+            .map_or(0, |arena| arena.ownership_counts().live_nodes)
     }
     pub(crate) fn acquire(arena: Arc<NodeArenaCore>, ids: RootIds) -> Result<Self, QueryError> {
         if ids.is_empty() {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
-        Ok(Self(Some(
-            verter_session_query::retention::owned::Owned::new(RootOwner { arena, ids }),
+        Ok(Self(RootOwner::new(arena, ids)))
+    }
+
+    /// Validate the input and result atomically and acquire only a distinct
+    /// result: the receipt keeps its input, so a result that is the input
+    /// needs no set of its own. This result set never enters the receipt.
+    pub(crate) fn retain_evaluation_result(
+        &self,
+        graph: &super::SemanticGraphStore,
+        input: SemanticNodeId,
+        result: SemanticNodeId,
+    ) -> Result<Self, QueryError> {
+        if !self.belongs_to(&graph.arena.core) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        self.node_ref(input)?;
+        let acquire = if input == result {
+            &[][..]
+        } else {
+            std::slice::from_ref(&result)
+        };
+        graph
+            .arena
+            .core
+            .retain_validated(&[input, result], acquire)?;
+        if input == result {
+            return Ok(Self::default());
+        }
+        Ok(Self(RootOwner::new(
+            Arc::clone(&graph.arena.core),
+            smallvec::smallvec![result],
         )))
     }
 
     pub fn operands(&self) -> &[SemanticNodeId] {
-        self.0.as_ref().map_or(&[], |owner| owner.ids.as_slice())
+        self.0.ids()
     }
 
     pub(crate) fn belongs_to(&self, arena: &Arc<NodeArenaCore>) -> bool {
-        self.0
-            .as_ref()
-            .is_none_or(|owner| Arc::ptr_eq(&owner.arena, arena))
+        self.0.arena().is_none_or(|owner| Arc::ptr_eq(owner, arena))
     }
 
     /// Borrow one operand this set owns. An ordinal the set does not hold is
     /// a foreign operand: a copied integer never authorizes a read.
     pub fn node_ref(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
-        let owner = self.0.as_ref().ok_or(QueryError::ForeignSemanticOperand)?;
-        if !owner.ids.contains(&id) {
+        let arena = self.0.arena().ok_or(QueryError::ForeignSemanticOperand)?;
+        if !self.0.ids().contains(&id) {
             return Err(QueryError::ForeignSemanticOperand);
         }
-        Ok(NodeRef {
-            id,
-            arena: &owner.arena,
-        })
+        Ok(NodeRef { id, arena })
     }
 }
 
@@ -302,12 +735,7 @@ impl NodeRoot {
     pub(crate) fn adopt(arena: Arc<NodeArenaCore>, id: SemanticNodeId) -> Self {
         Self {
             id,
-            roots: NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
-                RootOwner {
-                    arena,
-                    ids: smallvec::smallvec![id],
-                },
-            ))),
+            roots: NodeRootSet(RootOwner::new(arena, smallvec::smallvec![id])),
         }
     }
     pub fn id(&self) -> SemanticNodeId {
@@ -315,16 +743,6 @@ impl NodeRoot {
     }
     pub fn roots(&self) -> &NodeRootSet {
         &self.roots
-    }
-    /// Bytes the root set's own allocation is charged, and its class; `None`
-    /// while no owner has charged it. An observation that retains nothing.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn root_charge_for_tests(
-        &self,
-    ) -> Option<(usize, verter_session_query::retention::ChargeClass)> {
-        let owned = self.roots.0.as_ref()?;
-        owned.charge_bytes().zip(owned.charge_class())
     }
     /// Borrow the rooted node as a read capability.
     pub fn node_ref(&self) -> Result<NodeRef<'_>, QueryError> {
@@ -452,6 +870,7 @@ impl ScopeStack {
             let _ = heir.adopt(lease);
         }
         owners.delivered = DeliveredOwners::default();
+        owners.delivered_inline = None;
         None
     }
 
@@ -474,12 +893,14 @@ impl ScopeStack {
             if heir.deliveries.len() < owners.deliveries.len() {
                 std::mem::swap(&mut heir.deliveries, &mut owners.deliveries);
                 std::mem::swap(&mut heir.delivered, &mut owners.delivered);
+                std::mem::swap(&mut heir.delivered_inline, &mut owners.delivered_inline);
             }
             for lease in owners.deliveries.drain(..) {
                 // A repeat is another handle on an owner the heir keeps.
                 let _ = heir.adopt(lease);
             }
             owners.delivered = DeliveredOwners::default();
+            owners.delivered_inline = None;
         }
         owners
     }
@@ -558,7 +979,18 @@ struct ConstructionOwners {
     /// of one delivery names the same owner, so an owner keeps it once
     /// however often it is read or cloned under this owner.
     delivered: DeliveredOwners,
+    /// The inline sets `deliveries` already holds, once the list is too
+    /// long to scan: an inline set names no shared owner, so a repeat is
+    /// known by what it roots and kept once too.
+    delivered_inline: Option<rustc_hash::FxHashSet<InlineIdentity>>,
 }
+
+/// An inline set's arena address and operand slots.
+type InlineIdentity = (usize, [SemanticNodeId; INLINE_ROOTS]);
+
+/// Deliveries [`ConstructionOwners::adopt`] scans for a repeated inline set
+/// before it indexes them.
+const DELIVERED_SCAN: usize = 16;
 
 /// The owner a construction consumes: a full public delivery, or the
 /// counted roots an internal node-only memo already owns. Both use the
@@ -572,10 +1004,14 @@ impl ConstructionDelivery {
     fn owner_identity(&self) -> Option<usize> {
         match self {
             Self::Lease(lease) => lease.owner_identity(),
-            Self::Roots(roots) => roots
-                .0
-                .as_ref()
-                .map(verter_session_query::retention::owned::Owned::addr),
+            Self::Roots(roots) => roots.shared_block_identity(),
+        }
+    }
+
+    fn inline_identity(&self) -> Option<InlineIdentity> {
+        match self {
+            Self::Lease(_) => None,
+            Self::Roots(roots) => roots.inline_identity(),
         }
     }
 
@@ -595,9 +1031,15 @@ impl ConstructionDelivery {
 }
 
 impl Drop for ConstructionOwners {
+    /// Release the intern counts and the inline roots this owner holds in
+    /// one pass over the arena; a shared block releases its own counts.
     fn drop(&mut self) {
-        if !self.constructed.is_empty() {
-            self.arena.release_roots(&self.constructed);
+        let mut released = std::mem::take(&mut self.constructed);
+        for root in self.roots.drain(..) {
+            root.roots.hand_counts_to(&self.arena, &mut released);
+        }
+        if !released.is_empty() {
+            self.arena.release_roots(&released);
         }
     }
 }
@@ -656,6 +1098,7 @@ impl ConstructionOwners {
             deliveries: Vec::new(),
             held: Vec::new(),
             delivered: Default::default(),
+            delivered_inline: None,
         }
     }
 
@@ -669,13 +1112,41 @@ impl ConstructionOwners {
     /// Keep `lease` unless this owner already holds its delivery; a
     /// repeat is handed back for the caller to drop.
     fn adopt(&mut self, lease: ConstructionDelivery) -> Option<ConstructionDelivery> {
-        match lease.owner_identity() {
-            Some(owner) if !self.delivered.insert(owner) => Some(lease),
-            _ => {
-                self.deliveries.push(lease);
-                None
-            }
+        let repeat = match lease.owner_identity() {
+            Some(owner) => !self.delivered.insert(owner),
+            None => lease
+                .inline_identity()
+                .is_some_and(|inline| !self.record_inline(inline)),
+        };
+        if repeat {
+            return Some(lease);
         }
+        self.deliveries.push(lease);
+        None
+    }
+
+    /// Record an inline set about to join `deliveries`; `false` when an
+    /// equal one is already there. A short list is scanned; past
+    /// [`DELIVERED_SCAN`] its inline sets are indexed once and the index
+    /// kept from then on.
+    fn record_inline(&mut self, inline: InlineIdentity) -> bool {
+        if self.delivered_inline.is_none() {
+            if self.deliveries.len() < DELIVERED_SCAN {
+                return !self
+                    .deliveries
+                    .iter()
+                    .any(|held| held.inline_identity() == Some(inline));
+            }
+            self.delivered_inline = Some(
+                self.deliveries
+                    .iter()
+                    .filter_map(ConstructionDelivery::inline_identity)
+                    .collect(),
+            );
+        }
+        self.delivered_inline
+            .as_mut()
+            .is_some_and(|index| index.insert(inline))
     }
 }
 
@@ -1069,9 +1540,7 @@ pub(crate) fn root_in_arena(
     if ids.is_empty() {
         return NodeRootSet::default();
     }
-    NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
-        RootOwner { arena, ids },
-    )))
+    NodeRootSet(RootOwner::new(arena, ids))
 }
 
 impl Drop for NodeRootScope {

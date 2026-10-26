@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -35,6 +36,7 @@ import {
   ESCAPE_HATCHES,
   LANE_GATES,
   LANE_ROOTS,
+  OUT_OF_WORKSPACE_SOURCES,
   PATH_FILTERS,
   PROVIDER_PACKAGES,
   auditSelection,
@@ -385,6 +387,51 @@ test("the sfc-projection verifiers run for their node trees and crates, not for 
   }
 });
 
+test("a vendored source tree runs exactly the lanes its compiling crate runs", () => {
+  // verter_alloc compiles the vendored allocator; the native, LSP and MCP
+  // roots depend on it, the wasm root does not.
+  const dependents = new Set(["verter_napi", "verter_lsp", "verter_mcp"]);
+  const allocMetadata = fixtureMetadata([
+    { name: "verter_alloc", dir: "crates/verter_alloc" },
+    ...LANE_ROOT_CRATES.filter((name) => name !== "verter_alloc").map((name) => ({
+      name,
+      dir: `crates/${name}`,
+      deps: dependents.has(name) ? [{ name: "verter_alloc" }] : [],
+    })),
+  ]);
+  const selectWith = (files) => {
+    const { hits, owned } = matchPathFilters(files);
+    const impact = classifyCiImpact(files, allocMetadata, LANE_ROOTS, { ownedFiles: owned });
+    return { impact, gates: composeLaneGates(hits, impact) };
+  };
+  const crateChange = selectWith(["crates/verter_alloc/src/lib.rs"]);
+  for (const file of [
+    "vendor/libmimalloc-sys2/c_src/mimalloc3/src/alloc.c",
+    "vendor/libmimalloc-sys2/build.rs",
+  ]) {
+    const { impact, gates } = selectWith([file]);
+    assert.equal(impact.everything, false, file);
+    assert.deepEqual(impact.directCrates, ["verter_alloc"], file);
+    // The impact lanes follow the crate exactly; the path-filter gates differ
+    // only where a filter reads crates/ itself (the architecture verifiers).
+    assert.deepEqual(impact.lanes, crateChange.impact.lanes, file);
+    for (const gate of [
+      "rust",
+      "native",
+      "native_artifact",
+      "playground",
+      "transport",
+      "vscode",
+      "dx",
+      "editor_lsp",
+      "editors",
+    ]) {
+      assert.equal(gates[gate], "true", `${file} → ${gate}`);
+    }
+    assert.equal(gates.wasm, "false", file);
+  }
+});
+
 test("a script with no lane consumer runs the scripts' self-tests and nothing else", () => {
   assert.deepEqual(gatesOn(select(["scripts/perf-breakdown.mjs"]).gates), ["js"]);
 });
@@ -702,6 +749,10 @@ test("every declared lane root is a crate in this workspace", () => {
     for (const root of roots) {
       assert.ok(names.has(root), `lane ${lane} root ${root} is not a crate under crates/`);
     }
+  }
+  for (const [prefix, crate] of Object.entries(OUT_OF_WORKSPACE_SOURCES)) {
+    assert.ok(names.has(crate), `${prefix} maps to ${crate}, which is not a crate under crates/`);
+    assert.ok(existsSync(join(REPO_ROOT, prefix)), `${prefix} does not exist`);
   }
 });
 

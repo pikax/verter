@@ -51,6 +51,16 @@ pub fn written_union_arm_classifications_for_tests() -> u64 {
     WRITTEN_UNION_ARM_CLASSIFICATIONS.get()
 }
 
+/// Whether an intersection reads already-projected contributors or a demanded operand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum IntersectionDenotationDemand {
+    /// Only retained interfaces need an additional structural read. Other
+    /// contributors already carry the result of their publication projection.
+    ProjectedContributors,
+    /// A relation, keyspace or mapped operation demands every operand head.
+    Operand,
+}
+
 /// What a written-union arm can take part in when the checker absorbs
 /// literals into their supertypes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -452,7 +462,7 @@ pub(crate) struct ClassAncestryReading {
 
 /// The dispatch-scoped memo behind [`ProjectSemanticDispatch::class_heritage_ancestry`],
 /// keyed by the rooted declaration identity (canonical, owner, name).
-pub(crate) type HeritageAncestryMemo = std::cell::RefCell<
+pub(crate) type HeritageAncestryMemo = verter_execution::sync_cell::SyncRefCell<
     rustc_hash::FxHashMap<
         (
             verter_type_expr::OwnedStr,
@@ -7183,7 +7193,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .reverse_dependency_canonicals(decl_canonical.as_ref())
             {
-                let _ = self.ctx.source_is_available(&rdep);
+                let _ = self.transaction_indexed_record(&rdep);
             }
         };
 
@@ -7217,7 +7227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // does it: an augmenting block lives in a file that depends on the
         // augmented module.
         for rdep in self.ctx.reverse_dependency_canonicals(decl_canonical) {
-            let _ = self.ctx.source_is_available(&rdep);
+            let _ = self.transaction_indexed_record(&rdep);
         }
         self.collect_augmentation_contributions(
             AugmentationContribution::FunctionSignatures,
@@ -7647,7 +7657,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// file context (typed-IR `augmentation_scopes` inventory — never a source
     /// scan), and returns the ordered contributor nodes plus their per-augmenter
     /// `FileWholeHash` self-roots. Augmenter order is the stable
-    /// `canonical` key (`AugmenterSet.entries` is pre-sorted
+    /// `(canonical, parse_stable_hash)` key (`AugmenterSet.entries` is pre-sorted
     /// that way — deterministic, discovery-order-independent).
     ///
     /// Observes the augmenter-set fingerprint (`ModuleAugmentationIndexShape`)
@@ -7713,7 +7723,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         // Fact rail, part 1 — the augmenter-set shape fact (invalidates on
-        // augmenter add/remove/reorder and binding-owner/name/space changes). Observed onto the active tracer so it
+        // augmenter add/remove/reorder and on any augmenter's
+        // `parse_stable_hash` move). Observed onto the active tracer so it
         // enters this build's `ReadSetSignature.facts`.
         //
         // Observed HERE, immediately after the index read and BEFORE every
@@ -7724,7 +7735,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //   - non-empty set, no contributor for this declaration: the set is
         //     keyed by target MODULE, not by declaration, so an existing
         //     augmenter GAINING this declaration moves the set fingerprint
-        //     (it folds each augmenter's matching binding membership).
+        //     (it folds each augmenter's `parse_stable_hash`).
         // A cacheable "no augmentation" surface published without this fact
         // has nothing keyed on the augmenter set and serves stale once either
         // of those happens.
@@ -7804,17 +7815,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if augmenter_set.entries.is_empty() && !has_file_scope {
             return Some(FoldedAugmentation::Absent);
         }
-
-        // An empty, nongeneric interface adds neither a member nor a
-        // diagnostic-producing evaluation to a nongeneric class. Establish
-        // the base header inside this fold's recorded reads, so a cached
-        // absence cannot outlive a change to the class's binder frame.
-        let neutral_class_base = contribution == AugmentationContribution::TypeBody
-            && matches!(&target, AugmentationTargetKind::ResolvedRelativeCanonical(canonical)
-                if self.ctx.prepared_type_decl_return_only(canonical,
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(), decl_name)
-                    .is_some_and(|base| base.kind == verter_session_query::declarations::TypeDeclKind::Class
-                        && base.type_parameters.is_empty()));
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
         // A type body's contributions are planned here and projected under
@@ -8292,32 +8292,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 },
                             );
-                        if neutral_class_base
-                            && aug_prepared.kind
-                                == verter_session_query::declarations::TypeDeclKind::Interface
-                            && aug_prepared.type_parameters.is_empty()
-                            && aug_prepared.member_index.is_empty()
-                        {
-                            let empty = |body: &TypeExpr| {
-                                matches!(body,
-                                TypeExpr::Object(object) if object.properties.is_empty())
-                            };
-                            if self.ctx.deref_authored_body(&indexed.shallow_state, &locator).is_ok_and(|body| {
-                                body.type_parameters.is_empty() && match &body.shape {
-                                    verter_session_query::source::deref::DerefedBodyShape::Single(body) => empty(body),
-                                    verter_session_query::source::deref::DerefedBodyShape::Merged(bodies) => !bodies.is_empty() && bodies.iter().all(empty),
-                                }
-                            }) {
-                                // The exact body port already observed content.
-                                // Keep the previous source-environment/refusal
-                                // rail even though no graph body is demanded.
-                                if crate::fact_signature_helpers::observe_file_source_env_from_artifact_key(
-                                    self.ctx, Some(&effective_artifact_key)).is_none() {
-                                    source_env_unobservable = true;
-                                }
-                                continue;
-                            }
-                        }
                         let shape = self.fetch_located_shape(locator);
                         context_free &= shape.is_some();
                         planned_bodies.push(PlannedContributorBody {
@@ -8526,10 +8500,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
 
         // Persist any healed exact keys back into the cached `AugmenterSet`.
-        // Content changes can advance an exact artifact locator while keeping
-        // population membership identical. Each served artifact independently
-        // observed its content; the conditional refresh preserves the recorded
-        // population fingerprint without replacing a concurrent population.
+        // The augmenter-set fingerprint folds `parse_stable_hash` (NOT
+        // `content_hash`), and a stale key is healed only when the augmenter's
+        // `parse_stable_hash` is unchanged — so the rebuilt set carries the
+        // SAME fingerprint and the same per-entry `parse_stable_hash`; only the
+        // `artifact_key` content-hash dimension advances. Re-publishing under
+        // the identical fingerprint keeps every recorded
+        // `ModuleAugmentationIndexShape` signature valid while making the next
+        // stitch hit the fast exact-key path (mirrors the names stitch).
         // A fold that consumed a read the process did not keep — an
         // unretained or refused resolution among them — answers this request
         // only: nothing it derived, healed keys included, enters the index.
@@ -10009,6 +9987,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// under the same edit clocks answers again by replaying what serving it
     /// read — its facts, refusal and self-roots reach the enclosing build
     /// exactly as serving it again would deliver them.
+    /// Inspect a transaction serve in a fresh consuming frame and fact tracer.
+    /// The returned flag confirms that the production read reused its table.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn indexed_serve_probe_for_tests(
+        &self,
+        canonical: &str,
+    ) -> (
+        bool,
+        Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
+        super::dispatch_txn::FlowMemberReuse,
+    ) {
+        let reused = self
+            .dispatch_txn
+            .borrow()
+            .indexed_serves
+            .get(canonical, self.workspace_edit())
+            .is_some();
+        let _consumer = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let basis = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let ((record, replay), _) =
+            crate::fact_signature_helpers::install_fact_tracer(&basis, || {
+                self.record_transaction_read(
+                    || self.transaction_indexed_record(canonical),
+                    Option::is_some,
+                )
+            });
+        let (_, replay) = replay.expect("a complete indexed serve is request reusable");
+        (reused, record.expect("indexed input exists"), replay)
+    }
+
     pub(super) fn transaction_indexed_record(
         &self,
         canonical: &str,
@@ -10859,24 +10867,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<ClassMemberStep> {
-        if !self.class_takes_module_augmentation(canonical, class) {
-            if let Some(input) = self.ctx.class_member_input(canonical, owner, class, name) {
-                if let verter_session_query::source::deref::DerefedBodyShape::Single(
-                    TypeExpr::Object(ref members),
-                ) = input.selected.shape
-                {
-                    if let Some(node) = self.precise_class_member_read(
-                        canonical,
-                        owner,
-                        name,
-                        members,
-                        &input.name_resolution,
-                    ) {
-                        return Some(ClassMemberStep::Declared(node));
-                    }
-                }
-            }
-        }
         let prepared = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, class)?;
@@ -10899,6 +10889,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let TypeExpr::Object(ref members) = members else {
             return None;
         };
+        if let Some(node) = self.reference_free_class_member_read(
+            canonical,
+            owner,
+            class,
+            name,
+            members,
+            serve.indexed.whole_hash,
+            &prepared.name_resolution,
+        ) {
+            return Some(ClassMemberStep::Declared(node));
+        }
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
@@ -11051,7 +11052,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// elements declare, when every element declaring it is a property
     /// whose type names nothing: no reference, type parameter, `this`,
     /// `typeof` or operator — only keywords, literals and unions, arrays
-    /// and tuples of them (the independent-member type predicate). Such a type
+    /// and tuples of them ([`is_reference_free_member_type`]). Such a type
     /// is fixed by the elements' own text, so the read roots on the class's
     /// `Member` fact for the name (the declaring elements and the `extends`
     /// reference, observed at `observed_hash`) instead of the file's whole
@@ -11062,73 +11063,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// to an element declaring the name, to how many elements do, or to the
     /// `extends` clause moves it.
     ///
-    /// Unsupported signatures and binding-sensitive types keep the general
-    /// content path. Imported heads are accepted only from the source port's
-    /// exact resolved map; no file-scope fallback runs under Global.
+    /// `None` keeps the whole-file read: a method, accessor or a property
+    /// whose type references anything, a carrier-owned (non-file) owner, or
+    /// a fact the observed content cannot produce.
     #[allow(clippy::too_many_arguments)]
-    fn precise_class_member_read(
+    fn reference_free_class_member_read(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
         name: &str,
         members: &verter_type_expr::ObjectExpr,
+        observed_hash: verter_session_query::analysis::types::Hash16,
         name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     ) -> Option<SemanticNodeId> {
         if owner != verter_type_expr::TopLevelOwnerId::ordinary_file() {
             return None;
         }
         let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
-        let mut declaring = Vec::new();
+        let mut declaring: Vec<&verter_type_expr::ObjectProperty> = Vec::new();
         for member in members.properties.iter() {
             match member {
                 ObjectMember::Property(property) => {
                     if property.key.cloned_known().as_ref() != Some(&key) {
                         continue;
                     }
-                    if !is_independent_member_type(&property.ty, name_resolution) {
+                    if !is_reference_free_member_type(&property.ty) {
                         return None;
                     }
-                    declaring.push((
-                        property.ty.clone(),
-                        property.optional,
-                        property.readonly,
-                        None,
-                        false,
-                        property.visibility,
-                    ));
+                    declaring.push(property);
                 }
                 ObjectMember::Method(method)
                     if method.key.cloned_known().as_ref() == Some(&key) =>
                 {
-                    let function = &method.function;
-                    if function.flow_return.is_some()
-                        || !function.type_parameters.is_empty()
-                        || function.predicate.is_some()
-                        || !function
-                            .return_type
-                            .as_deref()
-                            .is_some_and(|ty| is_independent_member_type(ty, name_resolution))
-                        || !function.parameters.iter().all(|parameter| {
-                            is_independent_member_type(&parameter.ty, name_resolution)
-                        })
-                    {
-                        return None;
-                    }
-                    declaring.push((
-                        TypeExpr::Function(Arc::new({
-                            let mut signature = function.clone();
-                            signature.spans = Default::default();
-                            for parameter in &mut signature.parameters {
-                                parameter.span = None;
-                            }
-                            signature
-                        })),
-                        method.optional,
-                        false,
-                        Some(method.method_kind),
-                        method.has_implementation_body,
-                        method.visibility,
-                    ));
+                    return None;
                 }
                 _ => {}
             }
@@ -11144,6 +11112,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !options.strict_null_checks || options.exact_optional_property_types {
             return None;
         }
+        let fact = self.ctx.parse_fact_for_observed_content(
+            canonical,
+            observed_hash,
+            verter_session_query::facts::FactKey::Member {
+                exporter: verter_session_query::facts::registry::InternedName::from(class),
+                name: verter_type_expr::facts::FactPropertyKey::identifier(name),
+                space: verter_session_query::facts::SymbolSpace::Type,
+            },
+            verter_session_query::facts::FactLane::Semantic,
+        )?;
+        if fact.expected_hash == [0u8; 16] {
+            return None;
+        }
+        crate::resolver_core::resolver_context::observe_fan_out(
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
+        );
         let context = crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Navigate,
         )
@@ -11154,36 +11138,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         let own: Vec<SurfaceEntry> = declaring
             .into_iter()
-            .map(
-                |(ty, optional, readonly, method_kind, has_implementation_body, visibility)| {
-                    let value = self.shallow_lower_type_expr_with_context(
-                        &ty,
-                        &env,
-                        &NodeScopeId::Global,
-                        name_resolution,
-                        None,
-                        &shadowing,
-                        &mut substitutions,
-                        context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
-                    );
-                    SurfaceEntry::Member(SurfaceMember {
-                        key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
-                        value,
-                        optional,
-                        readonly,
-                        method_kind,
-                        has_implementation_body,
-                        visibility,
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                        spans: verter_type_expr::MemberSpans::default(),
-                        declaration_origin: Some(Arc::<str>::from(canonical).into()),
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::default(),
-                        merge_role: context
-                            .stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
-                    })
-                },
-            )
+            .map(|property| {
+                let value = self.shallow_lower_type_expr_with_context(
+                    &property.ty,
+                    &env,
+                    &NodeScopeId::Global,
+                    name_resolution,
+                    None,
+                    &shadowing,
+                    &mut substitutions,
+                    context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                );
+                SurfaceEntry::Member(SurfaceMember {
+                    key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
+                    value,
+                    optional: property.optional,
+                    readonly: property.readonly,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    visibility: property.visibility,
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    spans: verter_type_expr::MemberSpans::default(),
+                    declaration_origin: Some(Arc::<str>::from(canonical).into()),
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                    merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                })
+            })
             .collect();
         Some(self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
@@ -11201,10 +11181,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // module, indexed before the augmentation index is read — as the
         // declaration's own stitch reads it.
         for rdep in self.ctx.reverse_dependency_canonicals(canonical) {
-            // Populate the target's contributor index; no source payload is
-            // consumed here. The following population observation owns its
-            // membership, and actual contributions own their content reads.
-            let _ = self.ctx.source_is_available(&rdep);
+            let _ = self.transaction_indexed_record(&rdep);
         }
         let canonical_text: Arc<str> = Arc::from(canonical);
         let target =
@@ -14899,7 +14876,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Some(SemanticNodeData::Intersection(members)) => {
                 let members = members.members_arc();
-                match self.key_of_composite(&members, false) {
+                match self.key_of_composite(base, &members, false) {
                     Some(keys) => { enumerated.set(true); keys },
                     // An arm over a generic (`keyof (S & { a: 1 })`) has
                     // keys only its instantiation names: the keys stay the
@@ -14919,10 +14896,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Union(members))
-                if self.key_of_composite(&members.members_arc(), true).is_some() =>
+                if self.key_of_composite(base, &members.members_arc(), true).is_some() =>
             {
                 enumerated.set(true);
-                self.key_of_composite(&members.members_arc(), true)
+                self.key_of_composite(base, &members.members_arc(), true)
                     .expect("the keys settled")
             }
             Some(SemanticNodeData::Union(_)) => published_names()
@@ -15052,26 +15029,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         keyof_output
     }
 
-    /// Whether the intersection of `arms` is one the checker reduces to
-    /// `never` (`getReducedType`): the object types its arms name declare
-    /// one property whose literal types conflict (`{ c: 1 }` beside
-    /// `{ c: 2 }`), read through the declarations the arms name.
-    pub(super) fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
-        let published =
+    /// The terminal denotation of an intersection, if it is bottom or nullish.
+    /// Publication reads retained interfaces without forcing other projected
+    /// carriers; structural operations demand the denotation of every operand.
+    pub(super) fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+        demand: IntersectionDenotationDemand,
+    ) -> Option<SemanticNodeId> {
+        use verter_session_query::flow::policy::NullabilityPolicy;
+        let context =
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
         let surfaces: Vec<SemanticNodeId> = arms
             .iter()
-            .map(|arm| self.resolve_signature_source_carrier(*arm, published))
+            .map(|arm| {
+                let read = demand == IntersectionDenotationDemand::Operand
+                    || match self.graph().node_data(*arm).as_deref() {
+                        Some(
+                            SemanticNodeData::DeclRef { identity: base }
+                            | SemanticNodeData::InstantiationRef { base, .. },
+                        ) => {
+                            self.prepared_decl_kind(base)
+                                == Some(verter_session_query::declarations::TypeDeclKind::Interface)
+                        }
+                        _ => false,
+                    };
+                if read {
+                    self.resolve_signature_source_carrier(*arm, context)
+                } else {
+                    *arm
+                }
+            })
             .collect();
-        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let conflicts = super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+        let nullability = self
+            .graph()
+            .node_scope(source)
+            .and_then(|scope| scope.canonical_file())
+            .map_or(NullabilityPolicy::Strict, |canonical| {
+                NullabilityPolicy::from_strict_null_checks(
+                    self.ctx
+                        .semantic_compiler_options_for(&canonical)
+                        .strict_null_checks,
+                )
+            });
+        let reduced = super::canonical_algebra::intern_written_intersection_charged(
             self.graph(),
             &surfaces,
+            nullability,
             self.construction_meter(),
-            &mut evidence,
         );
-        self.deposit_canonical_evidence(evidence);
-        conflicts
+        self.deposit_canonical_evidence(reduced.evidence);
+        matches!(
+            self.graph().node_data(reduced.node).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined
+            ))
+        )
+        .then_some(reduced.node)
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -15085,11 +15100,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// alone (the name enumeration reads those).
     fn key_of_composite(
         &self,
+        source: SemanticNodeId,
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> Option<SemanticNodeId> {
-        if !is_union && self.intersection_arms_reduce_to_never(members) {
-            return Some(self.string_number_symbol());
+        if !is_union {
+            if let Some(terminal) = self.reduced_intersection_terminal(
+                source,
+                members,
+                IntersectionDenotationDemand::Operand,
+            ) {
+                return self.key_set_of(terminal);
+            }
         }
         let flattened;
         let members = if is_union {
@@ -16535,11 +16557,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // `unknown` is illegal ⇒ error. Runs before key-space enumeration.
         // An intersection the checker reduces to `never` is `never` here.
         let reduced_source = match self.graph().node_data(source).as_deref() {
-            Some(SemanticNodeData::Intersection(arms))
-                if self.intersection_arms_reduce_to_never(&arms.members_arc()) =>
-            {
-                self.primitive_node(PrimitiveKind::Never)
-            }
+            Some(SemanticNodeData::Intersection(arms)) => self
+                .reduced_intersection_terminal(
+                    source,
+                    &arms.members_arc(),
+                    IntersectionDenotationDemand::Operand,
+                )
+                .unwrap_or(source),
             _ => source,
         };
         // A mapping over `keyof S` (homomorphic) whose `S` is `any` maps the
@@ -21677,7 +21701,7 @@ enum AwaitedOutcome {
 /// Pops the operands one awaited run pushed onto the dispatch's path when
 /// the run ends, however it ends.
 struct AwaitedPathGuard<'g> {
-    active: &'g std::cell::RefCell<AwaitedPath>,
+    active: &'g verter_execution::sync_cell::SyncRefCell<AwaitedPath>,
     base: usize,
 }
 
@@ -21783,11 +21807,27 @@ const LIB_AWAITED_ENTRY_DEPTH: u32 = 2;
 /// operator, an object or function type (whose members carry declaration
 /// origins) — is not, nor is a type wider than a small fixed number of
 /// nodes.
-fn is_independent_member_type(
-    ty: &TypeExpr,
-    name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
-) -> bool {
-    verter_session_query::source::deref::independent_class_member_type(ty, name_resolution)
+fn is_reference_free_member_type(ty: &TypeExpr) -> bool {
+    const MAX_NODES: usize = 64;
+    let mut pending: Vec<&TypeExpr> = vec![ty];
+    let mut visited = 0usize;
+    while let Some(ty) = pending.pop() {
+        visited += 1;
+        if visited > MAX_NODES {
+            return false;
+        }
+        match ty {
+            TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {}
+            TypeExpr::Union(arms) => pending.extend(arms.iter()),
+            TypeExpr::Parenthesized(inner) => pending.push(inner),
+            TypeExpr::Array { element, .. } => pending.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                pending.extend(elements.iter().map(|element| &element.ty));
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// What one class of an inheritance path answers for a demanded member
@@ -22548,6 +22588,34 @@ impl TransactionReadRecording<'_> {
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
+        self.finish_admitting(dispatch, complete, true)
+    }
+
+    /// [`Self::finish`] for a read whose replay must reproduce every rail
+    /// the read reached: one that raised or read an operation refusal is
+    /// not reusable, since the replay re-deposits no refusal.
+    pub(super) fn finish_without_operation_refusals<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        self.finish_admitting(dispatch, complete, false)
+    }
+
+    fn finish_admitting<C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+        operation_refusals_reusable: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
         let Self {
             reads,
             refusals,
@@ -22572,7 +22640,10 @@ impl TransactionReadRecording<'_> {
             }
             None => verter_session_query::facts::reuse::ObservedRefusal::None,
         };
-        let complete = !observed.result_is_partial && !folded_partial && complete;
+        let complete = !observed.result_is_partial
+            && !folded_partial
+            && (operation_refusals_reusable || observed.operation_refusals.is_empty())
+            && complete;
         let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
         if !reuse.is_request_reusable() {
             return None;

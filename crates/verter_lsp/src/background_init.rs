@@ -472,7 +472,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // scan is re-armed under this generation; otherwise nothing walks the
     // workspace — an open document is served by its own import-dependency
     // publication, and the complete carrier inventory is built only when a
-    // request that needs it (frontier, workspace-wide enumeration) asks.
+    // request that needs it (frontier, workspace-wide enumeration) asks or the
+    // client negotiated the store-fill demand (`carrierStoreFill`): a client
+    // running a consumer over the durable carrier store subscribed to keep it
+    // filled. That subscription is fulfilled only where a carrier publisher
+    // exists — every tsserver-store tier, including the editor-owned plugin
+    // route and managed TSGO — and through this same idempotent lifecycle, so
+    // it re-arms per generation exactly like a request's demand; a session
+    // with no publisher has no store to fill and the demand stays inert.
     {
         let published_basis = vfs_workspace
             .read()
@@ -493,9 +500,25 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             server.workspace_scan_settled.notify_waiters();
         }
     }
+    // The store-fill tail baselines BEFORE the scan window opens — before the
+    // scan is even armed: the settler compares its own window once (arm →
+    // settle drain → counter read) and exits, so a publication landing after
+    // that compare but before a baseline captured later — including one
+    // captured after the settle wait below — is above the settler's count yet
+    // already absorbed into the later baseline, and NO observer pings it. A
+    // baseline from before the window spans the whole handoff: the settler's
+    // compare, the post-init drain, and everything the completion gate parks
+    // through. Fills the settler itself announced may be pinged again by the
+    // tail; the client's refresh coalesces, and one trailing ping per batch
+    // remains the contract.
+    let fill_tail = StoreFillTail::capture(&server);
+
+    let store_fill_demanded =
+        server.subscriptions.carrier_store_fill() && server.carrier_publish_coordinator.is_some();
     if server
         .workspace_scan_demanded
         .load(std::sync::atomic::Ordering::Acquire)
+        || store_fill_demanded
     {
         server.activate_workspace_scan().await;
     }
@@ -547,6 +570,19 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 return;
             }
 
+            // Test-only fence at the scan-to-tail handoff: parks this waiter
+            // between the settle wait and the post-init drain — the exact
+            // point where a baseline captured too late would absorb a
+            // successor publication that landed while the waiter was delayed.
+            #[cfg(test)]
+            {
+                let pause = server.post_scan_settle_waiter_pause.lock().take();
+                if let Some((arrived, release)) = pause {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+            }
+
             // Settle provider retries enqueued since the init drain before
             // announcing the provider frontier; a non-empty queue means level 2
             // is not true yet.
@@ -564,6 +600,20 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
             let weak = Arc::downgrade(&server.core);
             drop(server);
+            // The recovered-fill tail is an observer INDEPENDENT of the
+            // completion gate: `complete_post_scan` stays false while ANY
+            // carrier remains queued, so an unrelated carrier that stays
+            // refused — or holds a busy delivery lane, or exhausts its retry
+            // budget — would otherwise park this gate forever and hold the
+            // ping a recovered carrier's durable publication owes. The tail
+            // parks on the same progress signal every drain pass emits and
+            // spans everything above its pre-scan baseline: a fill the
+            // post-init drain itself recovered, one a successor pass landed
+            // while this gate was parked open or after it closed — and one
+            // that landed while an unrelated carrier still keeps the gate
+            // parked. It exits only on generation supersede or session drop,
+            // like the gate itself.
+            tokio::spawn(announce_recovered_store_fills(fill_tail, my_gen));
             finish_post_scan(weak, my_gen).await;
         });
     }
@@ -638,13 +688,107 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
     }
 }
 
+/// The captured starting point of [`announce_recovered_store_fills`]: the
+/// weak server reference, the pending-sync progress subscription, and the
+/// publication baseline, all taken BEFORE the workspace scan window even
+/// opens. The settler's own compare covers only its window and closes when
+/// its counter read returns, so the ONLY baseline that cannot swallow a
+/// publication is one from before the window: a carrier published inside the
+/// window is announced by the settler (and MAY be re-announced by this tail —
+/// the client's refresh coalesces), while a carrier published after the
+/// settler's read — recovered by the post-init drain, a successor pass, or a
+/// later external drain — is above this baseline no matter how long the
+/// completion waiter was delayed reaching it. The progress subscription rides
+/// along for the same reason — every wake the drain or the gate parks through
+/// stays visible to the tail.
+struct StoreFillTail {
+    server: std::sync::Weak<ServerCore>,
+    progress: tokio::sync::watch::Receiver<()>,
+    announced: u64,
+}
+
+impl StoreFillTail {
+    fn capture(server: &VerterLanguageServer) -> Self {
+        Self {
+            server: Arc::downgrade(&server.core),
+            progress: server
+                .carrier_transaction_coordinator
+                .subscribe_pending_sync_progress(),
+            announced: server
+                .carrier_publish_coordinator
+                .as_ref()
+                .map(|coordinator| coordinator.store_publication_count())
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Announce store publications that commit AFTER the baseline
+/// [`StoreFillTail`] captured — before the workspace scan window opened.
+///
+/// A publication the scan settle compared as "unchanged" can still commit
+/// later: the post-init drain re-runs a still-queued carrier, the failed
+/// drains armed a bounded successor chain (`background_drain`), and any pass
+/// that finds the inputs repaired publishes durably. Nothing else observes
+/// that recovery — the settle task compared its window once and exited, the
+/// completion loop returns once the queue empties, and the drain pass itself
+/// only notes pending-sync progress. An editor client subscribed to
+/// `carrierStoreChanged` would keep its empty project view until an
+/// unrelated refresh.
+///
+/// This tail parks on the same progress signal every drain pass emits and
+/// diffs the coordinator's monotonic publication count against that baseline,
+/// so a publication recovered anywhere after the scan was armed counts
+/// exactly alike — inside the post-init drain, while the completion gate is
+/// parked open behind an unrelated still-queued carrier, or after it closed.
+/// It may duplicate the settle ping for fills that landed inside the scan's
+/// own window; the client's refresh coalesces, and one trailing ping per
+/// batch remains the contract. Parks with only a weak server reference, like
+/// [`finish_post_scan`]: it neither keeps a closed session alive nor
+/// establishes a new readiness owner, and it exits when the generation is
+/// superseded or the session drops.
+async fn announce_recovered_store_fills(tail: StoreFillTail, my_gen: u64) {
+    let StoreFillTail {
+        server,
+        mut progress,
+        mut announced,
+    } = tail;
+    loop {
+        let Some(core) = server.upgrade() else {
+            return;
+        };
+        let current = VerterLanguageServer { core };
+        if current
+            .init_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != my_gen
+        {
+            return;
+        }
+        let Some(coordinator) = current.carrier_publish_coordinator.as_ref() else {
+            return;
+        };
+        let publications = coordinator.store_publication_count();
+        if publications > announced {
+            announced = publications;
+            current.notify_editor_carrier_store_changed().await;
+        }
+        drop(current);
+        if progress.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 impl super::VerterLanguageServer {
-    /// Start the workspace scanner — idempotently — because a request needs
-    /// the complete workspace inventory: the owning project's carrier frontier
-    /// (references/rename) or a workspace-wide enumeration (workspace symbols,
-    /// auto-import candidates, project overview, route tree, component
-    /// parents, global CSS classes). Nothing else starts it: initialization,
-    /// document open and edits never walk the workspace.
+    /// Start the workspace scanner — idempotently — because the complete
+    /// workspace inventory is demanded: either a request needs it (the owning
+    /// project's carrier frontier for references/rename, or a workspace-wide
+    /// enumeration: workspace symbols, auto-import candidates, project
+    /// overview, route tree, component parents, global CSS classes) or the
+    /// client negotiated the store-fill demand (`carrierStoreFill`) and a
+    /// carrier publisher exists. Absent both, initialization, document open
+    /// and edits never walk the workspace.
     ///
     /// The demand is sticky for the server's lifetime: a later init
     /// generation re-arms the scan over its own snapshot. Before the first
@@ -682,6 +826,17 @@ impl super::VerterLanguageServer {
             return;
         };
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        // The settle ping's basis: durable store publications are counted at the
+        // coordinator's single sealed commit seam, so this snapshot sees EVERY fill
+        // the scan window causes — the scanner's direct publishes AND the recovery
+        // writes the carrier-phase / completion drains commit after a transient
+        // first failure. The scanner's own companion count cannot: a retry that
+        // publishes through a drain is invisible to it, and the ping would be
+        // suppressed even though the store just filled.
+        let store_publications_at_arm = self
+            .carrier_publish_coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.store_publication_count());
         let scanner = crate::workspace_scanner::spawn_workspace_scanner(
             crate::workspace_scanner::WorkspaceScannerConfig {
                 root_paths,
@@ -743,6 +898,22 @@ impl super::VerterLanguageServer {
             server.workspace_scan_settled.notify_waiters();
             server.rearm_open_document_diagnostics();
             server.refresh_deferred_decorations();
+            // The scan is an editor-membership publication like any interactive
+            // one: a client that subscribed to carrier-store changes runs its
+            // own TypeScript service over the store and refreshes it on this
+            // ping. On the editor-owned tier the scan is the ONLY publisher, so
+            // without this settle ping the store's first fill stays invisible
+            // to the editor plugin. The decision is the coordinator's
+            // publication count diff, so a fill a retry drain recovered counts
+            // exactly like a direct publication. One trailing ping covers the
+            // whole batch (the client's refresh coalesces).
+            let store_publications_now = server
+                .carrier_publish_coordinator
+                .as_ref()
+                .map(|coordinator| coordinator.store_publication_count());
+            if store_publications_now != store_publications_at_arm {
+                server.notify_editor_carrier_store_changed().await;
+            }
         });
     }
 

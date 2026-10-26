@@ -11,7 +11,8 @@
 //! are reached via `super::*`.
 
 use crate::resolver_core::{
-    run_component_meta_request, ComponentMetaRequestResult, RequestSource, SingleflightRole,
+    run_component_meta_request_pollable, ComponentMetaRequestResult, RequestSource,
+    SingleflightRole,
 };
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
@@ -156,7 +157,7 @@ impl VerterHost {
     /// `with_session_overlay`). Promotion stays FENCED: the executor promotes the
     /// resolved-meta result into the shared cache only when the capture was
     /// current AND its captured fingerprint still equals the live host
-    /// fingerprint (see [`run_component_meta_request`]).
+    /// fingerprint (see [`run_component_meta_request_pollable`]).
     pub(crate) fn resolve_component_meta_with_view_and_fixed(
         &self,
         canonical_or_alias: &str,
@@ -187,15 +188,45 @@ impl VerterHost {
         ResolvedComponentMetaState,
         Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof>,
     )> {
-        let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let _ctx_guard = self.install_request_budget_context_if_none(
             self.next_request_id(),
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            verter_execution::blocking::on_heap(|| {
+                self.resolve_component_meta_with_view_and_fixed_admission_pollable(
+                    canonical_or_alias,
+                    mode,
+                    view,
+                    fixed_store_view,
+                )
+            })
+            .as_mut(),
+        )
+    }
+
+    /// [`Self::resolve_component_meta_with_view_and_fixed_admission`] as a
+    /// pollable computation: the capture of the owner's inputs and the
+    /// request flight it joins suspend it instead of parking. It runs under
+    /// its caller's request context, which bounds its budget.
+    pub(crate) async fn resolve_component_meta_with_view_and_fixed_admission_pollable(
+        &self,
+        canonical_or_alias: &str,
+        mode: ProjectionMode,
+        view: &dyn crate::session_view::SessionView,
+        fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
+    ) -> Option<(
+        ResolvedComponentMetaState,
+        Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof>,
+    )> {
+        let started = component_meta_debug_enabled().then(Instant::now);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         #[cfg(feature = "semantic-observe")]
-        let audit = self.config.audit_enabled.then(|| {
+        let mut audit = self.config.audit_enabled.then(|| {
             // Prefer the request_id stamped by
             // `get_component_meta_with_resolution` (via the installed
             // `RequestContext`); a fresh host-minted id only when no
@@ -236,10 +267,7 @@ impl VerterHost {
             view,
             overlay: std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
         };
-        let ComponentMetaRequestResult {
-            request: result,
-            admission,
-        } = run_component_meta_request(
+        let request = run_component_meta_request_pollable(
             &request_host,
             self.resolver_runtime().component_meta.singleflight(),
             &canonical,
@@ -247,6 +275,15 @@ impl VerterHost {
             fixed_store_view,
             STORE_VIEW_STABILITY_MAX_ATTEMPTS,
         );
+        #[cfg(feature = "semantic-observe")]
+        let request = crate::component_meta_audit::within_request_audit(
+            audit.as_mut().map(|audit| &mut audit.1),
+            request,
+        );
+        let ComponentMetaRequestResult {
+            request: result,
+            admission,
+        } = request.await;
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance
@@ -316,7 +353,7 @@ impl VerterHost {
         #[cfg(feature = "semantic-observe")]
         if let Some((
             _request_id,
-            request_audit_guard,
+            request_audit,
             mut audit_builder,
             host_cache_before_bytes,
             workspace_before_bytes,
@@ -374,7 +411,7 @@ impl VerterHost {
                 {
                     let mut timings = compute_audit.timings.clone();
                     timings.imported_root_proof_ms =
-                        request_audit_guard.snapshot().imported_root_proof_ms;
+                        request_audit.snapshot().imported_root_proof_ms;
                     audit_builder.record_timings(timings);
                     audit_builder.record_component_meta_payload(compute_audit.solver.clone());
                 }
@@ -758,22 +795,27 @@ impl VerterHost {
     /// observe the overlay candidate via
     /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
     ///
+    /// The capture is a pollable computation: the owner's artifact and its
+    /// imports' resolution suspend instead of parking.
+    ///
     /// [`Self::capture_component_meta_inputs_with_view_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
-    pub(crate) fn capture_component_meta_inputs_with_view(
+    pub(crate) async fn capture_component_meta_inputs_with_view(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<CapturedComponentMetaInputs> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.capture_component_meta_inputs_with_view_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical, view)
+            let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
+            self.capture_component_meta_inputs_with_view_in::<M>(&observation, canonical, view)
+                .await
         })
     }
 
     /// Compiled for the calling execution unit's capture mode `M`; a
     /// unit outside one calls the plain form, which adopts the installed
     /// request's mode.
-    pub(crate) fn capture_component_meta_inputs_with_view_in<
+    pub(crate) async fn capture_component_meta_inputs_with_view_in<
         M: verter_audit::observe::ObserveExec,
     >(
         &self,
@@ -801,11 +843,12 @@ impl VerterHost {
         // scheduler stays untouched (R17).
         let overlay_facts = if view.overlay_content_hash_for(canonical).is_some() {
             Some(
-                self.materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                self.materialize_overlay_indexed_ready_serve_with_view_in_pollable::<M>(
                     observation,
                     canonical,
                     view,
-                )?
+                )
+                .await?
                 .indexed,
             )
         } else {
@@ -818,7 +861,7 @@ impl VerterHost {
             // shallow state for canonicals the overlay does not cover.
             let store_read_started = audit_enabled.then(Instant::now);
             let mut snapshot = (*facts.snapshot).clone();
-            self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
+            self.resolve_captured_snapshot_imports_in::<M>(observation, canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.template_analysis_required() {
                 // Template inputs from the overlay artifact's OWN
@@ -854,8 +897,12 @@ impl VerterHost {
                 .unwrap_or(0.0);
             let owner_eval_source = Arc::clone(&facts.eval_source);
             let direct_import_started = audit_enabled.then(Instant::now);
-            let direct_dependency_candidates =
-                self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
+            let direct_dependency_candidates = self
+                .cache_dependency_candidates_from_captured_snapshot(
+                    canonical,
+                    &snapshot,
+                    Some(&facts),
+                );
             let direct_import_proof_ms = direct_import_started
                 .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
@@ -878,7 +925,8 @@ impl VerterHost {
         // capture runs inside the request driver's fenced compute, so seed
         // from the cold-seed's inner view.
         let store_view = self
-            .resolver_store_view_read()
+            .resolver_store_view_read_pollable()
+            .await
             .into_cold_seed_view()
             .into_inner();
         <Self as crate::resolver_core::ComponentMetaRequestHost>::capture_component_meta_inputs(
@@ -886,6 +934,7 @@ impl VerterHost {
             canonical,
             &store_view,
         )
+        .await
     }
 
     pub(crate) fn compute_component_meta_state_for_fallthrough<
@@ -2515,7 +2564,10 @@ impl VerterHost {
     /// analysis.
     ///
     /// [`Self::get_raw_analysis_snapshot_in`] for a caller outside a captured or uncaptured
-    /// execution unit: adopts the mode the installed request carries.
+    /// execution unit: adopts the mode the installed request carries. The
+    /// production capture awaits [`Self::get_raw_analysis_snapshot_pollable`];
+    /// this synchronous form serves the direct-host test seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn get_raw_analysis_snapshot(
         &self,
         canonical: &str,
@@ -2525,10 +2577,38 @@ impl VerterHost {
         })
     }
 
+    /// [`Self::get_raw_analysis_snapshot`] as a pollable computation.
+    pub(crate) async fn get_raw_analysis_snapshot_pollable(
+        &self,
+        canonical: &str,
+    ) -> Option<FileAnalysisSnapshot> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
+            self.get_raw_analysis_snapshot_in_pollable::<M>(&observation, canonical).await
+        })
+    }
+
     /// Compiled for the calling execution unit's capture mode `M`; a
     /// unit outside one calls the plain form, which adopts the installed
     /// request's mode.
     pub(crate) fn get_raw_analysis_snapshot_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical: &str,
+    ) -> Option<FileAnalysisSnapshot> {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            std::pin::pin!(self.get_raw_analysis_snapshot_in_pollable::<M>(observation, canonical)),
+        )
+    }
+
+    /// [`Self::get_raw_analysis_snapshot_in`] as a pollable computation: the
+    /// owner's artifact and its imports' resolution suspend instead of
+    /// parking.
+    pub(crate) async fn get_raw_analysis_snapshot_in_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
@@ -2560,7 +2640,8 @@ impl VerterHost {
                     return None;
                 }
                 let mut snapshot = snapshot;
-                self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
+                self.resolve_snapshot_imports_pollable::<M>(observation, canonical, &mut snapshot)
+                    .await;
                 self.enrich_destructured_bindings(&mut snapshot);
                 if self.template_analysis_required() {
                     // Thread the inputs joined at the snapshot's own
@@ -2590,10 +2671,13 @@ impl VerterHost {
         }
 
         // FileArtifactStore path: covers imported deps and non-scheduler files.
-        let serve = self.ensure_indexed_ready_serve_in::<M>(observation, canonical)?;
+        let serve = self
+            .ensure_indexed_ready_serve_in_pollable::<M>(observation, canonical)
+            .await?;
         let facts = serve.indexed;
         let mut snapshot = (*facts.snapshot).clone();
-        self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
+        self.resolve_snapshot_imports_pollable::<M>(observation, canonical, &mut snapshot)
+            .await;
         self.enrich_destructured_bindings(&mut snapshot);
         if self.template_analysis_required() {
             // Thread the artifact's own base-authoritative source +
@@ -2793,7 +2877,7 @@ impl VerterHost {
         // without changing call sites. Re-emit the structured trace
         // via `invalid_fact_details` only when validation fails so
         // the observability path still surfaces the offending facts.
-        if !view.validates_fact_signature(&cached.fact_versions) {
+        if !view.validates_fact_signature((&cached.fact_versions).into()) {
             let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
             component_meta_trace_custom!(
                 "try_get_cached_component_meta_invalid",
@@ -3209,7 +3293,7 @@ impl VerterHost {
         // `StoreView::validates_fact_signature` so per-domain validators
         // can short-circuit on the first mismatch. Empty signatures
         // trivially validate per the default-impl contract.
-        if view.validates_fact_signature(&cached.fact_versions) {
+        if view.validates_fact_signature((&cached.fact_versions).into()) {
             return Some(cached.payload.clone());
         }
         None
@@ -3287,7 +3371,7 @@ impl VerterHost {
         let view = current.view();
         verter_session_query::facts::store_view::StoreView::validates_fact_signature(
             view,
-            fact_versions,
+            verter_session_query::facts::fact_set::FactsRef::Slice(fact_versions),
         )
     }
 

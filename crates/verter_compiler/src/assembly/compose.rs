@@ -107,7 +107,7 @@ struct CopiedTables {
     name_ids: Vec<u32>,
 }
 
-fn copy_tables(builder: &mut SourceMapBuilder, decoded: &SourceMap<'_>) -> CopiedTables {
+fn copy_tables<'a>(builder: &mut SourceMapBuilder<'a>, decoded: &'a SourceMap<'_>) -> CopiedTables {
     // `get_source_content(i)` (index lookup, `None` on a short/absent
     // `sourcesContent` table) rather than zipping `get_sources()` with
     // `get_source_contents()` — the two iterators are NOT guaranteed the
@@ -137,7 +137,7 @@ fn copy_tables(builder: &mut SourceMapBuilder, decoded: &SourceMap<'_>) -> Copie
 /// composition instead of silently losing that marker.
 fn copied_ignore_list(decoded: &SourceMap<'_>, tables: &CopiedTables) -> Vec<u32> {
     decoded
-        .get_x_google_ignore_list()
+        .get_ignore_list()
         .unwrap_or(&[])
         .iter()
         .filter_map(|&index| tables.source_ids.get(index as usize).copied())
@@ -209,7 +209,7 @@ pub fn prepend_preamble(
 
     let mut result = builder.into_sourcemap();
     if !ignore_list.is_empty() {
-        result.set_x_google_ignore_list(ignore_list);
+        result.set_ignore_list(ignore_list);
     }
 
     Ok(ComposedOutput {
@@ -257,7 +257,7 @@ impl SequenceTables {
         self.names.extend(decoded.get_names().map(str::to_owned));
         self.ignore_list.extend(
             decoded
-                .get_x_google_ignore_list()
+                .get_ignore_list()
                 .unwrap_or(&[])
                 .iter()
                 .map(|entry| entry + source_base),
@@ -309,7 +309,7 @@ impl SequenceTables {
             None,
         );
         if !self.ignore_list.is_empty() {
-            map.set_x_google_ignore_list(self.ignore_list);
+            map.set_ignore_list(self.ignore_list);
         }
         map
     }
@@ -505,7 +505,7 @@ pub fn splice_into_hole(
     }
     let mut result = builder.into_sourcemap();
     if !ignore_list.is_empty() {
-        result.set_x_google_ignore_list(ignore_list);
+        result.set_ignore_list(ignore_list);
     }
 
     // The inserted fragment's own bytes begin one byte after

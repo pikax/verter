@@ -216,7 +216,9 @@ mod file_source_env_validation {
             "a recorded parse_env_hash differing from the view-current identity must reject"
         );
         assert!(
-            !view.validates_fact_signature(&[whole_hash_fact(), stale]),
+            !view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::from(
+                &[whole_hash_fact(), stale]
+            )),
             "the full signature must reject on the source-env mismatch even though the \
              whole-hash fact still matches"
         );

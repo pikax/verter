@@ -1501,18 +1501,15 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
                     ))
                 })
                 .collect();
+            // The witness reaches one consumed result holding every wide
+            // fact: its receipt is the unclaimed storage the publication
+            // must claim.
             let facts = seal_canonical_signature(facts);
-            let pages: Vec<_> = facts
-                .iter()
-                .filter_map(|fact| match fact {
-                    FactVersionRef::Receipt(page) => Some(page.clone()),
-                    _ => None,
-                })
-                .collect();
-            let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-            assert!(!pages.is_empty());
             let consumed = ResultReceipt::new(facts.to_vec());
             drop(facts);
+            let evidence = consumed.clone();
+            let evidence_bytes = evidence.retained_charge_bytes();
+            assert!(evidence_bytes > 0);
             let witness = ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(consumed)]));
             assert!(witness.validates(world.as_ref()));
             let captured = witness.clone();
@@ -1520,10 +1517,10 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
                 max_entry_bytes: if admitted || pressure {
                     usize::MAX
                 } else {
-                    page_bytes
+                    evidence_bytes
                 },
                 aggregate_ceiling_bytes: if pressure {
-                    page_bytes
+                    evidence_bytes
                 } else {
                     RetentionLimits::defaults().aggregate_ceiling_bytes
                 },
@@ -1578,9 +1575,7 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             } else {
                 ChargeClass::Pinned
             };
-            assert!(pages
-                .iter()
-                .all(|page| page.retained_charge_class() == Some(expected)));
+            assert_eq!(evidence.retained_charge_class(), Some(expected));
             if !overlay_lane {
                 assert_eq!(
                     outcome.non_admission_reason(),
@@ -1598,16 +1593,16 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             let unrelated = WorkspaceRead::capture_resolution_world(&workspace).unwrap();
             assert!(
                 captured.validates(unrelated.as_ref()),
-                "unrelated edits preserve the complete paged witness"
+                "unrelated edits preserve the complete wide witness"
             );
             workspace.remove_file("/p/wide/1024.ts");
             let edited = WorkspaceRead::capture_resolution_world(&workspace).unwrap();
             assert!(
                 !captured.validates(edited.as_ref()),
-                "the last evidence page participates in invalidation"
+                "every fact of the wide witness participates in invalidation, the 1025th included"
             );
             drop((
-                outcome, world, unrelated, edited, captured, workspace, overlay, pages,
+                outcome, world, unrelated, edited, captured, workspace, overlay, evidence,
             ));
             assert_eq!(account.snapshot().retained_bytes, 0);
         }
@@ -1624,8 +1619,12 @@ fn refresh_resolution_evidence(
     let task = engine.authority.current();
     let mut future =
         Box::pin(engine.refresh_resolution_evidence(reader, evidence, overlay, signature, &task));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
     .expect("evidence refresh completes in its task authority");
 }

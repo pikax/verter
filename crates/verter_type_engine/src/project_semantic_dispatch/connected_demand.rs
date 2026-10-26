@@ -24,6 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use verter_execution::sync_cell::{SyncBool, SyncRefCell, SyncU16, SyncU32, SyncU64, SyncUsize};
 
 use rustc_hash::FxHashSet;
 
@@ -138,6 +139,64 @@ pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: u64 =
         + crate::semantic_query::checker_policy::INSTANTIATION_COUNT as u64
             * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64
         + (512 << 20);
+
+/// The cost of an inline part of a computation, measured apart from the
+/// rest of it ([`ConnectedDemandLedger::open_inline_cost`]): the usage it
+/// charged itself, its longest tail run, and the results it consumed. A
+/// consumer that skips performing the part again charges it with
+/// [`ConnectedDemandLedger::replay_inline_cost`].
+#[derive(Clone)]
+pub(crate) struct InlineCost {
+    exclusive: LogicalUsage,
+    tail_steps: u32,
+    prerequisites: Vec<CostDependency>,
+}
+
+/// An inline measurement being taken
+/// ([`ConnectedDemandLedger::open_inline_cost`]). Dropped unclosed — an
+/// unwind — it ends unmeasured, with the recordings opened above it, each
+/// abandoned into the one below.
+pub(crate) struct InlineCostRecording<'l> {
+    ledger: &'l dyn InlineCostLedger,
+    place: usize,
+    open: bool,
+}
+
+impl InlineCostRecording<'_> {
+    /// Close it: what it measured, kept by the computation below. `None`
+    /// when it is not the recording on top.
+    pub(crate) fn close(mut self) -> Option<InlineCost> {
+        self.open = false;
+        self.ledger.close_at(self.place)
+    }
+}
+
+impl Drop for InlineCostRecording<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.ledger.abandon_at(self.place);
+        }
+    }
+}
+
+/// The ledger operations an [`InlineCostRecording`] ends itself with.
+trait InlineCostLedger {
+    fn close_at(&self, place: usize) -> Option<InlineCost>;
+    fn abandon_at(&self, place: usize);
+}
+
+impl InlineCostLedger for ConnectedDemandLedger<'_> {
+    fn close_at(&self, place: usize) -> Option<InlineCost> {
+        self.close_inline_cost(place)
+    }
+    fn abandon_at(&self, place: usize) {
+        self.abandon_inline_cost(place);
+    }
+}
+
+/// The identity of an inline measurement, which is never sealed.
+#[derive(Hash, PartialEq, Eq)]
+struct InlineCostKey;
 
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.
@@ -290,6 +349,89 @@ impl<'a> DemandCancellation<'a> {
     }
 }
 
+/// The reason set's explicit bit representation, read and replaced whole.
+struct PartialReasonCell(SyncU32);
+
+impl PartialReasonCell {
+    fn new(value: PartialReasonSet) -> Self {
+        Self(SyncU32::new(value.to_bits()))
+    }
+
+    fn get(&self) -> PartialReasonSet {
+        PartialReasonSet::from_bits(self.0.get())
+    }
+
+    fn set(&self, value: PartialReasonSet) {
+        self.0.set(value.to_bits());
+    }
+
+    fn swap(&self, other: &Self) {
+        self.0.swap(&other.0);
+    }
+}
+
+/// Exclusive receipt charges since the last recording transition. Budget
+/// counters advance immediately; only their attribution to the locked scope
+/// stack is batched. Like the ledger, these cells have one driver at a time.
+#[derive(Default)]
+struct PendingUsage {
+    work: SyncU64,
+    bytes: SyncU64,
+    advisory_bytes: SyncU64,
+    operations: SyncU64,
+    comparisons: SyncU64,
+}
+
+impl PendingUsage {
+    fn take(&self) -> LogicalUsage {
+        fn take(cell: &SyncU64) -> u64 {
+            let value = cell.get();
+            cell.set(0);
+            value
+        }
+        LogicalUsage {
+            work: take(&self.work),
+            bytes: take(&self.bytes),
+            advisory_bytes: take(&self.advisory_bytes),
+            operations: take(&self.operations),
+            comparisons: take(&self.comparisons),
+        }
+    }
+
+    fn swap(&self, other: &Self) {
+        self.work.swap(&other.work);
+        self.bytes.swap(&other.bytes);
+        self.advisory_bytes.swap(&other.advisory_bytes);
+        self.operations.swap(&other.operations);
+        self.comparisons.swap(&other.comparisons);
+    }
+}
+
+#[derive(Default)]
+struct RequestEffectCells {
+    operations: SyncUsize,
+    paid: SyncUsize,
+}
+
+impl RequestEffectCells {
+    fn get(&self) -> RequestEffects {
+        RequestEffects {
+            operations: self.operations.get(),
+            paid: self.paid.get(),
+        }
+    }
+
+    fn reset(&self) {
+        self.operations.set(0);
+        self.paid.set(0);
+    }
+
+    fn swap(&self, other: &Self) {
+        self.operations.swap(&other.operations);
+        self.paid.swap(&other.paid);
+    }
+}
+
 /// Operational budget ledger for one dispatcher's connected demands.
 ///
 /// Holds the live counters plus the configured caps. Every field is private
@@ -298,43 +440,44 @@ impl<'a> DemandCancellation<'a> {
 /// only outside a demand) are enforced by the operations, not by convention.
 pub struct ConnectedDemandLedger<'a> {
     cancellation: DemandCancellation<'a>,
-    active: Cell<bool>,
-    work_used: Cell<usize>,
-    work_limit: Cell<usize>,
+    active: SyncBool,
+    work_used: SyncUsize,
+    work_limit: SyncUsize,
     /// Every construction byte the demand charged: the bytes it reserved
     /// and the advisory footprint (`advisory_bytes_used`).
-    bytes_used: Cell<u64>,
+    bytes_used: SyncU64,
     /// The part of `bytes_used` charged while the advisory
     /// construction-byte rail is off: accounted, never enforced, so no
     /// later reservation is refused for it.
-    advisory_bytes_used: Cell<u64>,
-    bytes_limit: Cell<u64>,
+    advisory_bytes_used: SyncU64,
+    bytes_limit: SyncU64,
     /// Whether a canonical construction's footprint
     /// ([`Self::charge_construction`]) may be refused at `bytes_limit`: the
     /// advisory construction-byte rail, off unless explicitly enabled. Off,
     /// the footprint is still charged to `bytes_used`, as advisory bytes.
-    construction_byte_refusal: Cell<bool>,
-    query_depth: Cell<u16>,
-    query_depth_limit: Cell<u16>,
+    construction_byte_refusal: SyncBool,
+    query_depth: SyncU16,
+    query_depth_limit: SyncU16,
     instantiation_depth_limit: u32,
     tail_steps_limit: u32,
-    tripped: Cell<PartialReasonSet>,
+    tripped: PartialReasonCell,
     /// The cold computations recording their exclusive cost, innermost
     /// last; `scope_open` mirrors "the stack is not empty" so a charge
     /// taken outside any recording pays one flag read.
-    scopes: RefCell<Vec<CostScope>>,
-    scope_open: Cell<bool>,
+    scopes: SyncRefCell<Vec<CostScope>>,
+    scope_open: SyncBool,
+    pending_usage: PendingUsage,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
-    paid: RefCell<CostIdentitySet>,
+    paid: SyncRefCell<CostIdentitySet>,
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
-    request_effects: Cell<RequestEffects>,
+    request_effects: RequestEffectCells,
     /// Whether one of this demand's reads was answered with a recursion
     /// carrier another task's schedule decided — a cross-task wait cycle,
     /// or a joined producer's own re-entry: the demand went on without work
     /// it alone would have done, so where it stopped is not its own.
-    schedule_cut: Cell<bool>,
+    schedule_cut: SyncBool,
 }
 
 /// What one connected demand did to its request
@@ -364,32 +507,42 @@ pub(crate) struct ComponentMetaSpan {
 thread_local! {
     static COMPONENT_META_SPANS: RefCell<Vec<ComponentMetaSpan>> = const { RefCell::new(Vec::new()) };
     static COMPONENT_META_SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
+    #[cfg(test)]
+    static SCOPE_CHARGE_WRITES: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Opens one component-meta span on this thread. Nested computes each keep
-/// their own frame, and a charge is recorded on every frame still open.
-pub(crate) struct ComponentMetaSpanGuard {
-    armed: bool,
+/// The component-meta span of one compute, which the compute owns across
+/// its suspensions. Each step of the compute opens it on the running
+/// thread ([`Self::install`]); nested computes each keep their own frame,
+/// and a charge is recorded on every frame open.
+#[derive(Default)]
+pub(crate) struct ComputeSpan {
+    span: ComponentMetaSpan,
 }
 
-impl ComponentMetaSpanGuard {
-    pub(crate) fn enter() -> Self {
-        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(ComponentMetaSpan::default()));
+impl ComputeSpan {
+    /// Open the span on this thread until the returned installation drops,
+    /// unwinding included.
+    pub(crate) fn install(&mut self) -> ComputeSpanInstall<'_> {
+        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(self.span));
         COMPONENT_META_SPAN_OPEN.with(|open| open.set(true));
-        Self { armed: true }
+        ComputeSpanInstall { owner: self }
     }
 
-    pub(crate) fn finish(mut self) -> ComponentMetaSpan {
-        self.armed = false;
-        pop_component_meta_span()
+    pub(crate) fn finish(self) -> ComponentMetaSpan {
+        self.span
     }
 }
 
-impl Drop for ComponentMetaSpanGuard {
+/// One step's installation of a [`ComputeSpan`]; dropping it closes the
+/// frame on the thread and keeps its charges in the compute.
+pub(crate) struct ComputeSpanInstall<'c> {
+    owner: &'c mut ComputeSpan,
+}
+
+impl Drop for ComputeSpanInstall<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = pop_component_meta_span();
-        }
+        self.owner.span = pop_component_meta_span();
     }
 }
 
@@ -398,9 +551,12 @@ impl Drop for ComponentMetaSpanGuard {
 /// capture uses its existing scoped telemetry and panic cleanup.
 #[cfg(any(test, feature = "test-support"))]
 pub fn with_connected_work_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, DemandUsage) {
-    let guard = ComponentMetaSpanGuard::enter();
-    let result = body();
-    let span = guard.finish();
+    let mut span = ComputeSpan::default();
+    let result = {
+        let _installed = span.install();
+        body()
+    };
+    let span = span.finish();
     (
         result,
         DemandUsage {
@@ -499,27 +655,20 @@ impl Drop for TaskSpanInstall<'_> {
     }
 }
 
-fn remember_work(n: usize) {
-    if n == 0 || !span_open() {
+/// Record one charge on every open span, including its advisory footprint.
+fn remember_usage(work: usize, bytes: u64, advisory: u64) {
+    if (work == 0 && bytes == 0) || !span_open() {
         return;
     }
     COMPONENT_META_SPANS.with(|spans| {
         for span in spans.borrow_mut().iter_mut() {
-            span.work = span.work.saturating_add(n);
-        }
-    });
-}
-
-/// Record `n` construction bytes on every open span, `advisory` of them
-/// advisory footprint.
-fn remember_bytes(n: u64, advisory: u64) {
-    if n == 0 || !span_open() {
-        return;
-    }
-    COMPONENT_META_SPANS.with(|spans| {
-        for span in spans.borrow_mut().iter_mut() {
-            span.bytes = span.bytes.saturating_add(n);
-            span.advisory_bytes = span.advisory_bytes.saturating_add(advisory);
+            if work != 0 {
+                span.work = span.work.saturating_add(work);
+            }
+            if bytes != 0 {
+                span.bytes = span.bytes.saturating_add(bytes);
+                span.advisory_bytes = span.advisory_bytes.saturating_add(advisory);
+            }
         }
     });
 }
@@ -600,6 +749,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             tripped,
             scopes,
             scope_open,
+            pending_usage,
             paid,
             request_effects,
             schedule_cut,
@@ -621,6 +771,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         tripped.swap(&other.tripped);
         scopes.swap(&other.scopes);
         scope_open.swap(&other.scope_open);
+        pending_usage.swap(&other.pending_usage);
         paid.swap(&other.paid);
         request_effects.swap(&other.request_effects);
         schedule_cut.swap(&other.schedule_cut);
@@ -636,22 +787,22 @@ impl<'a> ConnectedDemandLedger<'a> {
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {
             cancellation,
-            active: Cell::new(false),
-            work_used: Cell::new(0),
+            active: SyncBool::new(false),
+            work_used: SyncUsize::new(0),
             #[cfg(not(any(test, feature = "test-support")))]
-            work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            work_limit: SyncUsize::new(MAX_CONNECTED_PROJECTION_WORK),
             #[cfg(any(test, feature = "test-support"))]
-            work_limit: Cell::new(
+            work_limit: SyncUsize::new(
                 WORK_FOR_TESTS
                     .with(Cell::get)
                     .unwrap_or(MAX_CONNECTED_PROJECTION_WORK),
             ),
-            bytes_used: Cell::new(0),
-            advisory_bytes_used: Cell::new(0),
-            bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
-            construction_byte_refusal: Cell::new(false),
-            query_depth: Cell::new(0),
-            query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
+            bytes_used: SyncU64::new(0),
+            advisory_bytes_used: SyncU64::new(0),
+            bytes_limit: SyncU64::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
+            construction_byte_refusal: SyncBool::new(false),
+            query_depth: SyncU16::new(0),
+            query_depth_limit: SyncU16::new(MAX_CONNECTED_QUERY_DEPTH),
             #[cfg(not(any(test, feature = "test-support")))]
             instantiation_depth_limit: MAX_CONNECTED_INSTANTIATION_DEPTH,
             #[cfg(any(test, feature = "test-support"))]
@@ -664,12 +815,13 @@ impl<'a> ConnectedDemandLedger<'a> {
             tail_steps_limit: TAIL_STEPS_FOR_TESTS
                 .with(Cell::get)
                 .unwrap_or(MAX_CONNECTED_TAIL_STEPS),
-            tripped: Cell::new(PartialReasonSet::empty()),
-            scopes: RefCell::new(Vec::new()),
-            scope_open: Cell::new(false),
-            paid: RefCell::new(CostIdentitySet::default()),
-            request_effects: Cell::new(RequestEffects::default()),
-            schedule_cut: Cell::new(false),
+            tripped: PartialReasonCell::new(PartialReasonSet::empty()),
+            scopes: SyncRefCell::new(Vec::new()),
+            scope_open: SyncBool::new(false),
+            pending_usage: PendingUsage::default(),
+            paid: SyncRefCell::new(CostIdentitySet::default()),
+            request_effects: RequestEffectCells::default(),
+            schedule_cut: SyncBool::new(false),
         }
     }
 
@@ -723,10 +875,11 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.bytes_used.set(0);
             self.advisory_bytes_used.set(0);
             self.paid.borrow_mut().clear();
-            self.request_effects.set(RequestEffects::default());
+            self.request_effects.reset();
             self.schedule_cut.set(false);
             self.scopes.borrow_mut().clear();
             self.scope_open.set(false);
+            self.pending_usage.take();
             self.query_depth.set(0);
             self.tripped.set(PartialReasonSet::empty());
             self.active.set(true);
@@ -813,7 +966,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
         }
         self.work_used.set(work_used + 1);
-        remember_work(1);
+        remember_usage(1, 0, 0);
         self.accrue(1, 0, 0);
         Ok(())
     }
@@ -843,12 +996,8 @@ impl<'a> ConnectedDemandLedger<'a> {
         if !self.scope_open.get() {
             return;
         }
-        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            scope.exclusive.comparisons = scope
-                .exclusive
-                .comparisons
-                .saturating_add(u64::from(comparisons));
-        }
+        let cell = &self.pending_usage.comparisons;
+        cell.set(cell.get().saturating_add(u64::from(comparisons)));
     }
 
     /// Construction room for a batch, before committing any reservation.
@@ -873,11 +1022,17 @@ impl<'a> ConnectedDemandLedger<'a> {
         if !self.scope_open.get() {
             return;
         }
-        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            scope.exclusive.work = scope.exclusive.work.saturating_add(work as u64);
-            scope.exclusive.bytes = scope.exclusive.bytes.saturating_add(bytes);
-            scope.exclusive.advisory_bytes =
-                scope.exclusive.advisory_bytes.saturating_add(advisory);
+        let usage = &self.pending_usage;
+        if work != 0 {
+            usage.work.set(usage.work.get().saturating_add(work as u64));
+        }
+        if bytes != 0 {
+            usage.bytes.set(usage.bytes.get().saturating_add(bytes));
+        }
+        if advisory != 0 {
+            usage
+                .advisory_bytes
+                .set(usage.advisory_bytes.get().saturating_add(advisory));
         }
     }
 
@@ -904,15 +1059,25 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// [`Self::work_available`].
     #[inline(always)]
     pub(crate) fn commit(&self, consumed: usize) {
-        if consumed == 0 {
+        self.commit_usage(consumed, 0, 0);
+    }
+
+    /// Commit an admitted charge once to the ledger, span and open receipt.
+    fn commit_usage(&self, work: usize, bytes: u64, advisory: u64) {
+        if work == 0 && bytes == 0 {
             return;
         }
         verter_debug_assert!(self.active.get());
-        let work_used = self.work_used.get();
-        verter_debug_assert!(work_used.saturating_add(consumed) <= self.work_limit.get());
-        self.work_used.set(work_used + consumed);
-        remember_work(consumed);
-        self.accrue(consumed, 0, 0);
+        if work != 0 {
+            let work_used = self.work_used.get();
+            verter_debug_assert!(work_used.saturating_add(work) <= self.work_limit.get());
+            self.work_used.set(work_used + work);
+        }
+        if bytes != 0 {
+            self.charge_bytes(bytes, advisory);
+        }
+        remember_usage(work, bytes, advisory);
+        self.accrue(work, bytes, advisory);
     }
 
     /// Reserve `bytes` of construction before building what they hold,
@@ -936,7 +1101,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         match self.enforced_bytes().checked_add(bytes) {
             Some(enforced) if enforced <= self.bytes_limit.get() => {
                 self.charge_bytes(bytes, 0);
-                remember_bytes(bytes, 0);
+                remember_usage(0, bytes, 0);
                 self.accrue(0, bytes, 0);
                 Ok(())
             }
@@ -957,18 +1122,18 @@ impl<'a> ConnectedDemandLedger<'a> {
         units: usize,
         bytes: usize,
     ) -> Result<(), PartialReasonSet> {
-        self.charge_units(units)?;
+        let available = self.work_available()?;
+        if units > available {
+            return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
+        }
         if self.construction_byte_refusal.get() {
+            // Work is paid before an enforced byte reservation, including
+            // when the reservation refuses or observes cancellation.
+            self.commit(units);
             return self.reserve_bytes(bytes);
         }
-        verter_debug_assert!(
-            self.active.get(),
-            "construction bytes must be charged inside a connected-demand guard"
-        );
         let bytes = bytes as u64;
-        self.charge_bytes(bytes, bytes);
-        remember_bytes(bytes, bytes);
-        self.accrue(0, bytes, bytes);
+        self.commit_usage(units, bytes, bytes);
         Ok(())
     }
 
@@ -1111,11 +1276,26 @@ impl ConnectedDemandLedger<'_> {
         self.scope_open.set(!scopes.is_empty());
     }
 
+    /// Materialize the current recording's pending charges before it moves,
+    /// is suspended, or lends its totals to a prefix recording. A transition
+    /// already holds the stack, so charging itself never acquires that lock.
+    fn flush_usage(&self, scopes: &mut [CostScope]) {
+        if let Some(scope) = scopes.last_mut() {
+            let usage = self.pending_usage.take();
+            if usage != LogicalUsage::default() {
+                #[cfg(test)]
+                SCOPE_CHARGE_WRITES.with(|count| count.set(count.get() + 1));
+                scope.exclusive = scope.exclusive.saturating_add(usage);
+            }
+        }
+    }
+
     /// Take the open computation's recording off the stack without ending
     /// it: a suspended frame keeps its recording between its steps, so a
     /// sibling's charges never accrue to it. `None` when none is open.
     pub(crate) fn suspend_cost_scope(&self) -> Option<CostScope> {
         let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
         let scope = scopes.pop();
         self.sync_top(&scopes);
         scope
@@ -1124,6 +1304,7 @@ impl ConnectedDemandLedger<'_> {
     /// Put a suspended recording back on top: its frame runs again.
     pub(crate) fn resume_cost_scope(&self, scope: CostScope) {
         let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
         scopes.push(scope);
         self.sync_top(&scopes);
     }
@@ -1137,9 +1318,8 @@ impl ConnectedDemandLedger<'_> {
     ) -> bool {
         self.note_request_effects(1, 0);
         if self.scope_open.get() {
-            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-                scope.exclusive.operations = scope.exclusive.operations.saturating_add(1);
-            }
+            let cell = &self.pending_usage.operations;
+            cell.set(cell.get().saturating_add(1));
         }
         request.check_projection_op_count()
     }
@@ -1147,11 +1327,15 @@ impl ConnectedDemandLedger<'_> {
     /// Record `operations` request operations this demand spent and `paid`
     /// computations it was first to pay in its request.
     pub(crate) fn note_request_effects(&self, operations: usize, paid: usize) {
-        let effects = self.request_effects.get();
-        self.request_effects.set(RequestEffects {
-            operations: effects.operations.saturating_add(operations),
-            paid: effects.paid.saturating_add(paid),
-        });
+        let effects = &self.request_effects;
+        if operations != 0 {
+            effects
+                .operations
+                .set(effects.operations.get().saturating_add(operations));
+        }
+        if paid != 0 {
+            effects.paid.set(effects.paid.get().saturating_add(paid));
+        }
     }
 
     /// What this connected demand itself has done to its request.
@@ -1236,6 +1420,148 @@ impl ConnectedDemandLedger<'_> {
         if let Some(scope) = self.suspend_cost_scope() {
             self.fold_into_consumer(scope);
         }
+    }
+
+    /// Open the measurement of an inline part of the computation on top:
+    /// until it closes ([`InlineCostRecording::close`]), the charges the
+    /// demand takes and the results it consumes are measured apart, and
+    /// stay the computation's own.
+    pub(crate) fn open_inline_cost(&self) -> InlineCostRecording<'_> {
+        let place = self.recording_depth();
+        self.open_cost_scope(CostIdentity::of_key(InlineCostKey));
+        InlineCostRecording {
+            ledger: self,
+            place,
+            open: true,
+        }
+    }
+
+    /// End the measurement at `place` unmeasured, with every recording
+    /// opened above it: each is abandoned into the one below it.
+    fn abandon_inline_cost(&self, place: usize) {
+        // bounded-loop: at most the recordings open above `place`.
+        while self.recording_depth() > place {
+            self.abandon_cost_scope();
+        }
+    }
+
+    /// Close the measurement [`Self::open_inline_cost`] opened at `place`:
+    /// what it measured goes to the computation below exactly as if it had
+    /// been charged there — its usage added, its tail runs joined, each
+    /// result it consumed a prerequisite of its own — and is returned.
+    /// `None`, closing nothing, when that measurement is not the recording
+    /// on top.
+    fn close_inline_cost(&self, place: usize) -> Option<InlineCost> {
+        if self.recording_depth() != place + 1 {
+            return None;
+        }
+        let scope = self.suspend_cost_scope()?;
+        let cost = InlineCost {
+            exclusive: scope.exclusive,
+            tail_steps: scope.tail_steps,
+            prerequisites: scope.prerequisites.clone(),
+        };
+        if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
+            consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
+            consumer.tail_steps = consumer.tail_steps.max(scope.tail_steps);
+            consumer.prerequisites.extend(scope.prerequisites);
+        }
+        Some(cost)
+    }
+
+    /// Perform `part`, a computation whose result the parts measured on
+    /// top of it keep for one another, with the charges it takes going to
+    /// the computation below those measurements: a measured part that
+    /// performs it pays it once, and a part found by a measurement later
+    /// performed again would find its result kept, so the measurement it
+    /// is charged into never holds it.
+    pub(crate) fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        if !self.scope_open.get() {
+            return part();
+        }
+        let lifted = {
+            let mut scopes = self.scopes.borrow_mut();
+            let keep = scopes
+                .iter()
+                .rposition(|scope| !scope.identity.is_keyed_by::<InlineCostKey>())
+                .map_or(0, |below| below + 1);
+            if keep == scopes.len() {
+                drop(scopes);
+                return part();
+            }
+            self.flush_usage(&mut scopes);
+            let lifted = scopes.split_off(keep);
+            self.sync_top(&scopes);
+            lifted
+        };
+        let value = part();
+        let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
+        scopes.extend(lifted);
+        self.sync_top(&scopes);
+        value
+    }
+
+    /// Charge an inline part's measured cost again, as performing that part
+    /// again would: its work units, construction bytes and request
+    /// operations to the demand and its request, all of it, with its
+    /// comparisons, tail runs and consumed results, to the computation on
+    /// top. `false`, charging nothing, when the demand has tripped or been
+    /// cancelled, lacks the room any of those charges needs, or a result the
+    /// part consumed does not fit this reader's allowances
+    /// ([`Self::footprint_refusal`]): performing the part again is then
+    /// what meets the allowance.
+    pub(crate) fn replay_inline_cost(
+        &self,
+        cost: &InlineCost,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> bool {
+        if !self.tripped.get().is_empty() || self.cancellation.is_cancelled() {
+            return false;
+        }
+        if cost.prerequisites.iter().any(|dependency| {
+            self.footprint_refusal(&dependency.receipt, dependency.nesting)
+                .is_some()
+        }) {
+            return false;
+        }
+        let usage = cost.exclusive;
+        let work = usize::try_from(usage.work).unwrap_or(usize::MAX);
+        if work > self.work_limit.get().saturating_sub(self.work_used.get()) {
+            return false;
+        }
+        let enforced = usage.bytes.saturating_sub(usage.advisory_bytes);
+        if self.enforced_bytes().saturating_add(enforced) > self.bytes_limit.get() {
+            return false;
+        }
+        let operations = usize::try_from(usage.operations).unwrap_or(usize::MAX);
+        if let Some(request) = request {
+            let room = request
+                .effective_projection_op_budget()
+                .saturating_sub(request.projection_ops_executed_count());
+            if operations > room {
+                return false;
+            }
+        }
+        self.commit_usage(work, usage.bytes, usage.advisory_bytes);
+        if let Some(request) = request {
+            // `operations` was checked against the request operations left.
+            // bounded-loop: at most the request operations left in its allowance.
+            for _ in 0..operations {
+                self.spend_request_operation(request);
+            }
+        }
+        if self.scope_open.get() {
+            let comparisons = &self.pending_usage.comparisons;
+            comparisons.set(comparisons.get().saturating_add(usage.comparisons));
+            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+                scope.tail_steps = scope.tail_steps.max(cost.tail_steps);
+                scope
+                    .prerequisites
+                    .extend(cost.prerequisites.iter().cloned());
+            }
+        }
+        true
     }
 
     /// Fold an ended recording into the recording below it, if any: the
@@ -1325,6 +1651,44 @@ impl ConnectedDemandLedger<'_> {
         .map(|_| ())
     }
 
+    /// Why the result `receipt` costs, read the way `nesting` names, does
+    /// not fit this reader's allowances whatever it has paid: its nesting
+    /// past the remaining query depth, its instantiation frames past the
+    /// instantiation allowance at the reader's frame depth, or its tail runs
+    /// past the tail allowance. `None` when it fits.
+    fn footprint_refusal(
+        &self,
+        receipt: &DemandCostReceipt,
+        nesting: Nesting,
+    ) -> Option<ReplayRefusal> {
+        let footprint = receipt.footprint();
+        // The reader's own nesting bounds where the result's drive, and so
+        // each of its frames, would be entered from.
+        if u32::from(self.query_depth.get())
+            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
+            > u32::from(self.query_depth_limit.get())
+        {
+            return Some(ReplayRefusal::Depth);
+        }
+        let first_frame = match nesting {
+            Nesting::Frame { depth } => Some(depth),
+            Nesting::Drive => Some(1),
+            Nesting::InPlace | Nesting::Entered | Nesting::Folded => None,
+        };
+        if footprint.instantiation_required > self.instantiation_depth_limit
+            || first_frame.is_some_and(|depth| {
+                depth.saturating_add(u32::from(footprint.instantiation_height))
+                    > self.instantiation_depth_limit
+            })
+        {
+            return Some(ReplayRefusal::InstantiationDepth);
+        }
+        if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
+            return Some(ReplayRefusal::TailSteps);
+        }
+        None
+    }
+
     /// [`Self::replay_admit`] for a reader whose relation check, if any,
     /// has `comparison_room` structured comparisons left: the unpaid
     /// closure's comparisons — what its cold run would have recorded into
@@ -1341,30 +1705,8 @@ impl ConnectedDemandLedger<'_> {
         if !tripped.is_empty() || self.cancellation.is_cancelled() {
             return Err(ReplayRefusal::Tripped);
         }
-        let footprint = receipt.footprint();
-        // The reader's own nesting bounds where the result's drive, and so
-        // each of its frames, would be entered from.
-        if u32::from(self.query_depth.get())
-            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
-            > u32::from(self.query_depth_limit.get())
-        {
-            return Err(ReplayRefusal::Depth);
-        }
-        let first_frame = match nesting {
-            Nesting::Frame { depth } => Some(depth),
-            Nesting::Drive => Some(1),
-            Nesting::InPlace | Nesting::Entered | Nesting::Folded => None,
-        };
-        if footprint.instantiation_required > self.instantiation_depth_limit
-            || first_frame.is_some_and(|depth| {
-                depth.saturating_add(u32::from(footprint.instantiation_height))
-                    > self.instantiation_depth_limit
-            })
-        {
-            return Err(ReplayRefusal::InstantiationDepth);
-        }
-        if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
-            return Err(ReplayRefusal::TailSteps);
+        if let Some(refusal) = self.footprint_refusal(receipt, nesting) {
+            return Err(refusal);
         }
         let operations_paid = request.map(|request| request.operations_paid());
         if self.paid.borrow().contains(receipt.identity())
@@ -1517,8 +1859,7 @@ impl ConnectedDemandLedger<'_> {
         let replayed_bytes = total.bytes;
         self.work_used.set(self.work_used.get() + replayed_work);
         self.charge_bytes(replayed_bytes, total.advisory_bytes);
-        remember_work(replayed_work);
-        remember_bytes(replayed_bytes, total.advisory_bytes);
+        remember_usage(replayed_work, replayed_bytes, total.advisory_bytes);
         self.paid.borrow_mut().extend(unpaid);
         // Within `comparison_room`, so within `u32`.
         Ok(u32::try_from(total.comparisons).unwrap_or(u32::MAX))
@@ -1536,6 +1877,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         if depth == 0 || scopes.len() != depth {
             return None;
         }
+        self.flush_usage(&mut scopes);
         let scope = scopes.last_mut()?;
         let held = CostScope {
             identity: scope.identity.clone(),
@@ -1579,6 +1921,7 @@ impl PrefixRecording<'_, '_> {
             if scopes.len() != self.depth {
                 return None;
             }
+            ledger.flush_usage(&mut scopes);
             let scope = scopes.last_mut()?;
             let receipt = DemandCostReceipt::with_tail_steps(
                 identity.clone(),
@@ -1663,8 +2006,7 @@ impl ConnectedDemandLedger<'_> {
         self.work_used
             .set(self.work_used.get().saturating_add(work));
         self.charge_bytes(bytes, advisory);
-        remember_work(work);
-        remember_bytes(bytes, advisory);
+        remember_usage(work, bytes, advisory);
         self.record_trip(trip);
     }
 
@@ -1900,6 +2242,88 @@ mod envelope_tests {
 mod advisory_bytes_tests {
     use super::*;
 
+    /// Charging a run does not edit the locked recording for each operation.
+    /// Suspending and resuming still attribute every charge to its producer.
+    #[test]
+    fn repeated_charges_commit_once_per_recording_interval() {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        let (_guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+        let request = crate::request_budget::RequestBudget::new(352);
+        SCOPE_CHARGE_WRITES.with(|count| count.set(0));
+        // bounded-loop: fixed batch of parent charges before its child opens.
+        for _ in 0..128 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([2])));
+        // bounded-loop: fixed batch of child charges before suspension.
+        for _ in 0..128 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        let child = ledger.suspend_cost_scope().unwrap();
+        assert_eq!(child.exclusive.work, 128);
+        assert_eq!(child.exclusive.bytes, 12_800);
+        // bounded-loop: fixed batch charged to the resumed parent.
+        for _ in 0..64 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        ledger.resume_cost_scope(child);
+        // bounded-loop: fixed batch charged to the resumed child.
+        for _ in 0..32 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        let child = ledger.seal_cost_scope(None).unwrap();
+        assert_eq!(child.exclusive().work, 160);
+        assert_eq!(child.exclusive().bytes, 16_000);
+        assert_eq!(child.exclusive().advisory_bytes, 16_000);
+        assert_eq!(child.exclusive().comparisons, 320);
+        assert_eq!(child.exclusive().operations, 160);
+        ledger.record_prerequisite(&child, Nesting::InPlace);
+        let parent = ledger.seal_cost_scope(None).unwrap();
+        assert_eq!(parent.exclusive().work, 192);
+        assert_eq!(parent.exclusive().bytes, 19_200);
+        assert_eq!(parent.exclusive().comparisons, 384);
+        assert_eq!(parent.exclusive().operations, 192);
+        assert_eq!(request.projection_ops_executed_count(), 352);
+        assert_eq!(ledger.request_effects().operations, 352);
+        assert_eq!(parent.closure_usage().work, 352);
+        assert_eq!(parent.closure_usage().bytes, 35_200);
+        let writes = SCOPE_CHARGE_WRITES.with(Cell::get);
+        eprintln!("recording_charge_writes={writes}");
+        assert!(
+            writes <= 4,
+            "charges must batch at scope transitions: {writes}"
+        );
+
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([3])));
+        ledger.charge_units(3).unwrap();
+        let prefixes = ledger.record_prefixes(1).unwrap();
+        ledger.charge_units(5).unwrap();
+        let prefix = prefixes
+            .seal_prefix(CostIdentity::new(Arc::<[u8]>::from([4])), None)
+            .unwrap();
+        assert_eq!(prefix.exclusive().work, 5);
+        ledger.charge_units(7).unwrap();
+        drop(prefixes);
+        let receipt = ledger.seal_cost_scope(None).unwrap();
+        assert_eq!(receipt.exclusive().work, 10);
+        assert_eq!(receipt.closure_usage().work, 15);
+    }
+
     /// A canonical construction's footprint, charged while the advisory
     /// construction-byte rail is off, is accounted in the demand's bytes but
     /// never enforced: a reservation after it still has the whole byte
@@ -1920,9 +2344,23 @@ mod advisory_bytes_tests {
             let (_guard, trip) = ledger.enter(false);
             assert!(trip.is_none());
             ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([7])));
-            ledger
-                .charge_construction(1, 1_000)
-                .expect("the rail is off: the footprint never refuses");
+            SCOPE_CHARGE_WRITES.with(|count| count.set(0));
+            let (charged, usage) =
+                with_connected_work_capture_for_tests(|| ledger.charge_construction(1, 1_000));
+            charged.expect("the rail is off: the footprint never refuses");
+            assert_eq!(
+                usage,
+                DemandUsage {
+                    work: 1,
+                    bytes: 1_000
+                }
+            );
+            let writes = SCOPE_CHARGE_WRITES.with(Cell::get);
+            eprintln!("construction_scope_writes={writes}");
+            assert_eq!(
+                writes, 0,
+                "charging does not edit the locked scope until its transition"
+            );
             ledger
                 .reserve_bytes(100)
                 .expect("the whole allowance remains after the advisory footprint");
@@ -1931,10 +2369,13 @@ mod advisory_bytes_tests {
                 .reserve_bytes(1)
                 .unwrap_err()
                 .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
-            ledger
+            let receipt = ledger
                 .seal_cost_scope(None)
-                .expect("a complete computation")
+                .expect("a complete computation");
+            assert_eq!(SCOPE_CHARGE_WRITES.with(Cell::get), 1);
+            receipt
         };
+        assert_eq!(receipt.exclusive().work, 1);
         assert_eq!(receipt.exclusive().bytes, 1_100);
         assert_eq!(receipt.exclusive().advisory_bytes, 1_000);
 
@@ -1970,5 +2411,71 @@ mod advisory_bytes_tests {
             .charge_construction(1, 1_000)
             .unwrap_err()
             .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
+    }
+}
+
+#[cfg(test)]
+mod inline_cost_tests {
+    use super::*;
+
+    fn with_ledger(run: impl FnOnce(&ConnectedDemandLedger<'_>)) {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        let (_guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+        run(&ledger);
+    }
+
+    /// A measurement keeps what its part charged, the computation below it
+    /// keeps that too, and a part every measured part shares is charged to
+    /// the computation alone. Replaying the measurement charges the demand
+    /// its work again, and refuses, charging nothing, past the allowance.
+    #[test]
+    fn a_measurement_replays_what_its_part_charged_and_no_shared_part() {
+        with_ledger(|ledger| {
+            let outer = ledger.open_inline_cost();
+            ledger.charge().unwrap();
+            let inner = ledger.open_inline_cost();
+            ledger.charge().unwrap();
+            ledger.outside_inline_costs(|| {
+                ledger.charge_units(5).unwrap();
+            });
+            let inner = inner.close().expect("the inner measurement is on top");
+            let outer = outer.close().expect("the outer measurement is on top");
+            assert_eq!((inner.exclusive.work, outer.exclusive.work), (1, 2));
+            let computation = ledger.suspend_cost_scope().unwrap();
+            assert_eq!(computation.exclusive.work, 7);
+            assert_eq!(ledger.recording_depth(), 0);
+
+            let used = ledger.work_used.get();
+            assert!(ledger.replay_inline_cost(&outer, None));
+            assert_eq!(ledger.work_used.get(), used + 2);
+            ledger.work_limit.set(ledger.work_used.get() + 1);
+            assert!(!ledger.replay_inline_cost(&outer, None));
+            assert_eq!(ledger.work_used.get(), used + 2);
+        });
+    }
+
+    /// Measurements dropped unclosed, the outer first as an unwinding
+    /// stack of them drops, end with every recording opened above them,
+    /// each abandoned into the one below: the computation keeps every
+    /// charge and is on top again.
+    #[test]
+    fn measurements_dropped_unclosed_leave_the_computation_on_top() {
+        with_ledger(|ledger| {
+            let mut measurements = vec![ledger.open_inline_cost()];
+            ledger.charge().unwrap();
+            measurements.push(ledger.open_inline_cost());
+            ledger.charge().unwrap();
+            drop(measurements);
+            assert_eq!(ledger.recording_depth(), 1);
+            let computation = ledger.suspend_cost_scope().unwrap();
+            assert_eq!(computation.exclusive.work, 2);
+        });
     }
 }

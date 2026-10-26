@@ -30,7 +30,7 @@ use verter_type_expr::TopLevelOwnerId;
 /// - `declaring_file` — whether the file holding the block is a module or a
 ///   script. In a module the block augments the module its specifier names;
 ///   in a script it declares an ambient module of that name instead.
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub struct ModuleAugmentationFact {
     pub specifier: InternedSpecifier,
     pub owner: TopLevelOwnerId,
@@ -38,31 +38,6 @@ pub struct ModuleAugmentationFact {
     pub space: SymbolSpace,
     pub augmented_member_shape_fingerprint: Hash16,
     pub declaring_file: FileModuleKind,
-}
-
-/// Content-free ownership and binding membership of an augmentation set.
-/// Authored member headers and body versions belong to the consuming reads.
-pub fn augmentation_population_hash<'a>(
-    facts: impl IntoIterator<Item = &'a ModuleAugmentationFact>,
-) -> Hash16 {
-    use std::hash::Hash;
-    let mut rows: Vec<Hash16> = facts
-        .into_iter()
-        .map(|fact| {
-            crate::inputs::route_surface::hash16_from_sorted(|hasher| {
-                fact.specifier.hash(hasher);
-                fact.owner.hash(hasher);
-                fact.augmented_name.hash(hasher);
-                fact.space.hash(hasher);
-                fact.declaring_file.hash(hasher);
-            })
-        })
-        .collect();
-    rows.sort_unstable();
-    crate::inputs::route_surface::hash16_from_sorted(|hasher| {
-        b"verter:augmentation-population:v1".hash(hasher);
-        rows.hash(hasher);
-    })
 }
 
 /// Special marker the parse-domain emission uses for `declare global

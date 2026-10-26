@@ -599,11 +599,15 @@ impl SemanticGraphStore {
         let result = QueryResult::Value(value);
         let walker_diagnostics = super::empty_diagnostics();
         Ok(MemoEntry {
-            lease: self.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
-                &result,
-                &walker_diagnostics,
-                dispatch_dep_signature,
-            ))?,
+            // The staged member is in-flight work until the batch's
+            // reservation adopts its charges or the batch is refused.
+            lease: self.lease_delivery_in_flight(
+                super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    dispatch_dep_signature,
+                ),
+            )?,
             result,
             read_set_signature: carrier.clone(),
             dispatch_dep_signature: dispatch_dep_signature.clone(),
@@ -638,7 +642,6 @@ impl SemanticGraphStore {
         Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
     > {
-        use verter_session_query::retention::RetentionAdmission;
         let account = self.retention_account();
         let refuse = |refusal: verter_session_query::retention::RetentionRefusal| {
             crate::cache_runtime::admission::propagate_non_admission(
@@ -666,32 +669,33 @@ impl SemanticGraphStore {
                 super::retention::own_reservation(entry, family, 1, direct_edges)
             })
             .collect();
-        // A shared carrier's evidence pages were claimed with the root; a
-        // page only a member's carrier holds is claimed here.
-        let carriers: Vec<&[verter_session_query::facts::fact_cache::FactVersionRef]> = members
+        // A shared carrier's receipts and tree nodes were claimed with the
+        // root; storage only a member's carrier reaches is claimed here.
+        let carriers: Vec<&verter_session_query::facts::fact_set::FactSet> = members
             .iter()
-            .map(|(_, entry)| &*entry.read_set_signature.facts)
+            .map(|(_, entry)| &entry.read_set_signature.facts)
             .collect();
-        let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        // The carriers' storage is claimed only once every member's own
+        // names are held: a refused hold leaves it pinned and unclaimed.
+        let owned = verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
             account,
             own.iter().map(|footprint| footprint.bytes).sum(),
             &carriers,
-        ) {
-            RetentionAdmission::Admitted(charge) => charge,
-            RetentionAdmission::Refused(refusal) => return Err(refuse(refusal)),
-        };
-        shared
+            |mut batch| {
+                own.into_iter()
+                    .map(|own| {
+                        let charge = batch.split_off(own.bytes);
+                        own.handles.retained_with(charge, self.charge_ctx())
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            },
+        )
+        .map_err(refuse)?;
+        Ok(shared
             .into_iter()
-            .zip(own)
-            .map(|(holds, own)| {
-                let charge = batch.split_off(own.bytes);
-                let charge = own
-                    .handles
-                    .retained_with(charge, self.charge_ctx())
-                    .map_err(refuse)?;
-                Ok(Arc::new(holds.with_own(charge)))
-            })
-            .collect()
+            .zip(owned)
+            .map(|(holds, own)| Arc::new(holds.with_own(own)))
+            .collect())
     }
 
     /// Reserve the container charge of EVERY staged member's family, keyed

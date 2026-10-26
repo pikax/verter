@@ -53,7 +53,7 @@ fn compile_tier_signature_carries_module_augmentation_index_shape() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "compile_tier matrix slice: the permissive view MUST accept \
          a `ModuleAugmentationIndexShape` RouteSurface fact in the \
          Arc-stored compile-slot signature so an augmentation-index \

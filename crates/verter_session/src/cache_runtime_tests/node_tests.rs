@@ -181,7 +181,7 @@ impl QueryNode for StaleGenerationQueryNode {
         // snapshot here.
         FactCandidateDiscriminant {
             validated_at_generation,
-            facts: Arc::clone(&signature.facts),
+            facts: signature.facts.clone(),
         }
     }
 
@@ -227,10 +227,13 @@ impl SkewedDiscriminantQueryNode {
     /// fact dimension is constant and only its GENERATION dimension can
     /// differ between candidates.
     fn fixed_signature() -> ReadSetSignature {
-        let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: "/skew.ts".into(),
-            hash: [7u8; 16],
-        }]);
+        let facts: verter_session_query::facts::fact_set::FactSet =
+            verter_session_query::facts::fact_set::FactSet::from(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: "/skew.ts".into(),
+                    hash: [7u8; 16],
+                },
+            ]);
         ReadSetSignature::new(facts)
     }
 }
@@ -298,7 +301,7 @@ impl QueryNode for SkewedDiscriminantQueryNode {
         // duplicate.
         FactCandidateDiscriminant {
             validated_at_generation,
-            facts: Arc::clone(&signature.facts),
+            facts: signature.facts.clone(),
         }
     }
 
@@ -486,7 +489,7 @@ fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
 }
 
 /// An `ArtifactNode` whose cold compute returns one shared signature wider
-/// than a page, claimed into the node's own account.
+/// than `WIDE_SIGNATURE_WIDTH`, claimed into the node's own account.
 struct WideArtifactNode {
     entries: dashmap::DashMap<u32, Arc<CacheEntry<String>>>,
     inflight: InflightTable<QueryFlightKey<u32>>,
@@ -497,38 +500,42 @@ struct WideArtifactNode {
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 
+/// `facts` sealed as a set extended from its first fact: a wide set held in
+/// shared tree storage no admission has claimed yet.
+fn extended_signature(facts: Vec<FactVersionRef>) -> ReadSetSignature {
+    ReadSetSignature::new(
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts[..1].to_vec())
+            .union_with_facts(&facts[1..]),
+    )
+}
+
 impl WideArtifactNode {
     fn new(account: Arc<verter_session_query::retention::SemanticRetentionAccount>) -> Self {
-        let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
-            .map(|index| FactVersionRef::FileWholeHash {
-                canonical_id: format!("/wide/{index:05}.ts").into(),
-                hash: [1u8; 16],
-            })
-            .collect();
+        let facts: Vec<FactVersionRef> =
+            (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
+                .map(|index| FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/wide/{index:05}.ts").into(),
+                    hash: [1u8; 16],
+                })
+                .collect();
         Self {
             entries: dashmap::DashMap::new(),
             inflight: InflightTable::new(),
             stale_generation: false,
             strict_root: false,
             during_compute: None,
-            signature: ReadSetSignature::new(
-                verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
-            ),
+            signature: extended_signature(facts),
             account,
         }
     }
 
     fn with_valid_signature(mut self, host: &VerterHost) -> Self {
-        self.signature = ReadSetSignature::new(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(
-                Self::valid_dependency_facts(host),
-            ),
-        );
+        self.signature = extended_signature(Self::valid_dependency_facts(host));
         self
     }
 
     fn valid_dependency_facts(host: &VerterHost) -> Vec<FactVersionRef> {
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
             .map(|index| {
                 let canonical_id = format!("/wide/{index:05}.ts");
                 let _ = host
@@ -557,17 +564,8 @@ impl WideArtifactNode {
             .collect()
     }
 
-    fn page_classes(&self) -> Vec<Option<verter_session_query::retention::ChargeClass>> {
-        self.signature
-            .facts
-            .iter()
-            .filter_map(|fact| match fact {
-                FactVersionRef::Receipt(page) if page.is_page() => {
-                    Some(page.retained_charge_class())
-                }
-                _ => None,
-            })
-            .collect()
+    fn storage(&self) -> verter_session_query::facts::fact_set::TreeFootprint {
+        self.signature.facts.tree_footprint()
     }
 }
 
@@ -625,12 +623,13 @@ impl ArtifactNode for WideArtifactNode {
     }
 }
 
-/// A cold winner about to publish a wide signature claims its pages into a
-/// refusable reservation; an account that refuses that footprint returns
-/// the complete value uncached and leaves every page pinned.
+/// A cold winner about to publish a wide signature claims its shared
+/// storage into a refusable reservation; an account that refuses that
+/// footprint returns the complete value uncached and leaves the storage
+/// pinned.
 #[test]
-fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
-    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+fn cold_publish_claims_wide_signature_storage_and_is_refused_for_it() {
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let flags: &RequestFlags = ctx.request_flags();
@@ -639,17 +638,18 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
     let node = WideArtifactNode::new(Arc::clone(&account)).with_valid_signature(&host);
     assert_eq!(lookup(&node, 7u32, ctx, flags).as_deref(), Some("v7"));
     assert_eq!(node.entries.len(), 1);
-    let classes = node.page_classes();
-    assert!(!classes.is_empty(), "premise: the signature is paged");
-    assert!(classes
-        .iter()
-        .all(|class| *class == Some(ChargeClass::Retained)));
+    let storage = node.storage();
+    assert!(
+        storage.nodes > 0,
+        "premise: the signature has shared storage"
+    );
+    assert_eq!(storage.pinned_bytes, 0, "the publication claims every node");
     assert!(account.snapshot().retained_bytes > 0);
     drop(node);
     assert_eq!(
         account.snapshot().retained_bytes,
         0,
-        "the last holder's drop drains the pages"
+        "the last holder's drop drains the storage"
     );
 
     let tight = SemanticRetentionAccount::new(RetentionLimits {
@@ -663,10 +663,9 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
         "a refused claim still delivers the complete value"
     );
     assert!(node.entries.is_empty(), "a refused claim publishes nothing");
-    assert!(node
-        .page_classes()
-        .iter()
-        .all(|class| *class == Some(ChargeClass::Pinned)));
+    let storage = node.storage();
+    assert_eq!(storage.retained_bytes, 0);
+    assert_eq!(storage.pinned_bytes, storage.charged_bytes);
     assert_eq!(tight.snapshot().retained_bytes, 0);
 }
 
@@ -748,7 +747,7 @@ impl QueryNode for WideQueryNode {
     ) -> FactCandidateDiscriminant {
         FactCandidateDiscriminant {
             validated_at_generation,
-            facts: Arc::clone(&signature.facts),
+            facts: signature.facts.clone(),
         }
     }
     fn publish_core(
@@ -774,7 +773,7 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
-    // Admit the identical dependency files only once. Seal fresh pages for
+    // Admit the identical dependency files only once. Seal a fresh set for
     // each case so its retention account owns independent signature storage.
     let facts = WideArtifactNode::valid_dependency_facts(&host);
     for (limit, stale, lower) in [
@@ -972,7 +971,6 @@ fn a_refused_or_return_only_artifact_value_is_charged_to_its_caller() {
         } else {
             RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             }

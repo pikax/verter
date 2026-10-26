@@ -844,7 +844,7 @@ function assertSharedTsgoHandshake(log: string): void {
     logText: log,
     controlDirEntries: fs.readdirSync(controlDir),
   });
-  assert.ok(verdict.ok, verdict.reason);
+  if (!verdict.ok) assert.fail(verdict.reason);
 }
 
 // ── Log file helpers ───────────────────────────────────────────

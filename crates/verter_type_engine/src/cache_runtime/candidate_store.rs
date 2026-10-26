@@ -626,7 +626,7 @@ where
         let _retention = self.retention_gate.read();
         let discriminant = FactCandidateDiscriminant {
             validated_at_generation,
-            facts: Arc::clone(&signature.facts),
+            facts: signature.facts.clone(),
         };
         let Ok(candidate) = Candidate::admit::<K>(
             discriminant,

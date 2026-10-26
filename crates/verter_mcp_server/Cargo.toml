@@ -13,9 +13,15 @@ publish = false
 name = "verter-mcp-server"
 path = "src/main.rs"
 
+[features]
+# Build on the platform heap instead of mimalloc, for hardened builds
+# (crates/verter_alloc documents the trade-off).
+system-allocator = ["verter_alloc/system-allocator"]
+
 [dependencies]
+verter_alloc = { path = "../verter_alloc" }
 verter_mcp = { path = "../verter_mcp" }
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 clap = { version = "4.6", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

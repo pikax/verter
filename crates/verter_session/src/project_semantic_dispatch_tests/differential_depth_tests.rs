@@ -509,6 +509,55 @@ fn an_80_deep_nested_generic_application_relates_on_the_default_stack() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Each declaration of an alias chain is handed to the declaration-lowering
+/// workers once: the lowering that registers its facts also serves the
+/// body read that follows, so every link the chain grows by adds one
+/// worker rendezvous and one statement lowering.
+#[test]
+fn an_alias_chain_hands_each_declaration_to_the_lowering_workers_once() {
+    let mut work = Vec::new();
+    #[cfg(feature = "semantic-observe")]
+    let mut lowered = Vec::new();
+    for links in [32, 64] {
+        let mut source = String::from("type A0<T> = T | undefined;\n");
+        for i in 0..links {
+            source.push_str(&format!("type A{}<T> = A{i}<T>;\n", i + 1));
+        }
+        let probe = format!("[A{links}<\"ok\">] extends [\"ok\" | undefined] ? 1 : 2");
+        let matrix = Matrix::new(&source).settings(&[STRICT]);
+        let rows = [(Read::Type(&probe), vec!["1"])];
+        let host = matrix.host(&rows);
+        let before = host.decl_lowering.handoff_count();
+        #[cfg(feature = "semantic-observe")]
+        let statements_before = host.provenance().snapshot().decl_statements_lowered;
+        let verdict = &matrix.verdicts_on(&host, &rows)[0][0];
+        assert!(verdict.matched, "links={links}: {}", verdict.lane);
+        let after = host.decl_lowering.handoff_count();
+        assert!(after >= before, "the rendezvous count never falls");
+        work.push(after - before);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let statements_after = host.provenance().snapshot().decl_statements_lowered;
+            assert!(statements_after >= statements_before);
+            lowered.push(statements_after - statements_before);
+        }
+    }
+    eprintln!("alias chain rendezvous: {work:?}");
+    #[cfg(feature = "semantic-observe")]
+    {
+        eprintln!("alias chain statements lowered: {lowered:?}");
+        assert!(
+            lowered[1] <= lowered[0] + 32 + 4,
+            "32 more links must add one statement lowering each: {lowered:?}"
+        );
+    }
+    let (shorter, longer) = (work[0], work[1]);
+    assert!(
+        longer <= shorter + 32 + 4,
+        "32 more links must add one rendezvous each: {work:?}"
+    );
+}
+
 /// An 800-member literal union.
 const WIDE_UNION_800: &str = r##"type W = "m0" | "m1" | "m2" | "m3" | "m4" | "m5" | "m6" | "m7" | "m8" | "m9" | "m10" | "m11" | "m12" | "m13" | "m14" | "m15" | "m16" | "m17" | "m18" | "m19" | "m20" | "m21" | "m22" | "m23" | "m24" | "m25" | "m26" | "m27" | "m28" | "m29" | "m30" | "m31" | "m32" | "m33" | "m34" | "m35" | "m36" | "m37" | "m38" | "m39" | "m40" | "m41" | "m42" | "m43" | "m44" | "m45" | "m46" | "m47" | "m48" | "m49" | "m50" | "m51" | "m52" | "m53" | "m54" | "m55" | "m56" | "m57" | "m58" | "m59" | "m60" | "m61" | "m62" | "m63" | "m64" | "m65" | "m66" | "m67" | "m68" | "m69" | "m70" | "m71" | "m72" | "m73" | "m74" | "m75" | "m76" | "m77" | "m78" | "m79" | "m80" | "m81" | "m82" | "m83" | "m84" | "m85" | "m86" | "m87" | "m88" | "m89" | "m90" | "m91" | "m92" | "m93" | "m94" | "m95" | "m96" | "m97" | "m98" | "m99" | "m100" | "m101" | "m102" | "m103" | "m104" | "m105" | "m106" | "m107" | "m108" | "m109" | "m110" | "m111" | "m112" | "m113" | "m114" | "m115" | "m116" | "m117" | "m118" | "m119" | "m120" | "m121" | "m122" | "m123" | "m124" | "m125" | "m126" | "m127" | "m128" | "m129" | "m130" | "m131" | "m132" | "m133" | "m134" | "m135" | "m136" | "m137" | "m138" | "m139" | "m140" | "m141" | "m142" | "m143" | "m144" | "m145" | "m146" | "m147" | "m148" | "m149" | "m150" | "m151" | "m152" | "m153" | "m154" | "m155" | "m156" | "m157" | "m158" | "m159" | "m160" | "m161" | "m162" | "m163" | "m164" | "m165" | "m166" | "m167" | "m168" | "m169" | "m170" | "m171" | "m172" | "m173" | "m174" | "m175" | "m176" | "m177" | "m178" | "m179" | "m180" | "m181" | "m182" | "m183" | "m184" | "m185" | "m186" | "m187" | "m188" | "m189" | "m190" | "m191" | "m192" | "m193" | "m194" | "m195" | "m196" | "m197" | "m198" | "m199" | "m200" | "m201" | "m202" | "m203" | "m204" | "m205" | "m206" | "m207" | "m208" | "m209" | "m210" | "m211" | "m212" | "m213" | "m214" | "m215" | "m216" | "m217" | "m218" | "m219" | "m220" | "m221" | "m222" | "m223" | "m224" | "m225" | "m226" | "m227" | "m228" | "m229" | "m230" | "m231" | "m232" | "m233" | "m234" | "m235" | "m236" | "m237" | "m238" | "m239" | "m240" | "m241" | "m242" | "m243" | "m244" | "m245" | "m246" | "m247" | "m248" | "m249" | "m250" | "m251" | "m252" | "m253" | "m254" | "m255" | "m256" | "m257" | "m258" | "m259" | "m260" | "m261" | "m262" | "m263" | "m264" | "m265" | "m266" | "m267" | "m268" | "m269" | "m270" | "m271" | "m272" | "m273" | "m274" | "m275" | "m276" | "m277" | "m278" | "m279" | "m280" | "m281" | "m282" | "m283" | "m284" | "m285" | "m286" | "m287" | "m288" | "m289" | "m290" | "m291" | "m292" | "m293" | "m294" | "m295" | "m296" | "m297" | "m298" | "m299" | "m300" | "m301" | "m302" | "m303" | "m304" | "m305" | "m306" | "m307" | "m308" | "m309" | "m310" | "m311" | "m312" | "m313" | "m314" | "m315" | "m316" | "m317" | "m318" | "m319" | "m320" | "m321" | "m322" | "m323" | "m324" | "m325" | "m326" | "m327" | "m328" | "m329" | "m330" | "m331" | "m332" | "m333" | "m334" | "m335" | "m336" | "m337" | "m338" | "m339" | "m340" | "m341" | "m342" | "m343" | "m344" | "m345" | "m346" | "m347" | "m348" | "m349" | "m350" | "m351" | "m352" | "m353" | "m354" | "m355" | "m356" | "m357" | "m358" | "m359" | "m360" | "m361" | "m362" | "m363" | "m364" | "m365" | "m366" | "m367" | "m368" | "m369" | "m370" | "m371" | "m372" | "m373" | "m374" | "m375" | "m376" | "m377" | "m378" | "m379" | "m380" | "m381" | "m382" | "m383" | "m384" | "m385" | "m386" | "m387" | "m388" | "m389" | "m390" | "m391" | "m392" | "m393" | "m394" | "m395" | "m396" | "m397" | "m398" | "m399" | "m400" | "m401" | "m402" | "m403" | "m404" | "m405" | "m406" | "m407" | "m408" | "m409" | "m410" | "m411" | "m412" | "m413" | "m414" | "m415" | "m416" | "m417" | "m418" | "m419" | "m420" | "m421" | "m422" | "m423" | "m424" | "m425" | "m426" | "m427" | "m428" | "m429" | "m430" | "m431" | "m432" | "m433" | "m434" | "m435" | "m436" | "m437" | "m438" | "m439" | "m440" | "m441" | "m442" | "m443" | "m444" | "m445" | "m446" | "m447" | "m448" | "m449" | "m450" | "m451" | "m452" | "m453" | "m454" | "m455" | "m456" | "m457" | "m458" | "m459" | "m460" | "m461" | "m462" | "m463" | "m464" | "m465" | "m466" | "m467" | "m468" | "m469" | "m470" | "m471" | "m472" | "m473" | "m474" | "m475" | "m476" | "m477" | "m478" | "m479" | "m480" | "m481" | "m482" | "m483" | "m484" | "m485" | "m486" | "m487" | "m488" | "m489" | "m490" | "m491" | "m492" | "m493" | "m494" | "m495" | "m496" | "m497" | "m498" | "m499" | "m500" | "m501" | "m502" | "m503" | "m504" | "m505" | "m506" | "m507" | "m508" | "m509" | "m510" | "m511" | "m512" | "m513" | "m514" | "m515" | "m516" | "m517" | "m518" | "m519" | "m520" | "m521" | "m522" | "m523" | "m524" | "m525" | "m526" | "m527" | "m528" | "m529" | "m530" | "m531" | "m532" | "m533" | "m534" | "m535" | "m536" | "m537" | "m538" | "m539" | "m540" | "m541" | "m542" | "m543" | "m544" | "m545" | "m546" | "m547" | "m548" | "m549" | "m550" | "m551" | "m552" | "m553" | "m554" | "m555" | "m556" | "m557" | "m558" | "m559" | "m560" | "m561" | "m562" | "m563" | "m564" | "m565" | "m566" | "m567" | "m568" | "m569" | "m570" | "m571" | "m572" | "m573" | "m574" | "m575" | "m576" | "m577" | "m578" | "m579" | "m580" | "m581" | "m582" | "m583" | "m584" | "m585" | "m586" | "m587" | "m588" | "m589" | "m590" | "m591" | "m592" | "m593" | "m594" | "m595" | "m596" | "m597" | "m598" | "m599" | "m600" | "m601" | "m602" | "m603" | "m604" | "m605" | "m606" | "m607" | "m608" | "m609" | "m610" | "m611" | "m612" | "m613" | "m614" | "m615" | "m616" | "m617" | "m618" | "m619" | "m620" | "m621" | "m622" | "m623" | "m624" | "m625" | "m626" | "m627" | "m628" | "m629" | "m630" | "m631" | "m632" | "m633" | "m634" | "m635" | "m636" | "m637" | "m638" | "m639" | "m640" | "m641" | "m642" | "m643" | "m644" | "m645" | "m646" | "m647" | "m648" | "m649" | "m650" | "m651" | "m652" | "m653" | "m654" | "m655" | "m656" | "m657" | "m658" | "m659" | "m660" | "m661" | "m662" | "m663" | "m664" | "m665" | "m666" | "m667" | "m668" | "m669" | "m670" | "m671" | "m672" | "m673" | "m674" | "m675" | "m676" | "m677" | "m678" | "m679" | "m680" | "m681" | "m682" | "m683" | "m684" | "m685" | "m686" | "m687" | "m688" | "m689" | "m690" | "m691" | "m692" | "m693" | "m694" | "m695" | "m696" | "m697" | "m698" | "m699" | "m700" | "m701" | "m702" | "m703" | "m704" | "m705" | "m706" | "m707" | "m708" | "m709" | "m710" | "m711" | "m712" | "m713" | "m714" | "m715" | "m716" | "m717" | "m718" | "m719" | "m720" | "m721" | "m722" | "m723" | "m724" | "m725" | "m726" | "m727" | "m728" | "m729" | "m730" | "m731" | "m732" | "m733" | "m734" | "m735" | "m736" | "m737" | "m738" | "m739" | "m740" | "m741" | "m742" | "m743" | "m744" | "m745" | "m746" | "m747" | "m748" | "m749" | "m750" | "m751" | "m752" | "m753" | "m754" | "m755" | "m756" | "m757" | "m758" | "m759" | "m760" | "m761" | "m762" | "m763" | "m764" | "m765" | "m766" | "m767" | "m768" | "m769" | "m770" | "m771" | "m772" | "m773" | "m774" | "m775" | "m776" | "m777" | "m778" | "m779" | "m780" | "m781" | "m782" | "m783" | "m784" | "m785" | "m786" | "m787" | "m788" | "m789" | "m790" | "m791" | "m792" | "m793" | "m794" | "m795" | "m796" | "m797" | "m798" | "m799";
 "##;
@@ -1336,26 +1385,6 @@ fn an_800_guard_narrowing_chain_answers_in(setting: Setting) {
         .settings(&[setting])
         .returns(&[("last", "\"k799\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_strict() {
-    an_800_guard_narrowing_chain_answers_in(STRICT);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
-    an_800_guard_narrowing_chain_answers_in(LOOSE);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
-    an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_with_both_off() {
-    an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
 }
 
 /// 800 returning guards.
@@ -2453,4 +2482,100 @@ fn a_conditional_over_an_infer_bound_union_distributes() {
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The 799-guard chain's shape at 10, 20, 30 and 40 members, in `setting`:
+/// the gate version of the 800-member chains in the nightly scale tier
+/// (`NARROW_CHAIN_800` is this generator's 800-member chain). Each width
+/// narrows to its last literal. Every guard filters the arms left, as the
+/// checker's `filterType` does, so the relations the chain asks grow exactly
+/// as its length times its width, a quadratic of the width, and the other
+/// counters at most that fast; any faster term changes the third step's
+/// growth. At 800 members the work stays within the request's connected-work
+/// budget and operation fuse.
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(setting: Setting) {
+    use crate::scale_gate::{quadratic, Counter};
+    let widths = [10, 20, 30, 40];
+    let settings = [setting];
+    let work = widths.map(|width| {
+        let source = super::wide_union_relation_tests::equality_guard_chain(width);
+        let matrix = Matrix::new(&source).settings(&settings);
+        let last = format!("\"k{}\"", width - 1);
+        let failures = matrix.returns(&[("last", &last)]);
+        assert!(failures.is_empty(), "{width}: {}", failures.join("\n"));
+        matrix.return_work_counters("last")
+    });
+    let counters = (0..work[0].len())
+        .map(|index| Counter {
+            name: work[0][index].0,
+            values: work.iter().map(|counts| counts[index].1).collect(),
+        })
+        .collect();
+    let work = quadratic("the guard chain", widths, counters);
+    let connected = work.at("connected work", 800);
+    assert!(
+        connected <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK as u64,
+        "800 members would spend {connected} connected work"
+    );
+    let operations = work.at("charged operations", 800);
+    assert!(
+        operations <= verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET as u64,
+        "800 members would charge {operations} operations"
+    );
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_strict() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(STRICT);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_without_strict_null_checks() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(LOOSE);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_without_no_implicit_any() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(STRICT_IMPLICIT);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_with_both_off() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(LOOSE_IMPLICIT);
+}
+
+/// The fixture is the generator's chain, so the gate widths are the same
+/// shape as the full-size chains.
+#[test]
+fn the_800_guard_fixture_is_the_generated_chain() {
+    assert_eq!(
+        NARROW_CHAIN_800,
+        super::wide_union_relation_tests::equality_guard_chain(800)
+    );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_strict() {
+        an_800_guard_narrowing_chain_answers_in(STRICT);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
+        an_800_guard_narrowing_chain_answers_in(LOOSE);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
+        an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_with_both_off() {
+        an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
+    }
 }

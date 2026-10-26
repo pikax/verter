@@ -31,7 +31,6 @@ fn export_table_refusals_keep_the_complete_answer_and_typed_reason() {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 1,
                 max_entry_bytes: 1,
-                active_ceiling_bytes: 1,
                 pin_threshold_bytes: 1,
             });
             let mut routes = crate::resolver_core::route_db::RouteDb::new();
@@ -54,7 +53,7 @@ fn export_table_refusals_keep_the_complete_answer_and_typed_reason() {
                 }
                 Some(NonAdmissionReason::UnresolvedProvenance) => {
                     match SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(
-                        Arc::from([]),
+                        verter_session_query::facts::fact_set::FactSet::empty(),
                     )) {
                         SignatureAdmission::NonCacheable(reason) => Err(reason),
                         _ => panic!("non-cacheable provenance cannot admit"),

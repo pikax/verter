@@ -14,7 +14,6 @@ const CANONICAL_LEN: usize = 12_000;
 fn unbounded_account() -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX,
-        active_ceiling_bytes: usize::MAX,
         max_entry_bytes: usize::MAX,
         pin_threshold_bytes: usize::MAX,
     })
@@ -165,7 +164,11 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     drop(members);
     drop((root, member));
     drop(receipt);
-    assert_eq!(account.snapshot().total_bytes(), 0, "every charge released");
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        store.project_dep_name_pinned_bytes(),
+        "every charge released but the store's own name"
+    );
     assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
 }
 
@@ -174,7 +177,6 @@ fn a_refused_candidate_keeps_no_charge_and_no_registration() {
     let (carrier, roots) = oversized_carrier();
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: CANONICAL_LEN,
-        active_ceiling_bytes: CANONICAL_LEN,
         max_entry_bytes: CANONICAL_LEN,
         pin_threshold_bytes: CANONICAL_LEN,
     });

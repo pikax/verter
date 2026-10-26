@@ -3843,6 +3843,90 @@ fn ffi_component_meta_distinguishes_partial_from_exact_empty() {
     );
 }
 
+/// Every method and call signature of a prop's object type reaches the
+/// protobuf type graph (the NAPI payload) with its own signature: through
+/// the session, the FFI projection and the payload encoder, `m0(): 0` ..
+/// `m31(): 31` and `(): 32` each decode to a function returning its own
+/// literal.
+#[test]
+fn prop_object_methods_reach_protobuf_with_their_own_signatures() {
+    use verter_protocol::verter::v1::component_property_key::Key;
+    use verter_protocol::verter::v1::type_node::Kind;
+
+    const METHODS: u32 = 32;
+    let members: String = (0..METHODS).map(|i| format!("m{i}(): {i}; ")).collect();
+    let source = format!(
+        "<script setup lang=\"ts\">\ndefineProps<{{ api: {{ {members}(): {METHODS} }} }}>()\n</script>\n<template><div /></template>"
+    );
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    let canonical = "/Methods.vue";
+    let _ = session
+        .upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source.as_str()),
+            file_language: host::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("registered carrier");
+    let meta = sidecar_less_wire_payload(&session, canonical);
+    let payload = verter_protocol::component_meta::component_meta_payload(&meta);
+    let graph = payload.type_graph.expect("type graph");
+    let string = |id: u32| graph.strings[(id - 1) as usize].as_str();
+    let node = |id: u32| {
+        graph.nodes[(id - 1) as usize]
+            .kind
+            .as_ref()
+            .expect("node kind")
+    };
+    let props = payload
+        .body
+        .expect("payload body")
+        .facts
+        .expect("component facts")
+        .props
+        .expect("props fact")
+        .value
+        .expect("props value")
+        .entries;
+    let api = props
+        .iter()
+        .find(|prop| string(prop.name_id) == "api")
+        .expect("the api prop");
+    let Kind::Object(object) = node(api.type_node_id) else {
+        panic!("api is an object node, got {:?}", node(api.type_node_id));
+    };
+    let signatures: Vec<(String, f64)> = object
+        .members
+        .iter()
+        .map(|member| {
+            let name = match member
+                .property_key
+                .as_ref()
+                .and_then(|key| key.key.as_ref())
+            {
+                Some(Key::StringId(id)) => string(*id).to_string(),
+                _ => "()".to_string(),
+            };
+            let Kind::Function(function) = node(member.function_node_id) else {
+                panic!("{name} carries a function node");
+            };
+            let Kind::Literal(literal) = node(function.return_type_node_id) else {
+                panic!("{name} returns a literal");
+            };
+            (name, literal.number_value)
+        })
+        .collect();
+    let expected: Vec<(String, f64)> = (0..METHODS)
+        .map(|i| (format!("m{i}"), f64::from(i)))
+        .chain(std::iter::once(("()".to_string(), f64::from(METHODS))))
+        .collect();
+    assert_eq!(
+        signatures, expected,
+        "each member decodes to its own signature"
+    );
+}
+
 fn svelte_props_lane(source: &str) -> (i32, Vec<u32>, Vec<String>, Option<bool>) {
     let session = host::VerterHost::new_standalone(host::HostConfig::default());
     let canonical = "/Props.svelte";

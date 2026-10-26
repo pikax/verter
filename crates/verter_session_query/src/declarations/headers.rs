@@ -1,7 +1,7 @@
 //! Declaration header records shared by the header index and its consumers.
 
 /// Where one enum member is declared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnumMemberPosition {
     /// The member's source start offset.
     pub start: u32,

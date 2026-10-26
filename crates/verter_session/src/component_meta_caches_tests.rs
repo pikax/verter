@@ -504,8 +504,8 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.cache_key(canonical, mode)
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-        self.inner.snapshot_store_view_read()
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.inner.snapshot_store_view_read().await
     }
 
     fn resolution_completeness(
@@ -519,13 +519,14 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.current_view_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         store_view: &Self::View,
     ) -> Option<Self::CapturedInputs> {
         self.inner
             .capture_component_meta_inputs(canonical, store_view)
+            .await
     }
 
     fn try_get_cached_component_meta(
@@ -667,7 +668,10 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
         overlay: Arc::new(CanonicalCompletionOverlay::new()),
     };
     let key = probe_host.cache_key(&canonical, mode);
-    let token = probe_host.snapshot_store_view_read().0.compat_token();
+    let token = host
+        .drive_for_tests(probe_host.snapshot_store_view_read())
+        .0
+        .compat_token();
 
     let sf = host.resolver_runtime().component_meta.singleflight();
     let follower_parked = sf.subscribe_joiner_park();
@@ -1008,7 +1012,7 @@ fn shape_value_and_fact_sig_for_scope(
     result_is_partial: bool,
 ) -> (
     verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+    verter_session_query::facts::fact_set::FactSet,
 ) {
     use verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     // Force the scope's `IndexedReady` artifact to materialise so the
@@ -1414,7 +1418,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(&control_key, || {
             control_computes.set(control_computes.get() + 1);
-            ComputedEntry::Rooted(declaration("rooted"), Arc::clone(&facts))
+            ComputedEntry::Rooted(declaration("rooted"), facts.clone())
         });
     assert_eq!(
         control_first.as_ref().and_then(|d| d.text.as_deref()),
@@ -1431,7 +1435,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(&control_key, || {
             control_computes.set(control_computes.get() + 1);
-            ComputedEntry::Rooted(declaration("recomputed"), Arc::clone(&facts))
+            ComputedEntry::Rooted(declaration("recomputed"), facts.clone())
         });
     assert_eq!(
         control_computes.get(),
@@ -1556,8 +1560,8 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
             self.inner.cache_key(canonical, mode)
         }
-        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-            self.inner.snapshot_store_view_read()
+        async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+            self.inner.snapshot_store_view_read().await
         }
         fn resolution_completeness(
             &self,
@@ -1568,13 +1572,14 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn current_view_supersession_fingerprint(&self) -> u64 {
             self.inner.current_view_supersession_fingerprint()
         }
-        fn capture_component_meta_inputs(
+        async fn capture_component_meta_inputs(
             &self,
             canonical: &str,
             store_view: &Self::View,
         ) -> Option<Self::CapturedInputs> {
             self.inner
                 .capture_component_meta_inputs(canonical, store_view)
+                .await
         }
         fn try_get_cached_component_meta(
             &self,
@@ -1730,14 +1735,15 @@ fn shape_cache_close_drops_rooted_closed_subject_and_dependent_entries() {
 
     let (value_a, sig_a) = shape_value_and_fact_sig_for_scope(ctx, "/rel_a.ts", false);
     let (value_b, sig_b) = shape_value_and_fact_sig_for_scope(ctx, "/rel_b.ts", false);
-    let sig_b_and_a: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> = Arc::from(
-        sig_b
-            .iter()
-            .chain(sig_a.iter())
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    );
+    let sig_b_and_a: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(
+            sig_b
+                .iter()
+                .chain(sig_a.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
 
     let key_rooted_a = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/rel_a.ts"),
@@ -1765,7 +1771,7 @@ fn shape_cache_close_drops_rooted_closed_subject_and_dependent_entries() {
     let _ = db.fixture(ctx).admit_computed_traced_for_test(
         &key_b_by_closed_node,
         value_b.clone(),
-        Arc::clone(&sig_b),
+        sig_b.clone(),
     );
     let _ = db.fixture(ctx).admit_computed_traced_for_test(
         &key_b_depends_on_a,
@@ -2200,7 +2206,6 @@ mod cached_result_footprint {
         let account = verter_session_query::retention::SemanticRetentionAccount::new(
             verter_session_query::retention::RetentionLimits {
                 aggregate_ceiling_bytes: usize::MAX,
-                active_ceiling_bytes: usize::MAX,
                 max_entry_bytes: usize::MAX,
                 pin_threshold_bytes: usize::MAX,
             },

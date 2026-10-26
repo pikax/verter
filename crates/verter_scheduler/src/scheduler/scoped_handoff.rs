@@ -3,8 +3,7 @@
 use super::*;
 use std::marker::PhantomData;
 use std::task::{Poll, Waker};
-use verter_execution::cancellation::CancellationSubscription;
-use verter_execution::tasks::{ExecutionScope, ExecutionTask, WaitEdge};
+use verter_execution::tasks::WaitEdge;
 use verter_execution::wake::WakeRegistration;
 
 /// One advancement of a scoped cache-node computation.
@@ -29,22 +28,32 @@ pub enum ScopedCacheNodeStep<T: Send + Sync + 'static> {
 /// thread; `poll` requires exclusive access. It retains the scheduler while live.
 ///
 /// Drop withdraws this subscriber and detaches only its request owner. A
-/// transferred producer keeps working for any surviving sibling. Cancellation
-/// is checked and registered on every poll. Reset/shutdown and producer settlement wake all
-/// subscribers. Polling after a terminal value or error is a contract violation.
+/// transferred producer keeps working for any surviving sibling. A pending
+/// handoff is also registered on its request's cancellation, so cancelling
+/// the request wakes it and its next poll answers `Cancelled`. Reset/shutdown
+/// and producer settlement wake all subscribers. Polling after a terminal
+/// value or error is a contract violation.
+///
+/// Construction captures the execution task installed for this scheduler's
+/// registry, or creates one if this is an external root. That task follows the
+/// handoff across threads. A follower holds a shared-registry wait edge to the
+/// transferred producer until it completes or drops; self-dependency and a
+/// cycle return `Reentrant` without cancelling other owners. Producer election
+/// wakes subscribers so waits made before election can register their edges.
 pub struct ScopedCacheNodeHandoff<T: Send + Sync + 'static> {
     scheduler: Option<Arc<Scheduler>>,
     identity: Option<WorkNodeIdentity>,
     flight: Option<Arc<ScopedCacheFlight>>,
     owner_id: u64,
+    task: Option<ExecutionTask>,
+    wait: Option<WaitEdge>,
     context: Option<verter_execution::request_context::OpaqueRequestContext>,
     request: Option<CancellationToken>,
+    /// This handoff's wait on its request's cancellation while pending.
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
     admission: Option<PendingSubmission>,
     registration: WakeRegistration,
     finished: bool,
-    waiter: Option<ExecutionTask>,
-    edge: Option<WaitEdge>,
-    stop: Option<CancellationSubscription>,
     value: PhantomData<T>,
 }
 
@@ -59,22 +68,21 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         submission: Submission,
     ) -> Self {
         let admission = Some(PendingSubmission::new(&scheduler.inbox, Some(submission)));
-        let waiter = ExecutionScope::current(&scheduler.task_registry)
+        let task = ExecutionScope::current(&scheduler.task_registry)
             .unwrap_or_else(|| scheduler.task_registry.register_task());
-        let stop = request.as_ref().map(CancellationToken::subscribe);
         Self {
             scheduler: Some(scheduler),
             identity: Some(identity),
             flight: Some(flight),
             owner_id,
+            task: Some(task),
+            wait: None,
             context,
+            stop: request.as_ref().map(CancellationToken::subscribe),
             request,
             admission,
             registration: WakeRegistration::default(),
             finished: false,
-            waiter: Some(waiter),
-            edge: None,
-            stop,
             value: PhantomData,
         }
     }
@@ -86,6 +94,8 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         waker: &Waker,
     ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
         assert!(!self.finished, "scoped cache handoff already completed");
+        let delivery = Arc::clone(&self.scheduler.as_ref().expect("live scheduler").dag);
+        let _wakes = delivery.defer_wakes();
         if self
             .stop
             .as_mut()
@@ -107,14 +117,18 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
                 Poll::Pending => {
                     // Subscribe to settlement as well as capacity: reset or a
                     // sibling's completion can answer without admitting us.
-                    let mut state = self.flight.as_ref().expect("live flight").state.lock();
+                    let flight = Arc::clone(self.flight.as_ref().expect("live flight"));
+                    let mut state = flight.state.lock();
                     if let Some(terminal) = state.terminal.clone() {
                         drop(state);
                         return self.finish_terminal(terminal);
                     }
-                    state.wakers.register(&mut self.registration, waker);
+                    if let Err(error) = self.subscribe(&mut state, waker) {
+                        drop(state);
+                        return self.finish(Err(error));
+                    }
                     drop(state);
-                    return self.pending();
+                    return self.pending_until_cancelled(waker);
                 }
                 Poll::Ready(Ok(())) => self
                     .scheduler
@@ -131,60 +145,100 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         }
         // Neither admission nor this poll dispatches work. Claiming and
         // registering share the same flight hold as dispatch and settlement.
-        let mut state = self.flight.as_ref().expect("live flight").state.lock();
+        let flight = Arc::clone(self.flight.as_ref().expect("live flight"));
+        let mut state = flight.state.lock();
         if let Some(terminal) = state.terminal.clone() {
             drop(state);
             return self.finish_terminal(terminal);
         }
-        if state.dispatched && !state.builder_claimed {
-            if self.edge.is_none() {
-                match self
-                    .waiter
-                    .as_ref()
-                    .expect("live waiter")
-                    .wait_for(&self.flight.as_ref().expect("live flight").task)
-                {
-                    Ok(edge) => self.edge = Some(edge),
-                    Err(_) => {
-                        drop(state);
-                        return self.finish(Err(ScopedCacheNodeError::Reentrant));
-                    }
-                }
-            }
+        if state.dispatched && state.producer.is_none() {
             let aggregate = state
                 .aggregate
                 .clone()
                 .expect("dispatch attaches the job token");
-            state.builder_claimed = true;
+            state.producer = Some((
+                self.task.as_ref().expect("live task").clone(),
+                self.owner_id,
+            ));
             state.wakers.withdraw(&mut self.registration);
+            // Followers that yielded before election must register their wait
+            // edges now that the producer is known, even if it never runs.
+            let wakes = state.wakers.take();
+            drop(state);
+            let scheduler = self.scheduler.as_ref().expect("live scheduler");
+            {
+                let identity = self.identity.as_ref().expect("live identity");
+                let mut dag = scheduler.dag.lock();
+                if dag
+                    .cancellation_for(identity)
+                    .is_some_and(|current| current.same_source(&aggregate))
+                {
+                    dag.set_execution_task(
+                        identity,
+                        self.task.as_ref().expect("live task").clone(),
+                    );
+                }
+            }
+            scheduler.dag.deliver(vec![wakes]);
             return Poll::Ready(Ok(ScopedCacheNodeStep::Produce(ScopedCacheNodeProducer {
                 scheduler: Arc::clone(self.scheduler.as_ref().expect("live scheduler")),
                 identity: self.identity.as_ref().expect("live identity").clone(),
                 flight: Arc::clone(self.flight.as_ref().expect("live flight")),
                 context: self.context.clone(),
                 aggregate,
+                task: self.task.as_ref().expect("live task").clone(),
                 settled: false,
                 value: PhantomData,
             })));
         }
-        state.wakers.register(&mut self.registration, waker);
+        if let Err(error) = self.subscribe(&mut state, waker) {
+            drop(state);
+            return self.finish(Err(error));
+        }
         drop(state);
-        self.pending()
+        self.pending_until_cancelled(waker)
     }
 
-    fn pending(&mut self) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
-        if self.edge.is_none() {
-            match self
-                .waiter
-                .as_ref()
-                .expect("live waiter")
-                .wait_for(&self.flight.as_ref().expect("live flight").task)
-            {
-                Ok(edge) => self.edge = Some(edge),
-                Err(_) => return self.finish(Err(ScopedCacheNodeError::Reentrant)),
-            }
+    /// Return `Pending` with `waker` also registered on the request's
+    /// cancellation, or answer `Cancelled` when it already landed: a
+    /// cancellation between the poll's first check and this registration
+    /// is still observed.
+    fn pending_until_cancelled(
+        &mut self,
+        waker: &Waker,
+    ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
+        if self
+            .stop
+            .as_mut()
+            .is_some_and(|stop| stop.poll(waker).is_ready())
+        {
+            return self.finish(Err(ScopedCacheNodeError::Cancelled));
         }
         Poll::Pending
+    }
+
+    /// Check task recursion and register the follower's wait before subscribing
+    /// under the flight hold. The transferring handoff itself may await its
+    /// externally driven producer; it does not depend on a different task.
+    fn subscribe(
+        &mut self,
+        state: &mut ScopedCacheFlightState,
+        waker: &Waker,
+    ) -> Result<(), ScopedCacheNodeError> {
+        if let Some((producer, owner_id)) = &state.producer {
+            if *owner_id != self.owner_id && self.wait.is_none() {
+                self.wait = Some(
+                    self.scheduler
+                        .as_ref()
+                        .expect("live scheduler")
+                        .task_registry
+                        .register_wait(self.task.as_ref().expect("live task").id(), producer.id())
+                        .map_err(|_| ScopedCacheNodeError::Reentrant)?,
+                );
+            }
+        }
+        state.wakers.register(&mut self.registration, waker);
+        Ok(())
     }
 
     fn finish_terminal(
@@ -207,9 +261,9 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         answer: Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>,
     ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
         self.finished = true;
-        self.edge = None;
+        self.wait = None;
         self.stop = None;
-        self.waiter = None;
+        self.task = None;
         self.admission = None;
         let flight = self.flight.take().expect("live flight");
         flight.state.lock().wakers.withdraw(&mut self.registration);
@@ -233,9 +287,9 @@ impl<T: Send + Sync + 'static> Drop for ScopedCacheNodeHandoff<T> {
     fn drop(&mut self) {
         // Last-owner detach can synchronously notify the producer. Retire
         // this subscriber's graph and stop interests before that callback.
-        self.edge = None;
+        self.wait = None;
         self.stop = None;
-        self.waiter = None;
+        self.task = None;
         self.admission = None;
         let Some(flight) = self.flight.take() else {
             return;
@@ -258,7 +312,7 @@ impl<T: Send + Sync + 'static> Drop for ScopedCacheNodeHandoff<T> {
 ///
 /// This is executor-neutral owned work authority, with no pool or blocking
 /// adapter. `run` executes on its caller's thread, installs the submitting
-/// request and aggregate cancellation scopes, contains producer panic, and
+/// request, execution-task and aggregate cancellation scopes, contains producer panic, and
 /// publishes once. A cancelled aggregate refuses publication. Dropping the
 /// producer without running it settles the flight as cancelled, waking followers.
 /// The closure may borrow its caller's data; parser arenas need not cross threads.
@@ -268,6 +322,7 @@ pub struct ScopedCacheNodeProducer<T: Send + Sync + 'static> {
     flight: Arc<ScopedCacheFlight>,
     context: Option<verter_execution::request_context::OpaqueRequestContext>,
     aggregate: CancellationToken,
+    task: ExecutionTask,
     settled: bool,
     value: PhantomData<T>,
 }
@@ -275,11 +330,13 @@ pub struct ScopedCacheNodeProducer<T: Send + Sync + 'static> {
 impl<T: Send + Sync + 'static> ScopedCacheNodeProducer<T> {
     /// Run the admitted producer outside its waiting root's poll.
     pub fn run(mut self, build: impl FnOnce(&CancellationToken) -> T) {
-        let _execution = ExecutionScope::install(&self.scheduler.task_registry, &self.flight.task);
-        let _request = self
-            .context
-            .as_ref()
-            .map(|context| Arc::clone(&context.0).install_tls());
+        let _task = ExecutionScope::install(&self.scheduler.task_registry, &self.task);
+        let _request = match self.context.as_ref() {
+            Some(context) => InlineTlsGuard::Install(Arc::clone(&context.0).install_tls()),
+            None => InlineTlsGuard::ClearAll(
+                verter_execution::request_context::AllSlotsClearGuard::clear_all(),
+            ),
+        };
         let _job =
             verter_execution::cancellation::JobCancellationGuard::install(self.aggregate.clone());
         let terminal = if self.aggregate.is_cancelled() {

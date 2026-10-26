@@ -20,40 +20,54 @@ struct DeliveryOwner {
     roots: NodeRootSet,
     signature: Option<SignatureEpochLease>,
     key_roots: NodeRootSet,
-    /// This owner's own block and root-owner metadata, charged
+    /// This owner's own block, with its root sets inline in it, charged
     /// separately from the shared allocations it holds for exactly as long
-    /// as the owner lives: the owner is its caller-first holder, so it is
-    /// pinned while only readers keep it, and a cache retaining the owner
-    /// (a memo candidate whose warm reads share it) adopts the same charge
-    /// into retention for as long as it does ([`SemanticDeliveryLease::adopt_metadata`]).
+    /// as the owner lives. The owner is its delivery's first holder and
+    /// the delivery is in-flight work — published to no cache yet — so it
+    /// is charged ACTIVE, never refused, until a cache retaining the
+    /// owner (a memo candidate whose warm reads share it) adopts the
+    /// charge into retention for as long as it does
+    /// ([`SemanticDeliveryLease::adopt_metadata`]), or the delivery hands
+    /// it to its caller
+    /// ([`SemanticDeliveryLease::hand_off_in_flight`]).
     _own: Option<verter_session_query::retention::shared::CallerHold>,
 }
 
 impl DeliveryOwner {
-    /// Pin this owner's own allocations against `account`: its `Arc` block.
-    /// Its two root owners are owned allocations a caller can clone out of
-    /// a delivered value, so each charges itself, pinned here for the
-    /// owner's readers. The rooted nodes are the arena's; the signature
-    /// epoch is its owner's; the allocations the delivery hands out carry
-    /// their own charges.
+    /// Charge this owner's own allocations against `account`: its `Arc`
+    /// block, in `phase` — pinned for a delivery its caller keeps, in
+    /// flight for one a publication may still adopt. A root set long
+    /// enough to need a shared block names an owned allocation a caller can
+    /// clone out of a delivered value, so the block charges itself, in the
+    /// same phase, for the owner's readers. The rooted nodes are the
+    /// arena's; the signature epoch is its
+    /// owner's; the allocations the delivery hands out carry their own
+    /// charges.
     fn charged(
         mut self,
         account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        phase: DeliveryPhase,
     ) -> std::sync::Arc<Self> {
         let footprint = self.own_footprint();
-        footprint
-            .handles
-            .pin(verter_session_query::retention::owned::ChargeCtx::new(
-                account,
-            ));
-        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
-            account,
-            footprint.bytes,
-        ));
+        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+        let own = match phase {
+            DeliveryPhase::Settled => {
+                footprint.handles.pin(ctx);
+                verter_session_query::retention::shared::CallerHold::pin(account, footprint.bytes)
+            }
+            DeliveryPhase::InFlight => {
+                footprint.handles.charge_in_flight(ctx);
+                verter_session_query::retention::shared::CallerHold::in_flight(
+                    account,
+                    footprint.bytes,
+                )
+            }
+        };
+        self._own = Some(own);
         std::sync::Arc::new(self)
     }
 
-    /// This owner's own block and the root owners' handles.
+    /// This owner's own block and its root sets' shared blocks, as handles.
     fn own_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
         let mut aliases = AliasSet::new();
@@ -115,7 +129,8 @@ impl SemanticDeliveryLease {
             .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
     /// The bytes this delivery's own metadata is charged for: its owner's
-    /// block and the root owners it names, each by its own cell.
+    /// block and the root sets' shared blocks it names, each by its own
+    /// cell.
     #[cfg(any(test, feature = "test-support"))]
     pub fn own_charge_bytes_for_tests(&self) -> usize {
         self.0.as_ref().map_or(0, |owner| {
@@ -127,8 +142,8 @@ impl SemanticDeliveryLease {
     }
 
     /// Observe this delivery's own metadata charges: its owner's block hold,
-    /// against the footprint the owner measures now, and the root-owner
-    /// cells it names. The rooted nodes are the arena's storage and the
+    /// against the footprint the owner measures now, and the root sets'
+    /// shared blocks it names. The rooted nodes are the arena's storage and the
     /// signature epoch its store's, so neither is observed here.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
     pub(crate) fn observe_metadata(
@@ -167,13 +182,46 @@ impl SemanticDeliveryLease {
             .transpose()
     }
 
-    /// The root owners this delivery's metadata names, for a cache that
+    /// Settle this delivery's still-in-flight charges at its caller
+    /// handoff: the delivery is complete and its callers hold it, so the
+    /// owner's own hold and the root sets' shared blocks its metadata names
+    /// transfer from ACTIVE to a pin — never released, never charged
+    /// twice. A publication that already adopted them keeps them
+    /// retained, and a hold that was never in flight keeps its class.
+    pub(super) fn hand_off_in_flight(&self) {
+        if let Some(owner) = self.0.as_ref() {
+            let footprint = owner.own_footprint();
+            footprint.handles.hand_off_in_flight();
+            if let Some(own) = owner._own.as_ref() {
+                own.hand_off_in_flight();
+            }
+        }
+    }
+
+    /// The root sets' shared blocks this delivery's metadata names, for a
+    /// cache that
     /// holds them together with the other allocations it retains.
     pub(super) fn metadata_handles(&self) -> verter_session_query::retention::owned::OwnedHandles {
         self.0
             .as_ref()
             .map(|owner| owner.own_footprint().handles)
             .unwrap_or_default()
+    }
+
+    /// A delivery rooting `roots` and holding no shared allocation, its own
+    /// metadata pinned against `account`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn from_roots(
+        roots: NodeRootSet,
+        account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self(Some(
+            DeliveryOwner {
+                roots,
+                ..Default::default()
+            }
+            .charged(account, DeliveryPhase::Settled),
+        ))
     }
 }
 
@@ -209,21 +257,50 @@ impl<'a> DeliveredAllocations<'a> {
     }
 }
 
+/// How a fresh delivery's allocations are first charged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeliveryPhase {
+    /// The delivery hands its value straight to its caller: its
+    /// allocations are pinned for that caller, exactly as they always
+    /// were.
+    Settled,
+    /// The delivery names in-flight work a publication may still adopt:
+    /// its allocations are charged ACTIVE until the publication or the
+    /// caller handoff settles them.
+    InFlight,
+}
+
 impl SemanticGraphStore {
     pub(crate) fn lease_delivery(
         &self,
         delivered: DeliveredAllocations<'_>,
     ) -> Result<SemanticDeliveryLease, QueryError> {
-        self.mint_delivery(delivered, NodeRootSet::default())
+        self.mint_delivery(delivered, NodeRootSet::default(), DeliveryPhase::Settled)
+    }
+
+    /// Mint a delivery of IN-FLIGHT work: a cold producer's settled value,
+    /// or a candidate a publication is about to stage. The delivery's
+    /// payload is charged ACTIVE — unconditionally, never refused — until
+    /// the publication adopts it into retention or the delivery reaches
+    /// its caller handoff
+    /// ([`SemanticGraphStore::hand_off_delivered_allocations`]).
+    pub(crate) fn lease_delivery_in_flight(
+        &self,
+        delivered: DeliveredAllocations<'_>,
+    ) -> Result<SemanticDeliveryLease, QueryError> {
+        self.mint_delivery(delivered, NodeRootSet::default(), DeliveryPhase::InFlight)
     }
 
     /// Mint a delivery: root its operands, attach its signature-version
-    /// lease, charge the allocations it hands out to its caller (pinned
-    /// until a cache retains them), and pin its own metadata.
+    /// lease, and charge the allocations it hands out — in flight for a
+    /// delivery the producer protocol has not handed off yet, pinned for
+    /// one that goes straight to its caller — together with its own
+    /// metadata in the same phase.
     fn mint_delivery(
         &self,
         delivered: DeliveredAllocations<'_>,
         key_roots: NodeRootSet,
+        phase: DeliveryPhase,
     ) -> Result<SemanticDeliveryLease, QueryError> {
         let result = delivered.result;
         let mut nodes = super::node_roots::RootIds::new();
@@ -251,7 +328,10 @@ impl SemanticGraphStore {
                 })
                 .transpose()?
         };
-        self.pin_delivered_allocations(&delivered);
+        match phase {
+            DeliveryPhase::Settled => self.pin_delivered_allocations(&delivered),
+            DeliveryPhase::InFlight => self.charge_delivered_in_flight(&delivered),
+        }
         let account = self.retention_account();
         if key_roots.operands().is_empty() {
             let lease = SemanticDeliveryLease(Some(
@@ -261,7 +341,7 @@ impl SemanticGraphStore {
                     key_roots,
                     _own: None,
                 }
-                .charged(account),
+                .charged(account, phase),
             ));
             lease.capture();
             return Ok(lease);
@@ -277,7 +357,7 @@ impl SemanticGraphStore {
                 key_roots: NodeRootSet::default(),
                 _own: None,
             }
-            .charged(account),
+            .charged(account, phase),
         ))
         .capture();
         Ok(SemanticDeliveryLease(Some(
@@ -287,7 +367,7 @@ impl SemanticGraphStore {
                 key_roots,
                 _own: None,
             }
-            .charged(account),
+            .charged(account, phase),
         )))
     }
 
@@ -371,6 +451,6 @@ impl SemanticGraphStore {
             }
         });
         let key_roots = self.root_nodes(nodes)?;
-        self.mint_delivery(delivered, key_roots)
+        self.mint_delivery(delivered, key_roots, DeliveryPhase::InFlight)
     }
 }

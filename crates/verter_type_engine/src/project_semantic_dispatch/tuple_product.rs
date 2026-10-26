@@ -25,7 +25,6 @@
 //! folds the ledger's trip and returns a typed incomplete node, without
 //! copying the authored list or representing a truncated tuple as complete.
 
-use std::cell::Cell;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -74,7 +73,7 @@ const TRAVERSAL_BATCH: usize = 256;
 /// diagnostic selector participates in tuple construction.
 #[must_use = "the site lasts while the guard lives"]
 pub(in crate::project_semantic_dispatch) struct CheckingSite<'d> {
-    current: &'d Cell<TupleSplicePosition>,
+    current: &'d verter_execution::sync_cell::SyncCell<TupleSplicePosition>,
     enclosing: TupleSplicePosition,
 }
 

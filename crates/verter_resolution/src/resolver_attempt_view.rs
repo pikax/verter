@@ -90,6 +90,63 @@ impl ResolverAttemptView {
     pub fn input_resolution_retention(&self) -> &crate::InputResolutionRetention {
         &self.input_resolution_retention
     }
+
+    /// [`ResolverObservation::path_probe`] as a snapshot read: a missing
+    /// input is reported without spelling its key, which the caller builds
+    /// from the path it already holds.
+    pub(crate) fn read_path_probe(
+        &self,
+        path: &str,
+    ) -> SnapshotRead<'_, verter_session_query::resolution::PathProbe> {
+        self.read_snapshot(ResolverObservationKind::PathProbe, |snapshot| {
+            snapshot.path_probe(path)
+        })
+    }
+
+    /// [`ResolverObservation::real_path`] as a snapshot read.
+    pub(crate) fn read_real_path(&self, path: &str) -> SnapshotRead<'_, Option<CanonicalId>> {
+        self.read_snapshot(ResolverObservationKind::RealPath, |snapshot| {
+            snapshot.real_path(path)
+        })
+    }
+
+    fn read_snapshot<T>(
+        &self,
+        observation: ResolverObservationKind,
+        read: impl FnOnce(&ResolutionObservationSnapshot) -> Option<T>,
+    ) -> SnapshotRead<'_, T> {
+        let Some((snapshot, basis)) = &self.resolution_snapshot else {
+            return SnapshotRead::Unavailable(observation);
+        };
+        read(snapshot).map_or(SnapshotRead::Missing(basis), SnapshotRead::Known)
+    }
+}
+
+/// One read of the attempt's resolution snapshot.
+pub(crate) enum SnapshotRead<'a, T> {
+    Known(T),
+    /// The snapshot does not hold the input yet; it is loaded under the
+    /// snapshot's basis.
+    Missing(&'a ResolutionBasis),
+    /// The view carries no resolution snapshot.
+    Unavailable(ResolverObservationKind),
+}
+
+impl<T> SnapshotRead<'_, T> {
+    /// The observation-protocol answer: a missing input is the one-key load
+    /// set of `key`.
+    pub(crate) fn into_outcome(
+        self,
+        key: impl FnOnce() -> verter_session_query::resolution::InputKey,
+    ) -> AttemptOutcome<T> {
+        match self {
+            Self::Known(value) => AttemptOutcome::Complete(value),
+            Self::Missing(basis) => AttemptOutcome::NeedInputs(
+                verter_session_query::resolution::LoadSet::new(vec![key()], *basis),
+            ),
+            Self::Unavailable(observation) => unavailable(observation),
+        }
+    }
 }
 
 impl Sealed for ResolverAttemptView {}
@@ -165,59 +222,33 @@ impl ResolverObservation for ResolverAttemptView {
         &self,
         path: &str,
     ) -> AttemptOutcome<verter_session_query::resolution::PathProbe> {
-        if let Some((snapshot, basis)) = &self.resolution_snapshot {
-            return snapshot.path_probe(path).map_or_else(
-                || {
-                    AttemptOutcome::NeedInputs(verter_session_query::resolution::LoadSet::new(
-                        vec![verter_session_query::resolution::InputKey::PathProbe {
-                            path: Arc::from(path),
-                        }],
-                        *basis,
-                    ))
-                },
-                AttemptOutcome::Complete,
-            );
-        }
-        unavailable(ResolverObservationKind::PathProbe)
+        self.read_path_probe(path).into_outcome(|| {
+            verter_session_query::resolution::InputKey::PathProbe {
+                path: Arc::from(path),
+            }
+        })
     }
 
     fn real_path(&self, path: &str) -> AttemptOutcome<Option<CanonicalId>> {
-        if let Some((snapshot, basis)) = &self.resolution_snapshot {
-            return snapshot.real_path(path).map_or_else(
-                || {
-                    AttemptOutcome::NeedInputs(verter_session_query::resolution::LoadSet::new(
-                        vec![verter_session_query::resolution::InputKey::RealPath {
-                            path: Arc::from(path),
-                        }],
-                        *basis,
-                    ))
-                },
-                AttemptOutcome::Complete,
-            );
-        }
-        unavailable(ResolverObservationKind::RealPath)
+        self.read_real_path(path).into_outcome(|| {
+            verter_session_query::resolution::InputKey::RealPath {
+                path: Arc::from(path),
+            }
+        })
     }
 
     fn package_manifest(
         &self,
         directory: &str,
     ) -> AttemptOutcome<Option<Arc<ResolutionPackageManifest>>> {
-        if let Some((snapshot, basis)) = &self.resolution_snapshot {
-            return snapshot.package_manifest(directory).map_or_else(
-                || {
-                    AttemptOutcome::NeedInputs(verter_session_query::resolution::LoadSet::new(
-                        vec![
-                            verter_session_query::resolution::InputKey::PackageManifest {
-                                directory: Arc::from(directory),
-                            },
-                        ],
-                        *basis,
-                    ))
-                },
-                AttemptOutcome::Complete,
-            );
-        }
-        unavailable(ResolverObservationKind::PackageManifest)
+        self.read_snapshot(ResolverObservationKind::PackageManifest, |snapshot| {
+            snapshot.package_manifest(directory)
+        })
+        .into_outcome(
+            || verter_session_query::resolution::InputKey::PackageManifest {
+                directory: Arc::from(directory),
+            },
+        )
     }
 }
 

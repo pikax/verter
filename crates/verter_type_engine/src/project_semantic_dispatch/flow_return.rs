@@ -347,6 +347,32 @@ pub mod flow_admission_fault_injection {
         pub indexed_argument_identity_work: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         #[cfg(any(test, feature = "test-support"))]
         pub short_nested_execution_ledger: AtomicBool,
+        /// How many times a nested function value's capture preparation
+        /// asked the frame creating it to seed a captured value.
+        #[cfg(any(test, feature = "test-support"))]
+        pub nested_capture_seeds: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// When armed, a nested function value's slice content reads as
+        /// unavailable.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fail_nested_slice_content: AtomicBool,
+        /// When armed, every call a nested function value's body evaluates
+        /// counts as having consumed one undecided relation outcome.
+        #[cfg(any(test, feature = "test-support"))]
+        pub undecided_nested_call_relations: AtomicBool,
+        /// When armed, a nested function value never reuses a signature
+        /// the root evaluation composed: its body is evaluated again.
+        #[cfg(any(test, feature = "test-support"))]
+        pub skip_nested_signature_reuse: AtomicBool,
+        /// When armed, the request result is marked partial, without a
+        /// trip, once a nested function's signature has been composed.
+        #[cfg(any(test, feature = "test-support"))]
+        pub partial_after_nested_signature: AtomicBool,
+        /// When armed, every call evidence a flow evaluation records is
+        /// copied to `call_evidence` as whether its relations were decided.
+        #[cfg(any(test, feature = "test-support"))]
+        pub observe_call_evidence: AtomicBool,
+        #[cfg(any(test, feature = "test-support"))]
+        pub call_evidence: std::sync::Mutex<Vec<bool>>,
 
         /// When armed, `build_flow_return` removes the `flow_completion`
         /// proof token from its build output while leaving the boolean
@@ -3739,7 +3765,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         reuse,
                         replay: super::dispatch_txn::FlowMemberReuse {
                             reads: crate::resolver_core::resolver_context::RecordedFactReads {
-                                facts: std::sync::Arc::from(vec![receipt]),
+                                facts: verter_session_query::facts::fact_set::FactSet::from(vec![
+                                    receipt,
+                                ]),
                                 non_cacheable: reads.non_cacheable,
                             },
                             observed_self_roots: observed.observed_self_roots,
@@ -10399,6 +10427,13 @@ enum CalleeStatementEffect {
     Undecided,
 }
 
+/// A nested function value's selected capture inputs and their basis
+/// bytes ([`PreparedFlowCaptureInput::basis_bytes`]).
+struct NestedCaptureInputs {
+    capture_inputs: Vec<PreparedFlowCaptureInput>,
+    capture_basis: Vec<Vec<u8>>,
+}
+
 /// Immutable values prepared for one selected child capture. Source annotation
 /// resolution completes before these values define the child input basis.
 struct PreparedFlowCaptureInput {
@@ -10442,6 +10477,31 @@ impl PreparedFlowCaptureInput {
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
         }
+    }
+
+    /// Every field of this input the nested body observes: the products it
+    /// imports into the body's store (declared type, the whole reaching
+    /// product, definite assignment), whether the body reads it at all,
+    /// whether it entered extended, and the declared type the body's own
+    /// creations inherit. Its subject is fixed by the function's selection,
+    /// and the deferred write it was read under is folded into its reaching.
+    fn basis_bytes(&self) -> Vec<u8> {
+        let mut e = verter_identity::encoding::CanonicalEncoder::new(
+            "verter.session.flow.nested_capture.v1",
+        );
+        e.field_bytes(
+            1,
+            &FlowProductStore::captured_input_bytes(
+                self.declared,
+                self.reaching.as_ref(),
+                self.assignment,
+            ),
+        );
+        e.field_bool(2, self.value_demanded);
+        e.field_bool(3, self.extended);
+        let inferred = self.inferred_declared.map(|node| node.0.to_le_bytes());
+        e.field_option(4, inferred.as_ref().map(|bytes| bytes.as_slice()));
+        e.finish()
     }
 }
 
@@ -10491,26 +10551,79 @@ impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
     }
 }
 
-/// The child observation includes its actual parameter and selected capture
-/// inputs. The demand's separate graph/query basis owns binding identities.
-/// The parent is named by its digest; its whole basis rides the demand's
-/// ancestry ([`super::flow_solve::FlowInputAncestry`]), which keeps the
-/// identity exact without a copy of the parent's bytes at every level.
-struct NestedFlowInputBasis<'a> {
+/// Everything a nested function value's evaluation reads from outside its
+/// body, apart from its parameter types: the enclosing evaluation (named by
+/// its digest; its whole basis rides the demand's ancestry,
+/// [`super::flow_solve::FlowInputAncestry`], which keeps the identity exact
+/// without a copy of the parent's bytes at every level), every field of each
+/// selected capture input ([`PreparedFlowCaptureInput::basis_bytes`]), the
+/// type-parameter environment the function sits in, the contextual
+/// signature it is checked under, and the enclosing receiver it reads `this`
+/// through. The environment's scope, scope payload and shadow set derive
+/// from the evaluation's file, and its name-resolution overlay is empty.
+/// Within one root evaluation the function, its lexical context and these
+/// fix its slice content and its parameter types, so an evaluation of one
+/// function on equal inputs reuses another's signature
+/// (`nested::NestedSignatureMemo`). The demand's separate graph/query basis
+/// owns binding identities.
+struct NestedFlowInputs<'a> {
     parent: verter_identity::encoding::CanonicalDigest,
-    parameters: &'a [SemanticNodeId],
     captures: &'a [Vec<u8>],
+    binders: &'a FlowBinderEnv,
+    contextual: Option<&'a ContextualSignature>,
+    receiver: Option<&'a class_expression::ClassReceiver>,
+}
+
+impl verter_identity::encoding::CanonicalEncode for NestedFlowInputs<'_> {
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v3";
+    fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+        e.field_bytes(1, self.parent.as_bytes());
+        for capture in self.captures {
+            e.field_bytes(2, capture);
+        }
+        let mut env: Vec<_> = self.binders.env.iter().collect();
+        env.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        for (name, node) in env {
+            e.field_str(3, name);
+            e.field_u64(4, node.0);
+        }
+        for decl in &self.binders.type_param_decls {
+            e.field_str(5, &decl.name);
+            e.field_u64(6, decl.param.0);
+            let constraint = decl.constraint.map(|node| node.0.to_le_bytes());
+            e.field_option(7, constraint.as_ref().map(|bytes| bytes.as_slice()));
+            let default = decl.default.map(|node| node.0.to_le_bytes());
+            e.field_option(8, default.as_ref().map(|bytes| bytes.as_slice()));
+            e.field_bool(9, decl.is_const);
+        }
+        e.field_sorted_set(10, self.binders.exact_binders.iter().map(String::as_bytes));
+        e.field_bool(11, self.contextual.is_some());
+        if let Some(contextual) = self.contextual {
+            contextual.encode_fields(e, 12);
+        }
+        e.field_bool(16, self.receiver.is_some());
+        if let Some(receiver) = self.receiver {
+            e.field_u64(17, receiver.binder.0);
+            let base = receiver.base.map(|node| node.0.to_le_bytes());
+            e.field_option(18, base.as_ref().map(|bytes| bytes.as_slice()));
+            e.field_bool(19, receiver.infer_literal_members);
+        }
+    }
+}
+
+/// A nested evaluation's input basis: its inputs ([`NestedFlowInputs`]),
+/// named by their digest, and its actual parameter types.
+struct NestedFlowInputBasis<'a> {
+    inputs: verter_identity::encoding::CanonicalDigest,
+    parameters: &'a [SemanticNodeId],
 }
 
 impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v2";
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_basis.v1";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
-        e.field_bytes(1, self.parent.as_bytes());
+        e.field_bytes(1, self.inputs.as_bytes());
         for parameter in self.parameters {
             e.field_u64(2, parameter.0);
-        }
-        for capture in self.captures {
-            e.field_bytes(3, capture);
         }
     }
 }
@@ -10546,6 +10659,8 @@ mod destructure;
 mod disjunction;
 #[cfg(any(test, feature = "test-support"))]
 pub use arm_index::{index_preparation_for_tests, indexed_arm_visits_for_tests};
+#[cfg(any(test, feature = "test-support"))]
+pub use nested::{nested_body_evaluations_for_tests, nested_signature_reuses_for_tests};
 #[path = "flow_return_footprint.rs"]
 mod footprint;
 #[cfg(any(test, feature = "semantic-observe"))]
@@ -10588,6 +10703,27 @@ pub(super) trait FlowDemandDriver {
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort>;
+    /// Begin recording a read the rest of the evaluation may replay
+    /// ([`ProjectSemanticDispatch::begin_transaction_read`]).
+    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>>;
+    /// End `recording`: what replaying it reproduces, when it is reusable
+    /// and raised no operation refusal
+    /// ([`super::build::TransactionReadRecording::finish_without_operation_refusals`]).
+    fn finish_transaction_read(
+        &self,
+        recording: super::build::TransactionReadRecording<'_>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )>;
+    /// Replay a recorded read into the scopes live now
+    /// ([`ProjectSemanticDispatch::replay_transaction_read`]).
+    fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    );
     /// The capability family of the request context this driver serves.
     type Caps: crate::resolver_core::ResolverCapabilities;
     fn flow_slice_skeleton(
@@ -10930,6 +11066,21 @@ pub(super) trait FlowDemandDriver {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::SurfaceView>;
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId;
+    /// The contextual tuple `node`, whose elements are `elements`
+    /// ([`ProjectSemanticDispatch::contextual_tuple`]).
+    fn contextual_tuple(
+        &self,
+        node: SemanticNodeId,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> super::contextual_tuple::ContextualTuple;
+    /// What `tuple` gives one array literal element
+    /// ([`ProjectSemanticDispatch::tuple_element_context`]).
+    fn tuple_element_context(
+        &self,
+        tuple: &super::contextual_tuple::ContextualTuple,
+        index: usize,
+        shape: super::call_resolve::ArrayLiteralShape,
+    ) -> super::contextual_tuple::TupleElementContext;
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
     fn shallow_lower_type_expr_with_context(
         &self,
@@ -11005,6 +11156,26 @@ pub(super) trait FlowDemandDriver {
     /// Count again the undecided relations a held executor attempt
     /// observed, for the run that resumes it.
     fn restore_call_relation_observations(&self, count: u64);
+    /// Open a window measuring how the undecided relation count moves
+    /// ([`super::dispatch_txn::ResolveCallDomainRuntime::open_undecided_window`]).
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_>;
+    /// Move the count as `delta` measured; `false`, moving nothing, when
+    /// it holds less than the delta took it down by.
+    fn replay_undecided_relation_delta(
+        &self,
+        delta: super::dispatch_txn::UndecidedRelationDelta,
+    ) -> bool;
+    /// Measure the connected demand's charges apart until
+    /// [`Self::close_inline_cost`]
+    /// ([`super::connected_demand::ConnectedDemandLedger::open_inline_cost`]).
+    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_>;
+    /// Charge a measured cost again, as performing its part again would;
+    /// `false`, charging nothing, when the demand lacks the room.
+    fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool;
+    /// Perform `part`, whose result every nested evaluation of the root
+    /// evaluation shares, charged past the measurements of nested bodies
+    /// ([`super::connected_demand::ConnectedDemandLedger::outside_inline_costs`]).
+    fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T;
     /// Open a window in which a contextual callback types while its call's
     /// collector waits ([`ProjectSemanticDispatch::open_contextual_window`]).
     fn open_contextual_window(&self) -> bool;
@@ -11012,6 +11183,9 @@ pub(super) trait FlowDemandDriver {
     /// Whether the running flow evaluation waits on a demand its frame must
     /// produce first.
     fn contextual_window_waits(&self) -> bool;
+    /// Whether a contextual window is open on the running flow evaluation
+    /// ([`ProjectSemanticDispatch::contextual_window_open`]).
+    fn contextual_window_open(&self) -> bool;
     /// Whether relating a typed callback to its call's held contextual
     /// target waits on a demand the frame must produce first
     /// ([`ProjectSemanticDispatch::contextual_delivery_waits`]).
@@ -11072,6 +11246,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         read.adopt(self)
+    }
+    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>> {
+        ProjectSemanticDispatch::begin_transaction_read(self)
+    }
+    fn finish_transaction_read(
+        &self,
+        recording: super::build::TransactionReadRecording<'_>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        recording.finish_without_operation_refusals(self, complete)
+    }
+    fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    ) {
+        ProjectSemanticDispatch::replay_transaction_read(self, reuse, replay);
     }
     type Caps = C;
     fn flow_slice_skeleton(
@@ -11619,6 +11813,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::resolved_reduction_view(self, view)
     }
+    fn contextual_tuple(
+        &self,
+        node: SemanticNodeId,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> super::contextual_tuple::ContextualTuple {
+        ProjectSemanticDispatch::contextual_tuple(self, node, elements)
+    }
+    fn tuple_element_context(
+        &self,
+        tuple: &super::contextual_tuple::ContextualTuple,
+        index: usize,
+        shape: super::call_resolve::ArrayLiteralShape,
+    ) -> super::contextual_tuple::TupleElementContext {
+        ProjectSemanticDispatch::tuple_element_context(self, tuple, index, shape)
+    }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         ProjectSemanticDispatch::self_reference_declaration(self, node)
     }
@@ -11734,12 +11943,38 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         self.dispatch_txn.borrow().call.undecided_relations
     }
     fn discard_call_relation_observations(&self, count: u64) {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(count);
+        self.dispatch_txn
+            .borrow_mut()
+            .call
+            .discard_undecided_relations(count);
     }
     fn restore_call_relation_observations(&self, count: u64) {
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
+    }
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_> {
+        super::dispatch_txn::UndecidedRelationWindow::open(&self.dispatch_txn)
+    }
+    fn replay_undecided_relation_delta(
+        &self,
+        delta: super::dispatch_txn::UndecidedRelationDelta,
+    ) -> bool {
+        self.dispatch_txn
+            .borrow_mut()
+            .call
+            .replay_undecided_delta(delta)
+    }
+    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_> {
+        self.connected_demand().open_inline_cost()
+    }
+    fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
+        self.connected_demand().replay_inline_cost(
+            cost,
+            crate::request_context::current_request_budget().as_deref(),
+        )
+    }
+    fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        self.connected_demand().outside_inline_costs(part)
     }
     fn open_contextual_window(&self) -> bool {
         ProjectSemanticDispatch::open_contextual_window(self)
@@ -11749,6 +11984,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn contextual_window_waits(&self) -> bool {
         ProjectSemanticDispatch::contextual_window_waits(self)
+    }
+    fn contextual_window_open(&self) -> bool {
+        ProjectSemanticDispatch::contextual_window_open(self)
     }
     fn contextual_delivery_waits(
         &self,
@@ -11920,6 +12158,26 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         self.driver.adopt_read(read)
+    }
+    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>> {
+        self.driver.begin_transaction_read()
+    }
+    fn finish_transaction_read(
+        &self,
+        recording: super::build::TransactionReadRecording<'_>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        self.driver.finish_transaction_read(recording, complete)
+    }
+    fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    ) {
+        self.driver.replay_transaction_read(reuse, replay);
     }
     fn flow_slice_skeleton(
         &self,
@@ -12442,6 +12700,21 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         self.driver.resolved_reduction_view(view)
     }
+    fn contextual_tuple(
+        &self,
+        node: SemanticNodeId,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> super::contextual_tuple::ContextualTuple {
+        self.driver.contextual_tuple(node, elements)
+    }
+    fn tuple_element_context(
+        &self,
+        tuple: &super::contextual_tuple::ContextualTuple,
+        index: usize,
+        shape: super::call_resolve::ArrayLiteralShape,
+    ) -> super::contextual_tuple::TupleElementContext {
+        self.driver.tuple_element_context(tuple, index, shape)
+    }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         self.driver.self_reference_declaration(node)
     }
@@ -12564,6 +12837,24 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn restore_call_relation_observations(&self, count: u64) {
         self.driver.restore_call_relation_observations(count);
     }
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_> {
+        self.driver.open_undecided_relation_window()
+    }
+    fn replay_undecided_relation_delta(
+        &self,
+        delta: super::dispatch_txn::UndecidedRelationDelta,
+    ) -> bool {
+        self.driver.replay_undecided_relation_delta(delta)
+    }
+    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_> {
+        self.driver.open_inline_cost()
+    }
+    fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
+        self.driver.replay_inline_cost(cost)
+    }
+    fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        self.driver.outside_inline_costs(part)
+    }
     fn open_contextual_window(&self) -> bool {
         self.driver.open_contextual_window()
     }
@@ -12572,6 +12863,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn contextual_window_waits(&self) -> bool {
         self.driver.contextual_window_waits()
+    }
+    fn contextual_window_open(&self) -> bool {
+        self.driver.contextual_window_open()
     }
     fn contextual_delivery_waits(
         &self,
@@ -12648,12 +12942,11 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// and holding the enclosing frame's key would name the wrong
     /// function. The `Option` is what makes that mistake unexpressible.
     self_slot: Option<&'b FlowReturnKey>,
-    /// The nested function values whose returns are being evaluated, the
-    /// outermost first, each flagged once a return it depends on is found
-    /// to read it again: the checker's return-type resolution stack
-    /// (`pushTypeResolution`), shared by every nested evaluator of one
-    /// root evaluation.
-    resolving_functions: std::rc::Rc<std::cell::RefCell<nested::ResolvingFunctions>>,
+    /// The checker's return-type resolution stack (`pushTypeResolution`)
+    /// and the nested signatures this evaluation composed, shared by every
+    /// nested evaluator of one root evaluation and dropped with it
+    /// ([`nested::NestedResolution`]).
+    resolving_functions: std::rc::Rc<std::cell::RefCell<nested::NestedResolution>>,
     /// The values an object literal's recursion check has walked and found
     /// to hold no polymorphic `this` binder at all
     /// ([`FlowEvaluator::value_mentions_receiver`]), shared by every nested
@@ -13837,11 +14130,13 @@ enum ExprProgress {
 #[derive(Clone, Default)]
 struct EnclosingFrames<'b>(Option<std::rc::Rc<EnclosingFrame<'b>>>);
 
-/// One frame around a nested function's evaluator.
+/// One frame around a nested function's evaluator, with `outside` frames
+/// around it.
 struct EnclosingFrame<'b> {
     function: verter_session_query::function_program::FunctionProgramKey,
     binder_env: &'b FlowBinderEnv,
     products: FlowProductStore,
+    outside: usize,
     outer: EnclosingFrames<'b>,
 }
 
@@ -13857,8 +14152,15 @@ impl<'b> EnclosingFrames<'b> {
             function,
             binder_env,
             products,
+            outside: self.len(),
             outer: self.clone(),
         })))
+    }
+
+    /// How many frames the chain holds: the number of frames around the
+    /// evaluator it is around, and the position of that evaluator's frame.
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |frame| frame.outside + 1)
     }
 
     /// The frames, innermost first.
@@ -14162,14 +14464,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         } else {
             self.lower_body_type(declared.ty())
         };
-        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver {
+        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver::of_type(
             binder,
-            base: Some(binder),
-            infer_literal_members: false,
-            members: std::cell::RefCell::new(Vec::new()),
-            declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
-            forward_read: std::cell::Cell::new(false),
-        }));
+            Some(binder),
+        )));
     }
 
     /// The canonical union of `members` under this frame's null algebra —
@@ -14533,8 +14831,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let receiver = inherited_receiver.or_else(|| {
             (!data_only || contextual.is_some() || contextual_this.is_some()).then(|| {
-                std::rc::Rc::new(class_expression::ClassReceiver {
-                    binder: contextual_this.unwrap_or_else(|| {
+                std::rc::Rc::new(class_expression::ClassReceiver::new(
+                    contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(
                             self.canonical,
                             self.owner,
@@ -14542,12 +14840,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             None,
                         )
                     }),
-                    members: std::cell::RefCell::new(Vec::new()),
-                    declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
-                    base: contextual_this,
+                    contextual_this,
+                    rustc_hash::FxHashSet::default(),
                     infer_literal_members,
-                    forward_read: std::cell::Cell::new(false),
-                })
+                ))
             })
         });
         if let Some(receiver) = receiver.as_ref() {
@@ -15876,7 +16172,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// array literal shaped `shape` typed by `contextual`
     /// (`getContextualTypeForElementExpression`): per constituent of a
     /// union, a tuple's element at the position
-    /// ([`super::call_resolve::tuple_element_contexts`]), an array's
+    /// ([`FlowDemandDriver::tuple_element_context`]), an array's
     /// element type, or, while no spread came before it, the object's
     /// numeric property or index; a constrained type parameter's through
     /// its constraint.
@@ -15901,17 +16197,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             SemanticNodeData::Array { element, .. } => Some(*element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let types = super::call_resolve::tuple_element_contexts(
-                    elements,
-                    position,
-                    shape,
-                    |rest| match graph.node_data(rest).as_deref() {
-                        Some(SemanticNodeData::Array { element, .. }) => Some(*element),
-                        _ => None,
-                    },
-                );
+                let tuple = self.dispatch.contextual_tuple(contextual, elements);
                 drop(data);
-                (!types.is_empty()).then(|| self.union(&types))
+                match self.dispatch.tuple_element_context(&tuple, position, shape) {
+                    super::contextual_tuple::TupleElementContext::None => None,
+                    super::contextual_tuple::TupleElementContext::Element(element) => {
+                        Some(self.union(&[element]))
+                    }
+                    super::contextual_tuple::TupleElementContext::Middle(middle) => {
+                        Some(self.union(&middle))
+                    }
+                }
             }
             SemanticNodeData::TypeParam {
                 constraint: Some(constraint),
@@ -19187,19 +19483,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.collect_throw_points = collect;
     }
 
+    /// The parameter ordinal, key and default presence of `binding` when
+    /// it is an element a parameter destructures.
+    fn destructured_param_element(
+        &self,
+        binding: &FlowProductSubject,
+    ) -> Option<(usize, Arc<str>, bool)> {
+        self.param_names
+            .iter()
+            .enumerate()
+            .find_map(|(ordinal, param)| {
+                param
+                    .destructured
+                    .iter()
+                    .find(|element| matches!(binding, FlowProductSubject::Local(id) if *id == element.binding))
+                    .map(|element| (ordinal, Arc::clone(&element.key), element.has_default))
+            })
+    }
+
     fn seed_destructured_param_element_value(&mut self, binding: &FlowProductSubject) {
-        let Some((ordinal, key, has_default)) =
-            self.param_names
-                .iter()
-                .enumerate()
-                .find_map(|(ordinal, param)| {
-                    param
-                        .destructured
-                        .iter()
-                        .find(|element| matches!(binding, FlowProductSubject::Local(id) if *id == element.binding))
-                        .map(|element| (ordinal, Arc::clone(&element.key), element.has_default))
-                })
-        else {
+        let Some((ordinal, key, has_default)) = self.destructured_param_element(binding) else {
             return;
         };
         let projected = self
@@ -19719,7 +20022,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(unwrap) = self.carrier_unwraps.borrow().get(&node) {
             return *unwrap;
         }
-        let unwrap = self.dispatch.unwrap_identity_carrier_for_relation(node);
+        let dispatch = self.dispatch;
+        let unwrap =
+            dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node));
         self.carrier_unwraps.borrow_mut().insert(node, unwrap);
         unwrap
     }
@@ -23118,7 +23423,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(read) = self.discriminant_members.borrow().get(&key) {
             return *read;
         }
-        let read = self.project_segments_navigate(arm, member);
+        let read = self
+            .dispatch
+            .outside_inline_costs(|| self.project_segments_navigate(arm, member));
         self.discriminant_members.borrow_mut().insert(key, read);
         read
     }
@@ -24349,7 +24656,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(known) = self.guard_relations.borrow().get(&pair) {
             return *known;
         }
-        let related = self.assignable(source, target);
+        let related = self
+            .dispatch
+            .outside_inline_costs(|| self.assignable(source, target));
         self.guard_relations.borrow_mut().insert(pair, related);
         related
     }
@@ -27145,6 +27454,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         })
     }
 
+    /// Note that this evaluator read `frame`, one around it, for the
+    /// recordings of the evaluations it sits in
+    /// ([`nested::NestedResolution::note_frame_read`]).
+    fn note_enclosing_frame_read(&self, frame: &EnclosingFrame<'_>) {
+        self.resolving_functions
+            .borrow_mut()
+            .note_frame_read(self.enclosing_frames.len(), frame.outside);
+    }
+
     fn capture_source_products(
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
@@ -27153,8 +27471,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.products.clone()
         } else {
             self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration().defining_function)
-                    .then(|| frame.products.clone())
+                (frame.function == locator.declaration().defining_function).then(|| {
+                    self.note_enclosing_frame_read(frame);
+                    frame.products.clone()
+                })
             })?
         };
         let subject = FlowProductSubject::Local(locator.local_declaration()?);
@@ -27172,8 +27492,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(self.binder_env)
         } else {
             self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration().defining_function)
-                    .then_some(frame.binder_env)
+                (frame.function == locator.declaration().defining_function).then(|| {
+                    self.note_enclosing_frame_read(frame);
+                    frame.binder_env
+                })
             })
         };
         let Some(binder_env) = binder_env else {
@@ -27218,6 +27540,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn nested_signature_prefix(
         &mut self,
+        precomputed: Option<(NestedCaptureInputs, verter_identity::identity::InputBasisId)>,
         nested_params: &[verter_session_query::flow::slice::SliceParam],
         type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
@@ -27436,269 +27759,38 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let inputs = FlowProductInputs::for_bound_graph(&bound);
-        // Prepare exactly the selected input values before sealing their basis.
-        // Only this transient evaluator owns execution handles; descriptors keep
-        // structural source locators and never retain semantic state.
-        let mut capture_inputs: Vec<_> = inputs
-            .selected_captures(planned.selection())
-            .map(|(identity, value_demanded)| {
-                let local = self.bindings.local(identity);
-                // A capture past its last assignment enters the body at its
-                // narrowed type where the function is created.
-                // A capture of this frame's own that entered it extended is
-                // extended for the functions this frame creates too.
-                let extended = match local {
-                    Some(binding) => extended_captures.contains(&binding),
-                    None => self.extended_capture_identities.contains(identity),
+        // Inputs read before the slice content changed no frame, and no
+        // frame changed since: they are the ones read here.
+        let (NestedCaptureInputs { capture_inputs, .. }, nested_inputs) = match precomputed {
+            Some(precomputed) => precomputed,
+            None => {
+                let Some(captures) = self.prepare_nested_capture_inputs(
+                    &inputs,
+                    planned,
+                    capture_context,
+                    declared_evolving_captures,
+                    extended_captures,
+                    false,
+                ) else {
+                    unreachable!("a preparation that may change a frame always completes");
                 };
-                let parent = local
-                    .map(FlowProductSubject::Local)
-                    .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
-                let narrowed = extended
-                    .then(|| {
-                        self.products.narrowing(&parent).and_then(|narrowing| {
-                            narrowing
-                                .facts()
-                                .iter()
-                                .find(|fact| fact.path.is_empty())
-                                .map(|fact| self.narrowed_node(&fact.narrowed_to))
-                        })
-                    })
-                    .flatten();
-                if value_demanded
-                    && self.products.contains_subject(&parent)
-                    && self.products.reaching(&parent).is_none()
-                {
-                    self.seed_destructured_param_element(&parent);
-                }
-                // A captured EVOLVING array reads its declared type, or
-                // (a `let` past its last assignment) continues from the
-                // evolving array it holds here.
-                if value_demanded && declared_evolving_captures.contains(identity) {
-                    let declared = self.evolving_declared_type();
-                    return PreparedFlowCaptureInput {
-                        subject: FlowProductSubject::Captured(identity.clone()),
-                        value_demanded,
-                        extended: false,
-                        assignment: self.products.assignment(&parent).with_single_path(false),
-                        deferred_write: None,
-                        reaching: Some(ReachingTypeProduct::of(declared)),
-                        declared: None,
-                        inferred_declared: None,
-                    };
-                }
-                // An AUTO-TYPED `var` (`noImplicitAny` on, no annotation, no
-                // initializer or a bare `null` / `undefined` one): a closure
-                // never reads a `var` at its creation point, so the read
-                // reaches the declaration and takes its declared type — the
-                // checker's auto type, read as `any` (TS7005).
-                if value_demanded
-                    && self.binding_layer(&parent) == FlowBindingLayer::Function
-                    && self.is_auto_typed_local(&parent)
-                {
-                    let any = self
-                        .dispatch
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-                    return PreparedFlowCaptureInput {
-                        subject: FlowProductSubject::Captured(identity.clone()),
-                        value_demanded,
-                        extended: false,
-                        assignment: self.products.assignment(&parent).with_single_path(false),
-                        deferred_write: None,
-                        reaching: Some(ReachingTypeProduct::of(any)),
-                        declared: Some(any),
-                        inferred_declared: Some(any),
-                    };
-                }
-                // Outside its extended container an unannotated `let` /
-                // `var` reads its DECLARED type: its initializer's widened
-                // type, whatever is assigned before or after the creation.
-                // A capture this frame itself reads outside its extended
-                // container is outside it in every deeper function too: it
-                // keeps the declared type the outer creation supplied.
-                let inferred_declared = (value_demanded && !extended)
-                    .then(|| {
-                        let Some(binding) = local else {
-                            return self
-                                .declared_capture_types
-                                .get(identity)
-                                .map(|node| Some(*node));
-                        };
-                        let fact = self.skeleton.binding(binding);
-                        let unannotated_whole = matches!(
-                            fact.kind,
-                            verter_session_query::flow::skeleton::SkeletonBindingKind::Let
-                                | verter_session_query::flow::skeleton::SkeletonBindingKind::Var
-                        ) && !fact.destructured
-                            && fact.annotation_span.is_none();
-                        unannotated_whole.then(|| {
-                            self.inferred_declared_locals
-                                .get(&self.canonical_runtime_subject(&parent))
-                                .map(|(_, node)| *node)
-                        })
-                    })
-                    .flatten();
-                if inferred_declared == Some(None) {
-                    // The declarator never supplied its type (it was not
-                    // evaluated on any path before the creation).
-                    self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                        verter_session_query::flow::policy::FlowGap::ClosureCapture,
-                    ));
-                }
-                let inferred_declared = inferred_declared.flatten();
-                PreparedFlowCaptureInput {
-                    subject: FlowProductSubject::Captured(identity.clone()),
-                    value_demanded,
-                    extended,
-                    assignment: if value_demanded {
-                        self.products.assignment(&parent).with_single_path(false)
-                    } else {
-                        DefiniteAssignmentProduct::default()
-                    },
-                    // A DEFERRED read observes every whole-slot write the
-                    // enclosing statement performs, ahead of the in-order
-                    // application: the statement's capture look-ahead
-                    // REPLACES the statement-entry reaching (the checker's
-                    // own deferred-read rule). Direct reads are unaffected
-                    // — they consume the live, evaluation-ordered reaching.
-                    //
-                    // An EXTENDED capture reads the reaching where the
-                    // function is created (or invoked, for an IIFE): no
-                    // write of the statement comes between, so the live
-                    // reaching and its narrowing are the answer.
-                    deferred_write: value_demanded
-                        .then(|| {
-                            self.capture_write_lookahead
-                                .get(&self.canonical_runtime_subject(&parent))
-                                .copied()
-                        })
-                        .flatten(),
-                    reaching: value_demanded
-                        .then(|| {
-                            if extended {
-                                narrowed
-                                    .map(ReachingTypeProduct::of)
-                                    .or_else(|| self.products.reaching_type(&parent).cloned())
-                                    .map(|reaching| {
-                                        // A capture is assumed initialized: a path
-                                        // reaching the creation only through an
-                                        // auto-typed declaration reads the
-                                        // variable's initial type — `any`, which
-                                        // absorbs every other path — once the
-                                        // variable is assigned anywhere.
-                                        if reaching.reaches_declaration_only()
-                                            && local.is_some_and(|binding| {
-                                                self.frame_writes_binding(binding)
-                                            })
-                                        {
-                                            ReachingTypeProduct::of(
-                                                self.dispatch.graph().intern_node(
-                                                    SemanticNodeData::Primitive(PrimitiveKind::Any),
-                                                ),
-                                            )
-                                        } else {
-                                            reaching
-                                        }
-                                    })
-                            } else {
-                                self.capture_write_lookahead
-                                    .get(&self.canonical_runtime_subject(&parent))
-                                    .map(|node| ReachingTypeProduct::of(*node))
-                                    .or_else(|| inferred_declared.map(ReachingTypeProduct::of))
-                                    .or_else(|| self.products.reaching_type(&parent).cloned())
-                            }
-                        })
-                        .flatten(),
-                    declared: value_demanded
-                        .then(|| self.products.declared_type(&parent))
-                        .flatten(),
-                    inferred_declared,
-                }
-            })
-            .collect();
-        let mut candidates: Vec<_> = inputs
-            .selected_captures(planned.selection())
-            .map(|(identity, value_demanded)| {
-                if value_demanded {
-                    capture_context.mutable_authorities(identity)
-                } else {
-                    Vec::new()
-                }
-                .into_iter()
-            })
-            .collect();
-        let mut unresolved: Vec<_> = (0..capture_inputs.len()).collect();
-        while !unresolved.is_empty() {
-            let mut missing = Vec::new();
-            for index in unresolved.drain(..) {
-                let Some(locator) = candidates[index].next() else {
-                    continue;
-                };
-                let source = self.capture_source_products(&locator);
-                if let Some(node) = source
-                    .as_ref()
-                    .and_then(|(products, subject)| products.declared_type(subject))
-                {
-                    capture_inputs[index].apply_authority(node, locator.source());
-                } else {
-                    missing.push((index, locator, source));
-                }
-            }
-            if missing.is_empty() {
-                break;
-            }
-            let locators: Vec<_> = missing
-                .iter()
-                .map(|(_, locator, _)| locator.clone())
-                .collect();
-            let authorities = self
-                .dispatch
-                .source
-                .indexed_flow_source(self.canonical)
-                .and_then(|(_, demand)| demand?.flow_capture_authorities(&locators));
-            let Some(authorities) = authorities else {
-                self.record_degradation(
-                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                let nested_inputs = self.nested_flow_inputs(
+                    &captures.capture_basis,
+                    outer_env,
+                    capture_context,
+                    contextual,
                 );
-                break;
-            };
-            for ((index, locator, source), authority) in missing.into_iter().zip(authorities) {
-                match authority {
-                    None => self.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                    ),
-                    Some(None) => unresolved.push(index),
-                    Some(Some(authority)) => {
-                        if let Some(node) = self.lower_capture_authority(&locator, authority) {
-                            if let Some((mut products, subject)) = source {
-                                products.set_declared_type(&subject, Some(node));
-                            }
-                            capture_inputs[index].apply_authority(node, locator.source());
-                        }
-                    }
-                }
+                (captures, nested_inputs)
             }
-        }
-        let capture_basis: Vec<_> = capture_inputs
-            .iter()
-            .map(|input| {
-                FlowProductStore::captured_input_bytes(
-                    input.declared,
-                    input.reaching.as_ref(),
-                    input.assignment,
-                )
-            })
-            .collect();
+        };
+        let input_basis =
+            verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputBasis {
+                inputs: nested_inputs.digest(),
+                parameters: &params,
+            });
         let request = super::flow_solve::FlowDemandRequest {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
-            input_basis: verter_identity::identity::InputBasisId::from_canonical(
-                &NestedFlowInputBasis {
-                    parent: self.execution_selection.basis().input_basis.digest(),
-                    parameters: &params,
-                    captures: &capture_basis,
-                },
-            ),
+            input_basis,
             ancestry: self
                 .execution_selection
                 .basis()
@@ -27784,6 +27876,342 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             bound,
             skeleton,
         }))
+    }
+
+    /// The inputs of a nested function value created here
+    /// ([`NestedFlowInputs`]), its captures' basis bytes `captures`.
+    fn nested_flow_inputs(
+        &self,
+        captures: &[Vec<u8>],
+        outer_env: &FlowBinderEnv,
+        capture_context: &verter_session_query::flow::slice::NestedFlowContext,
+        contextual: Option<&ContextualSignature>,
+    ) -> verter_identity::identity::InputBasisId {
+        verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputs {
+            parent: self.execution_selection.basis().input_basis.digest(),
+            captures,
+            binders: outer_env,
+            contextual,
+            receiver: self.enclosing_receiver_of(capture_context).as_deref(),
+        })
+    }
+
+    /// The enclosing receiver a nested function value created here reads
+    /// `this` through: this frame's, when the function's context binds one.
+    fn enclosing_receiver_of(
+        &self,
+        capture_context: &verter_session_query::flow::slice::NestedFlowContext,
+    ) -> Option<std::rc::Rc<class_expression::ClassReceiver>> {
+        matches!(
+            capture_context.this(),
+            Some(
+                verter_session_query::flow::slice::SliceThis::Receiver
+                    | verter_session_query::flow::slice::SliceThis::Explicit
+            )
+        )
+        .then(|| self.receiver.clone())
+        .flatten()
+    }
+
+    /// The selected capture inputs of a nested function value's body, read
+    /// where the function is created, and their basis bytes. With `peek`,
+    /// no frame changes: `None` when reading them would seed a captured
+    /// value, record a degradation, or lower and keep a capture's declared
+    /// authority.
+    fn prepare_nested_capture_inputs(
+        &mut self,
+        inputs: &FlowProductInputs,
+        planned: &crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
+        declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
+        extended_captures: &[verter_session_query::flow::skeleton::SkeletonBindingId],
+        peek: bool,
+    ) -> Option<NestedCaptureInputs> {
+        let mut changes_frame = false;
+        // Prepare exactly the selected input values before sealing their basis.
+        // Only this transient evaluator owns execution handles; descriptors keep
+        // structural source locators and never retain semantic state.
+        let mut capture_inputs: Vec<_> = inputs
+            .selected_captures(planned.selection())
+            .map(|(identity, value_demanded)| {
+                let local = self.bindings.local(identity);
+                // A capture past its last assignment enters the body at its
+                // narrowed type where the function is created.
+                // A capture of this frame's own that entered it extended is
+                // extended for the functions this frame creates too.
+                let extended = match local {
+                    Some(binding) => extended_captures.contains(&binding),
+                    None => self.extended_capture_identities.contains(identity),
+                };
+                let parent = local
+                    .map(FlowProductSubject::Local)
+                    .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
+                let narrowed = extended
+                    .then(|| {
+                        self.products.narrowing(&parent).and_then(|narrowing| {
+                            narrowing
+                                .facts()
+                                .iter()
+                                .find(|fact| fact.path.is_empty())
+                                .map(|fact| self.narrowed_node(&fact.narrowed_to))
+                        })
+                    })
+                    .flatten();
+                if value_demanded
+                    && self.products.contains_subject(&parent)
+                    && self.products.reaching(&parent).is_none()
+                    && self.destructured_param_element(&parent).is_some()
+                {
+                    if peek {
+                        changes_frame = true;
+                    } else {
+                        #[cfg(any(test, feature = "test-support"))]
+                        self.dispatch
+                            .observers
+                            .flow
+                            .nested_capture_seeds
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.seed_destructured_param_element(&parent);
+                    }
+                }
+                // A captured EVOLVING array reads its declared type, or
+                // (a `let` past its last assignment) continues from the
+                // evolving array it holds here.
+                if value_demanded && declared_evolving_captures.contains(identity) {
+                    let declared = self.evolving_declared_type();
+                    return PreparedFlowCaptureInput {
+                        subject: FlowProductSubject::Captured(identity.clone()),
+                        value_demanded,
+                        extended: false,
+                        assignment: self.products.assignment(&parent).with_single_path(false),
+                        deferred_write: None,
+                        reaching: Some(ReachingTypeProduct::of(declared)),
+                        declared: None,
+                        inferred_declared: None,
+                    };
+                }
+                // An AUTO-TYPED `var` (`noImplicitAny` on, no annotation, no
+                // initializer or a bare `null` / `undefined` one): a closure
+                // never reads a `var` at its creation point, so the read
+                // reaches the declaration and takes its declared type — the
+                // checker's auto type, read as `any` (TS7005).
+                if value_demanded
+                    && self.binding_layer(&parent) == FlowBindingLayer::Function
+                    && self.is_auto_typed_local(&parent)
+                {
+                    let any = self
+                        .dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                    return PreparedFlowCaptureInput {
+                        subject: FlowProductSubject::Captured(identity.clone()),
+                        value_demanded,
+                        extended: false,
+                        assignment: self.products.assignment(&parent).with_single_path(false),
+                        deferred_write: None,
+                        reaching: Some(ReachingTypeProduct::of(any)),
+                        declared: Some(any),
+                        inferred_declared: Some(any),
+                    };
+                }
+                // Outside its extended container an unannotated `let` /
+                // `var` reads its DECLARED type: its initializer's widened
+                // type, whatever is assigned before or after the creation.
+                // A capture this frame itself reads outside its extended
+                // container is outside it in every deeper function too: it
+                // keeps the declared type the outer creation supplied.
+                let inferred_declared = (value_demanded && !extended)
+                    .then(|| {
+                        let Some(binding) = local else {
+                            return self
+                                .declared_capture_types
+                                .get(identity)
+                                .map(|node| Some(*node));
+                        };
+                        let fact = self.skeleton.binding(binding);
+                        let unannotated_whole = matches!(
+                            fact.kind,
+                            verter_session_query::flow::skeleton::SkeletonBindingKind::Let
+                                | verter_session_query::flow::skeleton::SkeletonBindingKind::Var
+                        ) && !fact.destructured
+                            && fact.annotation_span.is_none();
+                        unannotated_whole.then(|| {
+                            self.inferred_declared_locals
+                                .get(&self.canonical_runtime_subject(&parent))
+                                .map(|(_, node)| *node)
+                        })
+                    })
+                    .flatten();
+                if inferred_declared == Some(None) {
+                    // The declarator never supplied its type (it was not
+                    // evaluated on any path before the creation).
+                    if peek {
+                        changes_frame = true;
+                    } else {
+                        self.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                verter_session_query::flow::policy::FlowGap::ClosureCapture,
+                            ),
+                        );
+                    }
+                }
+                let inferred_declared = inferred_declared.flatten();
+                PreparedFlowCaptureInput {
+                    subject: FlowProductSubject::Captured(identity.clone()),
+                    value_demanded,
+                    extended,
+                    assignment: if value_demanded {
+                        self.products.assignment(&parent).with_single_path(false)
+                    } else {
+                        DefiniteAssignmentProduct::default()
+                    },
+                    // A DEFERRED read observes every whole-slot write the
+                    // enclosing statement performs, ahead of the in-order
+                    // application: the statement's capture look-ahead
+                    // REPLACES the statement-entry reaching (the checker's
+                    // own deferred-read rule). Direct reads are unaffected
+                    // — they consume the live, evaluation-ordered reaching.
+                    //
+                    // An EXTENDED capture reads the reaching where the
+                    // function is created (or invoked, for an IIFE): no
+                    // write of the statement comes between, so the live
+                    // reaching and its narrowing are the answer.
+                    deferred_write: value_demanded
+                        .then(|| {
+                            self.capture_write_lookahead
+                                .get(&self.canonical_runtime_subject(&parent))
+                                .copied()
+                        })
+                        .flatten(),
+                    reaching: value_demanded
+                        .then(|| {
+                            if extended {
+                                narrowed
+                                    .map(ReachingTypeProduct::of)
+                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                                    .map(|reaching| {
+                                        // A capture is assumed initialized: a path
+                                        // reaching the creation only through an
+                                        // auto-typed declaration reads the
+                                        // variable's initial type — `any`, which
+                                        // absorbs every other path — once the
+                                        // variable is assigned anywhere.
+                                        if reaching.reaches_declaration_only()
+                                            && local.is_some_and(|binding| {
+                                                self.frame_writes_binding(binding)
+                                            })
+                                        {
+                                            ReachingTypeProduct::of(
+                                                self.dispatch.graph().intern_node(
+                                                    SemanticNodeData::Primitive(PrimitiveKind::Any),
+                                                ),
+                                            )
+                                        } else {
+                                            reaching
+                                        }
+                                    })
+                            } else {
+                                self.capture_write_lookahead
+                                    .get(&self.canonical_runtime_subject(&parent))
+                                    .map(|node| ReachingTypeProduct::of(*node))
+                                    .or_else(|| inferred_declared.map(ReachingTypeProduct::of))
+                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                            }
+                        })
+                        .flatten(),
+                    declared: value_demanded
+                        .then(|| self.products.declared_type(&parent))
+                        .flatten(),
+                    inferred_declared,
+                }
+            })
+            .collect();
+        let mut candidates: Vec<_> = inputs
+            .selected_captures(planned.selection())
+            .map(|(identity, value_demanded)| {
+                if value_demanded {
+                    capture_context.mutable_authorities(identity)
+                } else {
+                    Vec::new()
+                }
+                .into_iter()
+            })
+            .collect();
+        if changes_frame {
+            return None;
+        }
+        let mut unresolved: Vec<_> = (0..capture_inputs.len()).collect();
+        while !unresolved.is_empty() {
+            let mut missing = Vec::new();
+            for index in unresolved.drain(..) {
+                let Some(locator) = candidates[index].next() else {
+                    continue;
+                };
+                let source = self.capture_source_products(&locator);
+                if let Some(node) = source
+                    .as_ref()
+                    .and_then(|(products, subject)| products.declared_type(subject))
+                {
+                    capture_inputs[index].apply_authority(node, locator.source());
+                } else {
+                    missing.push((index, locator, source));
+                }
+            }
+            if missing.is_empty() {
+                break;
+            }
+            let locators: Vec<_> = missing
+                .iter()
+                .map(|(_, locator, _)| locator.clone())
+                .collect();
+            let authorities = self
+                .dispatch
+                .source
+                .indexed_flow_source(self.canonical)
+                .and_then(|(_, demand)| demand?.flow_capture_authorities(&locators));
+            let Some(authorities) = authorities else {
+                if peek {
+                    return None;
+                }
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+                break;
+            };
+            // An authority to lower and keep on its declaring frame, or one
+            // that cannot be read, changes a frame.
+            if peek
+                && authorities
+                    .iter()
+                    .any(|authority| !matches!(authority, Some(None)))
+            {
+                return None;
+            }
+            for ((index, locator, source), authority) in missing.into_iter().zip(authorities) {
+                match authority {
+                    None => self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                    ),
+                    Some(None) => unresolved.push(index),
+                    Some(Some(authority)) => {
+                        if let Some(node) = self.lower_capture_authority(&locator, authority) {
+                            if let Some((mut products, subject)) = source {
+                                products.set_declared_type(&subject, Some(node));
+                            }
+                            capture_inputs[index].apply_authority(node, locator.source());
+                        }
+                    }
+                }
+            }
+        }
+        let capture_basis: Vec<_> = capture_inputs
+            .iter()
+            .map(PreparedFlowCaptureInput::basis_bytes)
+            .collect();
+        Some(NestedCaptureInputs {
+            capture_inputs,
+            capture_basis,
+        })
     }
 
     /// The CALLEE's own type-parameter clause at a direct-call site.
@@ -31040,9 +31468,8 @@ mod nested_input_basis_tests {
         let mut parent = CanonicalDigest::of_bytes(root);
         for level in 0..levels {
             let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
-                parent,
+                inputs: parent,
                 parameters: &[SemanticNodeId(level as u64)],
-                captures: &[],
             });
             if let Some(previous) = bases.last() {
                 ancestry = ancestry.with(InputBasisId::clone(previous));
@@ -31080,6 +31507,56 @@ mod nested_input_basis_tests {
         assert!(left != shorter);
     }
 
+    /// A nested capture's basis holds every field of the reaching product
+    /// it imports: two inputs equal but for an evolving array's elements, or
+    /// for whether a path reaches the declaration only, have different
+    /// bases, so neither reuses the other's signature.
+    #[test]
+    fn a_capture_basis_tells_every_reaching_field_apart() {
+        use super::super::flow_products::{
+            DefiniteAssignmentProduct, EvolvingElement, ReachingTypeProduct,
+        };
+        use super::{FlowProductSubject, PreparedFlowCaptureInput};
+        let input = |reaching: ReachingTypeProduct| PreparedFlowCaptureInput {
+            subject: FlowProductSubject::Local(
+                verter_session_query::flow::skeleton::SkeletonBindingId(0),
+            ),
+            value_demanded: true,
+            extended: true,
+            assignment: DefiniteAssignmentProduct::default(),
+            reaching: Some(reaching),
+            declared: None,
+            inferred_declared: None,
+            deferred_write: None,
+        };
+        let finalized = SemanticNodeId(7);
+        let element = |node| EvolvingElement {
+            node: SemanticNodeId(node),
+            widening_nullish: false,
+        };
+        let one = input(ReachingTypeProduct::evolving(
+            finalized,
+            [element(1)].into(),
+        ));
+        let two = input(ReachingTypeProduct::evolving(
+            finalized,
+            [element(1), element(2)].into(),
+        ));
+        let plain = input(ReachingTypeProduct::of(finalized));
+        let declaration_only = input(ReachingTypeProduct::of(finalized).declaration_only());
+        assert_ne!(one.basis_bytes(), two.basis_bytes());
+        assert_ne!(one.basis_bytes(), plain.basis_bytes());
+        assert_ne!(plain.basis_bytes(), declaration_only.basis_bytes());
+        assert_eq!(
+            one.basis_bytes(),
+            input(ReachingTypeProduct::evolving(
+                finalized,
+                [element(1)].into()
+            ))
+            .basis_bytes()
+        );
+    }
+
     /// An ancestry is as long as its nest and drops from a loop: 100,000
     /// levels release on a 64 KiB thread.
     #[test]
@@ -31088,9 +31565,8 @@ mod nested_input_basis_tests {
             .stack_size(64 << 10)
             .spawn(|| {
                 let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
-                    parent: CanonicalDigest::of_bytes(b"root"),
+                    inputs: CanonicalDigest::of_bytes(b"root"),
                     parameters: &[],
-                    captures: &[],
                 });
                 let ancestry = (0..100_000).fold(FlowInputAncestry::default(), |ancestry, _| {
                     ancestry.with(InputBasisId::clone(&basis))

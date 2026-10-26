@@ -1578,6 +1578,84 @@ fn nested_nonbinding_relation_frame_registers_the_store_owned_family_flight() {
 }
 
 #[test]
+fn relation_publication_rejects_conflicting_root_and_queued_member_versions() {
+    relation_publication_checks_observed_versions(true);
+}
+
+#[test]
+fn relation_publication_rejects_conflicting_versions_between_queued_members() {
+    relation_publication_checks_observed_versions(false);
+}
+
+fn relation_publication_checks_observed_versions(scoped_root: bool) {
+    for edited in [false, true] {
+        let host = host();
+        let canonical = "/w/relation-versions.ts";
+        upsert_ts(&host, canonical, "export type Value = number[];");
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        // Keep the old operand alive across the edit, as a held answer can.
+        let _builder = graph.enter_node_root_scope();
+        let scope = || NodeScopeId::File {
+            canonical_id: canonical.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host.ensure_indexed_ready(canonical).unwrap().whole_hash,
+            local_scope: None,
+        };
+        let number = primitive(&graph, PrimitiveKind::Number);
+        let array = || SemanticNodeData::Array {
+            element: number,
+            readonly: false,
+        };
+        let old_array = graph.intern_node_with_scope(array(), scope());
+        if edited {
+            upsert_ts(&host, canonical, "export type Value = string[];");
+        }
+        let current_scope = scope();
+        let current_array = graph.intern_node_with_scope(array(), current_scope.clone());
+        let target_array = graph.intern_node(array());
+        let (source, target) = if scoped_root {
+            let object = simple_object(&graph, &[("x", old_array)]);
+            let data = graph.node_data(object).unwrap();
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                panic!("object fixture")
+            };
+            (
+                graph.intern_node_with_scope(
+                    SemanticNodeData::Object(surface.copy_for_tests()),
+                    current_scope,
+                ),
+                simple_object(&graph, &[("x", target_array)]),
+            )
+        } else {
+            (
+                simple_object(&graph, &[("x", current_array), ("y", old_array)]),
+                simple_object(&graph, &[("x", target_array), ("y", target_array)]),
+            )
+        };
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        assert!(matches!(
+            dispatch.execute_relate_pair_as_result_for_tests(source, target),
+            verter_type_engine::semantic_query::RelationResult::Assignable { .. }
+        ));
+        for key in [
+            dispatch.relate_key_for(source, target),
+            dispatch.relate_key_for(old_array, target_array),
+        ] {
+            assert_eq!(
+                graph.relation_published_carrier(&key).is_some(),
+                !edited,
+                "a torn component must publish neither root nor inline member: {key:?}"
+            );
+            assert_eq!(
+                graph.get_relation_payload(&host, &key).is_some(),
+                !edited,
+                "only a same-version component may serve warm: {key:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -3024,11 +3102,11 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
-/// A completed carrier wider than one evidence page — a traced set that
-/// already filled a page, plus the structural self-root merged in after
-/// finalisation — is paged and published whole, never refused for its width.
+/// A completed carrier wider than `WIDE_SIGNATURE_WIDTH` — a traced set
+/// already that wide, plus the structural self-root merged in after
+/// finalisation — is published whole, never refused for its width.
 #[test]
-fn semantic_publication_pages_a_post_finalise_wide_carrier() {
+fn semantic_publication_seals_a_post_finalise_wide_carrier_whole() {
     let canonical = "/w/semantic-publish.ts";
     let host = host();
     upsert_ts(&host, canonical, "export type Root = string;\n");
@@ -3036,7 +3114,7 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .ensure_indexed_ready(canonical)
         .expect("semantic root is indexed")
         .whole_hash;
-    let traced = crate::semantic_graph_self_root_tests::page_width_terminal_witness_facts();
+    let traced = crate::semantic_graph_self_root_tests::wide_width_terminal_witness_facts();
     let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
         QueryResult::Error(QueryError::Miss),
         verter_type_engine::semantic_query::DepSignature::default(),
@@ -3047,9 +3125,9 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
     let completed = finalise_traced_build_output(
         &host,
         output,
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(
-            traced.clone(),
-        )),
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::fact_set::FactSet::from(traced.clone()),
+        ),
         &CarrierNormalizationPrelude::none(),
     );
 
@@ -3061,17 +3139,16 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .graph_carrier
         .expect("the wide carrier is published");
     assert!(
-        carrier.facts.len() <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
-        "the published carrier's top level fits one page"
+        carrier.facts.len() > verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH,
+        "the published carrier is one set as wide as what it read"
     );
-    let entries: Vec<_> = carrier.entries().cloned().collect();
     assert!(
-        traced.iter().all(|fact| entries.contains(fact)),
-        "every traced fact survives into the paged carrier"
+        traced.iter().all(|fact| carrier.facts.contains(fact)),
+        "every traced fact survives into the carrier"
     );
 }
 
-/// A work-refused build that read more than one evidence page delivers its
+/// A work-refused build that read a wide set of facts delivers its
 /// WHOLE proving prefix: the broadcast carrier holds every traced fact, and
 /// the refusal is certified on that complete evidence — never on an empty
 /// or truncated signature.
@@ -3086,7 +3163,7 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
         .expect("the root is indexed")
         .whole_hash;
     let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 1)
             .map(|generation| {
                 verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
                     generation: generation as u64,
@@ -3167,7 +3244,9 @@ fn a_torn_self_root_never_certifies_a_refusal() {
         output
     };
     let traced = || {
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(Vec::new()))
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::fact_set::FactSet::from(Vec::new()),
+        )
     };
 
     let torn = || {
@@ -17296,11 +17375,13 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
             surface_member("tag", string, false, false),
         ],
     );
+    // A non-discriminant mismatch keeps the intersection from reducing to
+    // never before relation descent can exercise projection rollback.
     let losing_source_arm = intern_object_with_members(
         &graph,
         vec![
             surface_member("capture", number, false, false),
-            surface_member("tag", boolean, false, false),
+            surface_member("tag", number, false, false),
         ],
     );
     let winning_source_arm = intern_object_with_members(

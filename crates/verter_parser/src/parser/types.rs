@@ -417,17 +417,6 @@ fn vec_cap_bytes<T>(items: &Vec<T>) -> usize {
     items.capacity().saturating_mul(std::mem::size_of::<T>())
 }
 
-impl verter_retention::heap_size::HeapSize for ParsedSfc {
-    fn heap_size<'t>(
-        &'t self,
-        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        // Opaque parser payload convention: all reserved buffers and the
-        // template arena, excluding the inline record carried by its Arc.
-        self.retained_bytes() - std::mem::size_of::<Self>()
-    }
-}
-
 fn script_retained_bytes(script: Option<&RootNodeScript>) -> usize {
     let Some(script) = script else {
         return 0;

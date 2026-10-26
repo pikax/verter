@@ -574,7 +574,7 @@ fn load_requested_inputs(
             InputKey::PathProbe { path } => {
                 let (value, directories) = snapshot_path_probe(path);
                 progressed |= !inputs.snapshot.contains_path_probe(path);
-                Arc::make_mut(&mut inputs.snapshot).insert_path_probe(path.to_string(), value);
+                Arc::make_mut(&mut inputs.snapshot).insert_path_probe(Arc::clone(path), value);
                 inputs
                     .observation_inputs
                     .insert(key.clone(), SnapshotInput::PathProbe { directories });
@@ -583,7 +583,7 @@ fn load_requested_inputs(
                 let (value, directories) = snapshot_realpath(path);
                 progressed |= !inputs.snapshot.contains_real_path(path);
                 Arc::make_mut(&mut inputs.snapshot)
-                    .insert_real_path(path.to_string(), value.map(Arc::from));
+                    .insert_real_path(Arc::clone(path), value.map(Arc::from));
                 inputs
                     .observation_inputs
                     .insert(key.clone(), SnapshotInput::RealPath { directories });
@@ -607,7 +607,7 @@ fn load_requested_inputs(
                 });
                 progressed |= !inputs.snapshot.contains_package_manifest(directory);
                 Arc::make_mut(&mut inputs.snapshot)
-                    .insert_package_manifest(directory.to_string(), value);
+                    .insert_package_manifest(Arc::clone(directory), value);
                 inputs.observation_inputs.insert(
                     key.clone(),
                     SnapshotInput::PackageManifest {
@@ -967,9 +967,13 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
         run,
         None,
     ));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on_when_pending_with_interval(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
 }
 
 async fn drive_attempt_with_bounded_io_async<T>(
@@ -1056,6 +1060,7 @@ async fn drive_attempt_with_bounded_io_async<T>(
                 delta.clear();
                 #[cfg(test)]
                 let had_delta_capacity = delta.capacity() != 0;
+                delta.reserve(load_set.keys().len());
                 delta.extend(
                     load_set
                         .keys()
@@ -1093,12 +1098,21 @@ async fn drive_attempt_with_bounded_io_async<T>(
                     ));
                 }
 
+                // Sized once, from the first new key on: a retry with none
+                // allocates nothing.
                 let mut new_keys = Vec::new();
                 let mut new_key_bytes = 0_u64;
-                for key in &delta {
-                    if !ledger.unique_keys.contains(key) {
-                        new_keys.push(key.clone());
-                        new_key_bytes = new_key_bytes.saturating_add(input_key_spelling_bytes(key));
+                if let Some(first) = delta
+                    .iter()
+                    .position(|key| !ledger.unique_keys.contains(key))
+                {
+                    new_keys.reserve(delta.len() - first);
+                    for key in &delta[first..] {
+                        if !ledger.unique_keys.contains(key) {
+                            new_keys.push(key.clone());
+                            new_key_bytes =
+                                new_key_bytes.saturating_add(input_key_spelling_bytes(key));
+                        }
                     }
                 }
                 let prospective_unique = ledger
@@ -1335,6 +1349,7 @@ fn apply_loaded_resolution_inputs(
     loaded: LoadedResolutionInputBatch,
 ) -> bool {
     let mut progressed = false;
+    inputs.observation_inputs.reserve(loaded.entries.len());
     for entry in loaded.entries {
         match entry {
             LoadedResolutionInput::PathProbe {
@@ -1346,7 +1361,7 @@ fn apply_loaded_resolution_inputs(
                     return false;
                 };
                 progressed |= !inputs.snapshot.contains_path_probe(path);
-                Arc::make_mut(&mut inputs.snapshot).insert_path_probe(path.to_string(), value);
+                Arc::make_mut(&mut inputs.snapshot).insert_path_probe(Arc::clone(path), value);
                 inputs
                     .observation_inputs
                     .insert(key, SnapshotInput::PathProbe { directories });
@@ -1361,7 +1376,7 @@ fn apply_loaded_resolution_inputs(
                 };
                 progressed |= !inputs.snapshot.contains_real_path(path);
                 Arc::make_mut(&mut inputs.snapshot)
-                    .insert_real_path(path.to_string(), value.map(Arc::from));
+                    .insert_real_path(Arc::clone(path), value.map(Arc::from));
                 inputs
                     .observation_inputs
                     .insert(key, SnapshotInput::RealPath { directories });
@@ -1391,7 +1406,7 @@ fn apply_loaded_resolution_inputs(
                 });
                 progressed |= !inputs.snapshot.contains_package_manifest(directory);
                 Arc::make_mut(&mut inputs.snapshot)
-                    .insert_package_manifest(directory.to_string(), value);
+                    .insert_package_manifest(Arc::clone(directory), value);
                 inputs.observation_inputs.insert(
                     key,
                     SnapshotInput::PackageManifest {
@@ -1439,9 +1454,13 @@ pub(crate) fn resolve_tracked_in_project(
         project,
         None,
     ));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on_when_pending_with_interval(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
 }
 
 pub(crate) async fn resolve_tracked_in_project_async(
@@ -1507,9 +1526,13 @@ pub(crate) fn resolve_for_project_tracked(
         },
         None,
     ));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on_when_pending_with_interval(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
 }
 
 pub(crate) struct ProjectRequest<'a> {

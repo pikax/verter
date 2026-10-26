@@ -9,7 +9,7 @@
 //! `ComponentMetaResultEntry`.
 //!
 //! The entry carries `fact_dep_signature:
-//! Arc<[FactVersionRef]>` populated from the cold resolver's curated
+//! FactSet` populated from the cold resolver's curated
 //! observation set, and `ComponentMetaResultDb::get_with_view`
 //! validates the signature through
 //! `StoreView::validates_fact_signature` before returning the entry.
@@ -26,7 +26,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
 use verter_session::{CompileErrorPolicy, HostConfig};
-use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn metahost() -> ComponentMetaHost {
     ComponentMetaHost::new_standalone(HostConfig {
@@ -41,8 +40,10 @@ fn metahost() -> ComponentMetaHost {
 fn editing_dep_invalidates_component_meta_result_warm_hit() {
     // Structural arch guard: ensure the type carries the
     // `read_set_signature` carrier and the carrier exposes the
-    // `facts: Arc<[FactVersionRef]>` rail.
-    fn _assert_field_present<P>(entry: &ComponentMetaResultEntry<P>) -> &[FactVersionRef] {
+    // `facts: FactSet` rail.
+    fn _assert_field_present<P>(
+        entry: &ComponentMetaResultEntry<P>,
+    ) -> &verter_session_query::facts::fact_set::FactSet {
         &entry.read_set_signature.facts
     }
 

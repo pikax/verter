@@ -317,34 +317,119 @@ fn recursive_mapped_index_publishes_dotted_paths_across_three_modules() {
     assert_recursive_paths_layout(20, 3);
 }
 
-#[test]
-fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
-    assert_recursive_paths_layout(100, 5);
+/// Full-size layouts, run by the nightly scale tier (`.config/nextest.toml`).
+/// Their gate version is
+/// `recursive_mapped_index_work_is_affine_and_fits_every_full_size_layout`.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
+        assert_recursive_paths_layout(300, 5);
+    }
+
+    #[test]
+    fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
+        assert_recursive_paths_layout(100, 5);
+    }
+
+    /// Tripling the entities triples the work: instantiations and fact-signature
+    /// proof work stay linear in the entity count rather than growing with the
+    /// pairs of entities each recursive path can reach.
+    #[test]
+    fn recursive_mapped_index_path_work_grows_linearly_with_entity_count() {
+        let small = assert_recursive_paths_layout(25, 5);
+        let large = assert_recursive_paths_layout(75, 5);
+        assert!(
+            large.instantiations <= small.instantiations * 4,
+            "instantiations must grow linearly: {} at 25 entities, {} at 75",
+            small.instantiations,
+            large.instantiations,
+        );
+        assert!(
+            large.proof_work <= small.proof_work * 4,
+            "fact-signature proof work must grow linearly: {} at 25 entities, {} at 75",
+            small.proof_work,
+            large.proof_work,
+        );
+    }
 }
 
+/// The gate version of the 100- and 300-entity five-module layouts and of the
+/// 25-to-75-entity growth test, all in the nightly scale tier. Each layout at
+/// 5, 10 and 15 entities across five modules publishes its exact dotted-path
+/// set under the instantiation bound `15n + 20`, as the full-size layouts do.
+/// The instantiations, the request operations charged against the allowance
+/// and the paid computations grow by exactly the same amount for each further
+/// five entities, so they are affine in the entity count: any term that grows
+/// faster than the entities, however small, changes the second step. Extended
+/// to each full size, the affine work must meet the limits that layout runs
+/// under: the `15n + 20` bound and the 50,000-operation allowance, and the
+/// growth test's at most fourfold instantiations from 25 to 75 entities.
+///
+/// The fact-signature proof work is not exactly affine: its layout follows
+/// the entities' order. Its second step may differ from its first by at most a
+/// sixteenth of the first. A quadratic term large enough to make the proof
+/// work at 75 entities more than four times that at 25 (about 36 units per
+/// squared entity over the measured 4,200 per entity) changes the second step
+/// here by 50 units per unit of that term, 1,800 or more, which is over that
+/// sixteenth (about 1,270); the measured difference is under 200.
 #[test]
-fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
-    assert_recursive_paths_layout(300, 5);
-}
-
-/// Tripling the entities triples the work: instantiations and fact-signature
-/// proof work stay linear in the entity count rather than growing with the
-/// pairs of entities each recursive path can reach.
-#[test]
-fn recursive_mapped_index_path_work_grows_linearly_with_entity_count() {
-    let small = assert_recursive_paths_layout(25, 5);
-    let large = assert_recursive_paths_layout(75, 5);
-    assert!(
-        large.instantiations <= small.instantiations * 4,
-        "instantiations must grow linearly: {} at 25 entities, {} at 75",
-        small.instantiations,
-        large.instantiations,
+fn recursive_mapped_index_work_is_affine_and_fits_every_full_size_layout() {
+    use crate::scale_gate::{affine, Counter};
+    const GROUPS: usize = 5;
+    const ALLOWANCE: u64 = 50_000;
+    let sizes = [5, 10, 15];
+    let work = sizes.map(|count| assert_recursive_paths_layout(count, GROUPS));
+    let affine = affine(
+        "Paths<Api>",
+        sizes,
+        vec![
+            Counter {
+                name: "instantiations",
+                values: work.iter().map(|w| w.instantiations).collect(),
+            },
+            Counter {
+                name: "request operations",
+                values: work.iter().map(|w| w.operations).collect(),
+            },
+            Counter {
+                name: "paid computations",
+                values: work.iter().map(|w| w.paid).collect(),
+            },
+        ],
+    );
+    for entities in [25, 75, 100, 300] {
+        let instantiations = affine.at("instantiations", entities);
+        let bound = entities as u64 * 15 + 20;
+        assert!(
+            instantiations <= bound,
+            "{entities} entities would use {instantiations} instantiations, over the bound {bound}"
+        );
+        let operations = affine.at("request operations", entities);
+        assert!(
+            operations <= ALLOWANCE,
+            "{entities} entities would charge {operations} request operations, over the \
+             {ALLOWANCE}-operation allowance their layout runs under"
+        );
+    }
+    let (at_25, at_75) = (
+        affine.at("instantiations", 25),
+        affine.at("instantiations", 75),
     );
     assert!(
-        large.proof_work <= small.proof_work * 4,
-        "fact-signature proof work must grow linearly: {} at 25 entities, {} at 75",
-        small.proof_work,
-        large.proof_work,
+        at_75 <= at_25 * 4,
+        "instantiations must grow linearly: {at_25} at 25 entities, {at_75} at 75"
+    );
+    let [first, second, third] = work.each_ref().map(|w| w.proof_work);
+    let (first_step, second_step) = (second - first, third - second);
+    assert!(
+        first_step.abs_diff(second_step) <= first_step / 16,
+        "fact-signature proof work must grow linearly: {first}, {second}, {third} at {sizes:?} entities"
+    );
+    assert!(
+        third <= first * 4,
+        "fact-signature proof work must grow linearly: {first} at 5 entities, {third} at 15"
     );
 }
 
@@ -705,22 +790,24 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsW
     // request allowance; the smallest layout exercises the default fuse.
     let host = recursive_paths_host(count, groups, if count <= 20 { 0 } else { 50_000 });
     let proof_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
-    let (answer, record) = resolve_expr(
-        &host,
-        "/paths/scenario.ts",
-        "Probe",
-        &[],
-        ProjectionMode::Expanded,
-    );
+    // The spend capture records the operations the request charges against
+    // its allowance and the computations it pays, on this thread's request.
+    let ((answer, record), operations, paid) =
+        verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+            resolve_expr(
+                &host,
+                "/paths/scenario.ts",
+                "Probe",
+                &[],
+                ProjectionMode::Expanded,
+            )
+        });
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let proof_work =
         verter_session_query::facts::fact_read_set::signature_work_for_tests() - proof_before;
-    let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload else {
-        panic!("recursive paths must retain their resolution audit");
-    };
     println!(
-        "entities={count} instantiate_count={} projection_ops={} paths_proof_work={proof_work}",
-        stats.instantiate_count, payload.projection_ops_executed,
+        "entities={count} instantiate_count={} request_operations={operations} paid_computations={paid} paths_proof_work={proof_work}",
+        stats.instantiate_count,
     );
     assert!(
         stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
@@ -757,6 +844,8 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsW
     assert_eq!(actual, expected, "{count} entities/{groups} modules");
     RecursivePathsWork {
         instantiations: stats.instantiate_count,
+        operations: u64::try_from(operations).unwrap(),
+        paid: u64::try_from(paid).unwrap(),
         proof_work,
     }
 }
@@ -764,6 +853,10 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsW
 /// The work one `Paths<Api>` resolution spent, read from the engine's counters.
 struct RecursivePathsWork {
     instantiations: u64,
+    /// Operations charged against the request's allowance.
+    operations: u64,
+    /// Computations the request paid the operations of.
+    paid: u64,
     proof_work: usize,
 }
 

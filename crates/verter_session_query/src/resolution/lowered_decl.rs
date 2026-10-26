@@ -33,7 +33,7 @@ use verter_type_expr::facts::{
 /// lease-only from the retained snapshot on demand by `verter_session`'s
 /// lowering machinery; this memo stores the content-free mirror facts
 /// only.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct LoweredTypeDecl {
     pub kind: TypeDeclKind,
     /// Content-free facts retained per exact source contributor. Member return
@@ -136,14 +136,7 @@ pub struct LoweredTypeDecl {
 /// record shape and its budget-bit doc convention do not move.) Lossless
 /// bijection with [`HashOutcome`] via
 /// [`from_outcome`](Self::from_outcome) / [`to_outcome`](Self::to_outcome).
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    verter_no_typeexpr::NoTypeExpr,
-    verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
 pub struct ValueBodyHashFact {
     /// The structural fingerprint.
     pub hash: FactHash,
@@ -200,7 +193,7 @@ impl ValueBodyHashFact {
 /// witnessed by the `NoTypeExpr` derive): authored value positions are
 /// content-free locators inside the facts, lowered on demand through the
 /// shared dispatch.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct LoweredValueDecl {
     pub kind: ValueDeclKind,
     /// The narrowed annotation FACT: classification

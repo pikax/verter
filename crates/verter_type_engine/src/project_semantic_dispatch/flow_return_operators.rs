@@ -276,7 +276,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         // The walk starts from every part this evaluation already read, so
         // a nest whose every level enters the flow is walked once overall.
         let mut read = std::mem::take(&mut *self.declared_type_reads.borrow_mut());
-        let result = self.declared_read_within(node, &mut read);
+        let result = self
+            .dispatch
+            .outside_inline_costs(|| self.declared_read_within(node, &mut read));
         let mut shared = self.declared_type_reads.borrow_mut();
         if shared.is_empty() {
             *shared = read;
