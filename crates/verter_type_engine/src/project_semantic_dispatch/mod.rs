@@ -4144,6 +4144,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         (normalized, prelude)
     }
 
+    /// A node-domain family build's output in its key's value domain: an
+    /// overload set's group node read as its candidate set, any other as
+    /// the node it is.
+    pub(super) fn family_value_output(
+        &self,
+        key: &SemanticQueryKey,
+        output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        if matches!(key, SemanticQueryKey::ResolveOverloadSet { .. }) {
+            self.overload_set_value_output(output)
+        } else {
+            output.into()
+        }
+    }
+
     fn overload_set_value_output(
         &self,
         output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
@@ -5432,12 +5447,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         };
-        let output = build_node();
-        if matches!(key, SemanticQueryKey::ResolveOverloadSet { .. }) {
-            self.overload_set_value_output(output)
-        } else {
-            output.into()
-        }
+        self.family_value_output(key, build_node())
     }
 
     /// The family-memo protocol of one cold-query entry: a warm lookup,

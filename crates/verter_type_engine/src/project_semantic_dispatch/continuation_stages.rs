@@ -52,6 +52,24 @@ pub(super) struct ReduceIntersectionBuild {
     members: Vec<SemanticNodeId>,
 }
 
+/// An overload set's resolution between its stages: its callee's signature
+/// list of one kind is read first, then the result each composite candidate's
+/// node form applies, one at a time, everything settled before kept.
+pub(super) struct OverloadSetBuild {
+    callee: SemanticNodeId,
+    kind: crate::semantic_query::SignatureKind,
+    /// Whether the list is being read again after a kernel-epoch replacement
+    /// retired the first read's handles: a second retirement leaves the list
+    /// unsettled.
+    reread: bool,
+    /// The list once read, with the set value whose lease keeps its
+    /// handles readable.
+    list: Option<(
+        crate::signature_kernel::SignatureSetValue,
+        super::signature_discovery::PinnedSignatureList,
+    )>,
+}
+
 /// What a macro payload's output is rooted on: the owning file at the
 /// content version its owner stage observed, and its type arguments.
 pub(super) struct MacroPayloadRooting {
@@ -516,5 +534,131 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                 )
             }
         }
+    }
+
+    /// The first stage of an overload set's resolution: the callee's shared
+    /// signature list of `kind` is read next. The candidates ARE that list,
+    /// in the order call resolution tries them: the list owns carrier
+    /// settlement, alias and constraint hops, apparent globals and the
+    /// union and intersection procedures, and the kernel owns the order;
+    /// the set chooses nothing.
+    #[inline(never)]
+    pub(super) fn begin_resolve_overload_set(
+        &self,
+        callee: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+    ) -> FamilyStep {
+        self.graph().record_continuation_begun();
+        Self::read_overload_list(OverloadSetBuild {
+            callee,
+            kind,
+            reread: false,
+            list: None,
+        })
+    }
+
+    /// The read of `build`'s callee signature list.
+    fn read_overload_list(build: OverloadSetBuild) -> FamilyStep {
+        FamilyStep::Need(
+            SemanticQueryKey::SignaturesOfType {
+                subject: build.callee,
+                kind: build.kind,
+                context: crate::semantic_query::SemanticContextId::production(),
+            },
+            Box::new(FamilyBuild::OverloadSet(build)),
+        )
+    }
+
+    /// Resume an overload set's resolution with the read it waited on: its
+    /// callee's signature list, or the result the composite candidate it
+    /// prepared applies.
+    #[inline(never)]
+    pub(super) fn resume_resolve_overload_set(
+        &self,
+        mut build: OverloadSetBuild,
+        read: crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> FamilyStep {
+        use crate::semantic_query::SemanticQueryValue;
+        let settled = match build.list.as_mut() {
+            None => match read.value {
+                QueryResult::Value(SemanticQueryValue::SignatureSet(value))
+                    if read.fact_status.is_complete() =>
+                {
+                    self.pin_signature_list(build.kind, &value)
+                        .map(|list| build.list = Some((value, list)))
+                }
+                // An unsettled list is never a proven-empty one.
+                _ => return FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+            },
+            Some((_, list)) => match read.value {
+                QueryResult::Value(SemanticQueryValue::SignatureResult(result)) => {
+                    self.settle_composite_signature(list, result.result)
+                }
+                _ => return FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+            },
+        };
+        match settled {
+            Ok(()) => self.advance_resolve_overload_set(build),
+            Err(failure) => self.overload_set_read_failed(build, failure),
+        }
+    }
+
+    /// Settle the overload set's candidates from the next composite on: the
+    /// first composite's result is read next, and once every candidate is a
+    /// node the set is built.
+    fn advance_resolve_overload_set(&self, mut build: OverloadSetBuild) -> FamilyStep {
+        let (_, list) = build
+            .list
+            .as_mut()
+            .expect("an overload set settles its candidates once its list is read");
+        match self.prepare_next_composite(list) {
+            Ok(Some(key)) => FamilyStep::Need(
+                SemanticQueryKey::ReadSignatureResult(key),
+                Box::new(FamilyBuild::OverloadSet(build)),
+            ),
+            Ok(None) => {
+                let (_, list) = build.list.take().expect("the list was just read");
+                FamilyStep::Done(Box::new(self.overload_set_output(
+                    build.callee,
+                    build.kind,
+                    list.into_nodes(),
+                )))
+            }
+            Err(failure) => self.overload_set_read_failed(build, failure),
+        }
+    }
+
+    /// A list whose handles a kernel-epoch replacement retired is read once
+    /// more, in the current epoch; any other failure, or a second
+    /// retirement, leaves the set unsettled.
+    fn overload_set_read_failed(
+        &self,
+        build: OverloadSetBuild,
+        failure: super::signature_discovery::SignatureSetReadFailure,
+    ) -> FamilyStep {
+        match failure {
+            super::signature_discovery::SignatureSetReadFailure::Retired if !build.reread => {
+                Self::read_overload_list(OverloadSetBuild {
+                    reread: true,
+                    list: None,
+                    ..build
+                })
+            }
+            _ => FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+        }
+    }
+
+    /// The miss an unsettled candidate list answers: never admitted, so the
+    /// next read settles it again.
+    fn unsettled_overload_set() -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+            QueryResult::Error(QueryError::Miss),
+            super::empty_signature(),
+        )
+            .into();
+        output.cache_suppress = true;
+        output
     }
 }

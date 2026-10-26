@@ -31,9 +31,11 @@ use std::sync::Arc;
 use verter_session_query::inputs::indexed::IndexedInputServe;
 
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
-use crate::semantic_query::{CacheRead, QueryResult, SemanticNodeId, SemanticQueryKey};
+use crate::semantic_query::{
+    CacheRead, QueryResult, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
+};
 
-use super::continuation_stages::{MacroPayloadBuild, ReduceIntersectionBuild};
+use super::continuation_stages::{MacroPayloadBuild, OverloadSetBuild, ReduceIntersectionBuild};
 use super::ProjectSemanticDispatch;
 
 /// The capability a family continuation's stage runs with: everything a
@@ -89,6 +91,56 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         self.dispatch.observed_self_roots_from_nodes(nodes)
     }
+
+    /// The candidates of a dispatched signature set, pinned in the order
+    /// call resolution tries them.
+    pub(super) fn pin_signature_list(
+        &self,
+        kind: crate::semantic_query::SignatureKind,
+        value: &crate::signature_kernel::SignatureSetValue,
+    ) -> Result<
+        super::signature_discovery::PinnedSignatureList,
+        super::signature_discovery::SignatureSetReadFailure,
+    > {
+        self.dispatch.pin_signature_list(kind, value, true)
+    }
+
+    /// The result read the node form of `list`'s next composite candidate
+    /// waits on, or `None` once every candidate is a node.
+    pub(super) fn prepare_next_composite(
+        &self,
+        list: &mut super::signature_discovery::PinnedSignatureList,
+    ) -> Result<
+        Option<crate::signature_kernel::ReadSignatureResultKey>,
+        super::signature_discovery::SignatureSetReadFailure,
+    > {
+        self.dispatch.prepare_next_composite(list)
+    }
+
+    /// Settle `list`'s prepared composite candidate with its applied result.
+    pub(super) fn settle_composite_signature(
+        &self,
+        list: &mut super::signature_discovery::PinnedSignatureList,
+        applied: crate::signature_kernel::AppliedResultId,
+    ) -> Result<(), super::signature_discovery::SignatureSetReadFailure> {
+        self.dispatch.settle_composite_signature(list, applied)
+    }
+
+    /// The overload set over `callee`'s settled candidates, without explicit
+    /// type arguments.
+    pub(super) fn overload_set_output(
+        &self,
+        callee: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+        sigs: Vec<SemanticNodeId>,
+    ) -> QueryBuildOutput {
+        self.dispatch.overload_set_output(
+            callee,
+            kind,
+            sigs,
+            &Arc::from(Vec::new().into_boxed_slice()),
+        )
+    }
 }
 
 /// A family build between two of its stages: what the stages before the
@@ -96,6 +148,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
 pub(super) enum FamilyBuild {
     MacroPayload(MacroPayloadBuild),
     ReduceIntersection(ReduceIntersectionBuild),
+    OverloadSet(OverloadSetBuild),
 }
 
 /// Where a family build stands after its latest stage.
@@ -112,10 +165,14 @@ pub(super) enum FamilyStep {
 /// Whether `key`'s family builds as a continuation
 /// ([`ProjectSemanticDispatch::begin_family_build`]).
 pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
-    matches!(
-        key,
-        SemanticQueryKey::ResolveMacroPayload { .. } | SemanticQueryKey::ReduceIntersection { .. }
-    )
+    match key {
+        SemanticQueryKey::ResolveMacroPayload { .. }
+        | SemanticQueryKey::ReduceIntersection { .. } => true,
+        // Explicit type arguments instantiate each candidate through the
+        // substitution engine, which still reads in place.
+        SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
+        _ => false,
+    }
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -151,6 +208,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 *purpose,
                 context.clone(),
             )),
+            SemanticQueryKey::ResolveOverloadSet {
+                callee,
+                kind,
+                type_args,
+                ..
+            } if type_args.is_empty() => Some(
+                self.continuation_stage()
+                    .begin_resolve_overload_set(*callee, *kind),
+            ),
             _ => None,
         }
     }
@@ -160,17 +226,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn resume_family_build(
         &self,
         build: FamilyBuild,
-        read: CacheRead<QueryResult<SemanticNodeId>>,
+        read: CacheRead<QueryResult<SemanticQueryValue>>,
     ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
             FamilyBuild::MacroPayload(build) => FamilyStep::Done(Box::new(
                 self.continuation_stage()
-                    .finish_resolve_macro_payload(build, read),
+                    .finish_resolve_macro_payload(build, super::narrow_value_cache_read(read)),
             )),
             FamilyBuild::ReduceIntersection(build) => self
                 .continuation_stage()
-                .resume_reduce_intersection(build, read),
+                .resume_reduce_intersection(build, super::narrow_value_cache_read(read)),
+            FamilyBuild::OverloadSet(build) => self
+                .continuation_stage()
+                .resume_resolve_overload_set(build, read),
         }
     }
 
@@ -190,6 +259,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::ReduceIntersection(_) => {
                 unreachable!("an intersection reduction reads no file")
             }
+            FamilyBuild::OverloadSet(_) => unreachable!("an overload set reads no file"),
         }
     }
 
@@ -201,7 +271,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match step {
                 FamilyStep::Done(output) => return *output,
                 FamilyStep::Need(key, build) => {
-                    let read = self.execute_read(key);
+                    let read = self.execute_via_cold_build_helper(key);
                     step = self.resume_family_build(*build, read);
                 }
                 FamilyStep::Load(canonical, build) => {

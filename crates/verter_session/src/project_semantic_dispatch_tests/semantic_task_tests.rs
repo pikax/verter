@@ -2717,21 +2717,36 @@ mod semantic_poll_contract {
         (set, reads)
     }
 
-    /// A family built in one step whose nested read another task is
-    /// producing yields at the polled entry instead of waiting that producer
-    /// out inside the poll, and once the producer goes away reads exactly
-    /// what the synchronous entry reads.
+    /// An overload set whose callee's signature list another task is
+    /// producing returns `Pending` at the polled entry instead of waiting
+    /// that producer out inside the poll; its `Send` task stays pending on
+    /// another thread while the producer holds. Once the producer goes away
+    /// the set resumes from its retained first stage, running no stage
+    /// again, and reads exactly what the synchronous entry — which drives
+    /// the same continuation in place — reads on a fresh host: answer, fact
+    /// status, diagnostics and receipt, logical work included. Warm, the
+    /// polled and synchronous entries answer alike without running a stage.
     #[test]
-    #[ignore = "an overload set builds in one synchronous step: its signature-list read waits on another task's producer inside the poll until its build reads that list as a need"]
     fn an_overload_set_whose_signature_read_is_held_yields_and_reads_what_the_synchronous_entry_reads(
     ) {
         let synchronous = {
             let host = contextual_host();
             let dispatch = ProjectSemanticDispatch::new(&*host);
             let (set, _) = overload_set_keys(&host, &dispatch);
+            let before = continuation_stages(&host);
             let read = dispatch.execute_via_cold_build_helper(set);
+            let after = continuation_stages(&host);
+            assert_eq!(
+                (after.0 - before.0, after.1 - before.1),
+                (1, 1),
+                "the set begins once and reads its callee's list once"
+            );
             read_summary(&dispatch, &read)
         };
+        assert!(
+            synchronous.0.contains("OverloadSet"),
+            "the set answers in its own domain: {synchronous:?}"
+        );
         let host = contextual_host();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
         let graph = host.project_type_store().semantic_graph();
@@ -2746,21 +2761,198 @@ mod semantic_poll_contract {
                 ]
             })
             .unzip();
-        let waker = Waker::from(Arc::new(CountingWaker::default()));
-        let mut entry = dispatch.poll_query(set);
-        let first = while_held(leases, || entry.poll(&waker));
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = continuation_stages(&host);
+        let mut entry = dispatch.poll_query(set.clone());
+        let (first, frames, elsewhere) = while_held(leases, || {
+            let first = entry.poll(&waker).is_pending();
+            let task = entry.task();
+            let frames = task.as_ref().map(|task| task.live_frames_for_tests());
+            let elsewhere = task.map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, frames, elsewhere)
+        });
         assert!(
-            first.is_pending(),
+            first,
             "the overload set yields while its signature read is held"
+        );
+        assert_eq!(frames, Some(1), "the set's own frame waits");
+        assert_eq!(
+            elsewhere,
+            Some(true),
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
         );
         let read = match entry.poll(&waker) {
             Poll::Ready(read) => read,
             Poll::Pending => panic!("the woken overload set reads the signatures itself"),
         };
         drop(entry);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (1, 1),
+            "no stage runs again: the list is read once"
+        );
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+
+        let mut warm = dispatch.poll_query(set.clone());
+        let Poll::Ready(warm_read) = warm.poll(&waker) else {
+            panic!("a warm overload set answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(set);
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+        assert_eq!(
+            continuation_stages(&host),
+            after,
+            "a warm overload set runs no stage"
+        );
         drop(tasks);
+    }
+
+    /// A callee whose call signatures differ by arm: its shared list
+    /// synthesizes one composite candidate, whose node form reads the
+    /// result its call map applies.
+    const UNION_CALLEE: &str = "declare const pick: ((a: string) => 1) | ((a: string) => 2);\n";
+
+    fn union_callee_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CONTEXTUAL_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(UNION_CALLEE),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    /// The overload set of `pick`'s call signatures, and its list read.
+    fn union_overload_set_keys(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let callee = dispatch.execute_read(dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    CONTEXTUAL_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: "pick".into(),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ));
+        let QueryResult::Value(callee) = callee.value() else {
+            panic!("`pick` has a type: {callee:?}");
+        };
+        let kind = verter_type_engine::semantic_query::SignatureKind::Call;
+        let set = SemanticQueryKey::ResolveOverloadSet {
+            callee: *callee,
+            kind,
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: verter_type_engine::semantic_query::OverloadSetContext {
+                resolve_env_hash: host
+                    .host_view_env_hashes_for(CONTEXTUAL_FILE)
+                    .resolve_env_hash,
+                ..Default::default()
+            },
+        };
+        let list = SemanticQueryKey::SignaturesOfType {
+            subject: *callee,
+            kind,
+            context: verter_type_engine::semantic_query::SemanticContextId::production(),
+        };
+        (set, list)
+    }
+
+    /// An overload set over a composite candidate, its list held by another
+    /// task: the poll yields, and once released the set settles the
+    /// composite from its retained list — reading the composite's result as
+    /// its next stage, the list never again — and reads what the
+    /// synchronous entry reads. Released while pending instead, the set
+    /// leaves nothing open and the dispatcher answers it afterwards as the
+    /// synchronous entry does.
+    #[test]
+    fn an_overload_set_over_a_composite_candidate_resumes_at_its_composite_and_releases_cleanly() {
+        let synchronous = {
+            let host = union_callee_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (set, _) = union_overload_set_keys(&host, &dispatch);
+            let before = continuation_stages(&host);
+            let read = dispatch.execute_via_cold_build_helper(set);
+            let after = continuation_stages(&host);
+            assert_eq!(
+                (after.0 - before.0, after.1 - before.1),
+                (1, 2),
+                "the set begins once, reads its list, then its composite's result"
+            );
+            read_summary(&dispatch, &read)
+        };
+        assert!(
+            synchronous.0.contains("OverloadSet") && !synchronous.3,
+            "the set over the composite is complete: {synchronous:?}"
+        );
+
+        let host = union_callee_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (set, list) = union_overload_set_keys(&host, &dispatch);
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let before = continuation_stages(&host);
+        let (other, lease) = hold_producer(&host, graph, list.clone());
+        let mut entry = dispatch.poll_query(set.clone());
+        let first = while_held(lease, || entry.poll(&waker));
+        assert!(first.is_pending(), "the set yields while its list is held");
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken set reads its list itself"),
+        };
+        drop(entry);
+        drop(other);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (1, 2),
+            "no stage runs again: the list and the composite's result are each read once"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+
+        let host = union_callee_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (set, list) = union_overload_set_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, list);
+        let mut entry = dispatch.poll_query(set.clone());
+        assert!(entry.poll(&waker).is_pending());
+        drop(entry);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert_eq!(
+            graph.resident_flight_keys_for_tests().len(),
+            1,
+            "only the other producer's flight remains"
+        );
+        drop(lease);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(set);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
     }
 
     /// `defineProps` over two type arguments, owned by the chain's file, and

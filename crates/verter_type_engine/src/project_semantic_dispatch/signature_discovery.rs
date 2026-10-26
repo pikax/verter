@@ -1594,6 +1594,49 @@ pub enum SignatureSetReadFailure {
     Incomplete(IncompleteReason),
 }
 
+/// The candidates of one dispatched `SignaturesOfType` set, pinned in the
+/// order they are read, while the node form of its composites is built:
+/// each composite reads its applied result before it is a node.
+pub(super) struct PinnedSignatureList {
+    kind: GraphSignatureKind,
+    slots: Vec<PinnedSignature>,
+    /// The first slot not yet a node.
+    next: usize,
+    /// The composite at `next`, prepared for its result read.
+    prepared: Option<PreparedCompositeSignature>,
+}
+
+enum PinnedSignature {
+    Node(SemanticNodeId),
+    Composite {
+        descriptor: SignatureDescriptorId,
+        constituents: Vec<SemanticNodeId>,
+    },
+}
+
+/// A composite candidate's node form up to its result read.
+struct PreparedCompositeSignature {
+    descriptor: SignatureDescriptorId,
+    call: crate::signature_kernel::CallSubstitutionId,
+    params: Arc<[crate::semantic_query::FunctionParam]>,
+    type_parameters: Arc<[crate::semantic_query::TypeParamDecl]>,
+}
+
+impl PinnedSignatureList {
+    /// The node of every candidate, in the order the list was pinned in.
+    pub(super) fn into_nodes(self) -> Vec<SemanticNodeId> {
+        self.slots
+            .into_iter()
+            .map(|slot| match slot {
+                PinnedSignature::Node(node) => node,
+                PinnedSignature::Composite { .. } => {
+                    unreachable!("every composite settles before the list is read")
+                }
+            })
+            .collect()
+    }
+}
+
 /// Whether `error` is a kernel handle a replacement retired.
 fn is_retired_handle(error: &DiscoveryError) -> bool {
     matches!(
@@ -1737,6 +1780,37 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         value: &crate::signature_kernel::SignatureSetValue,
         resolution: bool,
     ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
+        let store = self.graph().store().signature_store();
+        let mut pinned = self.pin_signature_list(kind, value, resolution)?;
+        while let Some(key) = self.prepare_next_composite(&mut pinned)? {
+            let applied = match self.read_signature_result(
+                store,
+                key.descriptor,
+                key.call_substitution,
+                key.projection,
+                key.evaluation,
+                key.semantic_context,
+            ) {
+                QueryOutcome::Ready(Ready { value, .. }) => value,
+                QueryOutcome::Incomplete(reason) => {
+                    return Err(SignatureSetReadFailure::Incomplete(reason))
+                }
+            };
+            self.settle_composite_signature(&mut pinned, applied)?;
+        }
+        Ok(pinned.into_nodes())
+    }
+
+    /// The candidates of one dispatched set, pinned in candidate order — or,
+    /// with `resolution`, in the kernel's resolution order: each authored
+    /// candidate as its node, each composite as the result read its node
+    /// form waits on ([`Self::prepare_next_composite`]).
+    pub(super) fn pin_signature_list(
+        &self,
+        kind: GraphSignatureKind,
+        value: &crate::signature_kernel::SignatureSetValue,
+        resolution: bool,
+    ) -> Result<PinnedSignatureList, SignatureSetReadFailure> {
         let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().store().signature_store();
         let (candidates, order): (Vec<SignatureCandidate>, Vec<usize>) = {
@@ -1770,33 +1844,91 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if candidates.len() != value.nodes.len() {
             return Err(unsettled);
         }
-        let mut nodes = Vec::with_capacity(candidates.len());
-        for index in order {
-            let candidate = &candidates[index];
-            let node = match value.nodes[index].authored {
-                Some(node) => node,
-                // The composite's node form is built after the view above is
-                // released, so a replacement can still retire the candidate.
-                None => match self.composite_signature_node(
-                    store,
-                    kind,
-                    candidate.signature,
-                    &value.nodes[index].constituents,
-                ) {
-                    Ok(node) => node,
-                    Err(error) if is_retired_handle(&error) => {
-                        return Err(SignatureSetReadFailure::Retired)
-                    }
-                    Err(error) => {
-                        return Err(SignatureSetReadFailure::Incomplete(
-                            error.incomplete_reason(),
-                        ))
-                    }
+        let slots = order
+            .into_iter()
+            .map(|index| match value.nodes[index].authored {
+                Some(node) => PinnedSignature::Node(node),
+                None => PinnedSignature::Composite {
+                    descriptor: candidates[index].signature,
+                    constituents: value.nodes[index].constituents.to_vec(),
                 },
+            })
+            .collect();
+        Ok(PinnedSignatureList {
+            kind,
+            slots,
+            next: 0,
+            prepared: None,
+        })
+    }
+
+    /// Prepare the node form of `list`'s next composite candidate, settling
+    /// each authored candidate before it: the result read it waits on, or
+    /// `None` once every candidate is a node.
+    pub(super) fn prepare_next_composite(
+        &self,
+        list: &mut PinnedSignatureList,
+    ) -> Result<Option<crate::signature_kernel::ReadSignatureResultKey>, SignatureSetReadFailure>
+    {
+        let store = self.graph().store().signature_store();
+        let failure = |error: DiscoveryError| {
+            if is_retired_handle(&error) {
+                SignatureSetReadFailure::Retired
+            } else {
+                SignatureSetReadFailure::Incomplete(error.incomplete_reason())
+            }
+        };
+        while let Some(slot) = list.slots.get(list.next) {
+            let PinnedSignature::Composite {
+                descriptor,
+                constituents,
+            } = slot
+            else {
+                list.next += 1;
+                continue;
             };
-            nodes.push(node);
+            // The composite's node form is built after the set's view is
+            // released, so a replacement can still retire the candidate.
+            let prepared = self
+                .prepare_composite_signature(store, *descriptor, constituents)
+                .map_err(failure)?;
+            let key = crate::signature_kernel::ReadSignatureResultKey {
+                descriptor: prepared.descriptor,
+                call_substitution: prepared.call,
+                projection: ResultDemand::Both,
+                evaluation: CONTEXT_FREE_EVALUATION,
+                semantic_context: SemanticContextId::production(),
+            };
+            list.prepared = Some(prepared);
+            return Ok(Some(key));
         }
-        Ok(nodes)
+        Ok(None)
+    }
+
+    /// Settle `list`'s prepared composite candidate with the result its
+    /// node form read.
+    pub(super) fn settle_composite_signature(
+        &self,
+        list: &mut PinnedSignatureList,
+        applied: AppliedResultId,
+    ) -> Result<(), SignatureSetReadFailure> {
+        let prepared = list
+            .prepared
+            .take()
+            .expect("a composite settles with the result its preparation read");
+        let store = self.graph().store().signature_store();
+        let node = self
+            .finish_composite_signature(store, list.kind, prepared, applied)
+            .map_err(|error| {
+                if is_retired_handle(&error) {
+                    SignatureSetReadFailure::Retired
+                } else {
+                    SignatureSetReadFailure::Incomplete(error.incomplete_reason())
+                }
+            })?;
+        list.slots[list.next] = PinnedSignature::Node(node);
+        list.next += 1;
+        Ok(())
     }
 
     /// The type at positional argument `position` of every shared candidate
@@ -2373,15 +2505,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// The graph node form of one composite descriptor. `constituent_nodes`
-    /// are the authored nodes of its constituents, in sequence order.
-    fn composite_signature_node(
+    /// What the node form of one composite descriptor computes before its
+    /// result read: its parameter list and binders, in one constituent's
+    /// declaration environment, and the call map naming each residual binder
+    /// by its own declared parameter. `constituent_nodes` are the authored
+    /// nodes of its constituents, in sequence order.
+    fn prepare_composite_signature(
         &self,
         store: &SignatureStore,
-        kind: GraphSignatureKind,
         descriptor: SignatureDescriptorId,
         constituent_nodes: &[SemanticNodeId],
-    ) -> Result<SemanticNodeId, DiscoveryError> {
+    ) -> Result<PreparedCompositeSignature, DiscoveryError> {
         let view = SemanticReadView::pin(store);
         let desc = *view.descriptor(descriptor)?;
         let template = *view.template(desc.template)?;
@@ -2439,35 +2573,44 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ),
             None,
         )?;
-        drop(view);
-        let (return_type, predicate) = match self.read_signature_result(
-            store,
+        Ok(PreparedCompositeSignature {
             descriptor,
             call,
-            ResultDemand::Both,
-            CONTEXT_FREE_EVALUATION,
-            SemanticContextId::production(),
-        ) {
-            QueryOutcome::Ready(Ready { value, .. }) => {
-                let applied = store.applied_result(value)?;
-                let token = applied
-                    .return_type
-                    .ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
-                let predicate = match applied.effects {
-                    Some(effect) => Some(crate::semantic_query::SignaturePredicate {
-                        subject: effect.subject,
-                        asserts: effect.asserts,
-                        ty: effect
-                            .ty
-                            .map(|token| store.type_token_node(token))
-                            .transpose()?,
-                    }),
-                    None => None,
-                };
-                (store.type_token_node(token)?, predicate)
-            }
-            QueryOutcome::Incomplete(reason) => return Err(DiscoveryError::Incomplete(reason)),
+            params,
+            type_parameters,
+        })
+    }
+
+    /// The graph node form of a prepared composite descriptor, given the
+    /// result its call map applied.
+    fn finish_composite_signature(
+        &self,
+        store: &SignatureStore,
+        kind: GraphSignatureKind,
+        prepared: PreparedCompositeSignature,
+        applied: AppliedResultId,
+    ) -> Result<SemanticNodeId, DiscoveryError> {
+        let PreparedCompositeSignature {
+            params,
+            type_parameters,
+            ..
+        } = prepared;
+        let applied = store.applied_result(applied)?;
+        let token = applied
+            .return_type
+            .ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
+        let predicate = match applied.effects {
+            Some(effect) => Some(crate::semantic_query::SignaturePredicate {
+                subject: effect.subject,
+                asserts: effect.asserts,
+                ty: effect
+                    .ty
+                    .map(|token| store.type_token_node(token))
+                    .transpose()?,
+            }),
+            None => None,
         };
+        let return_type = store.type_token_node(token)?;
         Ok(self.graph().intern_node(SemanticNodeData::Signature {
             kind,
             params: crate::semantic_query::PayloadArray::from(params),

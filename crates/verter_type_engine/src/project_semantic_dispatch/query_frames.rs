@@ -1917,8 +1917,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // inside one, it is built in place through the same
             // continuation, its reads made where the obligation stands.
             key @ (SemanticQueryKey::ResolveMacroPayload { .. }
-            | SemanticQueryKey::ReduceIntersection { .. }) => {
-                self.reads_as_frame_need(key)
+            | SemanticQueryKey::ReduceIntersection { .. }
+            | SemanticQueryKey::ResolveOverloadSet { .. }) => {
+                super::family_continuation::builds_as_continuation(key)
+                    && self.reads_as_frame_need(key)
                     && self
                         .dispatch_txn
                         .try_borrow()
@@ -2520,18 +2522,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return FramePoll::Done(Box::new(self.build_cold_query_family(key)));
         }
         if let Some(refusal) = self.cold_build_budget_refusal(key) {
-            return InstantiatePoll::Done(Box::new(refusal)).into();
+            return FramePoll::Done(Box::new(self.family_value_output(key, refusal)));
         }
         let step = self
             .begin_family_build(key)
             .expect("a continuation family begins its build");
-        self.advance_family_frame(build, step, suspends_loads)
+        self.advance_family_frame(key, build, step, suspends_loads)
     }
 
     /// Resume a family's build with the delivery of the read it waited on.
     #[inline(never)]
     fn resume_family_frame(
         &self,
+        key: &SemanticQueryKey,
         build: &mut Option<FrameBuild>,
         depth: u32,
         delivery: QueryDelivery,
@@ -2540,12 +2543,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(FrameBuild::Family(family)) = build.take() else {
             unreachable!("a family frame resumes its own build")
         };
-        let read = super::narrow_value_cache_read(self.read_frame_delivery(FrameDelivery {
+        let read = self.read_frame_delivery(FrameDelivery {
             delivery,
             depth: depth + 1,
-        }));
+        });
         let step = self.resume_family_build(*family, read);
-        self.advance_family_frame(build, step, suspends_loads)
+        self.advance_family_frame(key, build, step, suspends_loads)
     }
 
     /// Carry a family build on from `step`: its output, or the query it
@@ -2558,6 +2561,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// retained, while the synchronous entry's drive loads it in place.
     fn advance_family_frame(
         &self,
+        key: &SemanticQueryKey,
         build: &mut Option<FrameBuild>,
         mut step: FamilyStep,
         suspends_loads: bool,
@@ -2576,13 +2580,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*family, serve);
                 }
-                FamilyStep::Done(output) => return InstantiatePoll::Done(output).into(),
-                FamilyStep::Need(key, family) if self.reads_as_frame_need(&key) => {
-                    *build = Some(FrameBuild::Family(family));
-                    return FramePoll::Need(key);
+                FamilyStep::Done(output) => {
+                    return FramePoll::Done(Box::new(self.family_value_output(key, *output)))
                 }
-                FamilyStep::Need(key, family) => {
-                    let read = self.execute_read(key);
+                FamilyStep::Need(need, family) if self.reads_as_frame_need(&need) => {
+                    *build = Some(FrameBuild::Family(family));
+                    return FramePoll::Need(need);
+                }
+                FamilyStep::Need(need, family) => {
+                    let read = self.execute_via_cold_build_helper(need);
                     step = self.resume_family_build(*family, read);
                 }
             }
@@ -2724,7 +2730,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the read it waited on; no completed stage runs again.
             Some(FrameBuild::Family(_)) => {
                 let delivery = delivery.expect("a family build resumes with the read it named");
-                self.resume_family_frame(&mut frame.build, frame.depth, delivery, suspends_loads)
+                self.resume_family_frame(
+                    &frame.key,
+                    &mut frame.build,
+                    frame.depth,
+                    delivery,
+                    suspends_loads,
+                )
             }
             // A family build whose file loaded reads it now.
             Some(FrameBuild::FamilySource(..)) => {
@@ -2732,6 +2744,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     unreachable!("the build was just matched")
                 };
                 self.advance_family_frame(
+                    &frame.key,
                     &mut frame.build,
                     FamilyStep::Load(canonical, family),
                     suspends_loads,

@@ -1058,8 +1058,12 @@ a query (`FamilyStep::Need`) or a file's indexed input (`FamilyStep::Load`)
 — and retains everything it computed in a `FamilyBuild`; each later stage
 resumes from that state with the dependency's answer. Macro payloads
 (`ResolveMacroPayload`: owner file, then the props intersection or the
-emits/slots/model projection) and ordered intersection reductions
-(`ReduceIntersection`: each nested subgroup) are written this way.
+emits/slots/model projection), ordered intersection reductions
+(`ReduceIntersection`: each nested subgroup) and overload sets without
+explicit type arguments (`ResolveOverloadSet`: the callee's
+`SignaturesOfType` list, then the `ReadSignatureResult` each composite
+candidate's node form applies, one at a time; a list a kernel-epoch
+replacement retired is read once more) are written this way.
 
 - **One implementation, two drivers.** The synchronous producer (the cold
   build every synchronous entry runs) drives the continuation in place,
@@ -1312,10 +1316,13 @@ compares the exact cold synchronous receipt and checks completed-member work.
 Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
 
-Family continuations (above) cover macro payloads and intersection
-reductions. Every other family a frame or cold build reaches still builds in
-one synchronous step: path projection, mapped types, `keyof`, template
-literals, apparent types, overload sets, class surfaces, signature discovery,
+Family continuations (above) cover macro payloads, intersection
+reductions and overload sets without explicit type arguments. Every other
+family a frame or cold build reaches still builds in one synchronous step:
+path projection, mapped types, `keyof`, template literals, apparent types,
+overload sets with explicit type arguments (each candidate instantiates
+through the substitution engine, whose template-literal fold reads in
+place), class surfaces, signature discovery,
 object-spread projection, locator lowering, relations, flow returns and the
 call walk below a suspension point. Their nested query reads and resolver
 port calls (`ensure_indexed_ready_serve`, prepared declarations, module
@@ -1327,13 +1334,11 @@ heritage or member declaration of another file, a declaration body lowered
 on its owner shard — still loads or is lowered in place. A flow frame still
 drops and re-runs its evaluation when its body meets an unanswered read.
 
-Two ignored acceptance tests in the session's `semantic_poll_contract` group
-state the polled entry's contract for these gaps and fail today:
-`an_overload_set_whose_signature_read_is_held_yields_and_reads_what_the_synchronous_entry_reads`
-(an overload set, built in one step, waits on its held signature-list read
-inside the poll) and `a_flow_suspended_at_a_held_read_evaluates_its_body_once`
-(after the held read is delivered the flow evaluates its body again: one
-evaluation and its logical work more than the synchronous entry). Retaining that evaluation is blocked on the
+An ignored acceptance test in the session's `semantic_poll_contract` group
+states the polled entry's contract for the flow gap and fails today:
+`a_flow_suspended_at_a_held_read_evaluates_its_body_once` (after the held
+read is delivered the flow evaluates its body again: one evaluation and its
+logical work more than the synchronous entry). Retaining that evaluation is blocked on the
 flow product execution authority, which is asserted `!Send`
 (`FlowProductStore`, `FlowProductExecution`, `FlowProductKey`,
 `SelectedFlowSite` in `flow_products.rs`), on the evaluator's borrowed

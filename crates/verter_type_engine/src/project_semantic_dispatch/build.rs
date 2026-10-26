@@ -4283,9 +4283,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         kind: crate::semantic_query::SignatureKind,
         type_args: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            (QueryResult::Error(QueryError::Miss), empty_signature()).into()
-        };
+        // Without explicit type arguments the set is a family continuation
+        // whose reads are its stages' transitions.
+        if type_args.is_empty() {
+            return self.drive_family_in_place(
+                self.continuation_stage()
+                    .begin_resolve_overload_set(callee, kind),
+            );
+        }
         // The candidates ARE the shared signature list of the callee's
         // requested bucket, in the order call resolution tries them. The
         // list owns carrier settlement, alias and constraint hops, apparent
@@ -4296,10 +4301,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
                 // An unsettled list is never a proven-empty one: the miss
                 // is not admitted, so the next read settles it again.
-                let mut output = miss();
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into();
                 output.cache_suppress = true;
                 return output;
             }
+        };
+        self.overload_set_output(callee, kind, sigs, type_args)
+    }
+
+    /// The overload set over `callee`'s settled candidates `sigs`, each
+    /// instantiated with `type_args` when there are any. An empty bucket,
+    /// or one whose every candidate drops under the explicit arguments, is
+    /// an honest `Miss`.
+    pub(super) fn overload_set_output(
+        &self,
+        callee: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+        sigs: Vec<SemanticNodeId>,
+        type_args: &Arc<[SemanticNodeId]>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            (QueryResult::Error(QueryError::Miss), empty_signature()).into()
         };
         if sigs.is_empty() {
             return miss();
