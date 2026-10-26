@@ -350,6 +350,46 @@ fn assert_work_is_linear(nest: impl Fn(usize) -> (String, &'static str), checker
     );
 }
 
+/// The gate version of [`assert_work_is_linear`]: the nest's connected work at
+/// 25, 50 and 75 levels must grow by the same amount per step, so it is affine
+/// in the depth, and its counts at 100, 200 and 400 levels must pass every
+/// check [`assert_work_is_linear`] makes on the measured ones.
+fn assert_work_is_affine_and_meets_the_linear_bounds(
+    nest: impl Fn(usize) -> (String, &'static str),
+    checker: &'static str,
+) {
+    let sizes = [25, 50, 75];
+    let work = crate::scale_gate::affine(
+        "the nest",
+        sizes,
+        vec![crate::scale_gate::Counter {
+            name: "connected work",
+            values: sizes
+                .iter()
+                .map(|&depth| {
+                    let (source, function) = nest(depth);
+                    connected_work_of(&source, function, checker) as u64
+                })
+                .collect(),
+        }],
+    );
+    let [at_100, at_200, at_400] =
+        [100, 200, 400].map(|depth| work.at("connected work", depth) as usize);
+    assert!(
+        at_100 < at_200 && at_200 < at_400,
+        "work at 100 / 200 / 400 levels grows: {at_100} / {at_200} / {at_400}"
+    );
+    let (first, second) = (at_200 - at_100, at_400 - at_200);
+    assert!(
+        second <= first * 2 + first / 10,
+        "work at 100 / 200 / 400 levels: {at_100} / {at_200} / {at_400}"
+    );
+    assert!(
+        at_400 * 25 <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+        "a nest of 10,000 levels, at the work of 400 ({at_400}) twenty-five times over,          stays within the production work budget"
+    );
+}
+
 fn wrap(depth: usize, open: &str, close: &str) -> String {
     format!("{}1{}", open.repeat(depth), close.repeat(depth))
 }
@@ -870,8 +910,12 @@ fn module_calls_nested_deep_answer_on_a_small_stack() {
 /// A module constant initialized by nested calls, read in a function,
 /// returns its value, and each call's resolution is charged once to the
 /// connected demand: the work grows with the nest.
+/// The same 250-call nest on [`WIDE_STACK`], with its work affine at 25, 50
+/// and 75 levels and its counts at 100, 200 and 400 meeting the linear-work
+/// bounds: the gate version of the test in the nightly scale tier, which
+/// measures 100, 200 and 400 levels.
 #[test]
-fn module_calls_nested_deep_read_charge_linear_work() {
+fn module_calls_nested_deep_read_charge_affine_work() {
     in_a_fresh_process(test_path!(), || {
         assert_eq!(
             on_a_stack(WIDE_STACK, || flow_return_outcome_on_host(
@@ -881,7 +925,10 @@ fn module_calls_nested_deep_read_charge_linear_work() {
             )),
             RETURNS_ITS_VALUE
         );
-        assert_work_is_linear(|depth| (module_calls(depth, true), "pf"), "number");
+        assert_work_is_affine_and_meets_the_linear_bounds(
+            |depth| (module_calls(depth, true), "pf"),
+            "number",
+        );
     });
 }
 
@@ -1009,8 +1056,12 @@ fn generic_callbacks(depth: usize) -> String {
 /// instead of suspending the route costs tens); each call resolution is
 /// charged once to the connected demand, so the work grows with the nest.
 /// TypeScript 7.0.2: `number`, under every setting.
+/// The same 200-deep nest on [`WIDE_STACK`], with its work affine at 25, 50
+/// and 75 levels and its counts at 100, 200 and 400 meeting the linear-work
+/// bounds: the gate version of the test in the nightly scale tier, which
+/// measures 100, 200 and 400 levels.
 #[test]
-fn generic_callbacks_nested_deep_answer_on_a_small_stack_and_charge_linear_work() {
+fn generic_callbacks_nested_deep_answer_on_a_small_stack_and_charge_affine_work() {
     in_a_fresh_process(test_path!(), || {
         assert_eq!(
             on_a_stack(WIDE_STACK, || mismatches(
@@ -1019,7 +1070,10 @@ fn generic_callbacks_nested_deep_answer_on_a_small_stack_and_charge_linear_work(
             )),
             Vec::<String>::new()
         );
-        assert_work_is_linear(|depth| (generic_callbacks(depth), "pf"), "number");
+        assert_work_is_affine_and_meets_the_linear_bounds(
+            |depth| (generic_callbacks(depth), "pf"),
+            "number",
+        );
     });
 }
 
@@ -1872,4 +1926,39 @@ fn an_index_through_12_nested_key_unions_enumerates_every_key() {
         ),
         Vec::<String>::new()
     );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn generic_callbacks_nested_deep_answer_on_a_small_stack_and_charge_linear_work() {
+        in_a_fresh_process(test_path!(), || {
+            assert_eq!(
+                on_a_stack(WIDE_STACK, || mismatches(
+                    &generic_callbacks(NESTED_FUNCTIONS),
+                    &[(RETURN, "number")]
+                )),
+                Vec::<String>::new()
+            );
+            assert_work_is_linear(|depth| (generic_callbacks(depth), "pf"), "number");
+        });
+    }
+
+    #[test]
+    fn module_calls_nested_deep_read_charge_linear_work() {
+        in_a_fresh_process(test_path!(), || {
+            assert_eq!(
+                on_a_stack(WIDE_STACK, || flow_return_outcome_on_host(
+                    &default_probe_host(),
+                    &module_calls(CALLS, true),
+                    "pf"
+                )),
+                RETURNS_ITS_VALUE
+            );
+            assert_work_is_linear(|depth| (module_calls(depth, true), "pf"), "number");
+        });
+    }
 }
