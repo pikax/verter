@@ -188,10 +188,14 @@ pub trait CandidateValidator: Send + Sync {
 }
 
 /// The production validator: real bounded process probes + capability smokes.
+#[derive(Debug, Clone)]
 pub struct ProcessValidator {
     policy: VersionPolicy,
     probe_bound: Duration,
     smoke_bound: Duration,
+    /// Where the capability smoke's engine writes its stderr; inherited when
+    /// `None`.
+    held_stderr: Option<std::sync::Arc<crate::process::HeldStderr>>,
 }
 
 impl ProcessValidator {
@@ -207,6 +211,7 @@ impl ProcessValidator {
             policy,
             probe_bound: DEFAULT_PROBE_BOUND,
             smoke_bound: DEFAULT_SMOKE_BOUND,
+            held_stderr: None,
         }
     }
 
@@ -214,6 +219,15 @@ impl ProcessValidator {
     pub fn with_bounds(mut self, probe_bound: Duration, smoke_bound: Duration) -> Self {
         self.probe_bound = probe_bound;
         self.smoke_bound = smoke_bound;
+        self
+    }
+
+    /// Pipe the capability smoke's engine stderr through `held`.
+    pub(crate) fn holding_stderr(
+        mut self,
+        held: std::sync::Arc<crate::process::HeldStderr>,
+    ) -> Self {
+        self.held_stderr = Some(held);
         self
     }
 
@@ -227,6 +241,14 @@ impl ProcessValidator {
         path: &Path,
         requirement: Capability,
     ) -> Result<ValidatedCandidate, RejectionReason> {
+        let candidate = self.probe_candidate(path).await?;
+        self.cross_check(&candidate, requirement).await?;
+        Ok(candidate)
+    }
+
+    /// Steps 1 and 2 of validation: a regular file whose bounded `--version`
+    /// probe parses as strict SemVer and satisfies the support policy.
+    async fn probe_candidate(&self, path: &Path) -> Result<ValidatedCandidate, RejectionReason> {
         // 1. A regular file.
         if !path.is_file() {
             return Err(RejectionReason::NotARegularFile);
@@ -238,13 +260,23 @@ impl ProcessValidator {
                 detail: e.to_string(),
             })?;
         let version = classify_probed_version(&self.policy, &probe)?;
-        // 3. The capability smoke on a throwaway process.
-        self.smoke(path, &probe, requirement).await?;
         Ok(ValidatedCandidate {
             path: path.to_path_buf(),
             version,
             version_string: probe,
         })
+    }
+
+    /// Step 3 of validation: the capability smoke on a throwaway process,
+    /// cross-checking the engine's in-band version against the candidate's
+    /// probed one.
+    pub(crate) async fn cross_check(
+        &self,
+        candidate: &ValidatedCandidate,
+        requirement: Capability,
+    ) -> Result<(), RejectionReason> {
+        self.smoke(&candidate.path, &candidate.version_string, requirement)
+            .await
     }
 
     /// The capability smoke: prove the required surface on a throwaway spawned
@@ -287,7 +319,7 @@ impl ProcessValidator {
         probe: &str,
         staged: &SmokeProject,
     ) -> Result<(), RejectionReason> {
-        let conn = spawn_own_lsp_connection(path, &staged.dir)
+        let conn = spawn_own_lsp_connection(path, &staged.dir, self.held_stderr.as_ref())
             .await
             .map_err(|e| RejectionReason::LspHandshakeFailed {
                 detail: e.to_string(),
@@ -321,7 +353,7 @@ impl ProcessValidator {
         probe: &str,
         staged: &SmokeProject,
     ) -> Result<(), RejectionReason> {
-        let conn = spawn_own_lsp_connection(path, &staged.dir)
+        let conn = spawn_own_lsp_connection(path, &staged.dir, self.held_stderr.as_ref())
             .await
             .map_err(|e| RejectionReason::ApiSmokeFailed {
                 detail: format!("spawn the engine: {e}"),
@@ -369,6 +401,23 @@ impl ProcessValidator {
         };
         let _ = attach.teardown().await;
         result
+    }
+}
+
+/// The probe stage of a [`ProcessValidator`] alone (steps 1 and 2), for
+/// [`crate::toolchain::discovery::resolve_provisional`]. Crate-private: a
+/// candidate it accepts is only provisional until the same validator's
+/// [`ProcessValidator::cross_check`] confirms it.
+pub(crate) struct ProbeStage<'a>(pub(crate) &'a ProcessValidator);
+
+impl CandidateValidator for ProbeStage<'_> {
+    fn validate<'a>(
+        &'a self,
+        path: &'a Path,
+        _requirement: Capability,
+    ) -> Pin<Box<dyn Future<Output = Result<ValidatedCandidate, RejectionReason>> + Send + 'a>>
+    {
+        Box::pin(async move { self.0.probe_candidate(path).await })
     }
 }
 

@@ -28,7 +28,10 @@ use std::path::{Path, PathBuf};
 use super::bundle::bundled_tsgo_path;
 use super::platform::{host_platform, TsgoPlatform};
 use super::policy::{TsgoVersion, VersionPolicy, SUPPORTED_POLICY_ID};
-use super::validation::{CandidateValidator, Capability, ProcessValidator, RejectionReason};
+use super::validation::{
+    CandidateValidator, Capability, ProbeStage, ProcessValidator, RejectionReason,
+    ValidatedCandidate,
+};
 
 /// The explicit engine-override environment variable (tier 1).
 pub const ENV_OVERRIDE_VAR: &str = "VERTER_TSGO_BIN";
@@ -165,10 +168,82 @@ pub struct Resolution {
     pub path: PathBuf,
     /// Its probed, policy-accepted version.
     pub version: TsgoVersion,
+    /// The raw version string its `--version` probe reported.
+    pub version_string: String,
     /// The tier that supplied it.
     pub provenance: Provenance,
     /// The candidates that failed validation before this one (actionable).
     pub rejections: Vec<CandidateRejection>,
+}
+
+/// The first candidate whose `--version` probe passed the support policy,
+/// before its capability cross-check has run.
+///
+/// It lets a caller start its own session on the engine while the
+/// cross-check runs alongside. It is not a [`Resolution`]: only
+/// [`Self::confirm`] turns it into one, and only when the cross-check
+/// passes, in which case it is exactly the resolution [`resolve_with`] with
+/// the same validator would have selected — every candidate before it failed
+/// the probe stage, which the full walk runs first. When the cross-check
+/// fails, the full walk would have moved past this candidate, so the caller
+/// discards everything it built on it and resolves again in full.
+#[derive(Debug)]
+pub struct ProvisionalResolution {
+    candidate: ValidatedCandidate,
+    provenance: Provenance,
+    rejections: Vec<CandidateRejection>,
+    requirement: Capability,
+}
+
+impl ProvisionalResolution {
+    /// The candidate engine binary path.
+    pub fn path(&self) -> &Path {
+        &self.candidate.path
+    }
+
+    /// The raw version string the candidate's `--version` probe reported.
+    pub fn probed_version(&self) -> &str {
+        &self.candidate.version_string
+    }
+
+    /// Run the capability cross-check on this candidate. `Ok` is the
+    /// resolution the full validated walk selects; `Err` is the rejection
+    /// the full walk records for this candidate.
+    pub async fn confirm(
+        self,
+        validator: &ProcessValidator,
+    ) -> Result<Resolution, RejectionReason> {
+        validator
+            .cross_check(&self.candidate, self.requirement)
+            .await?;
+        Ok(Resolution {
+            path: self.candidate.path,
+            version: self.candidate.version,
+            version_string: self.candidate.version_string,
+            provenance: self.provenance,
+            rejections: self.rejections,
+        })
+    }
+}
+
+/// Walk the candidates through `validator`'s probe stage only and return the
+/// first that passes it, provisionally: see [`ProvisionalResolution`]. An
+/// `Err` is never final for the caller, which resolves again in full.
+pub async fn resolve_provisional(
+    request: &ResolutionRequest,
+    validator: &ProcessValidator,
+) -> Result<ProvisionalResolution, ResolveError> {
+    let probed = resolve_with(request, &ProbeStage(validator)).await?;
+    Ok(ProvisionalResolution {
+        candidate: ValidatedCandidate {
+            path: probed.path,
+            version: probed.version,
+            version_string: probed.version_string,
+        },
+        provenance: probed.provenance,
+        rejections: probed.rejections,
+        requirement: request.requirement,
+    })
 }
 
 /// Why a resolution failed.
@@ -266,6 +341,7 @@ pub async fn resolve_with(
                 return Ok(Resolution {
                     path: validated.path,
                     version: validated.version,
+                    version_string: validated.version_string,
                     provenance: candidate.provenance,
                     rejections,
                 });

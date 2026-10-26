@@ -167,9 +167,136 @@ impl DeterministicCounter {
     }
 }
 
+/// Link the new path `dest` to the existing directory `src`: a directory
+/// junction on Windows, made in-process (no `cmd /c mklink` spawn and no
+/// symlink privilege), a symbolic link elsewhere. The failure names its
+/// cause.
+pub fn link_directory(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        windows_junction(src, dest)
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(src, dest).map_err(|e| format!("symlink failed: {e}"))
+    }
+}
+
+/// A directory junction (`IO_REPARSE_TAG_MOUNT_POINT`) at `dest` targeting
+/// `src`, set with `FSCTL_SET_REPARSE_POINT` on a new empty directory.
+#[cfg(windows)]
+fn windows_junction(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+    let target = std::fs::canonicalize(src)
+        .map_err(|e| format!("cannot resolve the junction target {}: {e}", src.display()))?;
+    let target = target.to_string_lossy();
+    let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
+    let substitute: Vec<u16> = std::ffi::OsStr::new(&format!(r"\??\{target}"))
+        .encode_wide()
+        .collect();
+    let print: Vec<u16> = std::ffi::OsStr::new(target).encode_wide().collect();
+
+    // REPARSE_DATA_BUFFER for a mount point: tag, data length, reserved, then
+    // the substitute and print names (each NUL-terminated) in one path buffer.
+    let substitute_bytes = substitute.len() * 2;
+    let print_bytes = print.len() * 2;
+    let path_buffer_bytes = substitute_bytes + 2 + print_bytes + 2;
+    let data_length = 8 + path_buffer_bytes;
+    let field = |value: usize| -> Result<u16, String> {
+        u16::try_from(value).map_err(|_| format!("junction target too long: {target}"))
+    };
+    let mut buffer = Vec::with_capacity(8 + data_length);
+    buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend_from_slice(&field(data_length)?.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&field(substitute_bytes)?.to_le_bytes());
+    buffer.extend_from_slice(&field(substitute_bytes + 2)?.to_le_bytes());
+    buffer.extend_from_slice(&field(print_bytes)?.to_le_bytes());
+    for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    std::fs::create_dir(dest)
+        .map_err(|e| format!("cannot create the junction {}: {e}", dest.display()))?;
+    let dest_wide: Vec<u16> = dest.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: `dest_wide` is NUL-terminated and outlives the call; the
+    // returned handle is checked and closed below.
+    let handle = unsafe {
+        CreateFileW(
+            dest_wide.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        let _ = std::fs::remove_dir(dest);
+        return Err(format!(
+            "cannot open the junction {}: {error}",
+            dest.display()
+        ));
+    }
+    let mut returned = 0u32;
+    // SAFETY: `buffer` holds a complete REPARSE_DATA_BUFFER of the length
+    // passed, and `handle` is a valid directory handle opened for writing.
+    let set = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            buffer.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: `handle` is valid and closed exactly once.
+    unsafe { CloseHandle(handle) };
+    if set == 0 {
+        let _ = std::fs::remove_dir(dest);
+        return Err(format!(
+            "cannot point the junction {} at {target}: {error}",
+            dest.display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linked_directory_shows_its_target_contents() {
+        let root = unique_temp_dir("link-directory");
+        let target = root.join("target");
+        std::fs::create_dir_all(target.join("inner")).expect("create the target");
+        std::fs::write(target.join("inner").join("file.txt"), "linked").expect("write");
+        let link = root.join("link");
+        link_directory(&target, &link).expect("link the directory");
+        assert_eq!(
+            std::fs::read_to_string(link.join("inner").join("file.txt")).expect("read through"),
+            "linked"
+        );
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn archived_binary_resolution_prefers_the_runtime_copy() {

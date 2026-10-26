@@ -487,6 +487,7 @@ mod harness {
             path: PathBuf::from("/opt/tsgo"),
             provenance: Provenance::ProjectLocal,
             version: verter_tsgo_api::toolchain::policy::TsgoVersion::parse("7.0.2").unwrap(),
+            version_string: "7.0.2".to_string(),
             rejections: Vec::new(),
         }))
         .expect("a validated engine must be handed through");
@@ -706,33 +707,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Link `src` into `dest`, returning the failure reason instead of swallowing
 /// it — a fixture whose `node_modules` never materialized must FAIL naming the
-/// link error, never pass with an empty program.
-#[cfg(windows)]
+/// link error, never pass with an empty program. The link is made in-process:
+/// spawning `cmd /c mklink` costs a process start on every test.
 fn create_junction_or_symlink(src: &Path, dest: &Path) -> Result<(), String> {
-    use std::process::{Command, Stdio};
-    let status = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(dest)
-        .arg(src)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        junction => {
-            let junction_note = match junction {
-                Ok(s) => format!("mklink /J exited {s}"),
-                Err(e) => format!("mklink /J failed to run: {e}"),
-            };
-            std::os::windows::fs::symlink_dir(src, dest)
-                .map_err(|e| format!("{junction_note}; symlink_dir fallback failed: {e}"))
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn create_junction_or_symlink(src: &Path, dest: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink(src, dest).map_err(|e| format!("symlink failed: {e}"))
+    verter_test_support::link_directory(src, dest)
 }
 
 /// Materialize the fixture project. Every failure here is a hard FAILURE
