@@ -2557,6 +2557,15 @@ fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(setting: Sett
             values: work.iter().map(|counts| counts[index].1).collect(),
         })
         .collect();
+    // The harness read runs in a request of its own, so its charged
+    // operations are counted: a flow return charges one.
+    assert!(
+        work[0]
+            .iter()
+            .any(|(name, count)| *name == "charged operations" && *count > 0),
+        "the harness counts the operations its read charges: {:?}",
+        work[0]
+    );
     let work = quadratic("the guard chain", widths, counters);
     let connected = work.at("connected work", 800);
     assert!(
