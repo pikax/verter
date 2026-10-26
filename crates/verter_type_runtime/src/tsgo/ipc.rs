@@ -1101,6 +1101,9 @@ impl LspTransport {
         }
     }
 
+    /// Enqueue one document notification. `lead` is a frame the writer puts
+    /// on the wire immediately before it, in the same lane message, so nothing
+    /// can come between the two and the lane spends one slot either way.
     async fn deliver_document(
         &self,
         method: &str,
@@ -1108,10 +1111,14 @@ impl LspTransport {
         priority: ProviderPriority,
         delivery: DocumentDelivery,
         done: oneshot::Receiver<()>,
+        lead: Option<Vec<u8>>,
     ) -> Result<(), TypeProviderError> {
         let body = serde_json::to_string(&jsonrpc_body(None, method, params))
             .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes();
+        let mut frame = lead.unwrap_or_default();
+        frame.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes(),
+        );
         {
             let accepted = Arc::clone(&delivery.accepted);
             let key = delivery.key.clone();
@@ -1239,6 +1246,36 @@ fn forget_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str) {
         .remove(key);
 }
 
+/// The frame that makes TSGO load a document's configured project ahead of the
+/// document's first `didOpen`, sent in front of that `didOpen`.
+///
+/// TSGO puts the file whose `didOpen` creates a configured project out of the
+/// project's own order in the program it builds (TypeScript 7.1.0-beta: with
+/// merged enum blocks in `a.ts` and `b.ts`, opening `a.ts` first moves TS2432
+/// onto `a.ts`, where `tsc` puts it on `b.ts`; 7.0.2 placed it as `tsc`
+/// does). A `custom/projectInfo` request for the document, read before the
+/// `didOpen`, loads the project first, so no `didOpen` creates it and every
+/// diagnostic whose placement follows program order is placed as `tsc`
+/// places it, whatever order the editor opens files in.
+///
+/// The request is not awaited: the engine reads it before the `didOpen` that
+/// follows it on the wire, which is all the ordering needs, so an editor
+/// write still never waits on a round trip. Its answer carries an id no
+/// caller registered, which the reader drops. A refusal (a document no
+/// project claims, an engine without the method) changes nothing. A
+/// TypeScript-editor compatibility option that keeps TSGO's open-order
+/// placement would leave this frame out.
+fn project_load_frame(transport: &LspTransport, uri: &str) -> Vec<u8> {
+    let id = transport.next_id.fetch_add(1, Ordering::Relaxed);
+    let body = jsonrpc_body(
+        Some(id),
+        "custom/projectInfo",
+        &serde_json::json!({ "textDocument": { "uri": uri } }),
+    )
+    .to_string();
+    format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
+}
+
 async fn deliver_document_sync(
     transport: &LspTransport,
     versions: &Arc<Mutex<HashMap<String, i32>>>,
@@ -1255,7 +1292,7 @@ async fn deliver_document_sync(
 
     // `Unchanged` returns before a frame exists, so the arms below are exactly the
     // notifications that reach the wire — there is no mode without a frame.
-    let (mode, version, method, params) = match versions_guard.get(&document_key) {
+    let (mode, version, method, params, lead) = match versions_guard.get(&document_key) {
         Some(version) => {
             let unchanged = accepted
                 .lock()
@@ -1278,6 +1315,7 @@ async fn deliver_document_sync(
                     "textDocument": { "uri": uri, "version": version },
                     "contentChanges": [{ "text": content }]
                 }),
+                None,
             )
         }
         None => (
@@ -1292,6 +1330,7 @@ async fn deliver_document_sync(
                     "text": content,
                 }
             }),
+            Some(project_load_frame(transport, &uri)),
         ),
     };
 
@@ -1311,6 +1350,7 @@ async fn deliver_document_sync(
                 diagnostics: None,
             },
             completed,
+            lead,
         )
         .await?;
 
@@ -1391,6 +1431,7 @@ async fn deliver_document_close(
                 diagnostics: Some(Arc::clone(diagnostics_cache)),
             },
             completed,
+            None,
         )
         .await?;
     Ok(())

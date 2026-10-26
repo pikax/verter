@@ -491,7 +491,7 @@ async fn open_file_still_delivers_the_editor_open_on_the_lsp_surface() {
     let mut chunk = [0u8; 8192];
     let mut methods: Vec<String> = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while methods.is_empty() {
+    while methods.len() < 2 {
         let n = tokio::time::timeout_at(deadline, lsp_peer.read(&mut chunk))
             .await
             .expect("open_file must deliver a didOpen on the --lsp transport")
@@ -508,9 +508,10 @@ async fn open_file_still_delivers_the_editor_open_on_the_lsp_surface() {
         }
     }
     assert_eq!(
-        methods.first().map(String::as_str),
-        Some("textDocument/didOpen"),
-        "the interactive open must still deliver the editor open: {methods:?}"
+        methods[..2],
+        ["custom/projectInfo", "textDocument/didOpen"],
+        "the interactive open must still deliver the editor open, behind the \
+         request that loads its project: {methods:?}"
     );
     open.abort();
 }
@@ -576,16 +577,20 @@ async fn editor_writes_never_pay_a_diagnostic_round_trip() {
     .expect("an editor write must not block on an --lsp round trip");
 
     let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
-    let frames = read_lsp_frames(&mut lsp_peer, &mut framer, |seen| seen.len() >= 3).await;
+    let frames = read_lsp_frames(&mut lsp_peer, &mut framer, |seen| seen.len() >= 5).await;
     let methods: Vec<&str> = frames.iter().map(|(method, _)| method.as_str()).collect();
+    // Each first open leads with the request that loads its project; that
+    // request is written, never awaited, so no write waited above.
     assert_eq!(
         methods,
         [
+            "custom/projectInfo",
             "textDocument/didOpen",
+            "custom/projectInfo",
             "textDocument/didOpen",
             "textDocument/didChange"
         ],
-        "only the document notifications reach the wire"
+        "only the document notifications and their project leads reach the wire"
     );
 }
 
