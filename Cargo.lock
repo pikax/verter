@@ -4099,7 +4099,6 @@ dependencies = [
  "verter_execution",
  "verter_language",
  "verter_parser",
- "verter_retention",
  "verter_semantic",
  "verter_session_query",
  "verter_span",

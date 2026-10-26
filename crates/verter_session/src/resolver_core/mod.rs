@@ -2201,9 +2201,8 @@ where
             true,
         );
         loop {
-            match verter_execution::blocking::block_on_when_pending_with_interval(
+            match verter_execution::blocking::block_on_when_pending(
                 verter_execution::blocking::WaitFamily::ResolverFlight,
-                None,
                 |waker| core.poll(waker),
             ) {
                 Ok(owned_singleflight::CoreStep::Produce(producer)) => producer.run(),
