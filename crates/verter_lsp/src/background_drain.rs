@@ -236,6 +236,10 @@ pub(crate) fn arm_pending_sync_redrive_once(
         return;
     }
     let successor = Arc::clone(drain);
+    #[cfg(test)]
+    drain
+        .carrier_transaction_coordinator
+        .note_pending_redrive_chain_started();
     tokio::spawn(async move {
         let mut attempt = 1u32;
         // The retry-signal generation as of the START of the latest pass. It
@@ -308,6 +312,10 @@ pub(crate) fn arm_pending_sync_redrive_once(
         {
             signal_pending_sync_redrive(&successor, redrive);
         }
+        #[cfg(test)]
+        successor
+            .carrier_transaction_coordinator
+            .note_pending_redrive_chain_finished();
     });
 }
 
