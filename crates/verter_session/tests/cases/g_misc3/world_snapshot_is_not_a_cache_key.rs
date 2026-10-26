@@ -149,7 +149,7 @@ fn type_mentions_world_snapshot(ty: &Type) -> bool {
                 // `Fn(WorldSnapshot) -> ()` etc.
                 if let syn::PathArguments::Parenthesized(args) = &seg.arguments {
                     for inner in &args.inputs {
-                        if type_mentions_world_snapshot(inner) {
+                        if type_mentions_world_snapshot(&inner.ty) {
                             return true;
                         }
                     }

@@ -240,7 +240,11 @@ fn policy_arms_of(file: &syn::File) -> std::collections::BTreeMap<String, String
         .expect("policy body is a match");
     let mut arms = std::collections::BTreeMap::new();
     for arm in &m.arms {
-        let syn::Pat::Path(pat) = &arm.pat else {
+        let pat = match &arm.pat {
+            syn::Pat::Guard(guarded) => &*guarded.pat,
+            pat => pat,
+        };
+        let syn::Pat::Path(pat) = pat else {
             continue;
         };
         let variant = pat.path.segments.last().unwrap().ident.to_string();

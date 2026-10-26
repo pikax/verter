@@ -431,12 +431,17 @@ jobs:
       # three minutes.
       - name: Run core Rust tests from the shared archive
         timeout-minutes: 30
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
         run: |
           mkdir -p target/rust-nextest-archive
-          export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
-          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER"
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
+          export VERTER_NEXTEST_FILTER
+          nextest_argv=(nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER")
+          echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
+          cargo "${nextest_argv[@]}"
       - name: Locate nextest JUnit report
         if: always()
         id: junit
@@ -449,6 +454,16 @@ jobs:
           fi
           echo "path=$found" >> "$GITHUB_OUTPUT"
           echo "JUnit report: $found"
+      # The JUnit report plus its metadata document, under a stable name per shard.
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          junit-path: ${{ steps.junit.outputs.path }}
+          name: nextest-evidence-rust-test-core-${{ matrix.shard }}-of-4
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+          matrix-json: ${{ toJSON(matrix) }}
       - name: Test report
         if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
@@ -489,9 +504,14 @@ jobs:
         run: cargo fetch --locked
       - name: Run the instrumentation lane
         timeout-minutes: 80
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
-        run: node scripts/observe-lane.mjs run
+        run: |
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node scripts/observe-lane.mjs args)"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/observe-lane.mjs run
       - name: Locate nextest JUnit report
         if: always()
         id: junit
@@ -502,6 +522,14 @@ jobs:
             exit 1
           fi
           echo "path=$found" >> "$GITHUB_OUTPUT"
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          junit-path: ${{ steps.junit.outputs.path }}
+          name: nextest-evidence-rust-observe
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
       - name: Test report
         if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
@@ -673,9 +701,21 @@ jobs:
       - name: Verify BF2 CI lane contract
         run: node --test scripts/bf2-ci-lane-selftest.mjs
       - name: Run exact BF2 authoritative inventory
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
-        run: node scripts/bf2-authoritative.mjs
+        run: |
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node -e 'import("./scripts/gate-internals.mjs").then((m) => console.log(JSON.stringify(m.buildBf2NextestArgs("run"))))')"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/bf2-authoritative.mjs
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-bf2-authoritative
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
 
   js-build-test:
     name: JS Build & Test
@@ -1125,7 +1165,7 @@ jobs:
       - name: Install wasm-bindgen CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.122
+          tool: wasm-bindgen-cli@0.2.129
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -1225,7 +1265,7 @@ jobs:
       - name: Install wasm-bindgen CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.122
+          tool: wasm-bindgen-cli@0.2.129
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:

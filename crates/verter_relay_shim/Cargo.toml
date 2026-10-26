@@ -56,7 +56,7 @@ getrandom = "0.2"
 # Async runtime for the stdio relay, the child process, the control endpoint,
 # and the shutdown select. `io-std` supplies the editor-side stdin/stdout the
 # relay pumps; `net` supplies the control endpoint (named pipe / UDS).
-tokio = { version = "1.52", features = [
+tokio = { version = "1.54", features = [
     "io-util",
     "io-std",
     "process",

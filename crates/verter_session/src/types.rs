@@ -3811,6 +3811,22 @@ pub struct DerivedRawState {
     /// cache across no-op reloads. `None` triggers the conservative bump that
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
+
+    /// How many times this file has been evicted. A reload clears
+    /// `evicted` only when no eviction has landed since it started, so an
+    /// eviction during a reload leaves the file evicted for the next reload.
+    pub(crate) eviction_epoch: u64,
+
+    /// The eviction whose pre-eviction scheduler snapshot a reload has
+    /// already reset. Below `eviction_epoch`, the next reload resets the
+    /// scheduler before loading; at it, a reload joins the reset one.
+    pub(crate) eviction_reset_epoch: u64,
+
+    /// Serialises this file's reload reset, so callers racing to reload one
+    /// eviction reset the scheduler once and every load request follows
+    /// that reset. Held only for the reset, never across the load, and never
+    /// for another file.
+    pub(crate) eviction_reset: Arc<parking_lot::Mutex<()>>,
 }
 
 impl DerivedRawState {

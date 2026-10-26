@@ -719,6 +719,7 @@
           "crates/verter_session/src/typeinfo/tests.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/declaration_merge.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_substrate.rs",
+          "crates/verter_session/src/typeinfo/typeinfo_tests/generic_interface_identity.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/macro_producer_fact_replay.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/mapped_template.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_discriminated_union.rs",

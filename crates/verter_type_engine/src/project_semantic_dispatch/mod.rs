@@ -99,6 +99,7 @@ pub mod build;
 pub mod canonical_algebra;
 pub mod carrier;
 mod conditional_decision;
+mod contextual_tuple;
 // The operational budget owner: work units, query-boundary depth, and the
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
@@ -474,6 +475,10 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// dispatcher's lifetime ([`conditional_decision::FreeTypeVariables`]).
     free_type_variables:
         verter_execution::sync_cell::SyncRefCell<conditional_decision::FreeTypeVariableSummaries>,
+    /// The contextual tuples array literal elements read in this
+    /// dispatcher's lifetime, each tuple's shape and middle ranges read
+    /// once ([`contextual_tuple::TupleContexts`]).
+    tuple_contexts: verter_execution::sync_cell::SyncRefCell<contextual_tuple::TupleContexts>,
     /// Memoized transitive CLASS ANCESTRY, keyed by the rooted declaration
     /// identity ([`build::ClassAncestryReading`],
     /// [`Self::class_heritage_ancestry`]).
@@ -1295,6 +1300,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             free_type_variables: verter_execution::sync_cell::SyncRefCell::new(
                 rustc_hash::FxHashMap::default(),
             ),
+            tuple_contexts: verter_execution::sync_cell::SyncRefCell::default(),
             heritage_ancestry: verter_execution::sync_cell::SyncRefCell::new(
                 rustc_hash::FxHashMap::default(),
             ),
@@ -1392,6 +1398,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             answer_reads,
             closedness,
             free_type_variables,
+            tuple_contexts,
             heritage_ancestry,
             build_local_taint,
             homomorphic_aliases,
@@ -1427,6 +1434,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         answer_reads.swap(&other.answer_reads);
         closedness.swap(&other.closedness);
         free_type_variables.swap(&other.free_type_variables);
+        tuple_contexts.swap(&other.tuple_contexts);
         heritage_ancestry.swap(&other.heritage_ancestry);
         build_local_taint.swap(&other.build_local_taint);
         homomorphic_aliases.swap(&other.homomorphic_aliases);
