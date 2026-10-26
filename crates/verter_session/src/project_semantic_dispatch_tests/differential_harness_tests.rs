@@ -515,22 +515,7 @@ impl<'a> Matrix<'a> {
                     verter_audit::observe::Uncaptured,
                 >::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-                let key = verter_type_engine::semantic_query::FlowReturnKey {
-                    function: dispatch.flow_function_slot_for(
-                        Arc::from(canonical.as_str()),
-                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        Arc::from(*function),
-                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-                        0,
-                    ),
-                    normalized_type_args: verter_type_expr::OwnedSlice::from(
-                        Vec::new().into_boxed_slice(),
-                    ),
-                    context: dispatch.flow_return_context_for(&canonical),
-                    demand: ReturnProjectionDemand::whole_return(),
-                    input: verter_type_engine::semantic_query::FlowInputContext::empty(),
-                    result_contract: super::flow_solve::flow_return_result_contract_id(),
-                };
+                let key = whole_return_key(&dispatch, &canonical, function);
                 let read = dispatch.execute_read(
                     verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
                 );
@@ -573,20 +558,7 @@ impl<'a> Matrix<'a> {
             verter_audit::observe::Uncaptured,
         >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let key = verter_type_engine::semantic_query::FlowReturnKey {
-            function: dispatch.flow_function_slot_for(
-                Arc::from(canonical.as_str()),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(function),
-                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-                0,
-            ),
-            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
-            context: dispatch.flow_return_context_for(&canonical),
-            demand: ReturnProjectionDemand::whole_return(),
-            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
-            result_contract: super::flow_solve::flow_return_result_contract_id(),
-        };
+        let key = whole_return_key(&dispatch, &canonical, function);
         let before = dispatch.graph().stats_snapshot().relation_check_count;
         let counted_before = counters.map(|counter| counter());
         let result = dispatch.execute_read(
@@ -621,20 +593,7 @@ impl<'a> Matrix<'a> {
             verter_audit::observe::Uncaptured,
         >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let key = verter_type_engine::semantic_query::FlowReturnKey {
-            function: dispatch.flow_function_slot_for(
-                Arc::from(canonical.as_str()),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(function),
-                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-                0,
-            ),
-            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
-            context: dispatch.flow_return_context_for(&canonical),
-            demand: ReturnProjectionDemand::whole_return(),
-            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
-            result_contract: super::flow_solve::flow_return_result_contract_id(),
-        };
+        let key = whole_return_key(&dispatch, &canonical, function);
         let stats = dispatch.graph().stats_snapshot();
         let argument_before =
             verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
@@ -1686,6 +1645,29 @@ fn signature_text(
 /// `text` with every union, intersection and object member list sorted,
 /// `true | false` folded to `boolean`, and an optional tuple element's
 /// `| undefined` dropped — the spelling both sides are compared in.
+/// The cold whole-return key of `function`'s declaration body in
+/// `canonical`: the one query every harness read of a return measures.
+fn whole_return_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    function: &str,
+) -> verter_type_engine::semantic_query::FlowReturnKey {
+    verter_type_engine::semantic_query::FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(function),
+            verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
 pub(super) fn canonical_text(text: &str) -> String {
     let text = text.trim();
     canonical_level(text)
