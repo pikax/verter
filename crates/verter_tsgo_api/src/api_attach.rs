@@ -28,7 +28,9 @@
 //! Every returned snapshot is a handle the caller OWNS: once no request will
 //! read it any more the caller hands it back through [`ApiAttachClient::release`]
 //! (the engine keeps the snapshot and its programs alive until then), and a
-//! released handle is never sent again.
+//! released handle is never sent again. A caller whose query can be cancelled
+//! holds the handle in a [`SnapshotLease`], which releases it even when the
+//! query's future is dropped mid-request.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,6 +74,61 @@ pub struct ApiAttachClient {
     /// project's program up to date (`ensurePrograms: [id]`). Shared across
     /// clones.
     project_ids: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    /// Whether the engine compares paths case-sensitively, from the
+    /// `initialize` response: the engine's id for a configured project is its
+    /// config path under that comparison, so a request can name the project
+    /// before any snapshot has listed it. Shared across clones.
+    case_sensitive: Arc<std::sync::OnceLock<bool>>,
+}
+
+/// A snapshot handle the caller owns, released exactly once: by
+/// [`SnapshotLease::release`] when the caller is done with it, or, when the
+/// lease is dropped unreleased because the query reading it was cancelled
+/// (an aborted diagnostics task, an elapsed timeout), by a release spawned on
+/// the current Tokio runtime. Without that, every cancelled query would leave
+/// its snapshot and its programs alive in the engine for the rest of the
+/// session.
+#[derive(Debug)]
+#[must_use = "a lease releases its snapshot only through `release` or on drop"]
+pub struct SnapshotLease {
+    client: ApiAttachClient,
+    snapshot: Option<OpaqueHandle>,
+}
+
+impl SnapshotLease {
+    /// The leased snapshot handle, for the requests that read it.
+    #[must_use]
+    pub fn handle(&self) -> &OpaqueHandle {
+        self.snapshot
+            .as_ref()
+            .expect("a lease holds its handle until it is released")
+    }
+
+    /// Release the snapshot now and report the engine's answer.
+    pub async fn release(mut self) -> TsgoApiResult<()> {
+        let snapshot = self
+            .snapshot
+            .take()
+            .expect("a lease holds its handle until it is released");
+        self.client.release(&snapshot).await
+    }
+}
+
+impl Drop for SnapshotLease {
+    fn drop(&mut self) {
+        let Some(snapshot) = self.snapshot.take() else {
+            return;
+        };
+        // No runtime means the process is tearing the engine down with it.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let client = self.client.clone();
+            runtime.spawn(async move {
+                // A failed release has no one left to report to; the handle is
+                // not used again either way.
+                let _ = client.release(&snapshot).await;
+            });
+        }
+    }
 }
 
 /// The language server's snapshot the attached `--api` session read: the
@@ -112,6 +169,16 @@ impl ApiAttachClient {
             first_validation_lock: Arc::new(tokio::sync::Mutex::new(())),
             leased_projects: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             project_ids: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            case_sensitive: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Hold `snapshot` in a [`SnapshotLease`] that releases it through this
+    /// client.
+    pub fn lease(&self, snapshot: OpaqueHandle) -> SnapshotLease {
+        SnapshotLease {
+            client: self.clone(),
+            snapshot: Some(snapshot),
         }
     }
 
@@ -123,7 +190,9 @@ impl ApiAttachClient {
             .conn
             .request(method::INITIALIZE, serde_json::Value::Null)
             .await?;
-        deserialize(value)
+        let response: InitializeResponse = deserialize(value)?;
+        let _ = self.case_sensitive.set(response.case_sensitive());
+        Ok(response)
     }
 
     /// Read the language server's current snapshot with `tsconfig_path` open.
@@ -167,7 +236,7 @@ impl ApiAttachClient {
         }
         let value = self.request_language_server_snapshot(tsconfig_path).await?;
         gate::require_integer_snapshot_handle(&value["snapshot"], observed_version)?;
-        let snap = decode_attach_snapshot(value)?;
+        let snap = self.decode_or_release(value).await?;
         // Flip the warm flag ONLY after the full first response validated AND decoded.
         self.first_snapshot_validated.store(true, Ordering::Release);
         // Record the project leased only after the full open succeeded.
@@ -181,9 +250,36 @@ impl ApiAttachClient {
     /// fast path and the slow-path double-check so both lease identically.
     async fn warm_open_and_lease(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
         let value = self.request_language_server_snapshot(tsconfig_path).await?;
-        let snap = decode_attach_snapshot(value)?;
+        let snap = self.decode_or_release(value).await?;
         self.mark_project_leased(tsconfig_path, &snap).await;
         Ok(snap)
+    }
+
+    /// Decode a snapshot response, releasing its handle when the rest of the
+    /// response does not decode: the engine created the snapshot either way,
+    /// and no caller will ever hold it.
+    async fn decode_or_release(&self, value: serde_json::Value) -> TsgoApiResult<AttachSnapshot> {
+        let handle = serde_json::from_value::<OpaqueHandle>(value["snapshot"].clone()).ok();
+        match decode_attach_snapshot(value) {
+            Ok(snap) => Ok(snap),
+            Err(err) => {
+                if let Some(handle) = handle {
+                    // The decode failure is the error worth reporting.
+                    let _ = self.release(&handle).await;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// The engine's id for the configured project `tsconfig_path`: the config
+    /// path keyed as the engine keys paths (`pathKey`), lowercased where the
+    /// file system compares paths case-insensitively (`toFileNameLowerCase`,
+    /// which keeps `İ`, `ı` and `ß`). `None` before `initialize` has said
+    /// how the engine compares paths.
+    fn derived_project_id(&self, tsconfig_path: &str) -> Option<String> {
+        let case_sensitive = *self.case_sensitive.get()?;
+        Some(project_id_for_config(tsconfig_path, case_sensitive))
     }
 
     /// Record `tsconfig_path` as a successfully-adopted `openProjects` lease,
@@ -213,7 +309,11 @@ impl ApiAttachClient {
     /// it because the open persists in the language server — re-sending it
     /// would double-increment the refcount (a leak). Every request carries
     /// `ensurePrograms`: the known project id once the opening snapshot named
-    /// it, `true` until then. No `baseSnapshot` rides the request, so the
+    /// it, else the id derived from the config path (the engine keys a
+    /// configured project by it), and `true` only before `initialize` has said
+    /// how to derive it. A config the engine has no configured project for
+    /// therefore never asks for the whole workspace to be rebuilt; an id that
+    /// names no project is ignored. No `baseSnapshot` rides the request, so the
     /// response lists EVERY project. The decision keys on
     /// the per-project lease set (populated only after a full successful open),
     /// so EVERY distinct project the shared client serves opens exactly once and
@@ -227,7 +327,10 @@ impl ApiAttachClient {
         tsconfig_path: &str,
     ) -> TsgoApiResult<serde_json::Value> {
         let already_leased = self.leased_projects.lock().await.contains(tsconfig_path);
-        let known_id = self.project_ids.lock().await.get(tsconfig_path).cloned();
+        let known_id = match self.project_ids.lock().await.get(tsconfig_path).cloned() {
+            Some(id) => Some(id),
+            None => self.derived_project_id(tsconfig_path),
+        };
         let ensure_programs = match known_id {
             Some(id) => EnsurePrograms::Projects(vec![id]),
             None => EnsurePrograms::All,
@@ -363,6 +466,33 @@ impl ApiAttachClient {
 fn deserialize<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> TsgoApiResult<T> {
     serde_json::from_value(value)
         .map_err(|e| crate::error::TsgoApiError::Json(format!("--api result decode: {e}")))
+}
+
+/// The engine's id for a configured project: its config path with backslash
+/// separators as `/`, lowercased per code point outside `a-z`, `0-9`,
+/// backslash, `/ : - _ .`, space, `İ`, `ı` and `ß` when paths compare
+/// case-insensitively (TypeScript 7.1.0-beta `api/path.js` `pathKey` and
+/// `toFileNameLowerCase`). `config` is already absolute and normalized.
+fn project_id_for_config(config: &str, case_sensitive: bool) -> String {
+    let config = config.replace('\\', "/");
+    if case_sensitive {
+        return config;
+    }
+    config
+        .chars()
+        .flat_map(|character| {
+            let kept = matches!(
+                character,
+                'a'..='z' | '0'..='9' | '\\' | '/' | ':' | '-' | '_' | '.' | ' ' | '\u{130}' | '\u{131}' | '\u{df}'
+            );
+            let lowered: Vec<char> = if kept {
+                vec![character]
+            } else {
+                character.to_lowercase().collect()
+            };
+            lowered
+        })
+        .collect()
 }
 
 /// Decode a snapshot raw result into an [`AttachSnapshot`]. Shared by the fast

@@ -707,3 +707,84 @@ async fn disk_changes_reach_the_engine_as_a_watched_files_notification() {
         "the change names the file by URI: {change}"
     );
 }
+
+/// A diagnostics query aborted while its checker request is in flight (every
+/// edit aborts the running diagnostics task) still hands its snapshot back:
+/// the engine sees `release` for the very handle the query read, though
+/// nothing ever answered the diagnostics request.
+#[tokio::test]
+async fn an_aborted_diagnostics_query_releases_its_snapshot() {
+    use tokio::io::AsyncWriteExt;
+
+    let (provider, _lsp_peer, mut api_peer) = owned_over_duplex();
+    let provider = Arc::new(provider);
+    let (carrier, tsconfig) = if cfg!(windows) {
+        ("D:/w/A.vue.tsx", "D:/w/tsconfig.json")
+    } else {
+        ("/w/A.vue.tsx", "/w/tsconfig.json")
+    };
+    let query = {
+        let provider = Arc::clone(&provider);
+        tokio::spawn(async move {
+            provider
+                .semantic_diagnostics_for_carrier_in_project(carrier, tsconfig)
+                .await
+        })
+    };
+
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    let mut chunk = [0u8; 8192];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let next = |framer: &mut verter_tsgo_api::jsonrpc::framing::MessageFramer| {
+        framer.next_message().expect("decode message")
+    };
+    let mut released = None;
+    let mut aborted = false;
+    while released.is_none() {
+        let message = match next(&mut framer) {
+            Some(message) => message,
+            None => {
+                let n = tokio::time::timeout_at(deadline, api_peer.read(&mut chunk))
+                    .await
+                    .expect("the --api requests never arrived")
+                    .expect("read from the --api peer");
+                assert_ne!(n, 0, "the --api transport closed early");
+                framer.push(&chunk[..n]);
+                continue;
+            }
+        };
+        match message["method"].as_str() {
+            Some("getCurrentLanguageServerSnapshot") => {
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {
+                        "snapshot": 41,
+                        "projects": [{
+                            "id": "p",
+                            "configFileName": tsconfig,
+                            "currentDirectory": "/w",
+                            "dirty": false,
+                            "parsedCommandLine": { "fileNames": [carrier], "options": {}, "errors": [] }
+                        }]
+                    }
+                })
+                .to_string();
+                api_peer
+                    .write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+                    .await
+                    .expect("answer the snapshot");
+            }
+            Some("getSemanticDiagnostics") => {
+                assert_eq!(message["params"]["snapshot"], 41);
+                // Never answered: the edit aborts the query mid-request.
+                query.abort();
+                aborted = true;
+            }
+            Some("release") => released = Some(message["params"]["snapshot"].clone()),
+            _ => {}
+        }
+    }
+    assert!(aborted, "the release followed the aborted request");
+    assert_eq!(released, Some(serde_json::json!(41)));
+}

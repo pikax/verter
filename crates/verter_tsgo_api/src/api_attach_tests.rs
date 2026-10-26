@@ -72,6 +72,26 @@ async fn fake_api_server(
                 continue;
             }
             recorder.lock().push((method.clone(), params.clone()));
+            if method == "getSemanticDiagnostics"
+                && params["files"][0]
+                    .as_str()
+                    .is_some_and(|file| file.contains("Hang"))
+            {
+                // Left unanswered: the query reading the snapshot is cancelled.
+                continue;
+            }
+            if method == "getCurrentLanguageServerSnapshot"
+                && params["changes"]["openProjects"][0] == "/ws/Bad/tsconfig.json"
+            {
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "snapshot": 5, "projects": "not a project list" },
+                });
+                let _ = writer.write_all(&encode_message(&reply)).await;
+                let _ = writer.flush().await;
+                continue;
+            }
             let result = match method.as_str() {
                 "initialize" => serde_json::json!({
                     "caseSensitivity": 0,
@@ -426,5 +446,147 @@ async fn project_for_config_predicate() {
         snap.project_for_config(|c| c == "/nope/tsconfig.json")
             .is_none(),
         "an unmatched config must yield None"
+    );
+}
+
+/// Wait until the fake has recorded a `release` of `snapshot`, or fail.
+async fn await_release(recorder: &Recorder, snapshot: i64) {
+    let expected = serde_json::json!({ "snapshot": snapshot });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if recorder
+            .lock()
+            .iter()
+            .any(|(method, params)| method == "release" && params == &expected)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "snapshot {snapshot} was never released: {:?}",
+            recorder.lock()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// DISCRIMINATING: a query cancelled while its checker request is in flight
+/// (an aborted diagnostics task, an elapsed timeout) still releases the
+/// snapshot it read: the lease's drop sends the release. A plain `.await`ed
+/// release after the request never runs on that path, and the engine keeps
+/// the snapshot and its programs for the rest of the session.
+#[tokio::test]
+async fn a_cancelled_query_still_releases_its_snapshot() {
+    let (client, recorder) = setup();
+    let snap = client
+        .current_snapshot_for_project("/ws/tsconfig.json", TYPESCRIPT_PIN)
+        .await
+        .expect("snapshot ok");
+    let query = {
+        let client = client.clone();
+        async move {
+            let lease = client.lease(snap.snapshot);
+            let diagnostics = client
+                .get_semantic_diagnostics(lease.handle(), "proj-1", "/ws/src/Hang.vue.tsx")
+                .await;
+            let _ = lease.release().await;
+            diagnostics
+        }
+    };
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(100), query).await;
+    assert!(outcome.is_err(), "the checker request is never answered");
+    await_release(&recorder, 1).await;
+}
+
+/// A lease released by its caller sends exactly one release, and none again
+/// on drop.
+#[tokio::test]
+async fn a_released_lease_releases_once() {
+    let (client, recorder) = setup();
+    let snap = client
+        .current_snapshot_for_project("/ws/tsconfig.json", TYPESCRIPT_PIN)
+        .await
+        .expect("snapshot ok");
+    client
+        .lease(snap.snapshot)
+        .release()
+        .await
+        .expect("release ok");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let releases = recorder
+        .lock()
+        .iter()
+        .filter(|(method, _)| method == "release")
+        .count();
+    assert_eq!(releases, 1);
+}
+
+/// A snapshot response whose projects do not decode still created the
+/// snapshot: its handle is released before the decode error returns, warm or
+/// cold.
+#[tokio::test]
+async fn an_undecodable_snapshot_response_releases_its_handle() {
+    for warm in [false, true] {
+        let (client, recorder) = setup();
+        if warm {
+            client
+                .current_snapshot_for_project("/ws/tsconfig.json", TYPESCRIPT_PIN)
+                .await
+                .expect("the cold rail clears on a good snapshot");
+        }
+        let err = client
+            .current_snapshot_for_project("/ws/Bad/tsconfig.json", TYPESCRIPT_PIN)
+            .await
+            .expect_err("a project list that does not decode is an error");
+        assert!(
+            matches!(err, crate::error::TsgoApiError::Json(_)),
+            "warm={warm}: {err:?}"
+        );
+        await_release(&recorder, 5).await;
+    }
+}
+
+/// Once `initialize` has said how the engine compares paths, the opening
+/// request for a project names it by the id derived from its config path, so
+/// a config with no configured project never asks for every program in the
+/// workspace to be rebuilt.
+#[tokio::test]
+async fn the_opening_request_names_the_project_by_its_derived_id() {
+    let (client, recorder) = setup();
+    client.initialize().await.expect("initialize ok");
+    client
+        .current_snapshot_for_project("/ws/A/TsConfig.json", TYPESCRIPT_PIN)
+        .await
+        .expect("snapshot ok");
+    let rec = recorder.lock();
+    let (_, params) = rec
+        .iter()
+        .find(|(method, _)| method == "getCurrentLanguageServerSnapshot")
+        .expect("snapshot request recorded");
+    assert_eq!(
+        params["changes"]["ensurePrograms"],
+        serde_json::json!(["/ws/a/tsconfig.json"]),
+        "{params}"
+    );
+}
+
+/// The engine keys a configured project by its config path, lowercased per
+/// code point where paths compare case-insensitively, except the characters
+/// `toFileNameLowerCase` keeps (TypeScript 7.1.0-beta: the API's
+/// `getConfiguredProject` finds the project by exactly this key, and a live
+/// engine reported `c:/users/…/tsconfig.json` for `C:/Users/…/tsconfig.json`).
+#[test]
+fn project_ids_follow_the_engine_path_key() {
+    assert_eq!(
+        project_id_for_config("C:/Users/Dev/İx/Straße/TsConfig.json", false),
+        "c:/users/dev/İx/straße/tsconfig.json"
+    );
+    assert_eq!(
+        project_id_for_config("C:\\Users\\Dev\\tsconfig.json", false),
+        "c:/users/dev/tsconfig.json"
+    );
+    assert_eq!(
+        project_id_for_config("/Users/Dev/TsConfig.json", true),
+        "/Users/Dev/TsConfig.json"
     );
 }

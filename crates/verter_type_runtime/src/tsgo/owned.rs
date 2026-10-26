@@ -38,11 +38,10 @@ use std::time::Duration;
 
 use verter_span::path::fs_paths_equal;
 use verter_span::Utf16LineIndex;
-use verter_tsgo_api::api_attach::ApiAttachClient;
+use verter_tsgo_api::api_attach::{ApiAttachClient, SnapshotLease};
 use verter_tsgo_api::client::probe_engine_version_bounded;
 use verter_tsgo_api::gate::{self, ObservedEngine};
 use verter_tsgo_api::jsonrpc::JsonRpcConnection;
-use verter_tsgo_api::proto::types::OpaqueHandle;
 use verter_tsgo_api::transport::pipe_attach::connect_attach_pipe;
 
 use crate::protocol::{
@@ -73,7 +72,9 @@ struct ApiSurface {
 /// query must release when done, the configured project, the carrier as the
 /// engine spells it, and the project's `checkJs`.
 struct ResolvedCarrier {
-    snapshot: OpaqueHandle,
+    /// The snapshot every request of the query reads, released when the query
+    /// ends, however it ends.
+    lease: SnapshotLease,
     project: String,
     engine_carrier: String,
     project_check_js: bool,
@@ -234,19 +235,19 @@ impl TsgoOwnedProvider {
                 resolved.project_check_js,
             )
         }) {
-            self.api.release(resolved.snapshot).await;
+            self.api.release(resolved.lease).await;
             return Ok(Vec::new());
         }
         let diags = self
             .api
             .client
             .get_semantic_diagnostics(
-                &resolved.snapshot,
+                resolved.lease.handle(),
                 &resolved.project,
                 &resolved.engine_carrier,
             )
             .await;
-        self.api.release(resolved.snapshot).await;
+        self.api.release(resolved.lease).await;
         let diags = diags.map_err(|e| {
             crate::protocol::TypeProviderError::new(format!("--api getSemanticDiagnostics: {e}"))
         })?;
@@ -294,7 +295,7 @@ impl TsgoOwnedProvider {
                 self.api
                     .client
                     .get_semantic_diagnostics(
-                        &resolved.snapshot,
+                        resolved.lease.handle(),
                         &resolved.project,
                         &resolved.engine_carrier,
                     )
@@ -311,7 +312,7 @@ impl TsgoOwnedProvider {
                 self.api
                     .client
                     .get_syntactic_diagnostics(
-                        &resolved.snapshot,
+                        resolved.lease.handle(),
                         &resolved.project,
                         &resolved.engine_carrier,
                     )
@@ -325,7 +326,7 @@ impl TsgoOwnedProvider {
             Ok::<_, crate::protocol::TypeProviderError>(diagnostics)
         }
         .await;
-        self.api.release(resolved.snapshot).await;
+        self.api.release(resolved.lease).await;
         let diagnostics = requests?;
         let engine_carrier = resolved.engine_carrier;
 
@@ -492,9 +493,11 @@ fn slash(p: &str) -> String {
 impl ApiSurface {
     /// Release a snapshot this surface read. A failed release is logged, never
     /// surfaced: the query's answer does not depend on it, and the handle is not
-    /// used again either way.
-    async fn release(&self, snapshot: OpaqueHandle) {
-        if let Err(err) = self.client.release(&snapshot).await {
+    /// used again either way. A query cancelled before it gets here releases
+    /// through the lease's drop instead.
+    async fn release(&self, lease: SnapshotLease) {
+        let snapshot = *lease.handle();
+        if let Err(err) = lease.release().await {
             tracing::warn!("owned tsgo `--api` could not release snapshot {snapshot:?}: {err}");
         }
     }
@@ -538,7 +541,7 @@ impl ApiSurface {
                     .find(|file| fs_paths_equal(file, carrier))
                     .cloned()?;
                 Some(ResolvedCarrier {
-                    snapshot: snap.snapshot,
+                    lease: self.client.lease(snap.snapshot),
                     project: project.id.clone(),
                     engine_carrier,
                     project_check_js: project
@@ -549,7 +552,7 @@ impl ApiSurface {
                 })
             });
         if resolved.is_none() {
-            self.release(snap.snapshot).await;
+            self.release(self.client.lease(snap.snapshot)).await;
         }
         resolved
     }

@@ -763,7 +763,8 @@ impl TsgoSharedProvider {
     /// the SAME [`position_carrier_diagnostics`] authority the OWNED path uses —
     /// over the carrier text Verter injected. The `.vue`/`.svelte` map-back is the
     /// feature layer's `ProviderPositionMapper` step (never a forged `(0,0)`). The
-    /// snapshot is released on every path once its requests are done.
+    /// snapshot is released on every path once its requests are done, and through
+    /// its lease when the query is cancelled first.
     async fn api_carrier_diagnostics(
         &self,
         carrier: &str,
@@ -785,10 +786,13 @@ impl TsgoSharedProvider {
             }
         };
         let snapshot_ms = api_started.elapsed().as_millis() as u64;
+        // Released below; a query cancelled mid-request (an edit aborting the
+        // diagnostics task, the composite timeout) releases on the lease drop.
+        let lease = self.api.lease(snap.snapshot);
         let result = self
             .api_carrier_diagnostics_in(&snap, carrier, tsconfig, include_syntactic)
             .await;
-        if let Err(err) = self.api.release(&snap.snapshot).await {
+        if let Err(err) = lease.release().await {
             tracing::warn!(
                 "shared tsgo `--api` could not release snapshot {:?}: {err}",
                 snap.snapshot
