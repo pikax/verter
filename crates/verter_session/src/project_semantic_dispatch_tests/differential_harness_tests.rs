@@ -611,7 +611,7 @@ impl<'a> Matrix<'a> {
     /// by the deterministic counters a growth test compares: relation
     /// checks, cold builds, connected work, the operations charged against
     /// the request's fuse, and call resolution's argument and binding work.
-    pub(super) fn return_work(&self, function: &str) -> Vec<(&'static str, u64)> {
+    pub(super) fn return_work_counters(&self, function: &str) -> Vec<(&'static str, u64)> {
         let host = self.host(&[]);
         let canonical = format!("{}/probe.ts", self.settings[0].root);
         let store_view = host.resolver_store_view_read().into_owned_view();

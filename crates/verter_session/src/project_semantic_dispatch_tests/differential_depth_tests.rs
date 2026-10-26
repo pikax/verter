@@ -2503,7 +2503,7 @@ fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(setting: Sett
         let last = format!("\"k{}\"", width - 1);
         let failures = matrix.returns(&[("last", &last)]);
         assert!(failures.is_empty(), "{width}: {}", failures.join("\n"));
-        matrix.return_work("last")
+        matrix.return_work_counters("last")
     });
     let counters = (0..work[0].len())
         .map(|index| Counter {

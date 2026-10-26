@@ -47,7 +47,7 @@ fn repeated_contravariant_callback_work_is_affine_and_meets_the_full_size_check(
                 Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
             let failures = matrix.returns(&[("result", "\"a\"")]);
             assert!(failures.is_empty(), "{callbacks}: {}", failures.join("\n"));
-            matrix.return_work("result")
+            matrix.return_work_counters("result")
         })
         .collect();
     let work = crate::scale_gate::affine(
