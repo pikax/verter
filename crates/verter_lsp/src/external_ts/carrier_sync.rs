@@ -1267,6 +1267,20 @@ pub struct CarrierTransactionCoordinator {
     /// Completed drain passes wake the existing post-scan completion gate.
     /// This carries progress only; the server still checks the live queue and generation.
     pending_sync_progress: tokio::sync::watch::Sender<()>,
+    /// Test-only: how many re-drive chains were spawned and how many have
+    /// ended, so a test waits for a chain's end instead of guessing it from
+    /// elapsed time.
+    #[cfg(test)]
+    pending_redrive_chains: tokio::sync::watch::Sender<PendingRedriveChains>,
+}
+
+/// Test-only count of pending-snapshot re-drive chains: spawned, and ended
+/// (after the chain released its guard and replayed any signal it owed).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PendingRedriveChains {
+    pub(crate) started: u64,
+    pub(crate) finished: u64,
 }
 
 impl CarrierTransactionCoordinator {
@@ -1281,6 +1295,28 @@ impl CarrierTransactionCoordinator {
 
     pub(crate) fn note_pending_sync_progress(&self) {
         self.pending_sync_progress.send_replace(());
+    }
+
+    /// Test-only: watch the re-drive chains' lifecycle counts.
+    #[cfg(test)]
+    pub(crate) fn subscribe_pending_redrive_chains(
+        &self,
+    ) -> tokio::sync::watch::Receiver<PendingRedriveChains> {
+        self.pending_redrive_chains.subscribe()
+    }
+
+    /// Test-only: a re-drive chain was spawned.
+    #[cfg(test)]
+    pub(crate) fn note_pending_redrive_chain_started(&self) {
+        self.pending_redrive_chains
+            .send_modify(|chains| chains.started += 1);
+    }
+
+    /// Test-only: a re-drive chain ended.
+    #[cfg(test)]
+    pub(crate) fn note_pending_redrive_chain_finished(&self) {
+        self.pending_redrive_chains
+            .send_modify(|chains| chains.finished += 1);
     }
 
     /// Begin a pending-snapshot re-drive chain: `true` only for the one

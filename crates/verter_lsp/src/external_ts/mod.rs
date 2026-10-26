@@ -27,6 +27,8 @@ pub use carrier_publish_store::{
 
 #[cfg(test)]
 pub use carrier_publish_store::test_store_dir_override;
+#[cfg(test)]
+pub(crate) use carrier_sync::PendingRedriveChains;
 pub(crate) use carrier_sync::{
     carrier_close_target, project_ownership_diagnostics_for, reconcile_carrier_source,
     AdmitOutcome, CarrierMembershipCtx, CarrierNotOwned, CarrierProviderDelivery,
