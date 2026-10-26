@@ -461,7 +461,7 @@ pub(crate) fn drive_compat<F: Future<Output = Answer> + Unpin>(
     let stop = CancellationToken::default();
     let mut core = Core::new(waiter.registry().clone(), waiter, stop.clone(), build);
     let mut producer = None;
-    let answer = verter_execution::blocking::block_on(
+    let answer = verter_execution::blocking::block_on_when_pending_with_interval(
         verter_execution::blocking::WaitFamily::WorkspaceResolution,
         cancelled.map(|_| std::time::Duration::from_millis(5)),
         |waker| loop {

@@ -685,7 +685,7 @@ pub(super) fn drive(manager: &StoreViewManager, host: &VerterHost) -> StoreViewR
         &core.manager.as_ref().expect("manager").state
     ));
     loop {
-        match verter_execution::blocking::block_on(
+        match verter_execution::blocking::block_on_when_pending_with_interval(
             verter_execution::blocking::WaitFamily::StoreViewBuild,
             None,
             |waker| core.poll(waker),

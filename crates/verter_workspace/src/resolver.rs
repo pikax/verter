@@ -967,7 +967,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
         run,
         None,
     ));
-    verter_execution::blocking::block_on(
+    verter_execution::blocking::block_on_when_pending_with_interval(
         verter_execution::blocking::WaitFamily::WorkspaceResolution,
         None,
         |waker| {
@@ -1454,7 +1454,7 @@ pub(crate) fn resolve_tracked_in_project(
         project,
         None,
     ));
-    verter_execution::blocking::block_on(
+    verter_execution::blocking::block_on_when_pending_with_interval(
         verter_execution::blocking::WaitFamily::WorkspaceResolution,
         None,
         |waker| {
@@ -1526,7 +1526,7 @@ pub(crate) fn resolve_for_project_tracked(
         },
         None,
     ));
-    verter_execution::blocking::block_on(
+    verter_execution::blocking::block_on_when_pending_with_interval(
         verter_execution::blocking::WaitFamily::WorkspaceResolution,
         None,
         |waker| {

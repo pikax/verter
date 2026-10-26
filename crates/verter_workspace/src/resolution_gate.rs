@@ -74,7 +74,7 @@ impl PublicationGate {
     }
     pub(crate) fn lock(&self) -> PublicationGuard {
         let mut subscription = self.subscribe(self.authority.current());
-        verter_execution::blocking::block_on(
+        verter_execution::blocking::block_on_when_pending_with_interval(
             verter_execution::blocking::WaitFamily::WorkspaceResolution,
             None,
             |waker| subscription.poll(waker),

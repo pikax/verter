@@ -306,6 +306,12 @@ register on their cancellation and park untimed.
 
 ## The external-boundary driver
 
+Compatibility entries that can answer on their first poll use
+`block_on_when_pending` or `block_on_when_pending_with_interval`. They announce
+their wait family only after `Pending`. The optional interval preserves legacy
+cancellation and worker-pump cadence while parked; owned dependency polls use
+their readiness and stop subscriptions.
+
 `verter_execution::blocking::block_on(family, slice, poll)` drives a
 pollable computation to completion by blocking. It polls with a waker that
 unparks the calling thread, and parks while the poll is pending. Each drive

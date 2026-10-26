@@ -196,7 +196,7 @@ impl CooperativeSchedulerAdapter {
                 CallerKind::CpuWorker | CallerKind::IoWorker
             )
             .then_some(std::time::Duration::from_millis(10));
-            verter_execution::blocking::block_on(
+            verter_execution::blocking::block_on_when_pending_with_interval(
                 verter_execution::blocking::WaitFamily::SchedulerCompletion,
                 interval,
                 poll_external,

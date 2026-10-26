@@ -2199,7 +2199,7 @@ where
             true,
         );
         loop {
-            match verter_execution::blocking::block_on(
+            match verter_execution::blocking::block_on_when_pending_with_interval(
                 verter_execution::blocking::WaitFamily::ResolverFlight,
                 None,
                 |waker| core.poll(waker),
