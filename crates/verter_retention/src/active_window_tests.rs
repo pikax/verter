@@ -9,7 +9,6 @@ use std::sync::atomic::Ordering;
 fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: ceiling,
-        active_ceiling_bytes: ceiling,
         max_entry_bytes: ceiling,
         pin_threshold_bytes: ceiling,
     })
@@ -125,7 +124,10 @@ fn class_transfers_are_active_transitions() {
     let owner = account.mint_active_owner();
     let window = account.open_active_window(&owner);
 
-    let committed = active_as(&account, &owner, 40).commit_retained();
+    let mut committed = active_as(&account, &owner, 40);
+    committed
+        .try_adopt_retained()
+        .expect("the isolated account admits the adoption");
     let mut pinned = active_as(&account, &owner, 60);
     pinned.transfer_to_pinned();
     let names: Vec<OwnedStr> = (0..8).map(|i| OwnedStr::from(format!("{i}"))).collect();
@@ -205,6 +207,91 @@ fn overlapping_windows_report_independently() {
     assert_eq!(outer.foreign_transitions, 2);
     assert_eq!(outer.peak_active_bytes, 100);
     assert_eq!(outer.attributed().map(|p| p.peak_active_bytes), Ok(100));
+}
+
+/// Closing a window removes EXACTLY its own registration — whichever
+/// order windows close in, and whichever thread closes one. A closed
+/// window that left its registration behind would keep its account alive
+/// for the measuring thread's whole life and attribute later unscoped
+/// in-flight work to an owner whose window is closed.
+#[test]
+fn closing_windows_out_of_order_removes_exactly_each_registration() {
+    let account = account(1 << 20);
+    let (outer_owner, inner_owner) = (account.mint_active_owner(), account.mint_active_owner());
+    let outer = account.open_active_window(&outer_owner);
+    let inner = account.open_active_window(&inner_owner);
+    // Non-LIFO: the outer window finishes while the inner one stays open.
+    let closed_first = outer.finish();
+    assert_conserved(&closed_first);
+    assert_eq!(closed_first.owner, outer_owner.id());
+    let _ = inner.finish();
+
+    // Neither closed window keeps the account registered: with every
+    // explicit reference gone, nothing the registry holds keeps it alive.
+    let retained = Arc::downgrade(&account);
+    drop((outer_owner, inner_owner));
+    drop(account);
+    assert!(
+        retained.upgrade().is_none(),
+        "an out-of-order close leaves no stale registration holding the account"
+    );
+}
+
+/// Window ids are account-local, so two accounts' first windows share one
+/// raw id. Closing one account's window must never remove another
+/// account's registration: the other account's own in-flight work stays
+/// attributable to its own open window.
+#[test]
+fn closing_one_accounts_window_never_removes_another_accounts_registration() {
+    let (first, second) = (account(1 << 20), account(1 << 20));
+    let first_owner = first.mint_active_owner();
+    let second_owner = second.mint_active_owner();
+    let first_window = first.open_active_window(&first_owner);
+    let second_window = second.open_active_window(&second_owner);
+    assert_eq!(
+        first_window.id(),
+        second_window.id(),
+        "the premise: window numbers are account-local"
+    );
+    let _ = first_window.finish();
+
+    // The second account's window still attributes its own thread's work.
+    let charge = second.reserve_in_flight(64);
+    drop(charge);
+    let report = second_window.finish();
+    assert_eq!(report.unknown_transitions, 0, "{report:?}");
+    assert!(
+        report
+            .attributed()
+            .expect("the second account's own work is attributable to its own window")
+            .crossed(1),
+        "{report:?}"
+    );
+    drop((first, second, first_owner, second_owner));
+}
+
+/// A window opened on one thread and finished on another removes the
+/// OPENING thread's registration: the account is not kept alive, and the
+/// opening thread's later work attributes to no closed owner.
+#[test]
+fn a_window_finished_on_another_thread_removes_its_opening_registration() {
+    let account = account(1 << 20);
+    let owner = account.mint_active_owner();
+    let window = account.open_active_window(&owner);
+    let moved = std::thread::spawn(move || window.finish())
+        .join()
+        .expect("the window is Send");
+    assert_conserved(&moved);
+    assert_eq!(moved.owner, owner.id());
+
+    // The opening thread's registration is gone: nothing keeps the account.
+    let retained = Arc::downgrade(&account);
+    drop(owner);
+    drop(account);
+    assert!(
+        retained.upgrade().is_none(),
+        "a cross-thread finish leaves no stale registration on the opening thread"
+    );
 }
 
 /// The measured owner's own ACTIVE bytes in flight at open or at close
@@ -445,7 +532,11 @@ fn concurrent_transitions_at_window_boundaries_are_never_lost() {
                     let transition = |extra: usize| {
                         let charge = active_as(&account, &owner, bytes + extra);
                         if round.is_multiple_of(2) {
-                            drop(charge.commit_retained());
+                            let mut charge = charge;
+                            charge
+                                .try_adopt_retained()
+                                .expect("the isolated account admits the adoption");
+                            drop(charge);
                         } else {
                             drop(charge);
                         }
@@ -555,7 +646,6 @@ fn an_open_window_changes_no_admission_decision() {
     }
     let limits = RetentionLimits {
         aggregate_ceiling_bytes: 120,
-        active_ceiling_bytes: 80,
         max_entry_bytes: 100,
         pin_threshold_bytes: 120,
     };
@@ -570,5 +660,8 @@ fn an_open_window_changes_no_admission_decision() {
     );
     assert_eq!(run(&measured, Some(&measured_owner)), expected);
     assert_eq!(measured.snapshot(), plain.snapshot());
-    assert_eq!(window.finish().peak_active_bytes, 61);
+    // The ACTIVE class admits unconditionally, so the sequence's peak is
+    // every ACTIVE reservation it made (60 + 50 + 1); the discretionary
+    // refusals in `expected` are all retained-class.
+    assert_eq!(window.finish().peak_active_bytes, 111);
 }

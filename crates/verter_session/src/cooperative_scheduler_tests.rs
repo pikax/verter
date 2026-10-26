@@ -142,7 +142,7 @@ fn owned_load_rechecks_cancellation_after_a_continuing_yield() {
     loader.insert("/yield.ts".into(), Arc::from("export const n = 1;"));
     // This discriminator controls stage execution itself. A threaded driver
     // could execute Source independently of the adapter's yield decision.
-    host.scheduler = Scheduler::new_sync_with_executor_and_registry(
+    host.scheduler = Scheduler::new_sync_with_executor_and_task_registry(
         config.clone(),
         loader,
         Arc::new(DefaultExecutor),
@@ -517,7 +517,7 @@ fn owned_load_driver_pumps_a_dependency_on_the_only_cpu_worker() {
     let slot = Arc::new(parking_lot::Mutex::new(None));
     let stop = CancellationToken::new();
     let (send, receive) = std::sync::mpsc::channel();
-    host.scheduler = Scheduler::with_executor_and_registry(
+    host.scheduler = Scheduler::with_executor_and_task_registry(
         config.clone(),
         loader,
         Arc::new(NestedLoad {

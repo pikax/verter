@@ -52,10 +52,10 @@ rustc-hash = { workspace = true }
 hotpath = { version = "0.23", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-glob = "0.3.3"
-imbl = "7.0.1"
-parking_lot = "0.12.5"
-smallvec = "1.15"
+glob = "0.3.4"
+imbl = "7.0.2"
+parking_lot = "0.13.0"
+smallvec = "1.16"
 thiserror = "2.0"
 verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
@@ -63,7 +63,7 @@ verter_scheduler = { path = "../verter_scheduler" }
 verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 verter_type_expr = { workspace = true }
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The profiler itself is native-only: on wasm32 `hotpath` stays in its
@@ -77,6 +77,12 @@ oxc_span = { workspace = true }
 tracing = "0.1.44"
 walkdir = "2.5"
 verter_tsgo_api = { path = "../verter_tsgo_api" }
+
+# One attribute query per live path probe on Windows, instead of the open,
+# query and close `std::fs::metadata` performs. `windows-sys 0.61` is already
+# resolved in the workspace lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 verter_execution = { path = "../verter_execution", features = ["test-support"] }

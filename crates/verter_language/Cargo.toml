@@ -11,8 +11,11 @@ keywords = ["vue", "compiler", "language", "classification"]
 categories = ["compilers"]
 
 [dependencies]
-verter_retention = { path = "../verter_retention" }
-getrandom = { version = "0.2", features = ["js"] }
+# 0.2, not 0.4: 0.2 reaches Linux entropy through the raw syscall, while 0.4's
+# musl backend takes libc's weakly merged `getrandom` symbol (see
+# `registered_source_authority::fill_random`). `std` supplies
+# `From<getrandom::Error> for io::Error`; `js` is the browser-wasm backend.
+getrandom = { version = "0.2", features = ["js", "std"] }
 verter_identity.workspace = true
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 

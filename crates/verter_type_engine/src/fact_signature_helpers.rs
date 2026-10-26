@@ -80,7 +80,10 @@ use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{
     fact_cache::signature_entries,
     fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::{seal_canonical_signature, FactReadSet, FactReadSetFinalise, FACT_PAGE_WIDTH},
+    fact_read_set::{
+        seal_canonical_signature, CanonicalFactReadSetFinalise, CanonicalFactSignature,
+        FactReadSet, FactReadSetFinalise, FACT_PAGE_WIDTH,
+    },
 };
 
 /// Bracket one cold-compute closure with a push-style fact tracer.
@@ -125,7 +128,7 @@ pub(crate) fn install_delivering_fact_tracer<
 >(
     source: &FactTracerBasisSource<'_, W>,
     f: F,
-) -> (R, FactReadSetFinalise)
+) -> (R, CanonicalFactReadSetFinalise)
 where
     F: FnOnce() -> R,
 {
@@ -138,17 +141,26 @@ where
                 f()
             },
         );
-    (value, finalise_compute_scope(source, read_set))
+    (value, finalise_compute_scope_canonical(source, read_set))
 }
 
 /// Finalise the read set of one compute's tracer scope: re-check its basis,
 /// then finalise it.
 fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
     source: &FactTracerBasisSource<'_, W>,
-    mut read_set: verter_session_query::facts::fact_read_set::FactReadSet,
+    read_set: verter_session_query::facts::fact_read_set::FactReadSet,
 ) -> FactReadSetFinalise {
+    finalise_compute_scope_canonical(source, read_set).into_raw()
+}
+
+fn finalise_compute_scope_canonical<
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
+    mut read_set: verter_session_query::facts::fact_read_set::FactReadSet,
+) -> CanonicalFactReadSetFinalise {
     note_basis_recheck(source, &mut read_set);
-    read_set.finalise()
+    read_set.finalise_canonical()
 }
 
 /// The fact tracer of one compute that runs in steps (a continuation
@@ -192,8 +204,8 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     }
 
     /// The compute completed: finalise what it observed.
-    pub(crate) fn finish(self) -> FactReadSetFinalise {
-        finalise_compute_scope(&self.source, self.tracer.into_read_set())
+    pub(crate) fn finish(self) -> CanonicalFactReadSetFinalise {
+        finalise_compute_scope_canonical(&self.source, self.tracer.into_read_set())
     }
 }
 
@@ -1355,6 +1367,24 @@ pub fn fact_signature_from_fence(
 /// torn roots and unresolved strict-world provenance.
 pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 
+/// A completed structural proof preserving the canonicalizer's order witness.
+/// Its fields stay internal; arbitrary raw signatures must verify before use.
+pub(crate) struct CompletedStructuralEvidence(
+    pub(crate) CanonicalFactSignature,
+    pub(crate) Arc<[Arc<str>]>,
+);
+
+impl CompletedStructuralEvidence {
+    pub(crate) fn verify(raw: StructuralCarrierReadSet) -> Option<Self> {
+        Some(Self(CanonicalFactSignature::verify(raw.0).ok()?, raw.1))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_raw(self) -> StructuralCarrierReadSet {
+        (self.0.into_arc(), self.1)
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static ROOT_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1391,20 +1421,23 @@ pub fn root_fact_visits_for_tests() -> usize {
 /// missing fact, a self-root observed at two versions or traced at another,
 /// an evidence page, a set wide enough for the strict-root rewrite, or a
 /// set out of canonical order); the caller completes it in full.
+#[cfg(test)]
 pub(crate) fn shared_completed_structural_carrier(
     observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
     traced: &Arc<[FactVersionRef]>,
     fence: &[FactVersionRef],
 ) -> Option<StructuralCarrierReadSet> {
+    let traced = CanonicalFactSignature::verify(Arc::clone(traced)).ok()?;
+    shared_completed_structural_carrier_sealed(observed_self_roots, &traced, fence)
+}
+
+pub(crate) fn shared_completed_structural_carrier_sealed(
+    observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    traced: &CanonicalFactSignature,
+    fence: &[FactVersionRef],
+) -> Option<StructuralCarrierReadSet> {
     if traced.len() > FACT_PAGE_WIDTH || traced.iter().any(is_paged_entry) {
         return None;
-    }
-    let mut index = 1;
-    while index < traced.len() {
-        if traced[index - 1] >= traced[index] {
-            return None;
-        }
-        index += 1;
     }
     for fact in fence {
         if traced.binary_search(fact).is_err() {
@@ -1421,25 +1454,22 @@ pub(crate) fn shared_completed_structural_carrier(
             }
             other += 1;
         }
-        let mut named = false;
+        let mut named = None;
         for fact in traced.iter() {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
                 if &**canonical_id == canonical.as_ref() {
                     if hash != observed {
                         return None;
                     }
-                    named = true;
+                    named = Some(Arc::clone(canonical_id));
                 }
             }
         }
-        if !named {
-            return None;
-        }
-        canonicals.push(Arc::from(canonical.as_str()));
+        canonicals.push(named?);
     }
     canonicals.sort();
     canonicals.dedup();
-    Some((Arc::clone(traced), Arc::from(canonicals)))
+    Some((Arc::clone(traced.as_arc()), Arc::from(canonicals)))
 }
 
 /// [`shared_completed_structural_carrier`] for a completion whose
@@ -1448,30 +1478,37 @@ pub(crate) fn shared_completed_structural_carrier(
 /// is its own carrier when it reads each file at one version and names every
 /// observed self-root at its observed version. The self-root canonicals are
 /// the whole-read files, in canonical order.
+#[cfg(test)]
 pub(crate) fn shared_completed_carrier_rooting_traced_files(
     observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
     traced: &Arc<[FactVersionRef]>,
 ) -> Option<StructuralCarrierReadSet> {
+    let traced = CanonicalFactSignature::verify(Arc::clone(traced)).ok()?;
+    shared_completed_carrier_rooting_sealed_files(observed_self_roots, &traced)
+        .map(CompletedStructuralEvidence::into_raw)
+}
+
+pub(crate) fn shared_completed_carrier_rooting_sealed_files(
+    observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    traced: &CanonicalFactSignature,
+) -> Option<CompletedStructuralEvidence> {
     if traced.len() > FACT_PAGE_WIDTH {
         return None;
     }
     // Canonical order puts one file's whole-file facts side by side, so a
     // file read at two versions shows as two adjacent facts of one file.
-    let mut files: Vec<(&str, &Hash16)> = Vec::new();
+    let mut files: Vec<(&Arc<str>, &Hash16)> = Vec::new();
     let mut index = 0;
     while index < traced.len() {
         let fact = &traced[index];
-        if (index > 0 && traced[index - 1] >= *fact) || is_paged_entry(fact) {
+        if is_paged_entry(fact) {
             return None;
         }
         if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-            if files
-                .last()
-                .is_some_and(|(last, _)| *last == &**canonical_id)
-            {
+            if files.last().is_some_and(|(last, _)| *last == canonical_id) {
                 return None;
             }
-            files.push((&**canonical_id, hash));
+            files.push((canonical_id, hash));
         }
         index += 1;
     }
@@ -1484,13 +1521,19 @@ pub(crate) fn shared_completed_carrier_rooting_traced_files(
             }
             other += 1;
         }
-        match files.iter().find(|(file, _)| *file == canonical.as_ref()) {
+        match files
+            .iter()
+            .find(|(file, _)| file.as_ref() == canonical.as_ref())
+        {
             Some((_, hash)) if *hash == observed => {}
             _ => return None,
         }
     }
-    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::from(*file)).collect();
-    Some((Arc::clone(traced), Arc::from(canonicals)))
+    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::clone(file)).collect();
+    Some(CompletedStructuralEvidence(
+        traced.clone(),
+        Arc::from(canonicals),
+    ))
 }
 
 pub(crate) fn bound_completed_structural_carrier(

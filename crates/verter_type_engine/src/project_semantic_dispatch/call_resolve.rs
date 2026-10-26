@@ -29,13 +29,14 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
     SignatureReturnCarrier, VariancePhase,
 };
-pub(super) use context::{tuple_element_contexts, ArgumentReadLiterals, ArrayLiteralShape};
+pub(super) use context::{ArgumentReadLiterals, ArrayLiteralShape};
 pub(super) use contextual::ContextualCallState;
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ARGUMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BINDING_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TUPLE_CONTEXT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Argument acquisition/copy positions, arity and contextual parameter visits.
@@ -50,9 +51,23 @@ pub fn binding_work_for_tests() -> usize {
     BINDING_WORK.with(std::cell::Cell::get)
 }
 
+/// Contextual tuple elements read while typing array literal elements
+/// against a contextual tuple.
+#[cfg(any(test, feature = "test-support"))]
+pub fn tuple_context_work_for_tests() -> usize {
+    TUPLE_CONTEXT_WORK.with(std::cell::Cell::get)
+}
+
 fn record_binding_work(count: usize) {
     #[cfg(any(test, feature = "test-support"))]
     BINDING_WORK.with(|work| work.set(work.get() + count));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = count;
+}
+
+pub(in crate::project_semantic_dispatch) fn record_tuple_context_work(count: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    TUPLE_CONTEXT_WORK.with(|work| work.set(work.get() + count));
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = count;
 }
@@ -694,6 +709,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The roots carried by the production pending-call state before admission.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_call_pending_self_roots_for_tests(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        self.resolve_call_pending_state(
+            key,
+            ResolveCallSelection::DynamicAny,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+        )
+        .self_roots
+    }
+
     fn resolve_call_pending_state(
         &self,
         key: &ResolveCallKey,
@@ -725,10 +757,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let site_rooted = if let Some(indexed) =
             self.transaction_indexed_record(key.point.canonical_id.as_ref())
         {
-            if !self_roots
-                .iter()
-                .any(|(canonical, _)| canonical == &key.point.canonical_id)
-            {
+            if !self_roots.iter().any(|(canonical, hash)| {
+                canonical == &key.point.canonical_id && *hash == indexed.whole_hash
+            }) {
                 self_roots.push((key.point.canonical_id.clone(), indexed.whole_hash));
             }
             true
@@ -5573,14 +5604,15 @@ fn tuple_suffix_target<M: verter_audit::observe::ObserveExec>(
     }
 }
 
-/// Union `source`'s self-roots into `target`, one root per canonical.
+/// Union `source`'s distinct (canonical, hash) observations into `target`.
+/// Conflicting versions must reach carrier admission, which rejects torn roots.
 pub(crate) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {
     note_root_union_work(source.len());
     for root in source {
-        if !target.iter().any(|(canonical, _)| canonical == &root.0) {
+        if !target.contains(root) {
             target.push(root.clone());
         }
     }

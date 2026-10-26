@@ -968,7 +968,6 @@ fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_ho
     let host = host();
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX / 2,
-        active_ceiling_bytes: usize::MAX / 2,
         max_entry_bytes: usize::MAX / 2,
         pin_threshold_bytes: usize::MAX / 2,
     });

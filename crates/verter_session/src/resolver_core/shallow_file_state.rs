@@ -771,6 +771,22 @@ impl ShallowFileState {
         self.decl_bodies.type_decl_outcome_in(owner, name)
     }
 
+    /// [`Self::type_decl_outcome_in`], keeping the declaration's body parts
+    /// when `keep` is set and this demand lowers it
+    /// ([`verter_semantic_source::decl_body_memo::DeclBodyMemo::type_decl_outcome_keeping_in`]).
+    pub(crate) fn type_decl_outcome_keeping_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (
+        DemandOutcome<LoweredTypeDecl>,
+        Option<verter_semantic_source::decl_body_memo::KeptTypeBody>,
+    ) {
+        self.decl_bodies
+            .type_decl_outcome_keeping_in(owner, name, keep)
+    }
+
     /// Demand the lowered BODY of a local VALUE symbol — eager
     /// synthesised `.vue`-default bodies first, then the lazy memo. A
     /// miss returns `None`.
@@ -1039,6 +1055,31 @@ impl ShallowFileState {
         }
         self.decl_bodies
             .augmentation_type_decl_outcome_in(scope, owner, name)
+    }
+
+    /// [`Self::augmentation_type_decl_outcome_in`], keeping the
+    /// declaration's body parts when `keep` is set and this demand lowers
+    /// it.
+    pub(crate) fn augmentation_type_decl_outcome_keeping_in(
+        &self,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (
+        DemandOutcome<LoweredTypeDecl>,
+        Option<verter_semantic_source::decl_body_memo::KeptTypeBody>,
+    ) {
+        if self
+            .decl_bodies
+            .header_index()
+            .augmentation_type_header_in(scope, owner, name)
+            .is_none()
+        {
+            return (DemandOutcome::Ready(None), None);
+        }
+        self.decl_bodies
+            .augmentation_type_decl_outcome_keeping_in(scope, owner, name, keep)
     }
 
     /// Lease-aware value-space counterpart of

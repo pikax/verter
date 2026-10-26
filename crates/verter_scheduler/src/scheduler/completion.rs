@@ -18,8 +18,7 @@ use super::*;
 /// clear path is a concrete `OpaqueContextGuard` that owns the
 /// prior value directly.
 ///
-/// Constructed only on the native inline-execution path.
-#[cfg(not(target_arch = "wasm32"))]
+/// Used for inline stages and transferred scoped producers on any target.
 pub(super) enum InlineTlsGuard {
     /// Winner has its own request context; install it for the
     /// inner stage. Drop restores the prior TLS via the trait

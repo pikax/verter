@@ -548,6 +548,10 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // return this type so a caller can tell a complete fact from a
         // retained refusal without reaching into the module.
         "pub use component_meta_delivery::ComponentMetaDelivery",
+        // The pollable host roots: a public request begun as an owned
+        // computation an external driver polls, the answer it gives, and the
+        // dependency work it hands that driver.
+        "pub use root_continuation::",
         // host_audit_runtime — owns the AuditRecordsStore + AuditConfig
         // snapshot + active-request registry. Public so integration
         // tests can call `host.host_audit_runtime().snapshot()` and

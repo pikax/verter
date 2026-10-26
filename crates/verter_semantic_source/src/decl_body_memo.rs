@@ -31,8 +31,6 @@ use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
-use verter_retention::heap_size::{HeapMeter, HeapSize};
-use verter_retention::pinned_heap::{PinContext, PinnedOnce, StoragePin};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -58,10 +56,9 @@ use verter_session_query::declarations::{
     ValueDeclGroup, ValueDeclKind,
 };
 use verter_session_query::facts::{
-    compute_class_member_read_hash, compute_display_hash, compute_semantic_hash,
-    produce_shallow_route_facts, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
-    EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
-    ValueBodyFingerprintInput,
+    compute_class_member_read_hash, compute_semantic_hash, produce_shallow_route_facts,
+    type_body_fingerprint, value_body_fingerprint, CrossDeclLens, EmptyRouteFactLens, HashOutcome,
+    RouteFactLens, TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput,
 };
 use verter_session_query::source::transient_parts::{TransientTypeParts, TransientValueParts};
 use verter_session_query::type_solver::prepared::{
@@ -152,17 +149,8 @@ enum DemandCell<D> {
     LeaseMiss,
 }
 
-impl<D: HeapSize + Send + Sync + 'static> HeapSize for DemandCell<D> {
-    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        match self {
-            Self::Ready(value) => value.heap_size(meter),
-            Self::LeaseMiss => 0,
-        }
-    }
-}
-
-type TypeCell = Arc<PinnedOnce<DemandCell<LoweredTypeDecl>>>;
-type ValueCell = Arc<PinnedOnce<DemandCell<LoweredValueDecl>>>;
+type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
+type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
 type LoweredDeclGroups = (
     Vec<(DeclBindingKey, LoweredTypeDecl)>,
     Vec<(DeclBindingKey, LoweredValueDecl)>,
@@ -346,7 +334,7 @@ struct FunctionIndexDemand {
     owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     class_fields: Arc<verter_session_query::declarations::class_fields::ClassFieldValues>,
     function_program_index:
-        PinnedOnce<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
+        OnceLock<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
 }
 impl FunctionIndexDemand {
     pub fn function_program_index(
@@ -451,7 +439,6 @@ pub struct IndexedExpressionDemand {
 }
 /// See module docs.
 pub struct DeclBodyMemo {
-    storage: StoragePin,
     #[cfg(any(test, feature = "test-support"))]
     pub capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
     /// This memo's slice lowerings' work
@@ -486,18 +473,18 @@ pub struct DeclBodyMemo {
     /// argument). Consulted by the lowering-time body-fingerprint producer;
     /// the SAME `Arc` backs the lazy fact source, so there is exactly one
     /// lens instance per state.
-    lens: PinnedOnce<Arc<ShallowLens>>,
+    lens: OnceLock<Arc<ShallowLens>>,
     /// The ONE shared route-fact lens (hash-free full-import-target +
     /// header-membership view) the graph-free route producer classifies
     /// against — installed with the shallow lens at state construction.
-    route_lens: PinnedOnce<Arc<RouteLens>>,
+    route_lens: OnceLock<Arc<RouteLens>>,
     type_entries: crate::per_file_map::PerFileMap<DeclBindingKey, TypeCell>,
     value_entries: crate::per_file_map::PerFileMap<DeclBindingKey, ValueCell>,
     aug_type_entries:
         crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
     aug_value_entries:
         crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
-    whole_env: PinnedOnce<Arc<EvalEnv>>,
+    whole_env: OnceLock<Arc<EvalEnv>>,
     /// The per-file function program index — a DEMAND product: exact
     /// function identities + body locators, binding/reference inventory,
     /// return sites, writes/effects, the control-region skeleton, exact
@@ -505,6 +492,12 @@ pub struct DeclBodyMemo {
     /// Arena-free, no lowered types; built once through the retained
     /// snapshot on first Flow demand.
     function_index: Arc<FunctionIndexDemand>,
+    /// The retained snapshot's macro field-address table, built on the
+    /// first field-payload demand and read by every later one, so a
+    /// component's `N` field payloads replay the macro assembly once, not
+    /// `N` times. Content-free spans and ordinals, valid exactly as long as
+    /// the snapshot this memo's key names.
+    macro_field_addresses: Arc<OnceLock<Arc<verter_semantic::analysis::MacroFieldAddressTable>>>,
     raw_surfaces:
         crate::per_file_map::PerFileMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
     /// Transient body parts a batched demand ([`prime_type_bodies`]) kept
@@ -513,15 +506,104 @@ pub struct DeclBodyMemo {
     /// [`PrimedTypeBodies`] guard drops any entry left unread, so nothing
     /// here outlives the demand that primed it.
     primed_type_parts: parking_lot::Mutex<Vec<PrimedTypeParts>>,
-    primed_parts_storage: parking_lot::Mutex<verter_retention::granular::GranularPin>,
+}
+
+/// The transient body parts a demanded lowering keeps beside the facts it
+/// registers: none for a demand that reads only facts, or the demanded type
+/// body's, in the file scope or in an augmentation scope.
+#[derive(Clone, Debug)]
+enum KeptParts {
+    Nothing,
+    FileScopeType,
+    AugmentationType(AugmentationScopeKind),
+}
+
+impl KeptParts {
+    /// The demanded type body's parts in `scope` (the file scope when
+    /// `None`).
+    fn type_body(scope: Option<&AugmentationScopeKind>) -> Self {
+        match scope {
+            None => Self::FileScopeType,
+            Some(scope) => Self::AugmentationType(scope.clone()),
+        }
+    }
+
+    fn keeps(&self) -> bool {
+        !matches!(self, Self::Nothing)
+    }
+
+    /// The augmentation scope whose parts are kept; `None` for the file
+    /// scope, and when nothing is kept.
+    fn scope(&self) -> Option<&AugmentationScopeKind> {
+        match self {
+            Self::AugmentationType(scope) => Some(scope),
+            Self::Nothing | Self::FileScopeType => None,
+        }
+    }
 }
 
 /// One primed transient body: the demanded declaration, its scope (`None`
-/// for the file scope) and the parts lowered for it.
+/// for the file scope), the parts lowered for it, and the token of the
+/// [`PrimedTypeBodies`] guard that releases it.
 struct PrimedTypeParts {
     scope: Option<AugmentationScopeKind>,
     key: DeclBindingKey,
     parts: Arc<TransientTypeParts>,
+    token: u64,
+}
+
+/// The source of [`PrimedTypeParts::token`]s: unique per primed entry for
+/// the process's lifetime.
+static PRIMED_TYPE_PARTS_TOKENS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The parts a body read takes, when its caller kept them, for a type name
+/// declared by an owner in a scope (the file scope when `None`)
+/// ([`DeclBodyMemo::deref_locator_body_with`]).
+pub type KeptTypeParts<'a> = dyn Fn(TopLevelOwnerId, &str, Option<&AugmentationScopeKind>) -> Option<Arc<TransientTypeParts>>
+    + 'a;
+
+/// The transient body parts of one type declaration, kept by the demand
+/// that lowered its facts for the body read its caller makes next. Its
+/// holder owns it: nothing in the memo keeps it, and only a body read the
+/// holder passes it to takes it ([`DeclBodyMemo::deref_locator_body_with`]).
+pub struct KeptTypeBody {
+    snapshot: SnapshotKey,
+    key: DeclBindingKey,
+    scope: Option<AugmentationScopeKind>,
+    parts: Arc<TransientTypeParts>,
+    source_bytes: usize,
+}
+
+impl KeptTypeBody {
+    /// The length of the declaration's authored source, which its lowered
+    /// parts grow with: the size estimate a holder charges them by.
+    #[must_use]
+    pub fn source_bytes(&self) -> usize {
+        self.source_bytes
+    }
+
+    /// Whether these are the parts of `name` declared by `owner` in
+    /// `scope` (the file scope when `None`) of `memo`'s source.
+    #[must_use]
+    pub fn serves(
+        &self,
+        memo: &DeclBodyMemo,
+        owner: TopLevelOwnerId,
+        name: &str,
+        scope: Option<&AugmentationScopeKind>,
+    ) -> bool {
+        self.snapshot == memo.key
+            && self.key.owner == owner
+            && self.key.name.as_ref() == name
+            && self.scope.as_ref() == scope
+    }
+
+    /// The kept parts.
+    #[must_use]
+    pub fn into_parts(self) -> Arc<TransientTypeParts> {
+        self.parts
+    }
 }
 
 impl std::fmt::Debug for DeclBodyMemo {
@@ -531,84 +613,6 @@ impl std::fmt::Debug for DeclBodyMemo {
             .field("type_entries", &self.type_entries.len())
             .field("value_entries", &self.value_entries.len())
             .finish_non_exhaustive()
-    }
-}
-
-impl HeapSize for SnapshotDemandLease {
-    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        let Self {
-            key,
-            eval_source,
-            source_type: _,
-            service: _,
-            lease: _,
-            counters: _,
-        } = self;
-        key.heap_size(meter) + eval_source.heap_size(meter)
-    }
-}
-
-impl HeapSize for FunctionIndexDemand {
-    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        let Self {
-            snapshot,
-            owner_table,
-            class_fields,
-            function_program_index: _,
-        } = self;
-        snapshot.heap_size(meter) + owner_table.heap_size(meter) + class_fields.heap_size(meter)
-    }
-}
-
-impl HeapSize for DeclBodyMemo {
-    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        let Self {
-            storage: _,
-            #[cfg(any(test, feature = "test-support"))]
-                capture_lookup_work: _,
-            #[cfg(any(test, feature = "test-support"))]
-                lowering_work: _,
-            key,
-            #[cfg(any(test, feature = "test-support"))]
-            eval_source,
-            framework_parse,
-            owner_table,
-            svelte_component_runes_mode: _,
-            service: _,
-            snapshot,
-            header_index,
-            counters: _,
-            lens: _,
-            route_lens: _,
-            type_entries: _,
-            value_entries: _,
-            aug_type_entries: _,
-            aug_value_entries: _,
-            whole_env: _,
-            function_index,
-            raw_surfaces: _,
-            primed_type_parts: _,
-            primed_parts_storage: _,
-        } = self;
-        #[cfg(any(test, feature = "test-support"))]
-        let test_source = eval_source.heap_size(meter);
-        #[cfg(not(any(test, feature = "test-support")))]
-        let test_source = 0;
-        test_source
-            + key.heap_size(meter)
-            + framework_parse.heap_size(meter)
-            + owner_table.heap_size(meter)
-            + snapshot.heap_size(meter)
-            + header_index.heap_size(meter)
-            + function_index.heap_size(meter)
-    }
-    fn pin_storage(&self, context: &PinContext) -> bool {
-        self.storage.ensure(
-            self,
-            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
-            context,
-        );
-        true
     }
 }
 
@@ -650,7 +654,7 @@ impl DeclBodyMemo {
             snapshot: Arc::clone(&snapshot),
             owner_table: Arc::clone(&owner_table),
             class_fields: Arc::clone(&header_index.class_field_values),
-            function_program_index: PinnedOnce::new(),
+            function_program_index: OnceLock::new(),
         });
         Self {
             #[cfg(any(test, feature = "test-support"))]
@@ -667,20 +671,17 @@ impl DeclBodyMemo {
             snapshot,
             header_index,
             counters,
-            lens: PinnedOnce::new(),
-            route_lens: PinnedOnce::new(),
-            storage: StoragePin::default(),
+            lens: OnceLock::new(),
+            route_lens: OnceLock::new(),
             type_entries: crate::per_file_map::per_file_map(),
             value_entries: crate::per_file_map::per_file_map(),
             aug_type_entries: crate::per_file_map::per_file_map(),
             aug_value_entries: crate::per_file_map::per_file_map(),
-            whole_env: PinnedOnce::new(),
+            whole_env: OnceLock::new(),
             function_index,
+            macro_field_addresses: Arc::default(),
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
-            primed_parts_storage: parking_lot::Mutex::new(
-                verter_retention::granular::GranularPin::new(PinContext::default().account(), 1024),
-            ),
         }
     }
 
@@ -712,7 +713,7 @@ impl DeclBodyMemo {
                 ),
             ),
             class_fields: Arc::clone(&header_index.class_field_values),
-            function_program_index: PinnedOnce::new(),
+            function_program_index: OnceLock::new(),
         });
         let memo = Self {
             #[cfg(any(test, feature = "test-support"))]
@@ -733,20 +734,17 @@ impl DeclBodyMemo {
             snapshot,
             header_index,
             counters,
-            lens: PinnedOnce::new(),
-            route_lens: PinnedOnce::new(),
-            storage: StoragePin::default(),
+            lens: OnceLock::new(),
+            route_lens: OnceLock::new(),
             type_entries: crate::per_file_map::per_file_map(),
             value_entries: crate::per_file_map::per_file_map(),
             aug_type_entries: crate::per_file_map::per_file_map(),
             aug_value_entries: crate::per_file_map::per_file_map(),
-            whole_env: PinnedOnce::new(),
+            whole_env: OnceLock::new(),
             function_index,
+            macro_field_addresses: Arc::default(),
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
-            primed_parts_storage: parking_lot::Mutex::new(
-                verter_retention::granular::GranularPin::new(PinContext::default().account(), 1024),
-            ),
         };
 
         for (name, group) in &env.type_symbols {
@@ -777,7 +775,7 @@ impl DeclBodyMemo {
             );
             memo.type_entries.insert(
                 name.clone(),
-                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for (name, group) in &env.value_symbols {
@@ -793,7 +791,7 @@ impl DeclBodyMemo {
             let lowered = lowered_value_decl_from_group(group, None, &UnresolvedLens);
             memo.value_entries.insert(
                 name.clone(),
-                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for ((scope, name), group) in &env.augmentation_scopes {
@@ -814,14 +812,14 @@ impl DeclBodyMemo {
             );
             memo.aug_type_entries.insert(
                 (scope.clone(), name.clone()),
-                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for ((scope, name), group) in &env.augmentation_value_scopes {
             let lowered = lowered_value_decl_from_group(group, None, &UnresolvedLens);
             memo.aug_value_entries.insert(
                 (scope.clone(), name.clone()),
-                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         let _ = memo.whole_env.set(Arc::new(env.clone()));
@@ -965,6 +963,19 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
+        self.type_decl_outcome_keeping_in(owner, name, false).0
+    }
+
+    /// [`Self::type_decl_outcome_in`], keeping the declaration's body parts
+    /// from the lowering that answers it when `keep` is set and this demand
+    /// is the one that lowers it. A declaration that names a JSDoc
+    /// `@typedef` keeps none: its typedef body is read by its own lowering.
+    pub fn type_decl_outcome_keeping_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (DemandOutcome<LoweredTypeDecl>, Option<KeptTypeBody>) {
         let key = DeclBindingKey::new(owner, name);
         let Some((contributors, jsdoc_typedef)) = self
             .header_index
@@ -973,18 +984,24 @@ impl DeclBodyMemo {
         else {
             // Not inventoried: a genuine, cacheable absence — never a
             // lease-miss.
-            return DemandOutcome::Ready(None);
+            return (DemandOutcome::Ready(None), None);
+        };
+        let kept = if keep && jsdoc_typedef.is_none() {
+            KeptParts::FileScopeType
+        } else {
+            KeptParts::Nothing
         };
         let cell = self.type_entries.entry(key.clone()).or_default().clone();
         // Backfill runs OUTSIDE the cell commit — see [`Self::backfill`]. The
         // initializing caller receives the batch and backfills siblings after
         // its own cell is committed; a lease-miss evicts the cell and commits
         // nothing.
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, parts) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             jsdoc_typedef,
+            kept,
             |batch| {
                 batch
                     .types
@@ -1000,7 +1017,29 @@ impl DeclBodyMemo {
         if let Some(batch) = batch {
             self.backfill(batch, &contributors, Some((SymbolSpace::Type, &key)), None);
         }
-        outcome
+        let kept = parts.map(|parts| self.kept_type_body(key, None, &contributors, parts));
+        (outcome, kept)
+    }
+
+    /// The parts of `key` in `scope` one demand kept, with the size of its
+    /// contributors' authored source.
+    fn kept_type_body(
+        &self,
+        key: DeclBindingKey,
+        scope: Option<AugmentationScopeKind>,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        parts: TransientTypeParts,
+    ) -> KeptTypeBody {
+        KeptTypeBody {
+            snapshot: self.key.clone(),
+            key,
+            scope,
+            parts: Arc::new(parts),
+            source_bytes: contributors
+                .iter()
+                .map(|contributor| contributor.declaration_span.len() as usize)
+                .sum(),
+        }
     }
 
     /// Demand the lowered body of one file-scope VALUE symbol.
@@ -1030,11 +1069,12 @@ impl DeclBodyMemo {
             return DemandOutcome::Ready(None);
         };
         let cell = self.value_entries.entry(key.clone()).or_default().clone();
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, _) = self.demand_and_commit(
             &cell,
             &key,
             contributors,
             None,
+            KeptParts::Nothing,
             |batch| {
                 batch
                     .values
@@ -1202,24 +1242,44 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
+        self.augmentation_type_decl_outcome_keeping_in(scope, owner, name, false)
+            .0
+    }
+
+    /// [`Self::augmentation_type_decl_outcome_in`], keeping the
+    /// declaration's body parts from the lowering that answers it when
+    /// `keep` is set and this demand is the one that lowers it.
+    pub fn augmentation_type_decl_outcome_keeping_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (DemandOutcome<LoweredTypeDecl>, Option<KeptTypeBody>) {
         let key = DeclBindingKey::new(owner, name);
         let Some(contributors) = self
             .header_index
             .augmentation_type_header_in(scope, owner, name)
             .map(|header| header.contributors.clone())
         else {
-            return DemandOutcome::Ready(None);
+            return (DemandOutcome::Ready(None), None);
+        };
+        let kept = if keep {
+            KeptParts::AugmentationType(scope.clone())
+        } else {
+            KeptParts::Nothing
         };
         let cell = self
             .aug_type_entries
             .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, parts) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             None,
+            kept,
             |batch| {
                 batch
                     .aug_types
@@ -1244,7 +1304,9 @@ impl DeclBodyMemo {
                 Some((scope, SymbolSpace::Type, &key)),
             );
         }
-        outcome
+        let kept =
+            parts.map(|parts| self.kept_type_body(key, Some(scope.clone()), &contributors, parts));
+        (outcome, kept)
     }
 
     /// Demand the lowered body of one augmentation-scoped VALUE symbol.
@@ -1285,11 +1347,12 @@ impl DeclBodyMemo {
             .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, _) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             None,
+            KeptParts::Nothing,
             |batch| {
                 batch
                     .aug_values
@@ -1828,28 +1891,28 @@ impl DeclBodyMemo {
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
-    ) -> DemandLower {
+        kept: KeptParts,
+    ) -> (DemandLower, Option<TransientTypeParts>) {
         // A seeded memo has no service: nothing to lower, a genuine (cacheable)
         // body-less miss — NOT a lease-pin break.
         let Some(service) = self.service.as_ref() else {
-            return DemandLower::Ready(None);
+            return (DemandLower::Ready(None), None);
         };
-        let job = self.demanded_job(key, contributors, jsdoc_typedef, None);
+        let job = self.demanded_job(key, contributors, jsdoc_typedef, kept);
         let outcome = service.run_leased(&job.key, job.run);
-        self.finish_demanded(outcome).0
+        self.finish_demanded(outcome)
     }
 
     /// The pure statement-lowering job of one demanded declaration: it
     /// lowers each contributing statement once, registering its facts, and
-    /// — when `transient` names the demanded body's scope — keeps that
-    /// body's transient parts from the SAME lowering, so a body demanded
-    /// right after its facts is not lowered a second time.
+    /// keeps the transient parts `kept` names from the SAME lowering, so a
+    /// body demanded right after its facts is not lowered a second time.
     fn demanded_job(
         &self,
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
-        transient: Option<Option<AugmentationScopeKind>>,
+        kept: KeptParts,
     ) -> crate::decl_lowering::LeasedJob<DemandJobOutput> {
         self.ensure_lease();
         // Several declarations in ONE statement (the overloads of a function
@@ -1865,9 +1928,12 @@ impl DeclBodyMemo {
         // ones included) through the plain statement lowering: keep its
         // parts only when this lowering visits exactly those statements the
         // same way.
-        let transient = transient.filter(|_| {
-            deduplicated.len() == contributors.len() && !self.svelte_component_runes_mode
-        });
+        let kept = if deduplicated.len() == contributors.len() && !self.svelte_component_runes_mode
+        {
+            kept
+        } else {
+            KeptParts::Nothing
+        };
         let contributors = deduplicated;
         let key = key.clone();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
@@ -1881,7 +1947,7 @@ impl DeclBodyMemo {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            let mut transient_parts = transient.as_ref().map(|_| TransientTypeParts::default());
+            let mut transient_parts = kept.keeps().then(TransientTypeParts::default);
 
             let mut scratch = EvalEnv::new();
             // TRANSIENT lowered TYPE bodies + type-parameter headers, retained
@@ -1933,8 +1999,8 @@ impl DeclBodyMemo {
                 counters
                     .decl_statements_lowered
                     .fetch_add(1, Ordering::Relaxed);
-                if let (Some(out), Some(scope)) = (transient_parts.as_mut(), transient.as_ref()) {
-                    accumulate_transient_type_parts(&parts, &key, scope.as_ref(), out);
+                if let Some(out) = transient_parts.as_mut() {
+                    accumulate_transient_type_parts(&parts, &key, kept.scope(), out);
                 }
                 for decl in &parts.type_decls {
                     retained_types
@@ -2015,7 +2081,7 @@ impl DeclBodyMemo {
                         .entry(key.clone())
                         .or_default()
                         .extend(typedef.dependencies);
-                    if let (Some(out), Some(None)) = (transient_parts.as_mut(), transient.as_ref())
+                    if let (Some(out), KeptParts::FileScopeType) = (transient_parts.as_mut(), &kept)
                     {
                         out.bodies.push(typedef.body.clone());
                     }
@@ -2176,47 +2242,58 @@ impl DeclBodyMemo {
     /// the poisoned cell from its owning map ptr-eq-guarded — so no future
     /// demand serves the wrong-empty warm entry and the next demand retries
     /// under a live lease. Fail CLOSED via ReturnOnly, in DEBUG *and* RELEASE.
-    fn demand_and_commit<D: HeapSize + Send + Sync + 'static>(
+    fn demand_and_commit<D>(
         &self,
-        cell: &Arc<PinnedOnce<DemandCell<D>>>,
+        cell: &Arc<OnceLock<DemandCell<D>>>,
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
+        kept: KeptParts,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
-        on_lease_miss_evict: impl FnOnce(&Arc<PinnedOnce<DemandCell<D>>>),
-    ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
+        on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
+    ) -> (
+        DemandOutcome<D>,
+        Option<LoweredStatementBatch>,
+        Option<TransientTypeParts>,
+    ) {
         // Warm / joiner-visible hit — the cell already carries a committed
         // outcome (this thread lost the init race or re-demands a warm cell).
         if let Some(committed) = cell.get() {
             return match committed {
-                DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), None),
+                DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), None, None),
                 DemandCell::LeaseMiss => {
                     on_lease_miss_evict(cell);
-                    (DemandOutcome::LeaseMiss, None)
+                    (DemandOutcome::LeaseMiss, None, None)
                 }
             };
         }
         let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
-        let committed =
-            cell.get_or_init(
-                || match self.lower_demanded(key, contributors, jsdoc_typedef) {
-                    DemandLower::Ready(maybe_batch) => {
-                        let decl = maybe_batch.as_ref().and_then(extract);
-                        leftover.set(maybe_batch);
-                        DemandCell::Ready(decl)
-                    }
-                    DemandLower::LeaseMiss => DemandCell::LeaseMiss,
-                },
-            );
+        let kept_parts: std::cell::Cell<Option<TransientTypeParts>> = std::cell::Cell::new(None);
+        let committed = cell.get_or_init(|| {
+            let (lowered, parts) = self.lower_demanded(key, contributors, jsdoc_typedef, kept);
+            match lowered {
+                DemandLower::Ready(maybe_batch) => {
+                    let decl = maybe_batch.as_ref().and_then(extract);
+                    leftover.set(maybe_batch);
+                    kept_parts.set(parts);
+                    DemandCell::Ready(decl)
+                }
+                DemandLower::LeaseMiss => DemandCell::LeaseMiss,
+            }
+        });
         match committed {
-            DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), leftover.take()),
+            DemandCell::Ready(value) => (
+                DemandOutcome::Ready(value.clone()),
+                leftover.take(),
+                kept_parts.take(),
+            ),
             // Surface the DISTINCT `LeaseMiss` outcome (so a caller that must
             // not collapse this transient ReturnOnly into a cacheable genuine
             // miss — the locator-deref path — routes it to a no-warm signal)
             // and evict the poisoned cell so the next demand retries.
             DemandCell::LeaseMiss => {
                 on_lease_miss_evict(cell);
-                (DemandOutcome::LeaseMiss, None)
+                (DemandOutcome::LeaseMiss, None, None)
             }
         }
     }
@@ -2380,17 +2457,13 @@ pub struct TypeBodyDemand<'a> {
 /// releases every one no body read has taken yet.
 #[must_use = "dropping the guard releases the primed bodies before they are read"]
 pub struct PrimedTypeBodies {
-    kept: Vec<(
-        Arc<DeclBodyMemo>,
-        Option<AugmentationScopeKind>,
-        DeclBindingKey,
-    )>,
+    kept: Vec<(Arc<DeclBodyMemo>, u64)>,
 }
 
 impl Drop for PrimedTypeBodies {
     fn drop(&mut self) {
-        for (memo, scope, key) in self.kept.drain(..) {
-            let _ = memo.take_primed_type_parts(&key, scope.as_ref());
+        for (memo, token) in self.kept.drain(..) {
+            memo.release_primed_type_parts(token);
         }
     }
 }
@@ -2441,7 +2514,7 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
             &key,
             &contributors,
             jsdoc_typedef,
-            Some(demand.scope.cloned()),
+            KeptParts::type_body(demand.scope),
         );
         let pending = Pending {
             memo: demand.memo,
@@ -2512,21 +2585,15 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
                 }
             }
             if let Some(parts) = transient {
-                let mut primed = pending.memo.primed_type_parts.lock();
-                primed.push(PrimedTypeParts {
-                    scope: pending.scope.clone(),
-                    key: pending.key.clone(),
+                let token =
+                    PRIMED_TYPE_PARTS_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                pending.memo.primed_type_parts.lock().push(PrimedTypeParts {
+                    scope: pending.scope,
+                    key: pending.key,
                     parts: Arc::new(parts),
+                    token,
                 });
-                let bytes = verter_retention::allocation::heap_block_bytes(
-                    primed.capacity() * std::mem::size_of::<PrimedTypeParts>(),
-                );
-                let mut pin = pending.memo.primed_parts_storage.lock();
-                let old = pin.used();
-                if bytes > old {
-                    pin.add(bytes - old);
-                }
-                kept.push((Arc::clone(pending.memo), pending.scope, pending.key));
+                kept.push((Arc::clone(pending.memo), token));
             }
         }
     }
@@ -2558,6 +2625,14 @@ impl DeclBodyMemo {
             .iter()
             .position(|entry| &entry.key == key && entry.scope.as_ref() == scope)?;
         Some(primed.swap_remove(position).parts)
+    }
+
+    /// Release the primed entry `token` names, if no body read took it.
+    fn release_primed_type_parts(&self, token: u64) {
+        let mut primed = self.primed_type_parts.lock();
+        if let Some(position) = primed.iter().position(|entry| entry.token == token) {
+            primed.swap_remove(position);
+        }
     }
 
     /// The header contributors (and JSDoc typedef, file scope only) of the
@@ -2827,18 +2902,6 @@ impl DeclBodyMemo {
         class: &str,
         member: &str,
     ) -> SourceRead<Option<HashOutcome>> {
-        self.class_member_read_hashes_in(owner, class, member)
-            .map(|hashes| hashes.map(|(semantic, _)| semantic))
-    }
-
-    /// Both fact lanes from one retained selection and binder frame. The
-    /// display lane adds graph-preserved cosmetic names without source offsets.
-    pub fn class_member_read_hashes_in(
-        &self,
-        owner: TopLevelOwnerId,
-        class: &str,
-        member: &str,
-    ) -> SourceRead<Option<(HashOutcome, HashOutcome)>> {
         let refused = || {
             DemandOutcome::<()>::LeaseMiss
                 .into_source_read()
@@ -2866,22 +2929,7 @@ impl DeclBodyMemo {
         // One fingerprint per declaring element, in selection (source) order:
         // an object-level hash would sort the members and lose which
         // declaration comes first.
-        let hash_in_header_scope = |body: &TypeExpr| {
-            // Reuse one grammar's binder frame for both existing fact lanes.
-            let framed = (!elements.type_parameters.is_empty()).then(|| {
-                TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
-                    Vec::new(),
-                    Some(Arc::new(body.clone())),
-                    elements.type_parameters.clone(),
-                )))
-            });
-            let body = framed.as_ref().unwrap_or(body);
-            (
-                compute_semantic_hash(body, space, &lens),
-                compute_display_hash(body, space, &lens),
-            )
-        };
-        let elements: Vec<(HashOutcome, HashOutcome)> = match &elements.body {
+        let elements: Vec<HashOutcome> = match &elements.body {
             TypeExpr::Object(object) => object
                 .properties
                 .iter()
@@ -2890,22 +2938,15 @@ impl DeclBodyMemo {
                         empty_literal: false,
                         properties: vec![member.clone()],
                     }));
-                    hash_in_header_scope(&single)
+                    compute_semantic_hash(&single, space, &lens)
                 })
                 .collect(),
-            other => vec![hash_in_header_scope(other)],
+            other => vec![compute_semantic_hash(other, space, &lens)],
         };
-        let (elements, display_elements): (Vec<_>, Vec<_>) = elements.into_iter().unzip();
-        let heritage = heritage.map(|heritage| hash_in_header_scope(&heritage.body));
-        SourceRead::clean(Some((
-            compute_class_member_read_hash(
-                &elements,
-                heritage.as_ref().map(|(semantic, _)| semantic),
-            ),
-            compute_class_member_read_hash(
-                &display_elements,
-                heritage.as_ref().map(|(_, display)| display),
-            ),
+        let heritage = heritage.map(|heritage| compute_semantic_hash(&heritage.body, space, &lens));
+        SourceRead::clean(Some(compute_class_member_read_hash(
+            &elements,
+            heritage.as_ref(),
         )))
     }
 
@@ -3077,10 +3118,11 @@ impl DeclBodyMemo {
     /// [`MacroPayloadPosition::Field`] deref source. Lease-only; same
     /// outcome semantics as [`Self::transient_type_parts`].
     ///
-    /// The position replays the analyzer's OWN macro assembly
-    /// ([`verter_semantic::analysis::lower_macro_field_payload_at`] — one
+    /// The position is read from the analyzer's OWN macro assembly
+    /// ([`verter_semantic::analysis::MacroFieldAddressTable`] — one
     /// macro-ordinal / field-ordinal addressing engine, mint side and deref
-    /// side cannot drift) over THIS memo's retained snapshot. The yielded
+    /// side cannot drift), replayed over THIS memo's retained snapshot once
+    /// and shared by every field demand. The yielded
     /// [`MacroFieldPayloadLowering`] keeps the authored absences typed
     /// (`Unauthored` / `NoField`) so the deref maps each to its exact
     /// fail-closed error — never a fabricated body.
@@ -3098,15 +3140,33 @@ impl DeclBodyMemo {
         };
         self.ensure_lease();
         let owner_table = Arc::clone(&self.owner_table);
+        let addresses = Arc::clone(&self.macro_field_addresses);
+        let counters = Arc::clone(&self.counters);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
+            let addresses = addresses.get_or_init(|| {
+                let table = verter_semantic::analysis::MacroFieldAddressTable::build(
+                    program,
+                    source,
+                    owner_table.as_ref(),
+                );
+                counters
+                    .macro_field_address_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "semantic-observe")]
+                counters
+                    .macro_field_address_work
+                    .fetch_add(table.work(), std::sync::atomic::Ordering::Relaxed);
+                Arc::new(table)
+            });
             Some(
                 verter_semantic::analysis::lower_macro_field_payload_at_with_owners(
                     program,
                     source,
                     owner_table.as_ref(),
+                    addresses,
                     owner,
                     macro_index,
                     field_index,
@@ -4037,12 +4097,6 @@ pub fn fold_flow_body_env_identity(
 /// ([`WalkedRead`]); the request-side capability that serves these reads to
 /// the engine applies it.
 impl IndexedExpressionDemand {
-    /// Identity of the exact retained source every demand reads. Consumers
-    /// use this provenance when replaying required dependency observations.
-    pub fn source_identity(&self) -> &SnapshotKey {
-        &self.snapshot.key
-    }
-
     pub fn function_program_index(
         &self,
     ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {

@@ -602,14 +602,8 @@ impl ReadyJob {
     /// idle re-pump.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub(crate) fn started(
-        mut self,
-        inbox_sender: &crossbeam_channel::Sender<crate::driver::Submission>,
-    ) -> Self {
-        if let Some(reservation) = self.capacity.take().and_then(Arc::into_inner) {
-            drop(reservation);
-            let _ = inbox_sender.try_send(crate::driver::Submission::Wake);
-        }
+    pub(crate) fn started(mut self) -> Self {
+        drop(self.capacity.take());
         self
     }
 }
@@ -865,6 +859,8 @@ pub struct SchedulerDag {
     /// Bumped by [`Self::clear`]; reservations taken before a reset give
     /// nothing back after it (see `DagCapacityReservation::epoch`).
     reset_epoch: Arc<AtomicU64>,
+    /// Notification attached to every reservation at dispatch.
+    progress_waker: Option<std::task::Waker>,
     /// In-flight CPU-bound permits. Capped at `budget.cpu`.
     cpu_counter: Arc<AtomicU64>,
     /// In-flight I/O-bound permits. Capped at `budget.io`.
@@ -1218,6 +1214,7 @@ impl SchedulerDag {
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
             reset_epoch: Arc::new(AtomicU64::new(0)),
+            progress_waker: None,
             cpu_counter: Arc::new(AtomicU64::new(0)),
             io_counter: Arc::new(AtomicU64::new(0)),
             budget,
@@ -1226,6 +1223,10 @@ impl SchedulerDag {
             #[cfg(test)]
             cache_node_cancelled: 0,
         }
+    }
+
+    pub(crate) fn set_progress_waker(&mut self, waker: std::task::Waker) {
+        self.progress_waker = Some(waker);
     }
 
     pub(crate) fn defer_completion_wakes(&mut self) {
@@ -1763,6 +1764,7 @@ impl SchedulerDag {
             class,
             class_counter: Some(Arc::clone(counter)),
             epoch: Some(self.reservation_epoch()),
+            progress: self.progress_waker.clone(),
         })
     }
 
@@ -1798,6 +1800,7 @@ impl SchedulerDag {
             class,
             class_counter: Some(Arc::clone(counter)),
             epoch: Some(self.reservation_epoch()),
+            progress: self.progress_waker.clone(),
         })
     }
 
@@ -2463,6 +2466,11 @@ impl SchedulerDag {
                 self.bind_waiter_producer(waiter_tok);
             }
         }
+        if !newly_ready.is_empty() {
+            if let Some(progress) = &self.progress_waker {
+                progress.wake_by_ref();
+            }
+        }
         newly_ready
     }
 
@@ -2514,6 +2522,11 @@ impl SchedulerDag {
             // Only the node's share: a dispatched job still queued or
             // running in a pool holds the permit until it is dropped.
             let _ = node.reservation.take();
+        }
+        if !stranded.is_empty() {
+            if let Some(progress) = &self.progress_waker {
+                progress.wake_by_ref();
+            }
         }
         stranded
     }
@@ -2824,9 +2837,8 @@ impl SchedulerDag {
     /// undropped reservations held by callers do not underflow on
     /// later release.
     pub fn clear(&mut self) {
-        // Drop reservations before clearing so each one's Drop hook
-        // decrements the counters; the explicit zero below catches
-        // any stragglers held outside the dag.
+        // Release this DAG's shares; pool jobs can still hold reservations
+        // against the old ledger after the reset.
         for (_, mut node) in self.nodes.drain() {
             let wakes = node.cancellation.cancel_deferred();
             if let Some(pending) = &mut self.completion_wakes {
@@ -2860,12 +2872,13 @@ impl SchedulerDag {
             }
         }
         self.credit = [0; PRIORITY_LANE_COUNT];
-        // Reservations still held outside the DAG (jobs queued or running
-        // in a pool) belong to the pre-reset ledger: bump the epoch first so
-        // they give nothing back against the zeroed counters.
+        // A release can select its eligibility before this reset and resume
+        // its debit after a new admission. Give the replacement ledger fresh
+        // counters so even that already-selected debit reaches only old work.
+        // Releases selecting afterward also suppress their advisory wake.
         self.reset_epoch.fetch_add(1, Ordering::AcqRel);
-        self.cpu_counter.store(0, Ordering::Release);
-        self.io_counter.store(0, Ordering::Release);
+        self.cpu_counter = Arc::new(AtomicU64::new(0));
+        self.io_counter = Arc::new(AtomicU64::new(0));
     }
 
     // ─────────────────────────────────────────────────────────────────

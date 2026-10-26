@@ -10,7 +10,6 @@
 //! contributes a continuation `impl VerterHost { … }` block.
 use verter_session_query::analysis::types::Hash16;
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
@@ -193,16 +192,7 @@ impl VerterHost {
         }
 
         let parse_env_hash = self.host_view_env_hashes_for(canonical_id).parse_env_hash;
-        let Some(old_key) =
-            verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                Arc::from(canonical_id),
-                old_source.whole_hash,
-                old_source.source.as_ref(),
-                old_data.file_language.clone(),
-                old_data.framework_parse.as_deref(),
-                parse_env_hash,
-            )
-        else {
+        let Some(old_key) = old_data.artifact_key(Arc::from(canonical_id), parse_env_hash) else {
             return false;
         };
         let Some(old_artifacts) = self.project_type_store.indexed().get_artifacts_for_content(
@@ -995,15 +985,11 @@ impl VerterHost {
         {
             return None;
         }
-        let (dep_edges, overlay_route_witness) = {
-            let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
-            let edges = self.prepared_decl_bundle_route_dep_edges_with_context(
-                ctx,
-                route_canonical_id,
-                state.as_ref(),
-            )?;
-            (edges, scope.collected())
-        };
+        let dep_edges = self.prepared_decl_bundle_route_dep_edges_with_context(
+            ctx,
+            route_canonical_id,
+            state.as_ref(),
+        )?;
 
         // Script-setup type bindings are ADAPTER-DECLARED registry data: the
         // materializer asks the composed registry whether the admitting
@@ -1033,11 +1019,6 @@ impl VerterHost {
                 import_canonicalization,
                 self.project_type_store().identity_interner(),
             ),
-        );
-
-        bundle.seal_resolution_facts(
-            (state.owner_import_targets.is_empty() || !overlay_route_witness.is_empty())
-                .then_some(overlay_route_witness),
         );
 
         // R17: do NOT insert into the shared `prepared_decl_bundles`
@@ -1319,7 +1300,6 @@ impl VerterHost {
         // and `framework::script_facts` producers do.
         let import_route_witness =
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
-        bundle.seal_resolution_facts(import_route_witness.clone());
         let mut facts = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.into(),
@@ -1530,7 +1510,6 @@ impl VerterHost {
         // this rail exists to provide.
         let import_route_witness =
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
-        bundle.seal_resolution_facts(import_route_witness.clone());
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
@@ -1670,7 +1649,6 @@ impl VerterHost {
         ) else {
             return Ok(None);
         };
-        bundle.observe_read();
         let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
         component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"prepared_type_decl_result",
             format!(
@@ -1704,7 +1682,6 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        bundle.observe_read();
         bundle.prepared_type_decls.get_in(owner, symbol_name)
     }
 
@@ -1775,7 +1752,6 @@ impl VerterHost {
         ) else {
             return Ok(None);
         };
-        bundle.observe_read();
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
@@ -1800,7 +1776,6 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        bundle.observe_read();
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
@@ -2291,6 +2266,18 @@ impl VerterHost {
         })
     }
 
+    /// [`Self::ensure_indexed_ready_serve`] as a pollable computation.
+    pub(crate) async fn ensure_indexed_ready_serve_pollable(
+        &self,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
+            self.ensure_indexed_ready_serve_in_pollable::<M>(&observation, canonical_id)
+                .await
+        })
+    }
+
     /// Compiled for the calling execution unit's capture mode `M`; a
     /// unit outside one calls the plain form, which adopts the installed
     /// request's mode.
@@ -2299,14 +2286,37 @@ impl VerterHost {
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            std::pin::pin!(
+                self.ensure_indexed_ready_serve_in_pollable::<M>(observation, canonical_id)
+            ),
+        )
+    }
+
+    /// [`Self::ensure_indexed_ready_serve_in`] as a pollable computation: a
+    /// cold file's materialization suspends on its owner shard, or follows
+    /// another task's materialization of it, instead of parking.
+    pub(crate) async fn ensure_indexed_ready_serve_in_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
         let _ = observation;
         verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
+        let located = verter_audit::attribution::attribute_polls(
+            verter_audit::attribution::WorkSite::IndexedReadyBuild,
+            self.ensure_indexed_ready_serve_located_pollable::<M>(observation, canonical_id, None),
+        )
+        .await;
         verter_audit::attribute_scope!(IndexedReadyBuild);
-        let (serve, current_hit) =
-            match self.ensure_indexed_ready_serve_located::<M>(observation, canonical_id, None) {
-                Some(located) => (Some(located.serve), located.current_hit),
-                None => (None, None),
-            };
+        let (serve, current_hit) = match located {
+            Some(located) => (Some(located.serve), located.current_hit),
+            None => (None, None),
+        };
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
         // `store_published = false`) WITHOUT a `project_generation` bump, so a
@@ -2423,7 +2433,41 @@ impl VerterHost {
 
     /// [`Self::ensure_indexed_ready_serve_uninstrumented`], also naming the
     /// store entry a scheduler-current fast hit served.
+    ///
+    /// The synchronous entry drives the pollable materialization
+    /// ([`Self::ensure_indexed_ready_serve_located_pollable`]) as a task of
+    /// the host's registry, entering the wait its pending boundary names —
+    /// the owner shard’s cold-index job, or another task’s flight for the
+    /// same file — only when it would park.
     fn ensure_indexed_ready_serve_located<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        held_source: Option<&HeldIndexedSource>,
+    ) -> Option<LocatedIndexedServe> {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            std::pin::pin!(self.ensure_indexed_ready_serve_located_pollable::<M>(
+                observation,
+                canonical_id,
+                held_source,
+            )),
+        )
+    }
+
+    /// [`Self::ensure_indexed_ready_serve_located`] as a pollable
+    /// computation, run as the execution task installed on the polling
+    /// thread.
+    ///
+    /// A cold file’s one materialization leads the file’s flight; its
+    /// cold-index job on the owner shard is a handoff the computation
+    /// suspends on, so a pending poll returns `Pending` with the waker
+    /// registered for the shard’s answer while the lane stays led by this
+    /// task. Another task claiming the same file follows the lane and
+    /// suspends too. Loading a source the scheduler has not seen still
+    /// waits inside the poll.
+    async fn ensure_indexed_ready_serve_located_pollable<M: verter_audit::observe::ObserveExec>(
         &self,
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
@@ -2518,9 +2562,9 @@ impl VerterHost {
             return None;
         }
 
-        let materialize = || -> Option<crate::project_type_store::IndexedFlightOutcome> {
+        let materialize = || async {
             #[cfg(test)]
-            let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
+            let catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             verter_session_query::probe_scope!(ENSURE_INDEXED_COLD);
             if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
                 self.provenance
@@ -2578,6 +2622,7 @@ impl VerterHost {
             let file_language = hd.file_language.clone();
             let framework_parse = hd.framework_parse.clone();
             let eval_source = Arc::clone(&hd.eval_source);
+            let source_parse_key = hd.source_parse_key();
             let source_type = hd.source_type;
             let script_analysis = Arc::clone(&hd.parse.script_analysis);
 
@@ -2645,7 +2690,7 @@ impl VerterHost {
             // rendezvous. A program refused for want of stack is not
             // retained and runs no job: the flight publishes nothing for the
             // source, never an artifact read off an empty program.
-            let (cold_lease, outcome) = self.decl_lowering.acquire_lease_and_run(
+            let mut cold_index = self.decl_lowering.begin_acquire_lease_and_run(
                 &snapshot_key,
                 &eval_source,
                 source_type,
@@ -2696,6 +2741,15 @@ impl VerterHost {
                     })
                 },
             );
+            // The thread-local catalog host covers this thread’s work, not
+            // the shard’s: it is released while the job runs and installed
+            // again for the work after it, wherever that resumes.
+            #[cfg(test)]
+            drop(catalog_host);
+            let (cold_lease, outcome) =
+                std::future::poll_fn(|cx| cold_index.poll(cx.waker())).await;
+            #[cfg(test)]
+            let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             if cold_lease.refused.is_some() {
                 return None;
             }
@@ -2794,7 +2848,6 @@ impl VerterHost {
             // Publish the canonical post-parse artifact into FileArtifactStore.
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
-                storage: Default::default(),
                 whole_hash,
                 file_language,
                 shallow_state,
@@ -2810,10 +2863,14 @@ impl VerterHost {
                 declares_interface_app_config,
                 macro_hot_mirror:
                     verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
-                source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                // The source snapshot already holds this revision's parse
+                // identity: the artifact starts with it rather than hashing
+                // its source again on first demand.
+                source_parse_key: crate::project_type_store::SourceParseKey::derived(
+                    source_parse_key,
+                ),
                 input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             });
-            indexed.pin_storage();
 
             if held_source.is_some_and(|held| {
                 crate::resolver_store::syntactic_route_interface_hash(
@@ -2909,7 +2966,7 @@ impl VerterHost {
             session: None,
             validity_fingerprint: 0,
         };
-        let flight_body = || -> Result<crate::project_type_store::IndexedFlightOutcome, ()> {
+        let flight_body = || async {
             // Re-check cache inside the flight — another thread may have
             // populated it after we dropped the first probe. Gate the
             // re-check on the scheduler's current `whole_hash` for the
@@ -2954,7 +3011,7 @@ impl VerterHost {
             // refused its stack anywhere inside it leaves some product read off
             // an empty program, so the flight publishes nothing and a later
             // demand materialises again.
-            match verter_parser::oxc_parse::refusals_within(materialize) {
+            match verter_parser::oxc_parse::refusals_within_pollable(materialize()).await {
                 (materialized, None) => materialized.ok_or(()),
                 (_, Some(_)) => Err(()),
             }
@@ -2984,12 +3041,12 @@ impl VerterHost {
         const MAX_FLIGHT_ATTEMPTS: usize = 3;
         let mut last_fenced: Option<Arc<crate::project_type_store::IndexedReady>> = None;
         for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
-            let run_result = match singleflight.run_retaining(
-                canonical_id.to_owned(),
-                token,
-                flight_body,
-                |outcome| outcome.published,
-            ) {
+            let run_result = match singleflight
+                .run_retaining_pollable(canonical_id.to_owned(), token, flight_body, |outcome| {
+                    outcome.published
+                })
+                .await
+            {
                 Ok(run_result) => run_result,
                 Err(()) => return None,
             };
@@ -3284,75 +3341,83 @@ impl VerterHost {
                 snapshot.downcast_data::<crate::host_executor::HostSourceData>()
             });
             if let Some(source_data) = source_data {
-                if let Some((owner, header_hash)) =
-                    crate::resolver_store::direct_declaration_export_proof(
-                        &source_data.parse,
-                        imported_name,
-                    )
-                {
-                    let dep_id: Arc<str> = Arc::from(dep_canonical);
-                    let mut facts = Vec::new();
-                    facts.push(verter_session_query::facts::fact_cache::FactVersionRef::Parse(
-                                verter_session_query::facts::fact_cache::ParseFactRef {
-                                    canonical_id: Arc::clone(&dep_id),
-                                    key: verter_session_query::facts::FactKey::DirectDeclarationExport {
-                                        name: verter_session_query::facts::registry::InternedName::from(imported_name),
-                                    },
-                                    lane: verter_session_query::facts::FactLane::Semantic,
-                                    expected_hash: header_hash,
-                                },
-                            ));
-                    // Cross-file ROUTE fact — recorded ONLY from an
-                    // already-materialized, content-pinned, parse-current
-                    // artifact (a `get`, never an `ensure`): the fast
-                    // path must not index the dependency just to derive
-                    // the hash. When available, the fact
-                    // uses the SAME `hash_route_surface` derivation the
-                    // store-view root lookup publishes, so warm validation
-                    // round-trips. The source-header fact proves direct
-                    // declaration existence without indexing; each content
-                    // consumer supplies its own exact served-content proof.
-                    let dep_key =
-                                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                                    Arc::clone(&dep_id),
-                                    source_data.parse.whole_hash,
-                                    source_snapshot.as_ref()?.source.as_ref(),
-                                    source_data.file_language.clone(),
-                                    source_data.framework_parse.as_deref(),
-                                    verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
-                                );
-                    if let Some(indexed) = dep_key.as_ref().and_then(|key| {
-                        self.project_type_store.indexed().get_in::<M>(
-                            verter_type_engine::resolver_core::resolver_context::capture_targets(
-                                ctx,
-                            ),
-                            dep_canonical,
-                            key.content_hash,
-                            &key.parse_key,
-                            &key.file_language_id,
-                        )
-                    }) {
-                        if self.indexed_surface_is_current(dep_canonical, &indexed)
-                            && indexed.shallow_state.has_resolvable_surface()
-                        {
-                            if let Some(parse_fact) = self
-                                .syntactic_route_interface_fact_for_indexed(
-                                    Arc::clone(&dep_id),
-                                    &indexed,
-                                )
-                            {
-                                facts.push(
-                                    verter_session_query::facts::fact_cache::FactVersionRef::Parse(
-                                        parse_fact,
-                                    ),
-                                );
+                let has_direct_local_export =
+                    source_data.parse.export_signatures.iter().any(|signature| {
+                        signature.name == imported_name && signature.reexport_source.is_none()
+                    });
+                if has_direct_local_export {
+                    let mut exact_owner = None;
+                    let mut ambiguous_owner = false;
+                    for declaration in source_data
+                        .parse
+                        .script_analysis
+                        .declaration_entries
+                        .iter()
+                        .filter(|declaration| declaration.name == imported_name)
+                    {
+                        match exact_owner {
+                            None => exact_owner = Some(declaration.owner),
+                            Some(owner) if owner == declaration.owner => {}
+                            Some(_) => {
+                                ambiguous_owner = true;
+                                break;
                             }
                         }
                     }
-                    return Some((
-                        (dep_canonical.to_string(), owner, imported_name.to_string()),
-                        facts,
-                    ));
+                    if !ambiguous_owner {
+                        if let Some(owner) = exact_owner {
+                            let dep_id: Arc<str> = Arc::from(dep_canonical);
+                            let mut facts =
+                                vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                                    canonical_id: Arc::clone(&dep_id),
+                                    hash: source_data.parse.whole_hash,
+                                }];
+                            // Cross-file ROUTE fact — recorded ONLY from an
+                            // already-materialized, content-pinned, parse-current
+                            // artifact (a `get`, never an `ensure`): the fast
+                            // path must not index the dependency just to derive
+                            // the hash. When available, the fact
+                            // uses the SAME `hash_route_surface` derivation the
+                            // store-view root lookup publishes, so warm validation
+                            // round-trips; when the artifact is absent, the
+                            // dep's `FileWholeHash` remains the (sufficient)
+                            // covering fact for a direct local export.
+                            // Keyed by the snapshot's own parse identity,
+                            // with no pass over the source.
+                            let dep_key = source_data.artifact_key(
+                                Arc::clone(&dep_id),
+                                verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
+                            );
+                            if let Some(indexed) = dep_key.as_ref().and_then(|key| {
+                                self.project_type_store.indexed().get_in::<M>(
+                                    verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                                    dep_canonical,
+                                    key.content_hash,
+                                    &key.parse_key,
+                                    &key.file_language_id,
+                                )
+                            }) {
+                                if self.indexed_surface_is_current(dep_canonical, &indexed)
+                                    && indexed.shallow_state.has_resolvable_surface()
+                                {
+                                    if let Some(parse_fact) = self
+                                        .syntactic_route_interface_fact_for_indexed(
+                                            Arc::clone(&dep_id),
+                                            &indexed,
+                                        )
+                                    {
+                                        facts.push(verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+                                            parse_fact,
+                                        ));
+                                    }
+                                }
+                            }
+                            return Some((
+                                (dep_canonical.to_string(), owner, imported_name.to_string()),
+                                facts,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -3372,7 +3437,9 @@ impl VerterHost {
             verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 let Some(import_target) = shallow.import_target_in(*owner, symbol_name.as_str())
                 else {
-                    if !shallow.declares_local_binding_in(*owner, symbol_name.as_str()) {
+                    if !shallow.has_type_symbol_in(*owner, symbol_name.as_str())
+                        && !shallow.has_value_symbol_in(*owner, symbol_name.as_str())
+                    {
                         return None;
                     }
 
@@ -3412,8 +3479,7 @@ impl VerterHost {
                     symbol_name,
                 } if target_state
                     .import_target_in(*owner, symbol_name.as_str())
-                    .is_none()
-                    && target_state.declares_local_binding_in(*owner, symbol_name.as_str()) =>
+                    .is_none() =>
                 {
                     (
                         *owner,
@@ -3918,3 +3984,7 @@ impl VerterHost {
 #[cfg(all(test, feature = "semantic-observe"))]
 #[path = "prepared_decl_capture_tests.rs"]
 mod capture_tests;
+
+#[cfg(test)]
+#[path = "prepared_decl_index_tests.rs"]
+mod index_tests;

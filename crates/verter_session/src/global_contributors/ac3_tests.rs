@@ -1145,15 +1145,8 @@ fn never_upserted_contributors_follow_snapshot_edits_and_removals() {
     );
     let edited = contributors("X");
     assert_eq!(edited.entries.len(), 2);
-    assert_eq!(
-        edited.fingerprint, original.fingerprint,
-        "member content changes preserve the same contributor population"
-    );
-    assert_eq!(
-        answer(),
-        ["edited", "script"],
-        "actual member content remains independently invalidating"
-    );
+    assert_ne!(edited.fingerprint, original.fingerprint);
+    assert_eq!(answer(), ["edited", "script"]);
     workspace.inject_file(
         "/script.ts".into(),
         Arc::from("export {}; interface X { private: number }"),

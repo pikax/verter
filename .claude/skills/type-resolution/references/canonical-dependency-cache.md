@@ -219,6 +219,30 @@ Eviction cannot revoke that scope's nodes, and the root owner's charge stays
 pinned until its last reader releases it. No public delivery wrapper is
 constructed for an internal evaluation serve.
 
+The connected-demand ledger keeps scalar accounting in typed
+`verter_execution::sync_cell` cells: supported scalar widths use acquire/release
+atomics, with whole-value mutex fallbacks on unsupported targets. Request-effect
+operation and paid counts use separate typed scalar cells; refusal reasons use their
+explicit `PartialReasonSet` bit encoding in `SyncU32`. The dispatcher's depth,
+degraded-read and evidence/budget epoch counters use the same scalar cells.
+Computations remain exclusively driven across thread resumptions; these cells do not make
+compound charging, scope changes or ledger swaps concurrent transactions.
+Logical charges, sticky refusal and receipt replay retain the ledger as their
+single owner. A canonical construction commits work and advisory bytes together,
+updating its receipt and each open span once. With the enforced byte rail enabled,
+work still commits before the byte reservation, preserving charged work when a
+reservation refuses or observes cancellation. See `docs/arch/root-continuations.md`
+for the storage contract.
+
+Exclusive receipt totals accumulate in scalar cells between recording transitions.
+The work, byte and request-operation budget authorities still advance and refuse at
+each charge. Only attribution to the locked scope stack is batched: push, suspension,
+seal and prefix boundaries flush the current totals to their recording. Suspended
+recordings carry their full totals, and a task handoff exchanges pending totals
+with the rest of its ledger. Abandonment folds the flushed totals into the consumer;
+prefix recording restores its held totals beside later charges. No charge changes
+its cost identity or moves across those boundaries.
+
 Each cold heap continuation traces its steps. A warm operand validates and
 replays its existing proof directly into the parent tracer, without starting
 a continuation or sealing another copy of the proof. Both cold and served
@@ -246,3 +270,42 @@ orthogonal dimensions). The module-resolution SHAPE vocabulary
 (`ModuleResolutionMode`, `SpecifierKind`, `ConditionSet`) lives in
 `verter_workspace::module_resolution`; the FORK-C resolution matrix walker
 that consumes it is U0 `verter_session::resolver_core`.
+
+
+The shared type-parameter binder constructor predeclares sibling shells before
+lowering bounds. A declaration parameter without authored constraint or default
+keeps that already-owned shell as its final binder: its identity and scope are
+identical. Parameters with authored bounds still lower them under the same
+per-position frames and intern their final bound-carrying nodes. This removes
+a duplicate fingerprint, arena lookup and counted acquisition; it changes no
+logical work charge, bound-read proof or construction-scope lifetime.
+
+A transaction indexed-serve hit must replay its recorded reads into each fresh
+consuming build frame and fact tracer. For an exported interface this includes
+the parse-owned syntactic route-interface fact of the exact served artifact.
+The transaction edit clocks invalidate that serve after an edit; its replay
+does not authorize another transaction or replace shared-cache validation.
+The direct indexed-serve regression confirms a table hit and the required fact,
+then edits the exported interface and requires the new route fact. Omitting
+the hit's replay must fail the fresh consumer's specific fact assertion.
+
+Canonical fact finalization also returns a sealed order witness. Stepwise
+evaluation and the shared delivering-tracer close keep that witness through
+structural completion, avoiding revalidation of order already established by
+the one canonicalizer. Raw signature absorption still verifies arbitrary
+input and falls back to ordinary canonicalization when it is malformed.
+This certificate says only that facts are ordered: mutation-basis rechecks,
+strict self-root versions, fences, refusal propagation and warm validation
+retain their existing authority. Completed self-root names share the
+corresponding whole-file facts' immutable string allocations.
+
+A cold deferred completion hands its receipt and completed proof to memo
+admission. The receipt owns the input; the memo separately owns a distinct
+result, or shares the input owner when both are identical. Admission first
+reserves the receipt as before, then validates input and result together under
+the arena hold before acquiring any additional result count. A warm read
+captures both owners into the consuming construction scope before dropping
+the entry. A prerequisite receipt never takes ownership of a distinct
+result, so memo eviction and consumer/receipt release retain their separate
+lifetimes. Footprint measurement and refusable evidence admission still run
+once at publication.

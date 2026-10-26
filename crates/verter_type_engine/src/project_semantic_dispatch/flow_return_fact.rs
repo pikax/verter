@@ -74,7 +74,7 @@ pub(super) struct ReadObservationScope<'a> {
 }
 
 struct DegradedCounterScope<'a> {
-    counter: &'a std::cell::Cell<u32>,
+    counter: &'a verter_execution::sync_cell::SyncU32,
     before: u32,
 }
 
@@ -222,7 +222,7 @@ pub(super) enum SignatureReturnProbe {
     Deferred(DeferredFlowReturnSource),
 }
 
-pub(super) type SignatureSourceHeaders = std::cell::RefCell<
+pub(super) type SignatureSourceHeaders = verter_execution::sync_cell::SyncRefCell<
     Vec<(
         std::sync::Arc<str>,
         verter_type_expr::TopLevelOwnerId,

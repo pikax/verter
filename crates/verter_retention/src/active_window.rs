@@ -64,9 +64,91 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::thread::ThreadId;
 
 use crate::{ChargeClass, Provenance, RetentionAdmission, SemanticRetentionAccount};
+
+/// One open window's registration: its id and owner on the account it
+/// measures. Window ids are ACCOUNT-LOCAL, so the account is part of the
+/// entry's identity.
+#[derive(Debug)]
+struct OpenWindow {
+    id: u64,
+    owner: u64,
+    account: Arc<SemanticRetentionAccount>,
+}
+
+// The windows each measuring thread opened, innermost last, keyed by the
+// thread that opened them. Opening a window pushes onto the opening
+// thread's stack; finishing or dropping one removes EXACTLY its own
+// `(account, id)` entry — from the opening thread's stack, whichever
+// thread closes it, in any order against other windows — so a closed
+// window never leaves a stale owner or a retained account behind. A
+// production in-flight charge (`SemanticRetentionAccount::reserve_in_flight`)
+// reserves with the innermost window its OWNING thread has open, when it is
+// bound to the account being charged — so a workload whose window is open
+// attributes the ACTIVE bytes of the semantic work it runs on that thread,
+// while a build without the window (or a thread without one open) charges
+// with no provenance at all.
+fn open_windows() -> &'static parking_lot::Mutex<HashMap<ThreadId, Vec<OpenWindow>>> {
+    static OPEN_WINDOWS: OnceLock<parking_lot::Mutex<HashMap<ThreadId, Vec<OpenWindow>>>> =
+        OnceLock::new();
+    OPEN_WINDOWS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+/// The provenance a production in-flight charge against `account`
+/// reserves with: the innermost open window's owner when that window
+/// measures this account, and UNKNOWN otherwise.
+pub(crate) fn current_window_owner(account: &Arc<SemanticRetentionAccount>) -> Provenance {
+    // A window this thread has open on `account` is counted open on it from
+    // before its registration until after its removal, so an account with
+    // none open attributes nothing, without the registry's lock.
+    if account.active_windows.open.load(Ordering::Relaxed) == 0 {
+        return Provenance::UNKNOWN;
+    }
+    let thread = std::thread::current().id();
+    let windows = open_windows().lock();
+    windows
+        .get(&thread)
+        .and_then(|stack| {
+            stack
+                .iter()
+                .rev()
+                .find(|open| Arc::ptr_eq(&open.account, account))
+                .map(|open| open.owner)
+        })
+        .map_or(Provenance::UNKNOWN, |owner| Provenance {
+            owner: Some(owner),
+        })
+}
+
+fn push_open_window(id: u64, owner: ActiveOwnerId, account: Arc<SemanticRetentionAccount>) {
+    let thread = std::thread::current().id();
+    open_windows()
+        .lock()
+        .entry(thread)
+        .or_default()
+        .push(OpenWindow {
+            id,
+            owner: owner.raw(),
+            account,
+        });
+}
+
+/// Remove exactly the `(account, id)` window's registration from the stack
+/// of the thread that opened it — wherever it sits in that stack, so an
+/// outer window closed before an inner one still removes its own entry,
+/// and a window closed on another thread removes the opening thread's.
+fn remove_open_window(opened_on: ThreadId, account: &Arc<SemanticRetentionAccount>, id: u64) {
+    let mut windows = open_windows().lock();
+    if let Some(stack) = windows.get_mut(&opened_on) {
+        stack.retain(|open| !(open.id == id && Arc::ptr_eq(&open.account, account)));
+        if stack.is_empty() {
+            windows.remove(&opened_on);
+        }
+    }
+}
 
 /// The account-side window registry. Every method that mutates it is
 /// called with the account's admission lock held.
@@ -313,6 +395,14 @@ impl SemanticRetentionAccount {
     /// See the [module docs](crate::active_window) for what it observes and
     /// when its witness is attributable.
     ///
+    /// While the window stays open, the in-flight charges the thread that
+    /// opened it reserves against this account
+    /// ([`SemanticRetentionAccount::reserve_in_flight`]) carry `owner`'s
+    /// provenance, so the window attributes the ACTIVE work of the workload
+    /// that opened it; finishing or dropping the window removes exactly
+    /// this attribution, from whichever thread closes it and in any order
+    /// against other open windows.
+    ///
     /// # Panics
     ///
     /// When `owner` was minted by a different account.
@@ -320,10 +410,12 @@ impl SemanticRetentionAccount {
     pub fn open_active_window(self: &Arc<Self>, owner: &ActiveOwner) -> ActiveOccupancyWindow {
         owner.assert_bound_to(self);
         let _admission_lock = self.lock_aggregate_state();
-        let id = self.active_windows.open_locked(owner.id);
+        let id = self.active_windows.open_locked(owner.id().raw());
+        push_open_window(id, owner.id(), Arc::clone(self));
         ActiveOccupancyWindow {
             account: Some(Arc::clone(self)),
             id,
+            opened_on: std::thread::current().id(),
         }
     }
 
@@ -341,11 +433,17 @@ impl SemanticRetentionAccount {
 pub struct ActiveWindowId(u64);
 
 /// An open ACTIVE-occupancy window. Dropping it unfinished deregisters it.
+///
+/// The window measures the thread that opened it: its attribution
+/// registration lives on that thread's stack however far the window itself
+/// travels, and finishing or dropping it — on any thread — removes exactly
+/// that registration.
 #[derive(Debug)]
 pub struct ActiveOccupancyWindow {
     /// `None` only once finished.
     account: Option<Arc<SemanticRetentionAccount>>,
     id: u64,
+    opened_on: ThreadId,
 }
 
 impl ActiveOccupancyWindow {
@@ -368,12 +466,15 @@ impl ActiveOccupancyWindow {
     }
 
     /// Close the window and report its interval. Transitions after this
-    /// point are not observed.
+    /// point are not observed, and the opening thread's in-flight charges
+    /// stop carrying the window owner's provenance.
     #[must_use]
     pub fn finish(mut self) -> ActiveWindowReport {
         let account = self.account.take().expect("an open window has its account");
         let _admission_lock = account.lock_aggregate_state();
-        account.active_windows.report_locked(self.id, true)
+        let report = account.active_windows.report_locked(self.id, true);
+        remove_open_window(self.opened_on, &account, self.id);
+        report
     }
 }
 
@@ -382,6 +483,7 @@ impl Drop for ActiveOccupancyWindow {
         if let Some(account) = self.account.take() {
             let _admission_lock = account.lock_aggregate_state();
             let _ = account.active_windows.report_locked(self.id, true);
+            remove_open_window(self.opened_on, &account, self.id);
         }
     }
 }

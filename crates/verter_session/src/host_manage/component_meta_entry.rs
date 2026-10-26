@@ -417,14 +417,10 @@ impl VerterHost {
         Option<crate::meta_resolve::ComponentMetaOutput>,
         crate::meta_resolve::ComponentMetaFailure,
     > {
-        let view = crate::session_view::HostViewRef::new(self);
-        let fixed = self.capture_batch_fixed_view(&view);
-        self.get_component_meta_output_via_view_with_fixed_store_view(
-            canonical_or_alias,
-            &view,
-            &fixed,
-            false,
-        )
+        // The synchronous entry drives the request's pollable root
+        // ([`Self::begin_component_meta_output`]) to its answer.
+        self.begin_component_meta_output(canonical_or_alias)
+            .drive(self.scheduler())
     }
 
     /// Output-bearing VIEW entry pinned to a caller-captured
@@ -473,6 +469,28 @@ impl VerterHost {
         .map(|output| output.map(|output| output.output))
     }
 
+    /// [`Self::get_component_meta_output_via_view_with_fixed_store_view`] as
+    /// a pollable computation, under its caller's request context.
+    pub(crate) async fn get_component_meta_output_via_view_with_fixed_store_view_pollable(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        with_resolution: bool,
+    ) -> Result<
+        Option<crate::meta_resolve::ComponentMetaOutput>,
+        crate::meta_resolve::ComponentMetaFailure,
+    > {
+        self.get_component_meta_output_via_view_with_publication_evidence_pollable(
+            canonical_or_alias,
+            view,
+            fixed,
+            with_resolution,
+        )
+        .await
+        .map(|output| output.map(|output| output.output))
+    }
+
     /// Evidence-bearing core of
     /// [`Self::get_component_meta_output_via_view_with_fixed_store_view`].
     /// The public output path discards this evidence; the background
@@ -491,7 +509,6 @@ impl VerterHost {
         if view.is_tombstoned(canonical.as_str()) {
             return Ok(None);
         }
-
         // Budget context spans the warm-path materialization AND the cold
         // resolve+extract+materialize — the projection-op fuse is armed for
         // every output raise. Install-if-none so a batch / outer caller
@@ -501,6 +518,39 @@ impl VerterHost {
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            verter_execution::blocking::on_heap(|| {
+                self.get_component_meta_output_via_view_with_publication_evidence_pollable(
+                    canonical_or_alias,
+                    view,
+                    fixed,
+                    with_resolution,
+                )
+            })
+            .as_mut(),
+        )
+    }
+
+    /// [`Self::get_component_meta_output_via_view_with_publication_evidence`]
+    /// as a pollable computation: a cold component's resolve suspends where
+    /// capturing its inputs waits. It runs under its caller's request
+    /// context, whose budget arms every output raise.
+    pub(crate) async fn get_component_meta_output_via_view_with_publication_evidence_pollable(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        with_resolution: bool,
+    ) -> Result<
+        Option<ComponentMetaOutputWithPublicationEvidence>,
+        crate::meta_resolve::ComponentMetaFailure,
+    > {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        if view.is_tombstoned(canonical.as_str()) {
+            return Ok(None);
+        }
 
         // Warm probe against the capture's proven-current overlaid view.
         if let Some((cache_key, cached_entry)) =
@@ -649,64 +699,75 @@ impl VerterHost {
                 overlay,
             );
             let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &session_ctx;
-            let dispatch =
-                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-            let Some(ComponentMetaColdResult {
-                resolved,
-                analysis: meta,
-                completeness,
-                admitted,
-            }) = self.component_meta_via_view_cold(
-                canonical.as_str(),
-                view,
-                fixed,
-                ctx,
-                dispatch,
-                &seed_fence,
-                validated_at_generation,
-            )?
-            else {
-                return Ok(None);
-            };
-            let seed = with_resolution.then(|| {
-                crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(&resolved)
-            });
-            // SEPARATE tracer scope: output-materialization dependencies never
-            // fold into the analysis entry's fact signature (the cold body's
-            // tracer already sealed + published above). Reuse the SAME live
-            // session context that extraction used.
-            let (output, output_read_set) = named_fact_tracer!(
-                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-                TracerScope::ComponentMetaOutput,
-                || {
-                    if let Some(final_result) = admitted.as_ref() {
-                        verter_type_engine::fact_signature_helpers::observe_fact_signature(
-                            &final_result.entry.read_set_signature.facts,
-                        );
-                    }
-                    crate::meta_resolve::projectors::build_component_meta_output(
+            // The cold body suspends where capturing the owner's inputs
+            // waits, so its dispatcher is one a suspended computation owns.
+            let suspendable =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::suspendable(
+                    ctx,
+                );
+            let dispatch = suspendable.dispatch();
+            suspendable.run(async {
+                let Some(ComponentMetaColdResult {
+                    resolved,
+                    analysis: meta,
+                    completeness,
+                    admitted,
+                }) = verter_execution::blocking::on_heap(|| {
+                    self.component_meta_via_view_cold_pollable(
+                        canonical.as_str(),
+                        view,
+                        fixed,
                         ctx,
                         dispatch,
-                        canonical.as_str(),
-                        meta.0.clone(),
-                        seed,
-                        completeness,
+                        &seed_fence,
+                        validated_at_generation,
                     )
-                }
-            );
-            let output = output?;
-            let publication_evidence = admitted
-                .zip(finalized_output_signature(output_read_set))
-                .map(
-                    |(final_result, output_read_set)| ComponentMetaOutputPublicationEvidence {
-                        final_result,
-                        output_read_set,
-                    },
+                })
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let seed = with_resolution.then(|| {
+                    crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(&resolved)
+                });
+                // SEPARATE tracer scope: output-materialization dependencies never
+                // fold into the analysis entry's fact signature (the cold body's
+                // tracer already sealed + published above). Reuse the SAME live
+                // session context that extraction used.
+                let (output, output_read_set) = named_fact_tracer!(
+                    &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                    TracerScope::ComponentMetaOutput,
+                    || {
+                        if let Some(final_result) = admitted.as_ref() {
+                            verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                                &final_result.entry.read_set_signature.facts,
+                            );
+                        }
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            dispatch,
+                            canonical.as_str(),
+                            meta.0.clone(),
+                            seed,
+                            completeness,
+                        )
+                    }
                 );
-            Ok(Some(ComponentMetaOutputWithPublicationEvidence {
-                output,
-                publication_evidence,
-            }))
+                let output = output?;
+                let publication_evidence = admitted
+                    .zip(finalized_output_signature(output_read_set))
+                    .map(
+                        |(final_result, output_read_set)| ComponentMetaOutputPublicationEvidence {
+                            final_result,
+                            output_read_set,
+                        },
+                    );
+                Ok(Some(ComponentMetaOutputWithPublicationEvidence {
+                    output,
+                    publication_evidence,
+                }))
+            })
+            .await
         })
     }
 
@@ -942,6 +1003,43 @@ impl VerterHost {
         validated_at_generation: u64,
     ) -> Result<Option<ComponentMetaColdResult>, verter_type_engine::semantic_query::ExecutionAbort>
     {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            verter_execution::blocking::on_heap(|| {
+                self.component_meta_via_view_cold_pollable(
+                    canonical,
+                    view,
+                    fixed,
+                    ctx,
+                    dispatch,
+                    seed_fence,
+                    validated_at_generation,
+                )
+            })
+            .as_mut(),
+        )
+    }
+
+    /// [`Self::component_meta_via_view_cold`] as a pollable computation: the
+    /// resolve suspends where capturing the owner's inputs waits, and the
+    /// compute keeps its trace across that suspension.
+    pub(crate) async fn component_meta_via_view_cold_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities<M>,
+        >,
+        seed_fence: &ColdSeedFence,
+        validated_at_generation: u64,
+    ) -> Result<Option<ComponentMetaColdResult>, verter_type_engine::semantic_query::ExecutionAbort>
+    {
         #[cfg(test)]
         run_cold_body_pre_resolve_hook();
         // Pin the request executor to the caller's fixed view (FENCED), so
@@ -952,63 +1050,71 @@ impl VerterHost {
             dispatch,
             self.project_type_store().component_meta_results(),
         );
-        let refusal_query = dispatch.component_meta_refusal_query(canonical);
-        let ((resolved_opt, meta_opt), admitted) = results.compute_and_admit_with_entry(
-            canonical,
-            "view-aware path",
-            || {
-                let (mut resolved, admission) = match self
-                    .resolve_component_meta_with_view_and_fixed_admission(
+        let refusal_query = &dispatch.component_meta_refusal_query(canonical);
+        let results = &results;
+        // The compute and its resolve are built on the heap: a cold compute
+        // nests deep, and a synchronous caller drives it on its own stack.
+        let ((resolved_opt, meta_opt), admitted) = verter_execution::blocking::on_heap(move || {
+            results.compute_and_admit_with_entry_pollable(
+                canonical,
+                "view-aware path",
+                async move {
+                    let resolve = verter_execution::blocking::on_heap(move || {
+                        self.resolve_component_meta_with_view_and_fixed_admission_pollable(
+                            canonical,
+                            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                            view,
+                            executor_fixed,
+                        )
+                    });
+                    let (mut resolved, admission) = match resolve.await {
+                        Some(pair) => pair,
+                        None => return (None, None),
+                    };
+                    let extract = extract_component_meta_from_resolved(
+                        self, canonical, &resolved, true, // include_fallthrough
+                        ctx, dispatch,
+                    );
+                    self.merge_extraction_facts_into_admitted_resolved_meta(
                         canonical,
                         verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                        view,
-                        executor_fixed,
-                    ) {
-                    Some(pair) => pair,
-                    None => return (None, None),
-                };
-                let extract = extract_component_meta_from_resolved(
-                    self, canonical, &resolved, true, // include_fallthrough
-                    ctx, dispatch,
-                );
-                self.merge_extraction_facts_into_admitted_resolved_meta(
-                    canonical,
-                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                    view.fingerprint(),
-                    &mut resolved,
-                    extract.fallthrough_fact_versions.as_deref(),
-                    admission.as_ref(),
-                );
-                (
-                    Some(resolved),
-                    Some((
-                        crate::component_meta_cached_result::shared_component_meta_analysis(
-                            extract.analysis,
-                        ),
-                        extract.completeness,
-                    )),
-                )
-            },
-            |computed, evidence| {
-                let (Some(resolved), Some((meta, extract_completeness))) = computed else {
-                    return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
+                        view.fingerprint(),
+                        &mut resolved,
+                        extract.fallthrough_fact_versions.as_deref(),
+                        admission.as_ref(),
                     );
-                };
-                let final_completeness = resolved.completeness.merge(*extract_completeness);
-                let admission = dispatch.component_meta_admission_proof(&refusal_query, evidence);
-                self.component_meta_publish_decision_with_view(
-                    canonical,
-                    view,
-                    resolved,
-                    meta.clone(),
-                    validated_at_generation,
-                    seed_fence,
-                    final_completeness,
-                    &refusal_query,
-                    admission,
-                )
-            },
-        );
+                    (
+                        Some(resolved),
+                        Some((
+                            crate::component_meta_cached_result::shared_component_meta_analysis(
+                                extract.analysis,
+                            ),
+                            extract.completeness,
+                        )),
+                    )
+                },
+                move |computed, evidence| {
+                    let (Some(resolved), Some((meta, extract_completeness))) = computed else {
+                        return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
+                        );
+                    };
+                    let final_completeness = resolved.completeness.merge(*extract_completeness);
+                    let admission = dispatch.component_meta_admission_proof(refusal_query, evidence);
+                    self.component_meta_publish_decision_with_view(
+                        canonical,
+                        view,
+                        resolved,
+                        meta.clone(),
+                        validated_at_generation,
+                        seed_fence,
+                        final_completeness,
+                        refusal_query,
+                        admission,
+                    )
+                },
+            )
+        })
+        .await;
         let (Some(resolved), Some((meta, extract_completeness))) = (resolved_opt, meta_opt) else {
             return absent_unless_aborted(ctx);
         };

@@ -170,9 +170,11 @@ impl<K: Eq + Hash, V, E> SingleflightGroup<K, V, E> {
     }
     /// Inject the host's existing cycle authority at composition time.
     pub(crate) fn bind_task_registry(&self, registry: TaskRegistry) {
-        self.registry
-            .set(registry)
-            .expect("resolver authority is composed once");
+        if let Some(existing) = self.registry.get() {
+            existing.share_authority_with(&registry);
+        } else {
+            self.registry.set(registry).expect("resolver authority is composed once");
+        }
     }
 }
 impl<K: Eq + Hash + Clone, V, E: Clone> SingleflightGroup<K, V, E> {

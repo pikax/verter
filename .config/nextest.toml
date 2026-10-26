@@ -8,7 +8,22 @@
 [test-groups.progressive-child-contract-completion]
 max-threads = 1
 
+# ── Two tiers ────────────────────────────────────────────────────────────────
+# The GATE (profiles `default` and `ci`, which inherits the filter) runs every
+# test except the nightly scale tier. The NIGHTLY tier (profile `nightly`, run
+# by `.github/workflows/nightly.yml`) runs exactly that tier: the full-size,
+# scale-parameterised workloads, unchanged. A test belongs to the tier when one
+# segment of its module path is `nightly_scale`; membership is that module
+# name, never a list of test names. Each tier test has a smaller gate version
+# outside the module that keeps every behavioural guarantee at a size the gate
+# deadline holds, with deterministic work counters where the big test guarded
+# growth. The compiled policy test
+# `verter_session::nextest_tier_policy_tests` checks that each gate profile
+# selects every discovered test but the tier and that `nightly` selects
+# exactly the tier.
+
 [profile.default]
+default-filter = 'not test(/(^|::)nightly_scale::/)'
 # A speed gate, on the debug build: a test aims at under 2s and must stay
 # under 10s even on a loaded machine. Past 10s it is flagged slow, and at 20s
 # (`terminate-after` periods) it is TERMINATED and fails. A test that needs
@@ -108,6 +123,20 @@ test-group = 'progressive-child-contract-completion'
 
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]
+path = "junit.xml"
+
+# The nightly scale tier: only tests under a `nightly_scale` module, at full
+# size, on the debug build. Its deadline is its own: flagged at 60s and
+# terminated at 120s. The largest tier workload takes about 14s idle and 20s
+# on a loaded CI runner in debug, so 120s leaves six times the loaded time for
+# runner noise, while a regression that multiplies the work by an order of
+# magnitude (a quadratic term at these sizes) or a hang still fails by name
+# instead of running into the job's limit.
+[profile.nightly]
+default-filter = 'test(/(^|::)nightly_scale::/)'
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.nightly.junit]
 path = "junit.xml"
 
 # ── The real-JS request boundary addon ──────────────────────────────────────

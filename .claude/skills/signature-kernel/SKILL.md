@@ -143,6 +143,9 @@ the same reduction, except the written `string & {}` pair (`number`,
 `bigint`, a pattern template literal, either order —
 `is_kept_primitive_over_empty_object`) stays as written, and with
 `strictNullChecks` off a union arm is first erased of `null` / `undefined`.
+A remaining nullish arm absorbs an object intersection under that erased
+policy; strict policy reduces it to `never`. Disjoint scalar domains reduce
+to `never` under both policies.
 The typeinfo materializer (`materialize_through_aliases`) reduces an
 intersection written at an alias root through it, so a named demand answers
 `never` for conflicting discriminants, distributes over a union, and absorbs

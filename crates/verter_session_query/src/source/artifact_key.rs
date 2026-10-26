@@ -33,9 +33,11 @@ pub struct FileArtifactKey {
 }
 
 impl FileArtifactKey {
-    /// [`Self::for_source_identity`] for a plain script whose parse identity
-    /// the source stage already derived: no pass over the source bytes.
-    pub fn for_script_parse_identity(
+    /// [`Self::for_source_identity`] for a source whose exact parse identity
+    /// is already derived (a plain script's by its source stage, a carrier's
+    /// by its framework parse): no pass over the source bytes. `parse_key`
+    /// must be the identity of the bytes `content_hash` names.
+    pub fn for_parse_identity(
         canonical: Arc<str>,
         content_hash: Hash16,
         parse_key: verter_language::ParseKey,

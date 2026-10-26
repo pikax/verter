@@ -519,7 +519,7 @@ jobs:
       - name: Install wasm-bindgen CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.122
+          tool: wasm-bindgen-cli@0.2.129
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:

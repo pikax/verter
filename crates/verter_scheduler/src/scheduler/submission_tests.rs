@@ -406,7 +406,7 @@ fn owned_request_source_executes_as_the_waited_producer_and_refuses_a_mixed_cycl
     }
     let registry = verter_execution::tasks::TaskRegistry::default();
     let parent = registry.register_task();
-    let scheduler = Scheduler::new_sync_with_executor_and_registry(
+    let scheduler = Scheduler::new_sync_with_executor_and_task_registry(
         SchedulerConfig::default(),
         Arc::new(CycleLoader {
             parent: parent.clone(),
@@ -745,6 +745,8 @@ fn completion_wakes_run_after_admission_completion_and_retirement_locks_release(
 fn a_driver_reset_does_not_wait_for_the_reset_that_may_be_joining_it() {
     let scheduler = scheduler();
     let serial = scheduler.reset_serial.lock();
+    // A real external reset posts shutdown before joining its driver.
+    scheduler.shutdown.store(true, Ordering::Release);
     let (done, completed) = std::sync::mpsc::channel();
     let resetting = Arc::clone(&scheduler);
     let driver = std::thread::spawn(move || {
@@ -768,6 +770,8 @@ fn a_driver_reset_does_not_wait_for_the_reset_that_may_be_joining_it() {
 fn another_schedulers_driver_still_waits_for_this_schedulers_reset_barrier() {
     let scheduler = scheduler();
     let serial = scheduler.reset_serial.lock();
+    let (boundary, observed) = std::sync::mpsc::channel();
+    *scheduler.lifecycle_boundary.lock() = Some(boundary);
     let (done, completed) = std::sync::mpsc::channel();
     let resetting = Arc::clone(&scheduler);
     let driver = std::thread::spawn(move || {
@@ -775,9 +779,11 @@ fn another_schedulers_driver_still_waits_for_this_schedulers_reset_barrier() {
         resetting.reset();
         done.send(()).unwrap();
     });
+    let attempted = observed.recv_timeout(std::time::Duration::from_secs(1));
     let premature = completed.recv_timeout(std::time::Duration::from_millis(100));
     drop(serial);
     driver.join().unwrap();
+    assert_eq!(attempted.unwrap(), "reset-contended");
     assert!(
         matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
         "a foreign driver must honor this reset barrier"

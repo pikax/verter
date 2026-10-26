@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use rmcp::model::{CallToolRequestParams, ClientInfo, ProtocolVersion};
+use rmcp::model::{CallToolRequestParams, ClientConfig, ProtocolVersion};
 use rmcp::{ClientHandler, ServerHandler, ServiceExt};
 use verter_diagnostics::Linter;
 use verter_mcp::config::McpServerConfig;
@@ -84,14 +84,14 @@ fn build_server() -> VerterMcpServer {
 /// negotiation actually exercises the server's supported-set pin.
 ///
 /// The default `()` client requests `ProtocolVersion::LATEST`
-/// (`2025-11-25`), which sits inside BOTH the pinned set AND rmcp 3.1.4's
+/// (`2025-11-25`), which sits inside BOTH the pinned set AND rmcp's
 /// unpinned `KNOWN_VERSIONS`, so a handshake through it cannot observe
 /// whether the pin is in force.
 struct ClientRequestingUntestedRevision;
 
 impl ClientHandler for ClientRequestingUntestedRevision {
-    fn get_info(&self) -> ClientInfo {
-        let mut info = ClientInfo::default();
+    fn get_info(&self) -> ClientConfig {
+        let mut info = ClientConfig::default();
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         info
     }
@@ -100,8 +100,8 @@ impl ClientHandler for ClientRequestingUntestedRevision {
 /// `initialize` (lifecycle negotiation): a real rmcp client, paired
 /// with the real server over an in-process duplex transport,
 /// completes the handshake and retains the server's declared identity
-/// and capabilities — proving `ServerInfo`/`ServerCapabilities` still
-/// round-trip through the 3.1.4 wire format. The client deliberately
+/// and capabilities — proving `ServerConfig`/`ServerCapabilities` still
+/// round-trip through the rmcp wire format. The client deliberately
 /// requests 2026-07-28 so the negotiated version is the pin's fallback,
 /// not an echo of a client request that happens to already be in the
 /// pinned set.
@@ -170,7 +170,7 @@ async fn initialize_negotiates_server_identity_and_capabilities() {
 
 /// `tools/list` + `tools/call`: the real tool router enumerates
 /// `list_files`, and a real `tools/call` round-trip for it returns a
-/// structured [`ContentBlock::text`] payload over the real 3.1.4 wire
+/// structured [`ContentBlock::text`] payload over the real rmcp wire
 /// transport — proving `ToolRouter`/`#[tool_router]` macro output still
 /// produces a valid envelope end-to-end.
 ///

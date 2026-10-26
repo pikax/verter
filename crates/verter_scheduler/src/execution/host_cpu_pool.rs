@@ -239,6 +239,7 @@ impl HostCpuPool {
     /// call on a lazily-constructed pool ([`Self::new_lazy`]) spawns the
     /// worker threads here.
     pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        verter_execution::blocking::enter_wait(verter_execution::blocking::WaitFamily::CpuPool);
         self.ensure_pool().install(f)
     }
 

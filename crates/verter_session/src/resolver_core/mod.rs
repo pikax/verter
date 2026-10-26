@@ -43,7 +43,6 @@ pub mod fact_read_set;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 mod owned_lowering_port;
-pub(crate) use owned_lowering_port::observe_whole_content;
 pub(crate) mod request_bound;
 pub(crate) mod request_store_view;
 pub mod route_db;
@@ -97,7 +96,9 @@ pub(crate) use component_meta_query_engine::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
     AdmittedRouteProjectionNode,
 };
+#[cfg(test)]
 pub(crate) use component_meta_request::run_component_meta_request;
+pub(crate) use component_meta_request::run_component_meta_request_pollable;
 pub(crate) use component_meta_request::ComponentMetaRequestHost;
 pub use declaration_metadata::{
     resolve_direct_local_type_declaration, resolve_local_type_declaration,
@@ -408,7 +409,10 @@ where
     type Error: Clone;
 
     fn cache_key(&self) -> K;
-    fn snapshot_view(&mut self) -> Self::View;
+    /// The view one attempt runs under, with whatever inputs the executor
+    /// captures alongside it. A snapshot that waits on a dependency
+    /// suspends the request.
+    async fn snapshot_view(&mut self) -> Self::View;
     /// Whether the view the most recent [`Self::snapshot_view`] returned
     /// was proven current by the underlying store-view manager.
     ///
@@ -517,11 +521,29 @@ where
     V: Clone,
     X: StableRequestExecutor<K, V>,
 {
+    let _task = verter_execution::tasks::ExecutionScope::enter(singleflight.task_registry());
+    verter_execution::blocking::drive_pending(
+        verter_execution::blocking::WaitFamily::ResolverFlight,
+        std::pin::pin!(run_stable_request_pollable(singleflight, executor)),
+    )
+}
+
+/// [`run_stable_request`] as a pollable computation: an attempt's snapshot
+/// and the flight it joins suspend the request instead of parking.
+pub(crate) async fn run_stable_request_pollable<K, V, X>(
+    singleflight: &SingleflightGroup<K, StableExecutionValue<V>, X::Error>,
+    executor: &mut X,
+) -> Result<RequestRunResult<V>, X::Error>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+    X: StableRequestExecutor<K, V>,
+{
     let cache_key = executor.cache_key();
     let max_attempts = executor.max_attempts();
 
     for attempt in 0..max_attempts {
-        let store_view = executor.snapshot_view();
+        let store_view = executor.snapshot_view().await;
         // Currentness of THIS attempt's snapshot. A non-current snapshot
         // (the manager handed back a known-stale `ReturnOnly` view under
         // sustained churn) must NOT serve a warm cache hit: validating a
@@ -640,40 +662,48 @@ where
             });
         }
 
-        let flight = singleflight.run_retaining(
-            cache_key.clone(),
-            store_view.compat_token(),
-            || {
-                // The leader is proven-current (the non-current branch
-                // returned before pinning), so the warm peek here is safe:
-                // a hit it retains as a `stable` rendezvous for followers
-                // was validated against a current view.
-                if let Some(cached) = executor.try_get_cached(&store_view) {
-                    return Ok(StableExecutionValue {
-                        value: cached,
-                        stable: true,
-                        computed: false,
-                        // A warm hit is complete (partials never warm).
-                        completeness: ResultCompleteness::Complete,
-                        // A warm hit came out of a shared cache: it was
-                        // admitted, so nothing refused it.
-                        reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
-                    });
-                }
+        let lane_token = store_view.compat_token();
+        let flight_key = cache_key.clone();
+        let leader = &mut *executor;
+        let leader_view = &store_view;
+        // The flight, with the compute it leads, is built on the heap: a
+        // cold compute nests deep under its synchronous driver.
+        let flight = verter_execution::blocking::on_heap(move || {
+            singleflight.run_retaining_pollable(
+                flight_key,
+                lane_token,
+                move || async move {
+                    let (executor, store_view) = (leader, leader_view);
+                    // The leader is proven-current (the non-current branch
+                    // returned before pinning), so the warm peek here is safe:
+                    // a hit it retains as a `stable` rendezvous for followers
+                    // was validated against a current view.
+                    if let Some(cached) = executor.try_get_cached(store_view) {
+                        return Ok(StableExecutionValue {
+                            value: cached,
+                            stable: true,
+                            computed: false,
+                            // A warm hit is complete (partials never warm).
+                            completeness: ResultCompleteness::Complete,
+                            // A warm hit came out of a shared cache: it was
+                            // admitted, so nothing refused it.
+                            reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
+                        });
+                    }
 
-                let value = executor.compute(&store_view)?;
-                let stable = executor.is_stable(&store_view);
-                let completeness = executor.capture_completeness();
-                let cache_refusal = executor.capture_cache_refusal();
-                if stable && !completeness.is_partial() && cache_refusal.is_none() {
-                    executor.store_stable(&value, StableAdmission { _private: () });
-                }
-                // The leader's COMPUTE completeness was captured before
-                // `store_stable`; store it INTO the value before
-                // it is published as `FlightInner::Done` under the
-                // `flights`→`inner` lock — so any follower that observes
-                // `Done` observes the completeness atomically with the value.
-                Ok(StableExecutionValue {
+                    let value = executor.compute(store_view)?;
+                    let stable = executor.is_stable(store_view);
+                    let completeness = executor.capture_completeness();
+                    let cache_refusal = executor.capture_cache_refusal();
+                    if stable && !completeness.is_partial() && cache_refusal.is_none() {
+                        executor.store_stable(&value, StableAdmission { _private: () });
+                    }
+                    // The leader's COMPUTE completeness was captured before
+                    // `store_stable`; store it INTO the value before
+                    // it is published as `FlightInner::Done` under the
+                    // `flights`→`inner` lock — so any follower that observes
+                    // `Done` observes the completeness atomically with the value.
+                    Ok(StableExecutionValue {
                     value,
                     stable,
                     computed: true,
@@ -683,14 +713,16 @@ where
                             cache_refusal,
                         ),
                 })
-            },
-            // Retain ONLY stable results as a joinable rendezvous. An
-            // unstable result (the snapshot view moved mid-compute) must
-            // NOT be retained, or the stability-retry loop below — and any
-            // concurrent sibling — would join the torn result instead of
-            // recomputing against fresh state.
-            |sev| sev.stable && !sev.completeness.is_partial() && sev.reuse.is_shared(),
-        )?;
+                },
+                // Retain ONLY stable results as a joinable rendezvous. An
+                // unstable result (the snapshot view moved mid-compute) must
+                // NOT be retained, or the stability-retry loop below — and any
+                // concurrent sibling — would join the torn result instead of
+                // recomputing against fresh state.
+                |sev| sev.stable && !sev.completeness.is_partial() && sev.reuse.is_shared(),
+            )
+        })
+        .await?;
 
         if flight.value.stable {
             // A flight LEADER whose closure served a warm hit (did NOT
@@ -753,7 +785,7 @@ where
         }
     }
 
-    let store_view = executor.snapshot_view();
+    let store_view = executor.snapshot_view().await;
     let value = executor.compute(&store_view)?;
     let completeness = executor.capture_completeness();
     if let Some(propagation) = executor.capture_cache_refusal() {
@@ -1874,6 +1906,7 @@ enum FlightInner<V, E> {
     /// caller has claimed leadership yet. The first `run` caller
     /// transitions this to `Running` and becomes the leader.
     Pending,
+    /// A leader is computing: the execution task that owns the lane.
     Running {
         owner: Option<std::thread::ThreadId>,
         task: Option<verter_execution::tasks::ExecutionTask>,
@@ -1984,14 +2017,29 @@ where
     K: Eq + Hash,
 {
     fn default() -> Self {
+        Self::with_task_registry(verter_execution::tasks::TaskRegistry::default())
+    }
+}
+
+impl<K, V, E> SingleflightGroup<K, V, E>
+where
+    K: Eq + Hash,
+{
+    /// A group whose flights are led and joined by tasks of `tasks`.
+    pub fn with_task_registry(tasks: verter_execution::tasks::TaskRegistry) -> Self {
         Self {
             flights: Arc::new(Mutex::new(FlightTable::default())),
-            registry: Arc::new(std::sync::OnceLock::new()),
+            registry: Arc::new(std::sync::OnceLock::from(tasks)),
             #[cfg(test)]
             non_retained_seam_hook: Arc::new(SeamHookSlot::default()),
             #[cfg(test)]
             joiner_park_tx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The registry whose tasks lead and join this group's flights.
+    pub(crate) fn task_registry(&self) -> &verter_execution::tasks::TaskRegistry {
+        self.registry.get().expect("flight registry is composed")
     }
 }
 
@@ -2350,6 +2398,10 @@ impl ResolverCounters {
 }
 
 #[cfg(test)]
+#[path = "singleflight_task_tests.rs"]
+mod singleflight_task_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use parking_lot::Condvar;
@@ -2436,7 +2488,7 @@ mod tests {
             self.key.clone()
         }
 
-        fn snapshot_view(&mut self) -> Self::View {
+        async fn snapshot_view(&mut self) -> Self::View {
             self.view()
         }
 
@@ -3141,7 +3193,7 @@ mod tests {
             "node".to_string()
         }
 
-        fn snapshot_view(&mut self) -> Self::View {
+        async fn snapshot_view(&mut self) -> Self::View {
             TestView {
                 token: StoreViewCompatToken {
                     epoch: 1,
@@ -3748,7 +3800,7 @@ mod tests {
             let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
             let (release, leader, state) = leader_in_compute(&group, retained);
             let (probe, waker) = flight_wake_probe(&group);
-            let mut join = FlightJoin::new(Arc::clone(&state));
+            let mut join = FlightJoin::new(&state);
             assert!(join.poll(&waker).is_pending());
             assert!(join.poll(&waker).is_pending());
             assert_eq!(
@@ -3776,8 +3828,8 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let (release, leader, state) = leader_in_compute(&group, true);
         let (probe, waker) = flight_wake_probe(&group);
-        let mut dropped = FlightJoin::new(Arc::clone(&state));
-        let mut kept = FlightJoin::new(Arc::clone(&state));
+        let mut dropped = FlightJoin::new(&state);
+        let mut kept = FlightJoin::new(&state);
         assert!(dropped.poll(&waker).is_pending());
         assert!(kept.poll(&waker).is_pending());
         drop(dropped);
@@ -3800,7 +3852,7 @@ mod tests {
             let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
             let (release, leader, state) = leader_in_compute(&group, round % 2 == 0);
             let (probe, waker) = flight_wake_probe(&group);
-            let mut join = FlightJoin::new(Arc::clone(&state));
+            let mut join = FlightJoin::new(&state);
             release.send(()).expect("release the leader");
             let answered_at_poll = join.poll(&waker).is_ready();
             leader.join().expect("the leader returns");

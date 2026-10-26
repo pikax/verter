@@ -32,7 +32,7 @@ verter-editor-client = { path = "../../crates/verter-editor-client" }
 lapce-plugin = { git = "https://github.com/lapce/lapce-plugin-rust.git" }
 
 [dev-dependencies]
-toml = "0.8"
+toml = "1.1"
 
 [profile.release]
 opt-level = 3

@@ -26,7 +26,7 @@ use crate::shared::default_shared;
 use crate::types::{HostConfig, HostMetrics};
 use crate::{host_executor, VerterHost};
 
-pub(crate) fn is_ambient_declaration_canonical(canonical: &str) -> bool {
+fn is_ambient_declaration_canonical(canonical: &str) -> bool {
     canonical.starts_with("ambient:/")
         || canonical.ends_with(".d.ts")
         || canonical.ends_with(".d.tsx")
@@ -129,6 +129,7 @@ impl HostResolverState {
         let runtime = crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
             routes,
             imported_roots,
+            registry.clone(),
         );
         runtime.bind_task_registry(registry);
         Self { runtime }
@@ -510,6 +511,8 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
+        // Scoped cache producers and semantic producers share one cycle authority.
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -561,14 +564,15 @@ impl VerterHost {
                         Arc::clone(&worker_pools.scheduler_io_pool),
                     ),
                 };
-                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor_and_registry(
-                    scheduler_config,
-                    loader,
-                    executor,
-                    scheduler_cpu_pool,
-                    scheduler_io_pool,
-                    task_registry.clone(),
-                );
+                let scheduler =
+                    verter_scheduler::scheduler::Scheduler::with_executor_and_task_registry(
+                        scheduler_config,
+                        loader,
+                        executor,
+                        scheduler_cpu_pool,
+                        scheduler_io_pool,
+                        task_registry.clone(),
+                    );
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::ThreadedSchedulerPools,
@@ -582,13 +586,12 @@ impl VerterHost {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let scheduler =
-                    verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_registry(
-                        scheduler_config,
-                        loader,
-                        executor,
-                        task_registry.clone(),
-                    );
+                let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_task_registry(
+                    scheduler_config,
+                    loader,
+                    executor,
+                    task_registry.clone(),
+                );
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::InlineDriveScheduler,
@@ -704,6 +707,7 @@ impl VerterHost {
                 envelope_ingest: registered_envelope_ingest,
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
+            task_registry: task_registry.clone(),
             language_classifier,
             workspace: workspace_lock,
             workspace_services,
@@ -719,7 +723,11 @@ impl VerterHost {
             platform_services,
             cooperative_drive,
             provenance,
-            resolver: HostResolverState::new(routes_handle, imported_roots_handle, task_registry),
+            resolver: HostResolverState::new(
+                routes_handle,
+                imported_roots_handle,
+                task_registry.clone(),
+            ),
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),

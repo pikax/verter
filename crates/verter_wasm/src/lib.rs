@@ -2776,3 +2776,133 @@ mod framework_options_js_constructor_tests {
         );
     }
 }
+
+/// The pollable host roots on the wasm32 host: one thread, the scheduler
+/// and the declaration-lowering shards inline. A root polled there answers
+/// or hands its driver the dispatch step or producer it waits on, and the
+/// driver — this test, standing in for a browser event loop — runs it and
+/// polls again. A root that waited with no work to hand out could never be
+/// woken here, so the loop refuses that outright.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod host_root_wasm_tests {
+    use super::*;
+    use std::task::{Poll, Waker};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const OWNER: &str = "/src/Owner.vue";
+    const OWNER_SOURCE: &str = "<script setup lang=\"ts\">\n\
+        defineProps<{ label: string; size?: number }>()\n\
+        </script>\n\
+        <template><b>{{ label }}</b></template>";
+
+    fn host_with_owner() -> WasmVerterHost {
+        let host = WasmVerterHost::new(js_sys::JSON::parse("{}").expect("valid JSON"))
+            .expect("default construction");
+        let _ = host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: Some(OWNER.to_owned()),
+                input_id: OWNER.to_owned(),
+                source: std::sync::Arc::from(OWNER_SOURCE),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("the owner registers");
+        host
+    }
+
+    fn ide_request() -> verter_compiler::compile_request::CompileRequest {
+        use verter_compiler::compile_request::{
+            CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+            RuntimeProductRequest, VueCompileRequest,
+        };
+        CompileRequest::new(
+            vec![
+                CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+                CompileProduct::IdeCompanion(IdeProductRequest::default()),
+            ],
+            FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("the demand constructs")
+    }
+
+    fn texts(response: host::CompileRequestResponse) -> Vec<String> {
+        response
+            .products
+            .iter()
+            .flat_map(|product| match product {
+                host::CompiledProduct::Runtime { nodes, .. } => {
+                    nodes.iter().map(|node| node.code.to_string()).collect()
+                }
+                host::CompiledProduct::Ide(ide) => vec![ide.code.to_string()],
+                host::CompiledProduct::Analysis(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// The compile root hands this thread a dispatch step for the inline
+    /// scheduler and then its macro producer, and answers what the
+    /// synchronous entry answers.
+    #[wasm_bindgen_test]
+    fn a_compile_root_is_driven_by_the_work_it_hands_out() {
+        let host = host_with_owner();
+        let expected = texts(
+            host.inner
+                .compile_request(OWNER, ide_request())
+                .expect("the owner compiles"),
+        );
+        let mut root = host.inner.begin_compile_request(OWNER, ide_request());
+        let (mut producers, mut dispatch_steps) = (0, 0);
+        let answer = loop {
+            if let Poll::Ready(answer) = root.poll(Waker::noop()) {
+                break answer;
+            }
+            let work = root
+                .take_work()
+                .expect("a pending root on one thread hands out the work it waits on");
+            if work.is_producer() {
+                producers += 1;
+            } else {
+                dispatch_steps += 1;
+            }
+            assert!(
+                work.run(),
+                "the inline scheduler dispatches what the root admitted"
+            );
+        };
+        assert_eq!(texts(answer.expect("the owner compiles")), expected);
+        assert_eq!(producers, 1);
+        assert!(dispatch_steps > 0, "the inline scheduler needed driving");
+    }
+
+    /// The component-metadata root answers on its first poll here: its
+    /// store view and its owner shards answer at once on one thread.
+    #[wasm_bindgen_test]
+    fn a_component_meta_root_answers_what_the_synchronous_entry_does() {
+        let host = host_with_owner();
+        let mut root = host.inner.begin_component_meta_output(OWNER);
+        let polled = match root.poll(Waker::noop()) {
+            Poll::Ready(answer) => answer,
+            Poll::Pending => panic!("nothing on one thread can make the root wait"),
+        };
+        let polled = format!(
+            "{:?}",
+            polled
+                .expect("the owner's metadata resolves")
+                .expect("the owner is a component")
+        );
+        let synchronous = format!(
+            "{:?}",
+            host.inner
+                .get_component_meta_output(OWNER)
+                .expect("the owner's metadata resolves")
+                .expect("the owner is a component")
+        );
+        assert_eq!(polled, synchronous);
+    }
+}

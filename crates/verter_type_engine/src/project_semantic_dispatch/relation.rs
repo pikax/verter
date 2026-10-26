@@ -117,7 +117,7 @@ pub(super) struct LiteralUnionIndex {
 }
 
 pub(super) type LiteralUnionIndexes =
-    std::cell::RefCell<FxHashMap<SemanticNodeId, Arc<LiteralUnionIndex>>>;
+    verter_execution::sync_cell::SyncRefCell<FxHashMap<SemanticNodeId, Arc<LiteralUnionIndex>>>;
 
 #[derive(Hash, PartialEq, Eq)]
 struct LiteralUnionIndexKey(SemanticNodeId);
@@ -8302,18 +8302,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 return Some(assignable(bindings));
             }
-            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
-                return Some(RelationResult::NotAssignable);
-            }
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Object))) => {
                 return Some(assignable(bindings));
             }
-            // After dynamic operands are handled, an object construction cannot
-            // satisfy a primitive target.
+            // Generic construction types can reduce to bottom even though
+            // their runtime value is an object. Decide through the same
+            // evaluated authority diagnostic preparation reads.
             (
                 _,
                 Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::String
+                    PrimitiveKind::Never
+                    | PrimitiveKind::String
                     | PrimitiveKind::Number
                     | PrimitiveKind::Boolean
                     | PrimitiveKind::BigInt
@@ -8322,7 +8321,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | PrimitiveKind::Undefined
                     | PrimitiveKind::Void,
                 )),
-            ) if source_is_program => return Some(RelationResult::NotAssignable),
+            ) if source_is_program => {
+                return Some(match self.evaluated_object_spread_type(source) {
+                    Some(evaluated) => {
+                        self.relate_member(evaluated, target, bindings, InferPosition::Covariant)
+                    }
+                    None => RelationResult::Unknown,
+                });
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
+                return Some(RelationResult::NotAssignable);
+            }
             _ => {}
         }
         let Some(source_branches) = self.projected_relation_branches(source) else {
@@ -9481,10 +9490,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ShallowRelation::Assignable
                 }
             }
-            // A carrier may settle to `never`: the structural reducer reads
-            // the type it settles to.
+            // A carrier or intersection may settle to `never`: the structural
+            // reducer reads instantiated contributors before deciding bottom.
             (source, SemanticNodeData::Primitive(PrimitiveKind::Never))
-                if is_settling_carrier(source) =>
+                if is_settling_carrier(source)
+                    || matches!(source, SemanticNodeData::Intersection(_)) =>
             {
                 ShallowRelation::Unknown
             }
@@ -15377,7 +15387,11 @@ trait RelationDemandDriver {
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId;
-    fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool;
+    fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId>;
     fn leave_inline_recursion(&self);
     fn matched_union_inference(
         &self,
@@ -15649,8 +15663,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     ) -> SemanticNodeId {
         ProjectSemanticDispatch::intern_normalized_union_or_intersection(self, members, is_union)
     }
-    fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
-        ProjectSemanticDispatch::intersection_arms_reduce_to_never(self, arms)
+    fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::reduced_intersection_terminal(
+            self,
+            source,
+            arms,
+            super::build::IntersectionDenotationDemand::Operand,
+        )
     }
     fn leave_inline_recursion(&self) {
         ProjectSemanticDispatch::leave_inline_recursion(self)
@@ -16135,8 +16158,12 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         self.driver
             .intern_normalized_union_or_intersection(members, is_union)
     }
-    fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
-        self.driver.intersection_arms_reduce_to_never(arms)
+    fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        self.driver.reduced_intersection_terminal(source, arms)
     }
     fn leave_inline_recursion(&self) {
         self.driver.leave_inline_recursion()
@@ -17267,11 +17294,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         //    types conflict) relates as `never`. ──────────────────────────
         if let SemanticNodeData::Intersection(arms) = &*source_data {
             let arms = arms.members_arc();
-            if self.intersection_arms_reduce_to_never(&arms) {
+            if let Some(terminal) = self.reduced_intersection_terminal(source, &arms) {
                 drop(source_data);
                 drop(target_data);
-                let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
-                work.push(same_pair(never, target));
+                work.push(same_pair(terminal, target));
                 return;
             }
         }
