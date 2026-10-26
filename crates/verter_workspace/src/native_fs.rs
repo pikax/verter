@@ -177,32 +177,49 @@ impl NativeFs {
         &self,
         path: &str,
     ) -> std::io::Result<verter_session_query::resolution::PathProbe> {
+        self.probe_path_live_noting_parent(path)
+            .map(|(probe, _)| probe)
+    }
+
+    /// [`Self::probe_path_live`], also reporting whether the same call showed
+    /// that `path`'s lexical parent cannot hold anything, so that nothing else
+    /// beneath it can exist either. Only Windows' attribute probe answers
+    /// that: it does not follow a final reparse point, so its
+    /// `ERROR_PATH_NOT_FOUND` means a component before the last is missing.
+    /// The metadata fallback follows a final symbolic link, so its errors may
+    /// describe the link's target rather than the parent, and say nothing.
+    pub(crate) fn probe_path_live_noting_parent(
+        &self,
+        path: &str,
+    ) -> std::io::Result<(verter_session_query::resolution::PathProbe, bool)> {
         #[cfg(test)]
         self.note_live_read("probe", path);
         let os_path = to_os_path(path);
         #[cfg(windows)]
-        if let Some(probe) = attribute_probe(&os_path) {
-            return Ok(probe);
+        if let Some(answer) = attribute_probe(&os_path) {
+            return Ok(answer);
         }
         match std::fs::metadata(&os_path) {
             Ok(metadata) if metadata.is_file() => {
-                Ok(verter_session_query::resolution::PathProbe::File)
+                Ok((verter_session_query::resolution::PathProbe::File, false))
             }
-            Ok(metadata) if metadata.is_dir() => {
-                Ok(verter_session_query::resolution::PathProbe::Directory)
-            }
-            Ok(_) => Ok(verter_session_query::resolution::PathProbe::Unknown),
+            Ok(metadata) if metadata.is_dir() => Ok((
+                verter_session_query::resolution::PathProbe::Directory,
+                false,
+            )),
+            Ok(_) => Ok((verter_session_query::resolution::PathProbe::Unknown, false)),
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                Ok(verter_session_query::resolution::PathProbe::Absent)
+                Ok((verter_session_query::resolution::PathProbe::Absent, false))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                Ok(verter_session_query::resolution::PathProbe::Inaccessible)
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok((
+                verter_session_query::resolution::PathProbe::Inaccessible,
+                false,
+            )),
             Err(error) => Err(error),
         }
     }
@@ -483,7 +500,7 @@ impl NativeFs {
 /// the query would read only the part before it) and any failure other than
 /// not-found are left to metadata.
 #[cfg(windows)]
-fn attribute_probe(os_path: &str) -> Option<verter_session_query::resolution::PathProbe> {
+fn attribute_probe(os_path: &str) -> Option<(verter_session_query::resolution::PathProbe, bool)> {
     use windows_sys::Win32::Foundation::{
         GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
     };
@@ -510,19 +527,24 @@ fn attribute_probe(os_path: &str) -> Option<verter_session_query::resolution::Pa
     if found == 0 {
         // SAFETY: reads this thread's last-error value, set by the call above.
         let error = unsafe { GetLastError() };
-        return matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
-            .then_some(verter_session_query::resolution::PathProbe::Absent);
+        return matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND).then_some((
+            verter_session_query::resolution::PathProbe::Absent,
+            error == ERROR_PATH_NOT_FOUND,
+        ));
     }
     // SAFETY: a successful call filled `data`.
     let attributes = unsafe { data.assume_init() }.dwFileAttributes;
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return None;
     }
-    Some(if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        verter_session_query::resolution::PathProbe::Directory
-    } else {
-        verter_session_query::resolution::PathProbe::File
-    })
+    Some((
+        if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            verter_session_query::resolution::PathProbe::Directory
+        } else {
+            verter_session_query::resolution::PathProbe::File
+        },
+        false,
+    ))
 }
 
 /// Convert a canonical ID (forward slashes) to an OS path.

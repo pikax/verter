@@ -11608,8 +11608,14 @@ fn a_300_operand_and_chain_evaluates_on_a_small_stack() {
 /// `and_chain(operands)` observed on a thread with a 1 MiB stack, with the
 /// guards its evaluation applied.
 fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
+    and_chain_on_a_stack(operands, 1 << 20)
+}
+
+/// `and_chain(operands)` observed on a thread of `stack` bytes, with the
+/// guards its evaluation applied.
+fn and_chain_on_a_stack(operands: usize, stack: usize) -> (String, usize) {
     std::thread::Builder::new()
-        .stack_size(1 << 20)
+        .stack_size(stack)
         .spawn(move || {
             let host = four_policy_host();
             let path = format!("{STRICT_ROOT}/and-chain-{operands}.ts");
@@ -11626,22 +11632,20 @@ fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
         .expect("the chain evaluates")
 }
 
-/// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread and
-/// answers the checker's type: the slice lowering walks its nested left
-/// operands from an explicit spine and classifies each operand's guard
-/// once, and the evaluation applies each operand's guard once, so neither
-/// its stack nor its work grows with a native level or a re-application
-/// per operand — the guards it applies grow linearly with the chain.
-///
-/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
-/// about one second): `"" | 0 | 1 | false | null | undefined` with
-/// `strictNullChecks`, `0 | 1` without it.
+/// A 400-operand `&&` chain lowers and evaluates on a 320 KiB thread and
+/// answers the checker's type, and every operand applies the same number of
+/// guards at 100, 200 and 400 operands: the gate version of the 2,000-operand,
+/// 1 MiB test in the nightly scale tier. The chain needs 192 to 256 KiB of
+/// fixed stack (measured at ten operands), so 320 KiB leaves at most 0.32 KiB
+/// an operand over 400, against at least 0.38 KiB over 2,000 operands on
+/// 1 MiB: an operand that recursed natively overflows here whenever it
+/// overflows there.
 #[test]
-fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
-    let (answer, guards) = and_chain_on_a_small_stack(2000);
+fn a_400_operand_and_chain_lowers_and_evaluates_on_a_smaller_stack() {
+    let (answer, guards) = and_chain_on_a_stack(400, 320 << 10);
     assert_eq!(answer, "\"\" | 0 | 1 | false | null | undefined");
-    let (_, half) = and_chain_on_a_small_stack(1000);
-    let (_, quarter) = and_chain_on_a_small_stack(500);
+    let (_, half) = and_chain_on_a_stack(200, 320 << 10);
+    let (_, quarter) = and_chain_on_a_stack(100, 320 << 10);
     assert_eq!(
         guards - half,
         2 * (half - quarter),
@@ -12706,5 +12710,34 @@ fn operator_chains_10000_deep_evaluate_on_a_small_stack() {
     ];
     for (path, source, expected) in rows {
         assert_eq!(observe_on_a_1_mib_thread(path, source), expected, "{path}");
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread and
+    /// answers the checker's type: the slice lowering walks its nested left
+    /// operands from an explicit spine and classifies each operand's guard
+    /// once, and the evaluation applies each operand's guard once, so neither
+    /// its stack nor its work grows with a native level or a re-application
+    /// per operand — the guards it applies grow linearly with the chain.
+    ///
+    /// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
+    /// about one second): `"" | 0 | 1 | false | null | undefined` with
+    /// `strictNullChecks`, `0 | 1` without it.
+    #[test]
+    fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
+        let (answer, guards) = and_chain_on_a_small_stack(2000);
+        assert_eq!(answer, "\"\" | 0 | 1 | false | null | undefined");
+        let (_, half) = and_chain_on_a_small_stack(1000);
+        let (_, quarter) = and_chain_on_a_small_stack(500);
+        assert_eq!(
+            guards - half,
+            2 * (half - quarter),
+            "every operand applies the same number of guards: {quarter}, {half}, {guards}"
+        );
     }
 }
