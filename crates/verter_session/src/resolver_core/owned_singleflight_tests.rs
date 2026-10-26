@@ -483,7 +483,7 @@ fn composed_resolver_compatibility_uses_its_shared_task_authority() {
             },
             |_| true,
         )));
-    assert_eq!(*pollable_task.value, 8);
+    assert_eq!(*pollable_task.unwrap().value, 8);
     drop(caller);
     assert_eq!(registry.active_task_count_for_tests(), 0);
     let mut foreign = group.begin_owned_retaining(
