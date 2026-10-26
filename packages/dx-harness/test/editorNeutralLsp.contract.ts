@@ -165,7 +165,9 @@ describe("TypeScript >=7 authority control", { concurrent: false }, () => {
           diagnosticCodes,
           output,
         };
-        expect(control.status, "the deliberate invalid-member control must fail typecheck").toBe(1);
+        // TypeScript 7.1 exits 2 (diagnostics present) for a `--noEmit` run that
+        // reports errors; 7.0 exited 1. Re-measured on typescript@7.1.0-beta.
+        expect(control.status, "the deliberate invalid-member control must fail typecheck").toBe(2);
         expect(diagnosticCodes, "the control must report exactly the anti-any diagnostic").toEqual([
           2339,
         ]);
@@ -254,7 +256,8 @@ describe("TypeScript >=7 authority control", { concurrent: false }, () => {
         diagnosticCodes,
         output,
       };
-      expect(control.status, "the authored directive must re-enable JavaScript checking").toBe(1);
+      // TypeScript 7.1 exits 2 for a `--noEmit` run with diagnostics (see above).
+      expect(control.status, "the authored directive must re-enable JavaScript checking").toBe(2);
       expect(diagnosticCodes).toEqual([2339]);
     } catch (error) {
       authoredCheckJavaScriptPolicyControl = {
