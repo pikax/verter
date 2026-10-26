@@ -181,6 +181,7 @@ pub(super) async fn handle_initialize(
                 vite_opts.trusted_files.len()
             );
         }
+        *server.idle_collect.lock() = crate::config::parse_idle_collect_options(opts);
         // Read inlayHints.enabled setting (default: true)
         if let Some(enabled) = opts
             .get("inlayHints")
@@ -317,6 +318,16 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // The server itself is the wiring: the heartbeat reads the server's own
     // handler activity, never a call-site-supplied handle.
     let _ = spawn_heartbeat(server);
+
+    // Return idle memory to the OS once per idle period (off when the client
+    // configured `memory.idleCollectSeconds` to 0).
+    if let Some(delay) = server.idle_collect.lock().delay {
+        drop(crate::idle_collect::spawn_idle_collect(
+            Arc::clone(&server.handler_activity),
+            delay,
+            verter_alloc::collect_idle_memory,
+        ));
+    }
 
     // B. Send immediate non-blocking notifications
     let tp_label = server.type_provider_kind.to_string();

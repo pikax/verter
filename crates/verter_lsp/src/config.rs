@@ -77,6 +77,54 @@ pub fn parse_hover_init_options(init_options: &serde_json::Value) -> HoverOption
     }
 }
 
+/// Seconds without a request before the server returns idle memory to the OS
+/// (`verter_alloc::collect_idle_memory`).
+pub const DEFAULT_IDLE_COLLECT_SECONDS: u64 = 30;
+
+/// The longest accepted idle delay (one day).
+pub const MAX_IDLE_COLLECT_SECONDS: u64 = 86_400;
+
+/// Idle memory-collection policy, from `initializationOptions.memory.idleCollectSeconds`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleCollectOptions {
+    /// Quiet time before a collect; `None` disables the hook.
+    pub delay: Option<std::time::Duration>,
+}
+
+impl Default for IdleCollectOptions {
+    fn default() -> Self {
+        Self {
+            delay: Some(std::time::Duration::from_secs(DEFAULT_IDLE_COLLECT_SECONDS)),
+        }
+    }
+}
+
+/// Parse [`IdleCollectOptions`]. A whole number of seconds from 1 to
+/// [`MAX_IDLE_COLLECT_SECONDS`] sets the delay and `0` disables the hook;
+/// anything else (wrong type, negative, fractional, too large) keeps the
+/// default.
+pub fn parse_idle_collect_options(init_options: &serde_json::Value) -> IdleCollectOptions {
+    let Some(value) = init_options
+        .get("memory")
+        .and_then(|memory| memory.get("idleCollectSeconds"))
+    else {
+        return IdleCollectOptions::default();
+    };
+    match value.as_u64() {
+        Some(0) => IdleCollectOptions { delay: None },
+        Some(seconds) if seconds <= MAX_IDLE_COLLECT_SECONDS => IdleCollectOptions {
+            delay: Some(std::time::Duration::from_secs(seconds)),
+        },
+        _ => {
+            tracing::warn!(
+                "ignoring memory.idleCollectSeconds={value}: expected a whole number of \
+                 seconds from 0 (off) to {MAX_IDLE_COLLECT_SECONDS}"
+            );
+            IdleCollectOptions::default()
+        }
+    }
+}
+
 /// Optional native semantic-enrichment policy. TypeScript-backed IDE features
 /// never depend on this lane; the Analysis UI or an explicitly enabled Verter
 /// lint configuration opts into isolated background snapshots.
@@ -1990,6 +2038,55 @@ export default defineConfig(({ mode }) => ({
         assert_eq!(
             ws2.root, "/home/user/project",
             "Linux-style root should pass through unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod idle_collect_option_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn delay(options: serde_json::Value) -> Option<Duration> {
+        parse_idle_collect_options(&options).delay
+    }
+
+    #[test]
+    fn idle_collect_defaults_on_and_accepts_a_whole_number_of_seconds() {
+        let default = Some(Duration::from_secs(DEFAULT_IDLE_COLLECT_SECONDS));
+        assert_eq!(delay(serde_json::json!({})), default);
+        assert_eq!(delay(serde_json::json!({ "memory": {} })), default);
+        assert_eq!(
+            delay(serde_json::json!({ "memory": { "idleCollectSeconds": 5 } })),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            delay(serde_json::json!({ "memory": { "idleCollectSeconds": 0 } })),
+            None
+        );
+    }
+
+    #[test]
+    fn idle_collect_rejects_invalid_values_with_the_default() {
+        let default = Some(Duration::from_secs(DEFAULT_IDLE_COLLECT_SECONDS));
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("10"),
+            serde_json::json!(true),
+            serde_json::json!(MAX_IDLE_COLLECT_SECONDS + 1),
+        ] {
+            assert_eq!(
+                delay(serde_json::json!({ "memory": { "idleCollectSeconds": bad } })),
+                default,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            delay(
+                serde_json::json!({ "memory": { "idleCollectSeconds": MAX_IDLE_COLLECT_SECONDS } })
+            ),
+            Some(Duration::from_secs(MAX_IDLE_COLLECT_SECONDS))
         );
     }
 }

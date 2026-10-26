@@ -121,6 +121,14 @@ mod selected {
         // this copy's arenas; it never dereferences it.
         unsafe { libmimalloc_sys2::mi_is_in_heap_region(ptr.cast()) }
     }
+
+    pub fn collect_idle_memory() {
+        // SAFETY: `mi_collect` is callable from any thread at any time. It
+        // only frees and purges pages that hold no live block; it never
+        // touches a live allocation, and it takes mimalloc's own arena
+        // locks, not a Rust one.
+        unsafe { libmimalloc_sys2::mi_collect(true) }
+    }
 }
 
 #[cfg(any(target_family = "wasm", feature = "system-allocator"))]
@@ -142,6 +150,8 @@ mod selected {
     pub fn owns(_ptr: *const u8) -> bool {
         false
     }
+
+    pub fn collect_idle_memory() {}
 }
 
 /// Which allocator a build installs.
@@ -194,6 +204,24 @@ pub fn linked_mimalloc_version() -> Option<i32> {
 #[must_use]
 pub fn mimalloc_owns(ptr: *const u8) -> bool {
     selected::owns(ptr)
+}
+
+/// Returns memory the allocator holds but no live allocation uses to the OS
+/// (`mi_collect(true)`), for a long-running process that has gone idle.
+///
+/// mimalloc has no background purge thread: it purges only inside its own
+/// allocator calls, so an idle process keeps the pages its last burst freed
+/// committed. Calling this once when the process goes quiet brings idle
+/// commit back toward the platform heap's level.
+///
+/// Safe from any thread at any time, and never moves or frees a live
+/// allocation. It is not free: it walks every heap's pages, so call it off
+/// the request path and once per idle period, never in a loop. Allocations
+/// on other threads keep running during it and may briefly contend on the
+/// arena locks it takes. Does nothing on `wasm32` and `system-allocator`
+/// builds.
+pub fn collect_idle_memory() {
+    selected::collect_idle_memory();
 }
 
 /// Whether this image's mimalloc served a fresh global allocation: `true`

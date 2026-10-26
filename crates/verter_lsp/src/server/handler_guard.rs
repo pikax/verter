@@ -14,6 +14,9 @@
 pub struct HandlerActivity {
     active: std::sync::atomic::AtomicU32,
     idle: tokio::sync::Notify,
+    /// Woken whenever a handler starts, for waiters that need the end of an
+    /// idle period rather than its start.
+    started: tokio::sync::Notify,
     epoch: std::sync::atomic::AtomicU64,
 }
 
@@ -56,6 +59,28 @@ impl HandlerActivity {
         wait_for_quiet_counter_bounded(&self.active, &self.idle, &self.epoch, quiet, max_defer)
             .await
     }
+
+    /// Wait until no handler has started or finished for a complete `quiet`
+    /// window, with no fairness deadline, and return the activity epoch that
+    /// held throughout it. Every handler event restarts the window.
+    pub async fn wait_quiet_unbounded(&self, quiet: std::time::Duration) -> u64 {
+        wait_for_quiet_counter(&self.active, &self.idle, &self.epoch, quiet).await
+    }
+
+    /// Wait until any handler starts or finishes after `epoch` (a value
+    /// returned by [`Self::wait_quiet_unbounded`]). Event-driven: it is woken
+    /// by the next handler start and never polls.
+    pub async fn wait_for_activity_after(&self, epoch: u64) {
+        loop {
+            let started = self.started.notified();
+            tokio::pin!(started);
+            started.as_mut().enable();
+            if self.epoch.load(std::sync::atomic::Ordering::Acquire) != epoch {
+                return;
+            }
+            started.await;
+        }
+    }
 }
 
 async fn wait_for_idle_counter(active: &std::sync::atomic::AtomicU32, idle: &tokio::sync::Notify) {
@@ -88,7 +113,7 @@ async fn wait_for_quiet_counter(
     idle: &tokio::sync::Notify,
     activity_epoch: &std::sync::atomic::AtomicU64,
     quiet: std::time::Duration,
-) {
+) -> u64 {
     loop {
         wait_for_idle_counter(active, idle).await;
         let epoch = activity_epoch.load(std::sync::atomic::Ordering::Acquire);
@@ -96,7 +121,7 @@ async fn wait_for_quiet_counter(
         if active.load(std::sync::atomic::Ordering::Acquire) == 0
             && activity_epoch.load(std::sync::atomic::Ordering::Acquire) == epoch
         {
-            return;
+            return epoch;
         }
     }
 }
@@ -136,6 +161,7 @@ impl<'a> HandlerGuard<'a> {
         activity
             .epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        activity.started.notify_waiters();
         #[cfg(feature = "semantic-observe")]
         let prev = activity
             .active
