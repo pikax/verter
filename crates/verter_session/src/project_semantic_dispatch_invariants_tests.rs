@@ -2574,10 +2574,13 @@ fn source_rule_violations(
             !(trimmed.starts_with("//") || trimmed.starts_with("/*"))
         };
         let lines: Vec<&str> = content.lines().collect();
-        let in_integration_tests = path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .contains("/tests/");
+        // Only the part below `crates/` decides: a checkout that itself sits
+        // under a `tests` directory holds no integration tests for it.
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        let below_crates = normalized
+            .rsplit_once("/crates/")
+            .map_or(normalized.as_str(), |(_, tail)| tail);
+        let in_integration_tests = below_crates.contains("/tests/");
         for (index, (_, rule, _)) in rules.iter().enumerate() {
             match rule {
                 SourceRule::Absent(symbols) => {
@@ -2684,8 +2687,8 @@ fn production_source_keeps_retired_vocabulary_out_and_single_owners_single() {
 /// Each rule kind fails on what it exists to catch and passes the text it
 /// exempts: a live retired reference, a definition count off by one and a
 /// deprecated retired symbol each fail their rule, while the same text in a
-/// comment line, a count under `tests/`, and a deprecated symbol five lines
-/// below its attribute do not.
+/// comment line, a count in a crate's `tests/` directory, and a deprecated
+/// symbol five lines below its attribute do not.
 #[test]
 fn production_source_rules_report_planted_violations_and_skip_exempt_text() {
     const RULES: &[(&str, SourceRule, &str)] = &[
@@ -2707,12 +2710,15 @@ fn production_source_rules_report_planted_violations_and_skip_exempt_text() {
     let file = |path: &str, content: &str| (std::path::PathBuf::from(path), content.to_owned());
     let clean = || {
         vec![
+            // The one live definition sits in a checkout under a directory
+            // named `tests`; only a crate's own `tests/` directory is exempt
+            // from the count.
             file(
-                "/c/a/src/lib.rs",
+                "/work/tests/repo/crates/a/src/lib.rs",
                 "fn sole_owner() {}\n// RetiredName was here\n",
             ),
             file(
-                "/c/a/tests/guard.rs",
+                "/work/tests/repo/crates/a/tests/guard.rs",
                 "const N: &str = \"fn sole_owner(\";\n",
             ),
             file(
