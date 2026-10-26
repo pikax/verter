@@ -188,11 +188,15 @@ fn assert_tagged_value(outcome: &Outcome, arms: &[TypeExpr]) {
 /// evaluates the callees bottom-up first: the depth the witness needs no
 /// longer depends on the chain's length, and it answers well below the
 /// production cap.
+/// A 101-level generic chain needs no more query depth than a three-level
+/// one: the gate version of the 128-level test in the nightly scale tier.
+/// Each level opening a query of its own shows at any length past the short
+/// chain's cap, and the chain is past the checker's instantiation depth.
 #[test]
-fn a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one() {
+fn a_101_level_generic_chain_needs_no_more_query_depth_than_a_short_one() {
     on_stack(8 << 20, || {
         let short = witness_chain(3);
-        let long = witness_chain(128);
+        let long = witness_chain(101);
         let short_outcome = witness_outcome(&short);
         assert_tagged_value(&short_outcome, &[number(), string()]);
         let depth = depth_needed(&short);
@@ -203,7 +207,7 @@ fn a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one() {
         assert_eq!(
             witness_under_caps(&long, MAX_CONNECTED_PROJECTION_WORK, depth).0,
             short_outcome,
-            "the 128-level chain answers like the short one under the short one's \
+            "the 101-level chain answers like the short one under the short one's \
              depth cap ({depth})"
         );
         assert_eq!(depth_needed(&long), depth);
@@ -290,8 +294,15 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
 /// chain, and `{ v: string | number; tag: "c"; }` for the chain of generic
 /// `const` arrow functions and for the chain through local arrow
 /// functions.
+/// The other call shapes at 101 levels: the gate version of the 128-level
+/// test in the nightly scale tier. Each answers like its three-level chain
+/// under that chain's depth cap, and runs on 768 KiB. The forms need 256 to
+/// 512 KiB of fixed stack, so 768 KiB leaves at most 5.1 KiB a level over 101
+/// levels, against at least the 4.0 to 6.0 KiB that 1 MiB leaves over 128
+/// levels for the same fixed need. The chains are past the checker's
+/// instantiation depth.
 #[test]
-fn chains_through_other_call_shapes_consume_no_depth_per_level() {
+fn chains_through_other_call_shapes_consume_no_depth_per_level_to_101_levels() {
     let shapes: [(&str, ChainSource, Vec<TypeExpr>); 3] = [
         ("non-generic", plain_chain, vec![number()]),
         ("const arrow", arrow_chain, vec![number(), string()]),
@@ -302,7 +313,7 @@ fn chains_through_other_call_shapes_consume_no_depth_per_level() {
             let short_source = chain(3);
             let depth = depth_needed(&short_source);
             (
-                witness_under_caps(&chain(128), MAX_CONNECTED_PROJECTION_WORK, depth).0,
+                witness_under_caps(&chain(101), MAX_CONNECTED_PROJECTION_WORK, depth).0,
                 witness_outcome(&short_source),
                 depth,
             )
@@ -310,13 +321,13 @@ fn chains_through_other_call_shapes_consume_no_depth_per_level() {
         assert_tagged_value(&short, &arms);
         assert_eq!(
             long, short,
-            "the 128-level {shape} chain answers like the short one under its depth cap \
+            "the 101-level {shape} chain answers like the short one under its depth cap \
              ({depth})"
         );
-        let on_small_stack = on_stack(1 << 20, move || witness_outcome(&chain(128)));
+        let on_small_stack = on_stack(768 << 10, move || witness_outcome(&chain(101)));
         assert_eq!(
             on_small_stack, short,
-            "the 128-level {shape} chain runs on a 1 MiB stack"
+            "the 101-level {shape} chain runs on a 768 KiB stack"
         );
     }
 }
@@ -582,22 +593,21 @@ fn module_chain_across_a_middle_edit(levels: usize) -> (Outcome, Outcome) {
     (before, witness(&host))
 }
 
-/// An edit to a module in the middle of a warm generic chain reaches the
-/// witness at its top: every instantiation read off an uninstantiated
-/// return carries that return's reads, and the functions above the edit —
-/// whose warm answers no longer validate — are re-evaluated bottom-up by
-/// the callee schedule, not one nested demand per invalidated level:
-/// counting a stale candidate as answered, the edited chain answers at 16
-/// modules and misses at 64, 128 and 201.
-///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
-/// `noImplicitAny` settings alike, over the same 201 modules): with
-/// `m100` edited to
-/// `export function c100<T>(x: T) { return { inner: c99(x), depth: 100 as const }; }`,
-/// `witness` is `{ inner: { v: string | number; tag: "c"; }; depth: 100; }`.
+/// An edit to the middle module of a 101-module chain reaches the top: the
+/// gate version of the 201-module test in the nightly scale tier. Fifty
+/// modules sit above the edit, past the connected query depth a stale
+/// candidate used to answer within, and the chain is past the checker's
+/// instantiation depth.
 #[test]
-fn an_edit_in_the_middle_of_a_module_chain_reaches_the_top() {
-    let (before, after) = on_stack(8 << 20, || module_chain_across_a_middle_edit(201));
+fn an_edit_in_the_middle_of_a_101_module_chain_reaches_the_top() {
+    assert_a_middle_edit_reaches_the_top(101);
+}
+
+/// After its middle module is edited, a `levels`-module chain's witness is a
+/// clean object admitted beside the stale candidate, carrying the edited
+/// depth and the original value beneath it.
+fn assert_a_middle_edit_reaches_the_top(levels: usize) {
+    let (before, after) = on_stack(8 << 20, move || module_chain_across_a_middle_edit(levels));
     assert_tagged_value(&before, &[number(), string()]);
     // Admitted beside the pre-edit candidate, which no longer validates.
     let Outcome::Value {
@@ -617,7 +627,9 @@ fn an_edit_in_the_middle_of_a_module_chain_reaches_the_top() {
     assert_eq!(object.properties.len(), 2, "{after:?}");
     assert_eq!(
         property("depth"),
-        Some(&TypeExpr::Literal(LiteralValue::Number(100.0))),
+        Some(&TypeExpr::Literal(LiteralValue::Number(
+            (levels / 2) as f64
+        ))),
         "{after:?}"
     );
     let inner = property("inner").unwrap_or_else(|| panic!("no `inner` member: {after:?}"));
@@ -1122,13 +1134,20 @@ fn a_type_position_chain_costs_the_same_work_per_level() {
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings, measured at 200 levels — every level is the
 /// same declaration): `witness` is `{ v: number; tag: "c"; }`.
+/// A 101-level type-position chain answers on a 640 KiB stack: the gate
+/// version of the 500-level, 2 MiB default-stack test in the nightly scale
+/// tier. The form needs 384 to 512 KiB of fixed stack, so 640 KiB leaves at
+/// most 2.5 KiB a level over 101 levels, against at least 3.1 KiB over 500
+/// levels on 2 MiB. The chain is past the checker's instantiation depth.
 #[test]
-fn a_500_level_type_position_chain_answers() {
-    assert_answers_as_the_checker(&cold_read_of(
-        &type_position_chain(500),
-        "witness",
-        "{ v: number; tag: \"c\"; }",
-    ));
+fn a_101_level_type_position_chain_answers_on_a_small_stack() {
+    on_stack(640 << 10, || {
+        assert_answers_as_the_checker(&cold_read_of(
+            &type_position_chain(101),
+            "witness",
+            "{ v: number; tag: \"c\"; }",
+        ))
+    });
 }
 
 /// A body's `ReturnType<…>` resolves where it is built exactly where the
@@ -1205,9 +1224,17 @@ export function d3<T extends (...a: any) => any>(f: T) { let r!: ReturnType<T>; 
 ///
 /// Left to the recursive path, each level nests one evaluation natively
 /// and the nesting bound refuses the chain from 24 levels.
+/// A new instantiation of a warm 101-level local-arrow chain on a 1 MiB
+/// stack: the gate version of the 200-level, 2 MiB default-stack test in the
+/// nightly scale tier, under the same checks.
+/// The forms need 384 to 512 KiB of fixed stack, measured at ten levels, so
+/// 1 MiB leaves at most the bound per level that 200 levels leave on
+/// the 2 MiB default stack, for every fixed need in that range: a level evaluated
+/// one native level deeper overflows here whenever it overflows there. The
+/// chain is past the checker's instantiation depth of 100.
 #[test]
-fn a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack() {
-    let second = warm_local_chain_second(200, true);
+fn a_new_instantiation_of_a_warm_101_level_local_arrow_chain_answers_on_a_one_mebibyte_stack() {
+    let second = on_stack(1 << 20, || warm_local_chain_second(101, true));
     assert_tagged_value(&second.warm, &[number(), string()]);
     let Some(value) = &second.value else {
         panic!(
@@ -1288,15 +1315,25 @@ fn arrow_nested_argument_chain(levels: usize) -> String {
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings): `witness` is `{ v: string | number; tag:
 /// "c"; }` over the 200-level chain.
+/// The nested-argument chain through local arrows at 101 levels on a 1 MiB
+/// stack, under the depth cap a three-level chain needs: the gate version of
+/// the 200-level, 2 MiB default-stack test in the nightly scale tier.
+/// The forms need 384 to 512 KiB of fixed stack, measured at ten levels, so
+/// 1 MiB leaves at most the bound per level that 200 levels leave on
+/// the 2 MiB default stack, for every fixed need in that range: a level evaluated
+/// one native level deeper overflows here whenever it overflows there. The
+/// chain is past the checker's instantiation depth of 100.
 #[test]
-fn a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack() {
+fn a_101_level_nested_argument_chain_in_local_arrows_answers_on_a_one_mebibyte_stack() {
     let expected = "{ v: string | number; tag: \"c\"; }";
     let depth = depth_answering(&arrow_nested_argument_chain(3), expected);
-    assert_answers_as_the_checker(&witness_under_depth(
-        &arrow_nested_argument_chain(200),
-        expected,
-        depth,
-    ));
+    on_stack(1 << 20, move || {
+        assert_answers_as_the_checker(&witness_under_depth(
+            &arrow_nested_argument_chain(101),
+            expected,
+            depth,
+        ))
+    });
 }
 
 /// The nested-argument chain through local arrows costs the same work per
@@ -1435,6 +1472,31 @@ fn warm_second_work(chain: ChainSource, levels: usize, second: &str) -> usize {
 #[track_caller]
 fn assert_warm_argument_form(chain: ChainSource, witness: &str, second: &str) {
     assert_warm_second_answers(&chain(200), witness, second);
+    assert_warm_argument_work_per_level(chain, second);
+}
+
+/// A new instantiation of a warm 101-level `chain` answers on a 1 MiB stack,
+/// and one more level costs the same work at 16, 32 and 64 levels: the gate
+/// version of [`assert_warm_argument_form`]'s 200 levels on the 2 MiB default
+/// test stack.
+/// The forms need 384 to 512 KiB of fixed stack, measured at ten levels, so
+/// 1 MiB leaves at most the bound per level that 200 levels leave on
+/// 2 MiB, for every fixed need in that range: a level evaluated
+/// one native level deeper overflows here whenever it overflows there. The
+/// chain is past the checker's instantiation depth of 100.
+#[track_caller]
+fn assert_warm_argument_form_to_101_levels(chain: ChainSource, witness: &str, second: &str) {
+    let (witness_print, second_print) = (witness.to_owned(), second.to_owned());
+    on_stack(1 << 20, move || {
+        assert_warm_second_answers(&chain(101), &witness_print, &second_print)
+    });
+    assert_warm_argument_work_per_level(chain, second);
+}
+
+/// One more level of a warm `chain`'s new instantiation costs the same work
+/// at 16, 32 and 64 levels.
+#[track_caller]
+fn assert_warm_argument_work_per_level(chain: ChainSource, second: &str) {
     let per_level: Vec<usize> = [16, 32, 64]
         .into_iter()
         .map(|levels| {
@@ -1463,9 +1525,11 @@ fn assert_warm_argument_form(chain: ChainSource, witness: &str, second: &str) {
 // | call `s(N-1)(id(x))` | `{ v: string \| number; tag: "c"; }` | `{ v: boolean; tag: "c"; }` |
 
 /// A parameter member read (`q(N-1)(o.a, o)`); oracle in the table above.
+/// The gate version of [`a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly`] in the nightly scale tier: 101 levels
+/// on a 1 MiB stack (see [`assert_warm_argument_form_to_101_levels`]).
 #[test]
-fn a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly() {
-    assert_warm_argument_form(
+fn a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly_to_101_levels() {
+    assert_warm_argument_form_to_101_levels(
         parameter_member_chain,
         "{ v: string | number; tag: \"c\"; }",
         "{ v: boolean; tag: \"c\"; }",
@@ -1473,9 +1537,11 @@ fn a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly() {
 }
 
 /// A local member read (`k(N-1)(box.a)`); oracle in the table above.
+/// The gate version of [`a_warm_chain_passing_a_local_member_read_instantiates_stacklessly`] in the nightly scale tier: 101 levels
+/// on a 1 MiB stack (see [`assert_warm_argument_form_to_101_levels`]).
 #[test]
-fn a_warm_chain_passing_a_local_member_read_instantiates_stacklessly() {
-    assert_warm_argument_form(
+fn a_warm_chain_passing_a_local_member_read_instantiates_stacklessly_to_101_levels() {
+    assert_warm_argument_form_to_101_levels(
         member_read_chain,
         "{ v: string | number; tag: \"c\"; }",
         "{ v: boolean; tag: \"c\"; }",
@@ -1484,9 +1550,11 @@ fn a_warm_chain_passing_a_local_member_read_instantiates_stacklessly() {
 
 /// A literal beside the parameter (`r(N-1)(x, "lit")`); oracle in the
 /// table above.
+/// The gate version of [`a_warm_chain_passing_a_literal_instantiates_stacklessly`] in the nightly scale tier: 101 levels
+/// on a 1 MiB stack (see [`assert_warm_argument_form_to_101_levels`]).
 #[test]
-fn a_warm_chain_passing_a_literal_instantiates_stacklessly() {
-    assert_warm_argument_form(
+fn a_warm_chain_passing_a_literal_instantiates_stacklessly_to_101_levels() {
+    assert_warm_argument_form_to_101_levels(
         literal_argument_chain,
         "{ v: string | number; u: string; tag: \"c\"; }",
         "{ v: boolean; u: string; tag: \"c\"; }",
@@ -1494,9 +1562,11 @@ fn a_warm_chain_passing_a_literal_instantiates_stacklessly() {
 }
 
 /// A call on the parameter (`s(N-1)(id(x))`); oracle in the table above.
+/// The gate version of [`a_warm_chain_passing_a_call_on_its_parameter_instantiates_stacklessly`] in the nightly scale tier: 101 levels
+/// on a 1 MiB stack (see [`assert_warm_argument_form_to_101_levels`]).
 #[test]
-fn a_warm_chain_passing_a_call_on_its_parameter_instantiates_stacklessly() {
-    assert_warm_argument_form(
+fn a_warm_chain_passing_a_call_on_its_parameter_instantiates_stacklessly_to_101_levels() {
+    assert_warm_argument_form_to_101_levels(
         call_argument_chain,
         "{ v: string | number; tag: \"c\"; }",
         "{ v: boolean; tag: \"c\"; }",
@@ -1683,13 +1753,17 @@ fn a_chain_of_degraded_callees_answers_on_the_default_stack() {
 ///
 /// Oracle: as for `a_chain_of_degraded_callees_answers_on_the_default_stack`,
 /// at every length.
+/// The object-literal chain at 16, 50 and 101 levels: the gate version of
+/// the 16-, 64- and 200-level test in the nightly scale tier. One more level
+/// costs the same at every length, and the 101-level chain is past the
+/// checker's instantiation depth.
 #[test]
-fn an_object_literal_argument_chain_costs_the_same_work_per_level() {
+fn an_object_literal_argument_chain_costs_the_same_work_per_level_to_101_levels() {
     let per_level = on_stack(8 << 20, || {
         work_per_level(
             object_literal_argument_chain,
             "{ v: string | number; tag: \"c\"; }",
-            &[16, 64, 200],
+            &[16, 50, 101],
         )
     });
     assert!(
@@ -1762,17 +1836,18 @@ fn a_256_level_chain_returning_a_same_name_generic_answers() {
     }
 }
 
-/// The same chain over a head holding a function TYPE written in the body
-/// with a same-name clause (`const id: <T>(z: T) => T = (z) => z`): a new
-/// instantiation of a 128-level chain answers too.
-///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
-/// `noImplicitAny` settings alike, measured at 128 levels): `witness` is
-/// `{ v: string | number; tag: "c"; id: <T>(z: T) => T; }` and
-/// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`.
+/// The same chain at 101 levels: the gate version of the 128-level test in
+/// the nightly scale tier, on the same production worker stack, past both
+/// the connected query depth and the checker's instantiation depth.
 #[test]
-fn a_128_level_chain_returning_a_same_name_function_type_answers() {
-    let source = local_arrow_chain(128).replacen(
+fn a_101_level_chain_returning_a_same_name_function_type_answers() {
+    assert_same_name_function_type_chain_answers(101);
+}
+
+/// A new instantiation of a `levels`-level local-arrow chain whose head
+/// holds a function type with a same-name clause answers.
+fn assert_same_name_function_type_chain_answers(levels: usize) {
+    let source = local_arrow_chain(levels).replacen(
         "function l0<T>(x: T) { return { v: x, tag: \"c\" as const }; }",
         "function l0<T>(x: T) { const id: <T>(z: T) => T = (z) => z; \
          return { v: x, tag: \"c\" as const, id }; }",
@@ -1780,7 +1855,7 @@ fn a_128_level_chain_returning_a_same_name_function_type_answers() {
     );
     // The production worker stack: the per-level evaluation meets the
     // typed depth refusal rather than a small test stack's end.
-    assert_same_name_generic_chain_answers(source, 128, "id", identity_of_its_own_t, 8 << 20);
+    assert_same_name_generic_chain_answers(source, levels, "id", identity_of_its_own_t, 8 << 20);
 }
 
 /// Every root close of a chain publishes on the roots of the members its
@@ -2210,57 +2285,75 @@ fn discriminated_switch(cases: usize) -> String {
 /// Repeated full-union narrowing per clause must not hide behind memo hits:
 /// measure enumeration leaves as well as connected query work. Every size
 /// answers all its member literals, completely and within production caps.
+/// The switch at 32, 64 and 96 cases: the gate version of the 128-, 512- and
+/// 2,048-case test in the nightly scale tier. Each answers every case's value
+/// completely and admits reuse; its connected work and union leaf visits grow
+/// by the same amount per step, so they are affine in the cases, and their
+/// counts at 128, 512 and 2,048 pass the full-size test's growth check.
 #[test]
-fn discriminated_switch_narrowing_work_grows_linearly() {
+fn discriminated_switch_narrowing_work_is_affine_and_meets_the_full_size_check() {
     use verter_type_engine::project_semantic_dispatch::flow_return::union_leaf_visits_for_tests;
 
-    let mut measured = Vec::new();
-    for cases in [128, 512, 2_048] {
-        let source = discriminated_switch(cases);
-        let host = host_with(&[(PATH, &source)]);
-        let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
-            let before = union_leaf_visits_for_tests();
-            let key = key_of(dispatch, PATH, "witness");
-            let outcome = eval_key_on(&host, dispatch, key);
-            (
-                outcome,
-                dispatch.connected_demand_usage().work,
-                union_leaf_visits_for_tests() - before,
-            )
-        });
-        let Outcome::Value {
-            ty: TypeExpr::Union(arms),
-            degradation: None,
-            candidates: 1,
-        } = &outcome
-        else {
-            panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
-        };
-        let mut values: Vec<_> = arms
-            .iter()
-            .map(|arm| match arm {
-                TypeExpr::Literal(LiteralValue::Number(value)) => *value,
-                other => panic!("unexpected return contributor: {other:?}"),
-            })
-            .collect();
-        values.sort_by(f64::total_cmp);
-        assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
-        assert!(work > 0 && leaves >= cases, "work counters must be live");
-        eprintln!("switch cases={cases} connected_work={work} union_leaves={leaves}");
-        measured.push((cases, work, leaves));
-    }
-    for pair in measured.windows(2) {
-        let [(small, small_work, small_leaves), (large, large_work, large_leaves)] = pair else {
-            unreachable!();
-        };
-        for (name, before, after) in [
-            ("connected work", small_work, large_work),
-            ("union leaves", small_leaves, large_leaves),
-        ] {
-            assert!(after > before, "{name} must grow with cases: {measured:?}");
+    let sizes = [32, 64, 96];
+    let measured: Vec<_> = sizes
+        .iter()
+        .map(|&cases| {
+            let source = discriminated_switch(cases);
+            let host = host_with(&[(PATH, &source)]);
+            let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
+                let before = union_leaf_visits_for_tests();
+                let key = key_of(dispatch, PATH, "witness");
+                let outcome = eval_key_on(&host, dispatch, key);
+                (
+                    outcome,
+                    dispatch.connected_demand_usage().work,
+                    union_leaf_visits_for_tests() - before,
+                )
+            });
+            let Outcome::Value {
+                ty: TypeExpr::Union(arms),
+                degradation: None,
+                candidates: 1,
+            } = &outcome
+            else {
+                panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
+            };
+            let mut values: Vec<_> = arms
+                .iter()
+                .map(|arm| match arm {
+                    TypeExpr::Literal(LiteralValue::Number(value)) => *value,
+                    other => panic!("unexpected return contributor: {other:?}"),
+                })
+                .collect();
+            values.sort_by(f64::total_cmp);
+            assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
+            (work as u64, leaves as u64)
+        })
+        .collect();
+    let work = crate::scale_gate::affine(
+        "the discriminated switch",
+        sizes,
+        vec![
+            crate::scale_gate::Counter {
+                name: "connected work",
+                values: measured.iter().map(|(work, _)| *work).collect(),
+            },
+            crate::scale_gate::Counter {
+                name: "union leaves",
+                values: measured.iter().map(|(_, leaves)| *leaves).collect(),
+            },
+        ],
+    );
+    let full = [128u64, 512, 2_048];
+    for name in ["connected work", "union leaves"] {
+        let counts = full.map(|cases| work.at(name, cases as usize));
+        for step in 0..2 {
+            let (small, large) = (full[step], full[step + 1]);
+            let (before, after) = (counts[step], counts[step + 1]);
+            assert!(after > before, "{name} must grow with cases: {counts:?}");
             assert!(
                 after * small * 10 <= before * large * 11,
-                "{name} grows faster than linear (10% tolerance): {measured:?}"
+                "{name} grows faster than linear (10% tolerance): {counts:?}"
             );
         }
     }
@@ -2428,20 +2521,22 @@ fn replayed_receipt(
     }
 }
 
-/// A chain's evidence grows with its length, never with its prefixes:
-/// every completed callee is answered by one receipt holding its own reads
-/// and the receipt of the callee it consumed, so each level's evidence has
-/// the same few entries at any depth, and the witness's published
-/// signature is its own reads and one receipt — the same length for 200
-/// levels as for 1,100, past the 1,024 entries a flat signature could hold
-/// and still admitted.
-///
-/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
-/// `{ v: number; tag: "c"; }` at every length.
+/// The same evidence at 101 and 120 levels: the gate version of the 200- and
+/// 1,100-level test in the nightly scale tier. Each level's receipt holds the
+/// one below it, so lost evidence fails at any length; the top receipt reaches
+/// every level; and a flattened chain, whose evidence would grow with its
+/// prefixes, gives the two lengths different shapes. The chains are past the
+/// checker's instantiation depth.
 #[test]
-fn a_chains_evidence_grows_linearly_in_its_length() {
+fn a_chains_evidence_keeps_one_size_from_101_to_120_levels() {
+    assert_chain_evidence_keeps_one_size(&[101, 120]);
+}
+
+/// At every one of `lengths`, a chain's evidence holds each level's receipt
+/// in the next, reaches every level from the top, and keeps one size.
+fn assert_chain_evidence_keeps_one_size(lengths: &[usize]) {
     let mut shapes = Vec::new();
-    for levels in [200usize, 1_100] {
+    for &levels in lengths {
         let (outcome, signature, replays) = chain_evidence(levels);
         assert_tagged_value(&outcome, &[number()]);
         let receipts: Vec<_> = replays.iter().map(replayed_receipt).collect();
@@ -2758,5 +2853,250 @@ mod nightly_scale {
     #[test]
     fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level() {
         assert_warm_local_arrow_work_per_level([16, 64, 200]);
+    }
+
+    #[test]
+    fn a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly() {
+        assert_warm_argument_form(
+            parameter_member_chain,
+            "{ v: string | number; tag: \"c\"; }",
+            "{ v: boolean; tag: \"c\"; }",
+        );
+    }
+
+    #[test]
+    fn a_warm_chain_passing_a_local_member_read_instantiates_stacklessly() {
+        assert_warm_argument_form(
+            member_read_chain,
+            "{ v: string | number; tag: \"c\"; }",
+            "{ v: boolean; tag: \"c\"; }",
+        );
+    }
+
+    #[test]
+    fn a_warm_chain_passing_a_literal_instantiates_stacklessly() {
+        assert_warm_argument_form(
+            literal_argument_chain,
+            "{ v: string | number; u: string; tag: \"c\"; }",
+            "{ v: boolean; u: string; tag: \"c\"; }",
+        );
+    }
+
+    #[test]
+    fn a_warm_chain_passing_a_call_on_its_parameter_instantiates_stacklessly() {
+        assert_warm_argument_form(
+            call_argument_chain,
+            "{ v: string | number; tag: \"c\"; }",
+            "{ v: boolean; tag: \"c\"; }",
+        );
+    }
+
+    #[test]
+    fn a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack() {
+        let expected = "{ v: string | number; tag: \"c\"; }";
+        let depth = depth_answering(&arrow_nested_argument_chain(3), expected);
+        assert_answers_as_the_checker(&witness_under_depth(
+            &arrow_nested_argument_chain(200),
+            expected,
+            depth,
+        ));
+    }
+
+    #[test]
+    fn a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack() {
+        let second = warm_local_chain_second(200, true);
+        assert_tagged_value(&second.warm, &[number(), string()]);
+        let Some(value) = &second.value else {
+            panic!(
+                "the second instantiation answers no value (rails: {:?})",
+                second.reasons
+            );
+        };
+        assert_tagged_value(value, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
+        assert!(
+            !second.partial && second.candidates == 1,
+            "a clean, admitted answer (rails: {:?})",
+            second.reasons
+        );
+    }
+
+    #[test]
+    fn a_500_level_type_position_chain_answers() {
+        assert_answers_as_the_checker(&cold_read_of(
+            &type_position_chain(500),
+            "witness",
+            "{ v: number; tag: \"c\"; }",
+        ));
+    }
+
+    #[test]
+    fn chains_through_other_call_shapes_consume_no_depth_per_level() {
+        let shapes: [(&str, ChainSource, Vec<TypeExpr>); 3] = [
+            ("non-generic", plain_chain, vec![number()]),
+            ("const arrow", arrow_chain, vec![number(), string()]),
+            ("local arrow", local_arrow_chain, vec![number(), string()]),
+        ];
+        for (shape, chain, arms) in shapes {
+            let (long, short, depth) = on_stack(8 << 20, move || {
+                let short_source = chain(3);
+                let depth = depth_needed(&short_source);
+                (
+                    witness_under_caps(&chain(128), MAX_CONNECTED_PROJECTION_WORK, depth).0,
+                    witness_outcome(&short_source),
+                    depth,
+                )
+            });
+            assert_tagged_value(&short, &arms);
+            assert_eq!(
+                long, short,
+                "the 128-level {shape} chain answers like the short one under its depth cap \
+                 ({depth})"
+            );
+            let on_small_stack = on_stack(1 << 20, move || witness_outcome(&chain(128)));
+            assert_eq!(
+                on_small_stack, short,
+                "the 128-level {shape} chain runs on a 1 MiB stack"
+            );
+        }
+    }
+
+    #[test]
+    fn a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one() {
+        on_stack(8 << 20, || {
+            let short = witness_chain(3);
+            let long = witness_chain(128);
+            let short_outcome = witness_outcome(&short);
+            assert_tagged_value(&short_outcome, &[number(), string()]);
+            let depth = depth_needed(&short);
+            assert!(
+                depth < MAX_CONNECTED_QUERY_DEPTH / 2,
+                "the short chain needs a query depth of {depth}"
+            );
+            assert_eq!(
+                witness_under_caps(&long, MAX_CONNECTED_PROJECTION_WORK, depth).0,
+                short_outcome,
+                "the 128-level chain answers like the short one under the short one's \
+                 depth cap ({depth})"
+            );
+            assert_eq!(depth_needed(&long), depth);
+        });
+    }
+
+    /// The same chain over a head holding a function TYPE written in the body
+    /// with a same-name clause (`const id: <T>(z: T) => T = (z) => z`): a new
+    /// instantiation of a 128-level chain answers too.
+    ///
+    /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+    /// `noImplicitAny` settings alike, measured at 128 levels): `witness` is
+    /// `{ v: string | number; tag: "c"; id: <T>(z: T) => T; }` and
+    /// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`.
+    #[test]
+    fn a_128_level_chain_returning_a_same_name_function_type_answers() {
+        assert_same_name_function_type_chain_answers(128);
+    }
+
+    /// An edit to a module in the middle of a warm generic chain reaches the
+    /// witness at its top: every instantiation read off an uninstantiated
+    /// return carries that return's reads, and the functions above the edit —
+    /// whose warm answers no longer validate — are re-evaluated bottom-up by
+    /// the callee schedule, not one nested demand per invalidated level:
+    /// counting a stale candidate as answered, the edited chain answers at 16
+    /// modules and misses at 64, 128 and 201.
+    ///
+    /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+    /// `noImplicitAny` settings alike, over the same 201 modules): with
+    /// `m100` edited to
+    /// `export function c100<T>(x: T) { return { inner: c99(x), depth: 100 as const }; }`,
+    /// `witness` is `{ inner: { v: string | number; tag: "c"; }; depth: 100; }`.
+    #[test]
+    fn an_edit_in_the_middle_of_a_module_chain_reaches_the_top() {
+        assert_a_middle_edit_reaches_the_top(201);
+    }
+
+    #[test]
+    fn an_object_literal_argument_chain_costs_the_same_work_per_level() {
+        let per_level = on_stack(8 << 20, || {
+            work_per_level(
+                object_literal_argument_chain,
+                "{ v: string | number; tag: \"c\"; }",
+                &[16, 64, 200],
+            )
+        });
+        assert!(
+            per_level.windows(2).all(|pair| pair[0] == pair[1]),
+            "work per level: {per_level:?}"
+        );
+    }
+
+    #[test]
+    fn discriminated_switch_narrowing_work_grows_linearly() {
+        use verter_type_engine::project_semantic_dispatch::flow_return::union_leaf_visits_for_tests;
+
+        let mut measured = Vec::new();
+        for cases in [128, 512, 2_048] {
+            let source = discriminated_switch(cases);
+            let host = host_with(&[(PATH, &source)]);
+            let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
+                let before = union_leaf_visits_for_tests();
+                let key = key_of(dispatch, PATH, "witness");
+                let outcome = eval_key_on(&host, dispatch, key);
+                (
+                    outcome,
+                    dispatch.connected_demand_usage().work,
+                    union_leaf_visits_for_tests() - before,
+                )
+            });
+            let Outcome::Value {
+                ty: TypeExpr::Union(arms),
+                degradation: None,
+                candidates: 1,
+            } = &outcome
+            else {
+                panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
+            };
+            let mut values: Vec<_> = arms
+                .iter()
+                .map(|arm| match arm {
+                    TypeExpr::Literal(LiteralValue::Number(value)) => *value,
+                    other => panic!("unexpected return contributor: {other:?}"),
+                })
+                .collect();
+            values.sort_by(f64::total_cmp);
+            assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
+            assert!(work > 0 && leaves >= cases, "work counters must be live");
+            eprintln!("switch cases={cases} connected_work={work} union_leaves={leaves}");
+            measured.push((cases, work, leaves));
+        }
+        for pair in measured.windows(2) {
+            let [(small, small_work, small_leaves), (large, large_work, large_leaves)] = pair
+            else {
+                unreachable!();
+            };
+            for (name, before, after) in [
+                ("connected work", small_work, large_work),
+                ("union leaves", small_leaves, large_leaves),
+            ] {
+                assert!(after > before, "{name} must grow with cases: {measured:?}");
+                assert!(
+                    after * small * 10 <= before * large * 11,
+                    "{name} grows faster than linear (10% tolerance): {measured:?}"
+                );
+            }
+        }
+    }
+
+    /// A chain's evidence grows with its length, never with its prefixes:
+    /// every completed callee is answered by one receipt holding its own reads
+    /// and the receipt of the callee it consumed, so each level's evidence has
+    /// the same few entries at any depth, and the witness's published
+    /// signature is its own reads and one receipt — the same length for 200
+    /// levels as for 1,100, past the 1,024 entries a flat signature could hold
+    /// and still admitted.
+    ///
+    /// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
+    /// `{ v: number; tag: "c"; }` at every length.
+    #[test]
+    fn a_chains_evidence_grows_linearly_in_its_length() {
+        assert_chain_evidence_keeps_one_size(&[200, 1_100]);
     }
 }

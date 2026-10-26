@@ -422,6 +422,16 @@ fn alias_chains_up_to_500_long_answer_cold_on_a_small_stack() {
     });
 }
 
+/// `f` on a thread of `bytes` of stack.
+fn on_a_stack_of<T: Send + 'static>(bytes: usize, f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(bytes)
+        .spawn(f)
+        .expect("spawn the probing thread")
+        .join()
+        .expect("the probe answers")
+}
+
 /// `f` over the evaluated rows, read on a 1 MiB thread — the least a host
 /// asks from.
 fn on_a_one_mebibyte_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -459,20 +469,13 @@ fn cold_and_warm_displays(source: &str, probe: &str) -> [String; 2] {
     })
 }
 
-/// The call's return through 500 aliases answers as the shorter chains do,
-/// every row, on a 1 MiB thread, in a fresh process — and the same again
-/// warm on the host the cold evaluation filled.
-///
-/// TypeScript 7.0.2 (all four settings at 500): no TS2589; under
-/// `strictNullChecks` `typeof c` and `gj`'s return are `"ok" | undefined`.
 /// Every row through 200 aliases, cold and warm alike, on the small stack:
 /// the gate version of the 500-alias, 1 MiB test in the nightly scale tier.
-/// The small stack leaves at most 224 KiB above a probe's fixed need of 416
-/// to 480 KiB (see [`on_a_small_stack`]); 1 MiB leaves at least 544 KiB.
-/// So a link evaluated one native level deeper may spend at most 1.12 KiB
-/// here before the 200-alias chain overflows, against 1.09 to 1.22 KiB over
-/// 500 aliases on 1 MiB: for every fixed need in that range the bound here is
-/// the tighter one, and a level evaluated in place costs several KiB. The
+/// This form needs more than 576 KiB of fixed stack (measured at ten links),
+/// so the 640 KiB small stack leaves under 64 KiB, at most 0.32 KiB a link
+/// over 200 links, against at least 0.77 KiB a link over 500 on 1 MiB: a
+/// link evaluated one native level deeper overflows here whenever it
+/// overflows there, and a level evaluated in place costs several KiB. The
 /// chain is still past the checker's instantiation depth of 100.
 #[test]
 fn alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack() {
@@ -592,44 +595,58 @@ fn member_path_typeof_chain_displays(depth: usize) -> [(String, [String; 2]); 2]
     })
 }
 
-/// Member-path `typeof` chains 200 deep, cold and warm alike, on the small
+/// Member-path `typeof` chains 200 deep, cold and warm alike, on a 576 KiB
 /// stack: the gate version of the 500-deep, 1 MiB test in the nightly scale
-/// tier, under the same tighter per-level stack bound as
-/// [`alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack`].
+/// tier.
+/// The chains need 320 to 352 KiB of fixed stack (measured at ten levels),
+/// so 576 KiB leaves at most 1.28 KiB a level over 200 levels, against at
+/// least 1.34 KiB over 500 levels on 1 MiB for the same fixed need: a level
+/// evaluated one native level deeper overflows here whenever it overflows
+/// there. The chains are still past the checker's instantiation depth.
 #[test]
 fn member_path_typeof_chains_200_deep_answer_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let displays = on_a_small_stack(|| member_path_typeof_chain_displays(200));
+        let displays = on_a_stack_of(576 << 10, || member_path_typeof_chain_displays(200));
         for (probe, [cold, warm]) in displays {
             assert_eq!(cold, warm, "{probe}: cold and warm answer alike");
         }
     });
 }
 
-/// A chain of 500 functions each returning the type the one before returns
-/// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
-/// lowers its signatures one at a time as its frame's projections, which
-/// need the instantiations and `typeof`s they reach from the runtime.
-///
-/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
-/// `noImplicitAny` off: `ReturnType<typeof h500>` is `"ok"`.
+/// A chain of `depth` functions each returning the type the one before
+/// returns, answering `"ok"`, displayed cold and then warm.
+fn signature_chain_displays(depth: usize) -> [String; 2] {
+    let mut source = String::from(
+        "function h0(): \"ok\" { return \"ok\"; }
+",
+    );
+    for level in 1..=depth {
+        source.push_str(&format!(
+            "declare function h{level}(): ReturnType<typeof h{}>;
+",
+            level - 1
+        ));
+    }
+    let probe = format!("ReturnType<typeof h{depth}>");
+    assert_eq!(
+        evaluated_mismatches(&source, &[(probe.as_str(), "\"ok\"")]),
+        Vec::<String>::new()
+    );
+    cold_and_warm_displays(&source, &probe)
+}
+
+/// Signature chains 200 deep, cold and warm alike, on a 448 KiB stack: the
+/// gate version of the 500-deep, 1 MiB test in the nightly scale tier. The
+/// chains need 320 to 352 KiB of fixed stack (measured at ten levels), so
+/// 448 KiB leaves at most 0.64 KiB a level over 200 levels, against at least
+/// 1.34 KiB over 500 levels on 1 MiB. A signature chain's reads grow faster
+/// than its depth, so this bound is also chosen to overflow wherever the
+/// full-size test does when every read burns stack in proportion to the reads
+/// before it. The chains are still past the checker's instantiation depth.
 #[test]
-fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+fn signature_chains_200_deep_answer_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let mut source = String::from("function h0(): \"ok\" { return \"ok\"; }\n");
-        for level in 1..=500 {
-            source.push_str(&format!(
-                "declare function h{level}(): ReturnType<typeof h{}>;\n",
-                level - 1
-            ));
-        }
-        let displays = on_a_one_mebibyte_stack(move || {
-            assert_eq!(
-                evaluated_mismatches(&source, &[("ReturnType<typeof h500>", "\"ok\"")]),
-                Vec::<String>::new()
-            );
-            cold_and_warm_displays(&source, "ReturnType<typeof h500>")
-        });
+        let displays = on_a_stack_of(448 << 10, || signature_chain_displays(200));
         assert_eq!(displays[0], displays[1], "cold and warm answer alike");
     });
 }
@@ -676,16 +693,16 @@ fn assert_conditional_chains_decide(displays: [(String, [String; 2]); 2]) {
 }
 
 /// The literal-branch chain at 200 levels and the alias-branch chain at 100,
-/// cold and warm alike, on the small stack: the gate version of the 500- and
-/// 100-level, 1 MiB test in the nightly scale tier. The 200-level chain has
-/// the same tighter per-level stack bound as
-/// [`alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack`];
-/// the 100-level alias-branch chain keeps its length on a smaller stack, so
-/// its bound is tighter still.
+/// cold and warm alike, on a 448 KiB stack: the gate version of the 500- and
+/// 100-level, 1 MiB test in the nightly scale tier. The chains need 192 to
+/// 256 KiB of fixed stack (measured at ten levels), so 448 KiB leaves at most
+/// 1.28 KiB a level over 200 levels, against at least 1.54 KiB over 500
+/// levels on 1 MiB for the same fixed need; the 100-level alias-branch chain
+/// keeps its length on the smaller stack, so its bound is tighter still.
 #[test]
 fn conditional_chains_decide_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let displays = on_a_small_stack(|| conditional_chain_displays(200));
+        let displays = on_a_stack_of(448 << 10, || conditional_chain_displays(200));
         assert_conditional_chains_decide(displays);
     });
 }
@@ -1485,6 +1502,12 @@ fn circular_type_aliases_are_the_checkers_ts2456_and_tail_runs_its_ts2589() {
 mod nightly_scale {
     use super::*;
 
+    /// The call's return through 500 aliases answers as the shorter chains do,
+    /// every row, on a 1 MiB thread, in a fresh process — and the same again
+    /// warm on the host the cold evaluation filled.
+    ///
+    /// TypeScript 7.0.2 (all four settings at 500): no TS2589; under
+    /// `strictNullChecks` `typeof c` and `gj`'s return are `"ok" | undefined`.
     #[test]
     fn alias_chains_500_long_answer_every_row_cold_and_warm_on_a_one_mebibyte_stack() {
         in_a_fresh_process(test_path!(), || {
@@ -1536,6 +1559,21 @@ mod nightly_scale {
         in_a_fresh_process(test_path!(), || {
             let displays = on_a_one_mebibyte_stack(|| conditional_chain_displays(500));
             assert_conditional_chains_decide(displays);
+        });
+    }
+
+    /// A chain of 500 functions each returning the type the one before returns
+    /// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
+    /// lowers its signatures one at a time as its frame's projections, which
+    /// need the instantiations and `typeof`s they reach from the runtime.
+    ///
+    /// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+    /// `noImplicitAny` off: `ReturnType<typeof h500>` is `"ok"`.
+    #[test]
+    fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+        in_a_fresh_process(test_path!(), || {
+            let displays = on_a_one_mebibyte_stack(|| signature_chain_displays(500));
+            assert_eq!(displays[0], displays[1], "cold and warm answer alike");
         });
     }
 }
