@@ -44,10 +44,6 @@ pub fn oracle_row(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// visibility, and signature; REPLACES the body with the synthesized driver
 /// call keyed by the fn's own identifier.
 //
-// (Named `synthesize_body` rather than the bare verb `expand` so it does not
-//  collide with the `expand` symbol the guard
-//  `workspace_sources_name_no_retired_expand_or_scratch_only_node_vocabulary`
-//  asserts is absent from the workspace — an unrelated symbol.)
 fn synthesize_body(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     let attrs = &item_fn.attrs;
     let vis = &item_fn.vis;
