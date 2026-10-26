@@ -834,12 +834,26 @@ fn reversed_object_unions_reach_the_checker_answer_3200() {
     assert_reversed_checker_answer(3200, 2);
 }
 
+/// The same rails over 100 reversed arms under a 5,000-comparison allowance:
+/// the gate version of the 200-arm, 20,000-comparison test in the nightly
+/// scale tier. Relating 100 reversed arms needs 5,050 comparisons, just past
+/// the allowance, as 200 arms need 20,100 against 20,000, so the work rail
+/// stops the reducer first, the mapped read reaches the checker's TS2859, and
+/// every other check holds as at full size.
 #[test]
-fn cold_query_entries_fit_within_the_checker_relation_envelope() {
+fn cold_query_entries_fit_within_a_quarter_relation_envelope() {
+    assert_cold_query_entries_fit_the_relation_envelope(100, 5_000);
+}
+
+/// Over `arms` reversed object arms under a `comparisons` allowance just
+/// short of their relation's need, the work rail stops the reducer before the
+/// checker, the mapped read recovers the checker's TS2859 without a branch
+/// proof, and a warm repeat recomputes and compares nothing.
+fn assert_cold_query_entries_fit_the_relation_envelope(arms: usize, comparisons: u32) {
     use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
     use verter_type_engine::semantic_query::PartialReasonSet;
-    let host = bench_host(1_000_000, &reversed_unions(200));
-    let (key, [source, target]) = reversed_conditional_key(&host, 200);
+    let host = bench_host(1_000_000, &reversed_unions(arms));
+    let (key, [source, target]) = reversed_conditional_key(&host, arms);
     let branch_proofs = || {
         host.project_type_store()
             .semantic_graph()
@@ -859,7 +873,6 @@ fn cold_query_entries_fit_within_the_checker_relation_envelope() {
             .count()
     };
     let before_recovery = branch_proofs();
-    let comparisons = 20_000;
     let reducer_only =
         comparisons as usize * super::connected_demand::RELATION_UNITS_PER_COMPARISON;
     // One hundredth of the pinned checker's comparison allowance and
@@ -3082,4 +3095,15 @@ fn a_369_by_271_spread_infers_every_constituent_and_the_later_write() {
 #[test]
 fn a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write() {
     assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[50, 50, 39]);
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn cold_query_entries_fit_within_the_checker_relation_envelope() {
+        assert_cold_query_entries_fit_the_relation_envelope(200, 20_000);
+    }
 }
