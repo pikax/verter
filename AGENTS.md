@@ -49,6 +49,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - For component-meta work, follow `/component-meta`. For type resolution work, follow `/type-resolution`.
 - **Testing hermeticity**: see `CLAUDE.md` "Testing-Hermeticity (MANDATORY)" and `.claude/skills/testing/SKILL.md`.
 - **Test speed and the two tiers**: see `CLAUDE.md` "Test Speed (MANDATORY)". The gate runs every test except those under a `nightly_scale` module; that nightly scale tier runs at full size in `.github/workflows/nightly.yml`, and each tier test has a smaller gate version with the same guarantees.
+- **Deterministic tests, no fixed sleeps**: see `CLAUDE.md` "Test Speed (MANDATORY)". A test waits on a signal or a paused or injected clock (`vi.useFakeTimers()` in vitest), never on `sleep` or `setTimeout`.
 - **No roadmap archaeology in source or tests**: see `CLAUDE.md` "No roadmap archaeology in source or tests (MANDATORY)".
 
 ## Task Routing
