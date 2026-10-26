@@ -59,6 +59,20 @@ pnpm exec playwright test --project=preview 2>&1 | grep "fail"
 pnpm exec playwright test --project=preview 2>&1 | grep "error"  # wasteful re-run
 ```
 
+## Deterministic Waits (no fixed sleeps)
+
+A test never waits for a fixed time. A sleep that is long enough on an idle machine is too short under load, so it flakes, and a flaky test stops CI, merges and landing.
+
+| Instead of | Use |
+| --- | --- |
+| `thread::sleep` / `tokio::time::sleep` until work "should" be done | a channel, `tokio::sync::Notify`, `Barrier` or the operation's completion future |
+| sampling a counter, sleeping, sampling again to decide work has stopped | an explicit completion signal from the work itself (for example, a test hook that fires when the chain drains) |
+| a real delay when time is the behaviour under test | `#[tokio::test(start_paused = true)]` with `tokio::time::advance`, or an injected clock |
+| `setTimeout` / `await sleep(ms)` in vitest | `vi.useFakeTimers()` with `vi.advanceTimersByTime` / `vi.runAllTimersAsync`, or `vi.waitFor` on a condition |
+| a production backoff or debounce read from a constant | an injectable duration or clock that the test sets |
+
+A deadline is allowed only as a hang guard around a signal wait, and it must never decide the outcome.
+
 ## TypeScript Test Patterns
 
 **Test locations**: Unit tests co-located as `*.spec.ts` next to source. Type tests in `packages/types/` use `vitest --typecheck`.
