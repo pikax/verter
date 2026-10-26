@@ -827,14 +827,21 @@ const KEYOF_PROBE: &str = "D extends string | number | symbol ? 1 : 2";
 /// A `keyof` chain whose resolution exceeds the connected-demand work
 /// budget returns its typed budget failure, the plan budget at its
 /// production default.
+/// A 200-deep `keyof` chain under a quarter of the lowered work budget
+/// returns the typed budget failure, the plan budget at its production
+/// default: the gate version of the 400-deep test in the nightly scale tier.
+/// The chain's work grows with the square of its depth, so 200 levels need
+/// about a quarter of what 400 need, still several times past 25,000, and the
+/// trip is the work rail's as it is at full size.
 #[test]
-fn keyof_chains_past_the_work_budget_return() {
+fn keyof_chains_past_a_quarter_work_budget_return() {
     in_a_fresh_process(test_path!(), || {
         let source = format!(
-            "{}export function pf() {{ return null as unknown as ({KEYOF_PROBE}); }}\n",
-            keyof_chain(BUDGET_DEPTH)
+            "{}export function pf() {{ return null as unknown as ({KEYOF_PROBE}); }}
+",
+            keyof_chain(BUDGET_DEPTH / 2)
         );
-        assert_returns_past_a_work_budget(source, WORK_BUDGET, SMALL_STACK);
+        assert_returns_past_a_work_budget(source, WORK_BUDGET / 4, SMALL_STACK);
     });
 }
 
@@ -1959,6 +1966,17 @@ mod nightly_scale {
                 RETURNS_ITS_VALUE
             );
             assert_work_is_linear(|depth| (module_calls(depth, true), "pf"), "number");
+        });
+    }
+
+    #[test]
+    fn keyof_chains_past_the_work_budget_return() {
+        in_a_fresh_process(test_path!(), || {
+            let source = format!(
+                "{}export function pf() {{ return null as unknown as ({KEYOF_PROBE}); }}\n",
+                keyof_chain(BUDGET_DEPTH)
+            );
+            assert_returns_past_a_work_budget(source, WORK_BUDGET, SMALL_STACK);
         });
     }
 }
