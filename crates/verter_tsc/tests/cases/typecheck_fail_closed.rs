@@ -343,7 +343,7 @@ fn a_missing_server_info_fails_closed() {
 
 #[test]
 fn an_out_of_policy_version_is_rejected_before_any_session() {
-    assert_rejected_like_the_in_order_walk("v710", false);
+    assert_rejected_like_the_in_order_walk("outofrange", false);
 }
 
 // ── An engine whose cross-check passes is checked on the session engine the
