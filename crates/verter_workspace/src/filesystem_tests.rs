@@ -3387,3 +3387,151 @@ fn a_replay_refused_before_admission_returns_its_refusal_across_a_watched_file_c
         "returning the refusal charges no restart"
     );
 }
+
+/// Live disk reads as `(kind, path)`, in order.
+#[cfg(not(target_arch = "wasm32"))]
+type LiveReads = Vec<(&'static str, String)>;
+
+/// Resolve `pkg` from the package fixture, splitting the workspace's live
+/// disk reads into the ones the attempt makes (discovery, preflight, load
+/// and freeze) and the ones the admission's final validation makes.
+#[cfg(not(target_arch = "wasm32"))]
+fn live_reads_of_one_resolution(
+    workspace: &Arc<FilesystemWorkspace>,
+    importer: &str,
+    on_phase: impl FnMut(crate::engine::resolution_test_hooks::ResolutionPhase) + 'static,
+) -> (
+    crate::resolution_currency::ResolutionOutcome,
+    LiveReads,
+    LiveReads,
+) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let published = workspace.load_published().expect("published root");
+    let _ = workspace.native_fs.take_live_reads_for_test();
+    let segments = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let hooked = Arc::clone(workspace);
+    let recorded = Arc::clone(&segments);
+    let mut on_phase = on_phase;
+    let outcome = resolution_test_hooks::with_every_phase_hook(
+        move |phase| {
+            recorded
+                .lock()
+                .push((Some(phase), hooked.native_fs.take_live_reads_for_test()));
+            on_phase(phase);
+        },
+        || {
+            WorkspaceRead::resolve_import_at_published(
+                &**workspace,
+                &published,
+                importer,
+                "pkg",
+                CONTEXT,
+            )
+        },
+    );
+    let mut segments = std::mem::take(&mut *segments.lock());
+    segments.push((None, workspace.native_fs.take_live_reads_for_test()));
+    // The last publication-gate wait is the admitting replay's; every read
+    // after it is the admission's final validation.
+    let admission_starts = segments
+        .iter()
+        .rposition(|(phase, _)| *phase == Some(ResolutionPhase::PublicationGateWait))
+        .expect("the resolution reached its admission")
+        + 1;
+    let admission = segments
+        .split_off(admission_starts)
+        .into_iter()
+        .flat_map(|(_, reads)| reads)
+        .collect();
+    let attempts = segments.into_iter().flat_map(|(_, reads)| reads).collect();
+    (outcome, attempts, admission)
+}
+
+/// One resolution attempt reads each path from disk once per kind of read:
+/// the freeze reuses what the discovery's probes and the bounded preflight
+/// and load already read live in the same content generation, instead of
+/// reading it again. The admission's final validation still reads every
+/// path it checks live, once.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn one_resolution_attempt_reads_each_path_from_disk_once() {
+    let (_temp, _root, importer, _manifest, workspace) = filesystem_package_fixture(8);
+    let workspace = Arc::new(workspace);
+    let (outcome, attempt, admission) = live_reads_of_one_resolution(&workspace, &importer, |_| {});
+    assert!(outcome.is_cacheable(), "the fixture resolves and admits");
+
+    let distinct = |reads: &[(&'static str, String)]| {
+        reads.iter().collect::<std::collections::HashSet<_>>().len()
+    };
+    assert!(
+        attempt.iter().any(|(kind, _)| *kind == "probe")
+            && attempt.iter().any(|(kind, _)| *kind == "file"),
+        "the attempt reads the disk at all: {attempt:?}"
+    );
+    assert_eq!(
+        attempt.len(),
+        distinct(&attempt),
+        "every disk read of the attempt is of a distinct path: {attempt:?}"
+    );
+    assert!(!admission.is_empty(), "the admission re-checks live");
+    assert_eq!(
+        admission.len(),
+        distinct(&admission),
+        "the admission re-checks each path once: {admission:?}"
+    );
+}
+
+/// A file that changes on disk after the attempt read it, before the attempt
+/// seals its evidence, is never admitted: the freeze reuses the attempt's
+/// read, so the admission's final validation is what sees the change, and it
+/// refuses and restarts. The restarted attempt reads the disk afresh and
+/// admits the new answer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_file_changed_mid_attempt_is_refused_at_admission_and_retried() {
+    use crate::engine::resolution_test_hooks::ResolutionPhase;
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(8);
+    let workspace = Arc::new(workspace);
+    let manifest_path = std::path::PathBuf::from(&manifest);
+    let mut rewritten = false;
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let _ = take_admission_revalidation_refusals_for_test();
+    let (outcome, attempts, _) =
+        live_reads_of_one_resolution(&workspace, &importer, move |phase| {
+            // The first completed provider attempt is the discovery's: the
+            // manifest has been read live and the freeze has not run yet.
+            if phase == ResolutionPhase::ProviderProjection && !rewritten {
+                rewritten = true;
+                std::fs::write(&manifest_path, r#"{"name":"pkg","types":"./b.d.ts"}"#)
+                    .expect("rewrite the manifest mid-attempt");
+            }
+        });
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    let refusals = take_admission_revalidation_refusals_for_test();
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some(format!("{root}/node_modules/pkg/b.d.ts").as_str()),
+        "the stale answer is never admitted"
+    );
+    assert!(outcome.is_cacheable(), "the restarted attempt admits");
+    assert_eq!(restarts, 1, "the change costs exactly one restart");
+    assert_eq!(
+        refusals, 1,
+        "the stale replay reached admission and its final validation refused it"
+    );
+    let manifest_reads = attempts
+        .iter()
+        .filter(|(kind, path)| *kind == "file" && *path == manifest)
+        .count();
+    // The first attempt's load, its refused admission's re-check, and the
+    // restarted attempt's own load: the restarted attempt reads the
+    // manifest afresh rather than reusing the first attempt's read.
+    assert_eq!(
+        manifest_reads, 3,
+        "the manifest is read once per attempt and once by the refused admission"
+    );
+}
