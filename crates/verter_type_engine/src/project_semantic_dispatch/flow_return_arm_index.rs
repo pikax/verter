@@ -236,7 +236,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let mut arms = Vec::new();
         let mut expanded = FxHashSet::default();
         let mut gapped = false;
-        self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
+        self.dispatch.outside_inline_costs(|| {
+            self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
+        });
         note_index_preparation(arms.len());
         let mut positions = FxHashMap::default();
         for (position, arm) in arms.iter().enumerate() {
@@ -267,18 +269,21 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// algebra erases) and every subset of them is its own union's arms.
     fn arm_index_is_exact(&self, index: &ArmIndex) -> bool {
         *index.exact.get_or_init(|| {
-            if index.gapped || index.arms.len() < 2 || index.positions.len() != index.arms.len() {
-                return false;
-            }
-            let built = self.union(&index.arms);
-            let mut back = Vec::new();
-            let mut expanded = FxHashSet::default();
-            let mut gapped = false;
-            self.collect_enumerated_arms(built, &mut back, &mut expanded, &mut gapped);
-            note_index_preparation(back.len());
-            !gapped
-                && back.len() == index.arms.len()
-                && back.iter().all(|arm| index.positions.contains_key(arm))
+            self.dispatch.outside_inline_costs(|| {
+                if index.gapped || index.arms.len() < 2 || index.positions.len() != index.arms.len()
+                {
+                    return false;
+                }
+                let built = self.union(&index.arms);
+                let mut back = Vec::new();
+                let mut expanded = FxHashSet::default();
+                let mut gapped = false;
+                self.collect_enumerated_arms(built, &mut back, &mut expanded, &mut gapped);
+                note_index_preparation(back.len());
+                !gapped
+                    && back.len() == index.arms.len()
+                    && back.iter().all(|arm| index.positions.contains_key(arm))
+            })
         })
     }
 
@@ -342,7 +347,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     fn heritage_arms(&mut self, index: &ArmIndex) -> Rc<HeritageArms> {
         let heritage = match index.heritage.get() {
             Some(Some(heritage)) => Rc::clone(heritage),
-            _ => {
+            _ => self.dispatch.outside_inline_costs(|| {
                 note_index_preparation(index.arms.len());
                 let mut heritage = HeritageArms {
                     by_ancestor: FxHashMap::default(),
@@ -405,7 +410,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 let heritage = Rc::new(heritage);
                 let _ = index.heritage.set(Some(Rc::clone(&heritage)));
                 heritage
-            }
+            }),
         };
         for observation in &heritage.observed {
             if !self.heritage_self_roots.contains(observation) {
@@ -521,31 +526,33 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// The own-key index of `arms`, prepared once per evaluation.
     fn own_key_arms(&self, index: &ArmIndex) -> Rc<OwnKeyArms> {
         Rc::clone(index.own_keys.get_or_init(|| {
-            note_index_preparation(index.arms.len());
-            let mut own = OwnKeyArms {
-                by_key: FxHashMap::default(),
-                keys: Vec::with_capacity(index.arms.len()),
-                open: Vec::new(),
-            };
-            for (position, arm) in index.arms.iter().enumerate() {
-                let position = position as u32;
-                match self.dispatch.closed_object_own_string_keys(*arm) {
-                    Some(keys) => {
-                        for key in &keys {
-                            own.by_key
-                                .entry(Arc::clone(key))
-                                .or_default()
-                                .push(position);
+            self.dispatch.outside_inline_costs(|| {
+                note_index_preparation(index.arms.len());
+                let mut own = OwnKeyArms {
+                    by_key: FxHashMap::default(),
+                    keys: Vec::with_capacity(index.arms.len()),
+                    open: Vec::new(),
+                };
+                for (position, arm) in index.arms.iter().enumerate() {
+                    let position = position as u32;
+                    match self.dispatch.closed_object_own_string_keys(*arm) {
+                        Some(keys) => {
+                            for key in &keys {
+                                own.by_key
+                                    .entry(Arc::clone(key))
+                                    .or_default()
+                                    .push(position);
+                            }
+                            own.keys.push(Some(keys.into_iter().collect()));
                         }
-                        own.keys.push(Some(keys.into_iter().collect()));
-                    }
-                    None => {
-                        own.keys.push(None);
-                        own.open.push(position);
+                        None => {
+                            own.keys.push(None);
+                            own.open.push(position);
+                        }
                     }
                 }
-            }
-            Rc::new(own)
+                Rc::new(own)
+            })
         }))
     }
 
