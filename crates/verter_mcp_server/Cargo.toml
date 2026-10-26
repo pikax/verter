@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 verter_mcp = { path = "../verter_mcp" }
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 clap = { version = "4.6", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

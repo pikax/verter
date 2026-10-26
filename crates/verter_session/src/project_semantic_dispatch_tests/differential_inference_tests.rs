@@ -2253,6 +2253,58 @@ fn candidate_literal_contexts() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The fixture of [`candidate_tuple_element_contexts`].
+const CANDIDATE_TUPLE_ELEMENT_CONTEXTS: &str = r##"
+declare const c: boolean;
+declare function tu2<T extends string>(x: [T, number] | [T, string]): T;
+export function t1() { return tu2(["a", 1]); }
+declare function tv<T extends string, U>(x: [T, ...U[], T]): [T, U];
+export function t2() { return tv(["a", 1, 2, "b"]); }
+declare function ov<T extends string>(x: [T], y: 1): T;
+declare function ov<T>(x: [T], y: 2): T;
+export function t3() { return ov(["a"], 2); }
+export function t4() { return ov(["a"], 1); }
+declare function tw<T extends string>(x: [T, T, T, T, T, T, T, T]): T;
+export function t5() { return tw(["a", "b", "c", "d", "e", "f", "g", c ? "h" : "i"]); }
+declare function te<T extends string>(x: [...T[], number, T]): T;
+export function t6() { return te(["a", "b", 1, "z"]); }
+declare function tn<T extends number, U>(x: [[T, U], [T, U]]): [T, U];
+export function t7() { return tn([[1, "a"], [2, "b"]]); }
+declare function tp<T extends string>(x: [T, string] | T[]): T;
+export function t8() { return tp(["a", "b"]); }
+declare function sk<T extends string, U>(x: { v: T; w: [U, ...U[]] }): U;
+export function t9() { return sk({ v: "a", w: ["a", "b"] }); }
+declare function so<T extends "a" | "b">(x: [{ k: T }, { k: T }]): T;
+export function t10() { return so([{ k: "a" }, { k: "b" }]); }
+"##;
+
+/// Each element of an array literal argument is decided against the
+/// element its candidate's contextual tuple gives that position: every
+/// constituent of a union of tuples (or of a tuple and an array) types
+/// it; a leading fixed element types it by position, a trailing fixed
+/// element by its distance from the end, and a rest element the
+/// elements between; each overload's own tuple decides; and a nested
+/// array or object literal is decided against its own element's type.
+#[test]
+fn candidate_tuple_element_contexts() {
+    let failures = Matrix::new(CANDIDATE_TUPLE_ELEMENT_CONTEXTS).returns(&[
+        ("t1", r#""a""#),
+        ("t2", r#"["a" | "b", number]"#),
+        ("t3", "string"),
+        ("t4", r#""a""#),
+        (
+            "t5",
+            r#""a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i""#,
+        ),
+        ("t6", r#""a" | "b" | "z""#),
+        ("t7", "[1 | 2, string]"),
+        ("t8", r#""a" | "b""#),
+        ("t9", "string"),
+        ("t10", r#""a" | "b""#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const AUTHORED_LITERAL_OCCURRENCES: &str = r##"
 declare const c: boolean;
 declare function pu<T>(x: { v: T }): T;

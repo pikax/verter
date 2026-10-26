@@ -205,7 +205,10 @@ pub(super) fn new_dag_mutex(
     Arc::new_cyclic(|weak| {
         dag.set_progress_waker(Waker::from(Arc::new(CapacityWake(weak.clone()))));
         #[cfg(feature = "semantic-observe")]
-        let inner = hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag");
+        let inner = hotpath::mutex!(
+            hotpath_parking_lot::Mutex::new(dag),
+            label = "scheduler_dag"
+        );
         #[cfg(not(feature = "semantic-observe"))]
         let inner = Mutex::new(dag);
         DagMutex {

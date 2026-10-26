@@ -8,6 +8,48 @@ The shared semantic query system has exactly five modes. Every caller picks one;
 - **`Expanded`** — recursively materialize the requested result. Walk into member bodies, resolve nested references, evaluate every decidable conditional, distribute open conditionals into their remaining path projections, normalize unions / intersections. Aliases: unwrap transparently. Most expensive mode.
 - **`Skeleton`** — specialised traversal mode for BFS/generic-helper surfaces where unbound type parameters must remain `TypeParam` shells and conditional branches must not collapse to `never` just because arguments are intentionally absent. It is not a display mode and does not alias `Navigate`; it is a distinct semantic policy.
 
+**Named interface applications in published answers.** Expanded publication
+retains an interface application's `InstantiationRef` as a union or intersection contributor,
+with its substituted and evaluated arguments, including omitted defaults bound
+by the shared `declared_application_arguments` owner (a zero-argument `DeclRef`
+uses the same completion as a partially supplied `InstantiationRef`). An empty interface therefore
+remains a named contributor to an intersection, including inside an object or
+tuple, instead of becoming an empty object that the intersection's raise fold
+drops. This decision belongs to the shared post-substitution view projector
+(`locator_view_worklist/finish.rs`), before identity is lost; output sinks raise
+the existing typed carrier without reconstructing a name from an expanded body
+or provenance. A direct declaration instantiation, a demanded member, `keyof`
+and an indexed access still read the interface's instantiated structural meaning
+through the same engine. An Expanded root alias that directly names an
+application still requests its body through the shared named/wire root
+projector. An indexed access keeps a selected generic interface application
+named, including completed defaults. An explicit Expanded terminal demand
+materializes aliases and non-generic declarations through Instantiate; Navigate
+keeps those same terminals shallow.
+Ordinary member and element positions still expand. Contributor and ordinary
+positions have distinct `ProjectionSlot` memo keys, including when the body
+folder projects a contributor as a separate root. Residual applications from
+a partial or recursive evaluation are terminal; the materializer never retries
+them as fresh root instantiations.
+Retaining a name does not exempt its intersection from structural reduction:
+the shared `reduced_intersection_terminal` reader applies the written
+intersection algebra under the source file's nullability policy. Its
+`ProjectedContributors` demand reads retained interfaces while leaving other
+already-projected carriers alone: publication must not lower the transitive
+declarations those carriers preserve. Relations, keyspace and mapped operations
+use `Operand` demand to read every operand head through the existing resolver.
+Conflicting
+literal discriminants reduce to `never`; nullish/object intersections reduce
+to `never` with strict null checks and to the nullish type without them.
+Disjoint scalar domains still reduce to `never` under either policy.
+Only the reduction result replaces the published carriers; a compatible
+intersection keeps its named contributors. Heritage and shallow carriers do
+not enter this published Expanded reduction.
+Heritage positions materialize their interface bodies
+so inherited members remain visible. Aliases, including closed conditional
+helpers beside a named interface, still evaluate normally. Navigate and Shallow
+keep their existing demand boundaries and do not expand unrelated members.
+
 **Carrier-preserving decl-body lowering.** Under `ProjectionMode::Shallow` (as under `Navigate` / `Skeleton`), decl-body lowering (`crates/verter_type_engine/src/project_semantic_dispatch/lower.rs`) interns `DeclRef` / `InstantiationRef` carriers for member-value type references — including ALL builtin utilities — and never executes `ResolveDecl` / `Instantiate` eagerly. Under `Navigate` / `Skeleton`, a builtin over an OPEN argument (predicate `raise/openness.rs::builtin_lowering_argument_is_open`: the argument subtree reaches an unbound `TypeParam` — including a mapper binder substituted later at a demand point — or an open carrier) also interns the carrier; closed-argument non-object-filter builtins keep the eager execute. Eager lowering-time execution is `Expanded` / `Identity` only. Materialisation enters exclusively through the demand points: PathWalker hops, the shallow-surface synthesiser's carrier unwrap (`walk.rs::visit_shallow_node` — an `InstantiationRef` unwrap dispatches `Instantiate` under `StructuralTransit(Navigate)` and stamps interface/class bodies as heritage overlays), closed object-filter surface reads, and the relation/conditional oracle (`build.rs::pre_relation_infer_selection` may execute a carrier-check instantiation, pre-evaluating its operator-shaped arguments, to materialise the check for positional infer binding).
 
 **Query-free structural carrier emission (LIVE macro-arg producer).** A separate, session-owned structural lowerer (`crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs`, entry `lower_type_expr_structural`, a BARE module-private fn — the producer is COLLAPSED into the ONE private module `crate::structural_carrier_producer::macro_arg_producer`, declared as a private `mod macro_arg_producer;` that re-exports only `macro_type_arg_hot_ref` + `MacroHotMirror` `pub(crate)`; the FOREIGN case is compiler-confined by module privacy and the SAME-MODULE residual is policed by the strengthened single-producer guards) emits the unresolved carriers directly from an owned `TypeExpr`, NodeScopeId-rooted, performing NO name / import / type resolution or reduction — it is a PRODUCER of carriers, never a second resolver, so it neither competes with nor duplicates the single demand-time resolution engine. A bare `Foo` becomes `BareRef`; `Foo<Arg>` a `BareRef` whose `type_args` are structurally lowered (never an `InstantiationRef`); `import("…")` an `ImportType`; unsupported raw syntax a `RawFallback` (display/compat only, never a control-flow miss); a construct-signature type a `Signature { kind: Construct }` node; tuple rest stays on `TupleElement.rest`; and `keyof` / indexed-access / conditional / mapped / `typeof` lower to their deferred shells carrying structurally-lowered operands — even where the eager path would reduce them. The only "resolution" it performs is the purely syntactic in-scope binder lookup that maps a `Ref` to a type-parameter / `infer` binder it already interned. It is intern-only (it never reaches `ProjectSemanticDispatch`, a `CarrierResolverContext`, a `SemanticQueryKey`, or any host / type-provider state) and stays demand-time — never pulled into publish or indexing (the `indexed_ready_publish_lowers_zero_decl_bodies` invariant). It is the LIVE macro-arg structural producer: macro type-argument carriers flow through production at the four macro sites, and its SOLE production caller is the session macro hot-mirror builder (Stage 5A, LANDED — see "Macro Hot Mirror" below), pinned by the module-privacy guard `structural_carrier_producer_lowerer_is_module_private` plus the ordering tripwire `no_production_macro_arg_eager_lowering_outside_mirror` and the purity guard `macro_hot_mirror_producer_is_pure_no_route_resolution`. The GLOBAL declaration-body structural flip (so a `type A = B` decl body lowers to `BareRef(B)` instead of the resolved body) is the **separate deferred query-free declaration-body structural-template producer** (NOT Stage 6, NOT landed) — the LANDED Stage 6 Option-B flip mints `HotTypeRef` handles in the `decl_body_hot_ref` accessor over the `Instantiate` result the graph-bearing dispatch producer drives via the RESOLVING lowerer, and does NOT route declaration bodies through this structural lowerer. Three further guards lock its query-freedom: `session_graph_lowerer_makes_no_query` (no query / resolver / host surface in the lowerer's production code), `unresolved_carriers_not_materialized_during_emission` (no `materialize_type_expr` / raise during emission, and the emitted root stays a carrier), and `oxc_worker_emits_no_session_graph_node` (the OXC worker / semantic-lowering surface produces owned `TypeExpr` IR only). Hermetic structural-equivalence fixtures prove its no-resolution shapes lower to the SAME interned graph as the eager `lower.rs` path.

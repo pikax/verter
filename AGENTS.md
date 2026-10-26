@@ -48,6 +48,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - Follow the build philosophy and shallow file processing invariant in `CLAUDE.md`.
 - For component-meta work, follow `/component-meta`. For type resolution work, follow `/type-resolution`.
 - **Testing hermeticity**: see `CLAUDE.md` "Testing-Hermeticity (MANDATORY)" and `.claude/skills/testing/SKILL.md`.
+- **Test speed and the two tiers**: see `CLAUDE.md` "Test Speed (MANDATORY)". The gate runs every test except those under a `nightly_scale` module; that nightly scale tier runs at full size in `.github/workflows/nightly.yml`, and each tier test has a smaller gate version with the same guarantees.
 - **No roadmap archaeology in source or tests**: see `CLAUDE.md` "No roadmap archaeology in source or tests (MANDATORY)".
 
 ## Task Routing

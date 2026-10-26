@@ -56,28 +56,28 @@ boxcar = "=0.2.14"
 dashmap = "6.2"
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
 hotpath = { version = "0.23", optional = true }
-imbl = "7.0.1"
+imbl = "7.0.2"
 indexmap = "2.14"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"
 static_assertions = "1.1.0"
 tracing = "0.1.44"
 # Correlation-only request trace ids (minted only with `semantic-observe`).
-uuid = { version = "1.23", features = ["v4"] }
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+uuid = { version = "1.29", features = ["v4"] }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1"
-uuid = { version = "1.23", features = ["js"] }
+uuid = { version = "1.29", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The profiler itself is native-only: on wasm32 `hotpath` stays in its
 # no-op mode, so `semantic-observe` builds for every target.
 hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
-uuid = { version = "1.23", features = ["rng-getrandom"] }
+uuid = { version = "1.29", features = ["rng-getrandom"] }
 
 # Generator for the SemanticQueryKeySpec table artifact (sole writer of
 # `src/semantic_query/query_key_spec_table.txt`). Run via the pnpm script
@@ -87,6 +87,6 @@ name = "gen-query-key-spec"
 path = "src/bin/gen_query_key_spec.rs"
 
 [dev-dependencies]
-aho-corasick = "1.1.4"
+aho-corasick = "1.1.5"
 verter_session_query = { workspace = true, features = ["test-support"] }
 verter_type_engine = { path = ".", features = ["test-support"] }

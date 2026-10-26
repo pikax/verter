@@ -613,6 +613,14 @@ impl RootCapture {
         }
     }
 
+    /// Whether the artifact root was captured with no artifact-membership
+    /// mutation in flight. Only then does it hold every artifact the
+    /// generation captured before it accounts for (see
+    /// [`crate::file_artifact_store::FileArtifactRoot::is_settled`]).
+    pub(crate) fn artifact_root_is_settled(&self) -> bool {
+        self.artifact_root.is_settled()
+    }
+
     /// Test-only: the workspace this capture addresses, for the mid-build
     /// mutation injection that must fire AFTER the token is sealed.
     ///

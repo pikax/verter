@@ -1278,6 +1278,8 @@ type Fn<T> = (x: T) => void;
 type Lit<T> = T;
 interface Face { a: 1 }
 class Klass { k = 1 }
+class GK<T> { v!: T }
+type ToGK = GK<string>;
 type ToFace = Face;
 type ToToFace = ToFace;
 type ToKlass = Klass;
@@ -1321,6 +1323,7 @@ export function witness() { return 1; }";
         ("ToFace", "Face"),
         ("ToToFace", "Face"),
         ("ToKlass", "Klass"),
+        ("ToGK", "ToGK"),
         ("ToObj", "ObjNoGen"),
         ("ToToObj", "ObjNoGen"),
         ("ToGFace", "ToGFace"),

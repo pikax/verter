@@ -301,7 +301,7 @@ test("missingArtifactExports fails a stub without host methods", () => {
   assert.deepEqual(missingArtifactExports(WASM_JS), []);
 });
 
-test("missingArtifactExports accepts wasm-bindgen 0.2.122 export-list default", () => {
+test("missingArtifactExports accepts an export-list default", () => {
   assert.ok(!/export default/.test(WASM_JS));
   assert.match(WASM_JS, /as\s+default/);
   assert.deepEqual(missingArtifactExports(WASM_JS), []);

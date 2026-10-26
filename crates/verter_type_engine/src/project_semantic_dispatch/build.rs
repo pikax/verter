@@ -51,6 +51,16 @@ pub fn written_union_arm_classifications_for_tests() -> u64 {
     WRITTEN_UNION_ARM_CLASSIFICATIONS.get()
 }
 
+/// Whether an intersection reads already-projected contributors or a demanded operand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum IntersectionDenotationDemand {
+    /// Only retained interfaces need an additional structural read. Other
+    /// contributors already carry the result of their publication projection.
+    ProjectedContributors,
+    /// A relation, keyspace or mapped operation demands every operand head.
+    Operand,
+}
+
 /// What a written-union arm can take part in when the checker absorbs
 /// literals into their supertypes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14866,7 +14876,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Some(SemanticNodeData::Intersection(members)) => {
                 let members = members.members_arc();
-                match self.key_of_composite(&members, false) {
+                match self.key_of_composite(base, &members, false) {
                     Some(keys) => { enumerated.set(true); keys },
                     // An arm over a generic (`keyof (S & { a: 1 })`) has
                     // keys only its instantiation names: the keys stay the
@@ -14886,10 +14896,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Union(members))
-                if self.key_of_composite(&members.members_arc(), true).is_some() =>
+                if self.key_of_composite(base, &members.members_arc(), true).is_some() =>
             {
                 enumerated.set(true);
-                self.key_of_composite(&members.members_arc(), true)
+                self.key_of_composite(base, &members.members_arc(), true)
                     .expect("the keys settled")
             }
             Some(SemanticNodeData::Union(_)) => published_names()
@@ -15019,26 +15029,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         keyof_output
     }
 
-    /// Whether the intersection of `arms` is one the checker reduces to
-    /// `never` (`getReducedType`): the object types its arms name declare
-    /// one property whose literal types conflict (`{ c: 1 }` beside
-    /// `{ c: 2 }`), read through the declarations the arms name.
-    pub(super) fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
-        let published =
+    /// The terminal denotation of an intersection, if it is bottom or nullish.
+    /// Publication reads retained interfaces without forcing other projected
+    /// carriers; structural operations demand the denotation of every operand.
+    pub(super) fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+        demand: IntersectionDenotationDemand,
+    ) -> Option<SemanticNodeId> {
+        use verter_session_query::flow::policy::NullabilityPolicy;
+        let context =
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
         let surfaces: Vec<SemanticNodeId> = arms
             .iter()
-            .map(|arm| self.resolve_signature_source_carrier(*arm, published))
+            .map(|arm| {
+                let read = demand == IntersectionDenotationDemand::Operand
+                    || match self.graph().node_data(*arm).as_deref() {
+                        Some(
+                            SemanticNodeData::DeclRef { identity: base }
+                            | SemanticNodeData::InstantiationRef { base, .. },
+                        ) => {
+                            self.prepared_decl_kind(base)
+                                == Some(verter_session_query::declarations::TypeDeclKind::Interface)
+                        }
+                        _ => false,
+                    };
+                if read {
+                    self.resolve_signature_source_carrier(*arm, context)
+                } else {
+                    *arm
+                }
+            })
             .collect();
-        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let conflicts = super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+        let nullability = self
+            .graph()
+            .node_scope(source)
+            .and_then(|scope| scope.canonical_file())
+            .map_or(NullabilityPolicy::Strict, |canonical| {
+                NullabilityPolicy::from_strict_null_checks(
+                    self.ctx
+                        .semantic_compiler_options_for(&canonical)
+                        .strict_null_checks,
+                )
+            });
+        let reduced = super::canonical_algebra::intern_written_intersection_charged(
             self.graph(),
             &surfaces,
+            nullability,
             self.construction_meter(),
-            &mut evidence,
         );
-        self.deposit_canonical_evidence(evidence);
-        conflicts
+        self.deposit_canonical_evidence(reduced.evidence);
+        matches!(
+            self.graph().node_data(reduced.node).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined
+            ))
+        )
+        .then_some(reduced.node)
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -15052,11 +15100,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// alone (the name enumeration reads those).
     fn key_of_composite(
         &self,
+        source: SemanticNodeId,
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> Option<SemanticNodeId> {
-        if !is_union && self.intersection_arms_reduce_to_never(members) {
-            return Some(self.string_number_symbol());
+        if !is_union {
+            if let Some(terminal) = self.reduced_intersection_terminal(
+                source,
+                members,
+                IntersectionDenotationDemand::Operand,
+            ) {
+                return self.key_set_of(terminal);
+            }
         }
         let flattened;
         let members = if is_union {
@@ -16502,11 +16557,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // `unknown` is illegal ⇒ error. Runs before key-space enumeration.
         // An intersection the checker reduces to `never` is `never` here.
         let reduced_source = match self.graph().node_data(source).as_deref() {
-            Some(SemanticNodeData::Intersection(arms))
-                if self.intersection_arms_reduce_to_never(&arms.members_arc()) =>
-            {
-                self.primitive_node(PrimitiveKind::Never)
-            }
+            Some(SemanticNodeData::Intersection(arms)) => self
+                .reduced_intersection_terminal(
+                    source,
+                    &arms.members_arc(),
+                    IntersectionDenotationDemand::Operand,
+                )
+                .unwrap_or(source),
             _ => source,
         };
         // A mapping over `keyof S` (homomorphic) whose `S` is `any` maps the

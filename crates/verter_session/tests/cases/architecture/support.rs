@@ -3955,7 +3955,7 @@ pub(super) fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec
                 if attrs_test_or_test_support_gate(&imp.attrs) {
                     continue;
                 }
-                if let Some((_, trait_path, _)) = &imp.trait_ {
+                if let Some((trait_path, _)) = &imp.trait_ {
                     let trait_spelling = trait_path_segments(trait_path).join("::");
                     let self_name = type_path_last_segment(&imp.self_ty);
                     // FULL-PATH allowlist: a final-segment match would wrongly admit
