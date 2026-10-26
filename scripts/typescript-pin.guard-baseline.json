@@ -834,14 +834,6 @@
       "count": 1,
       "reason": "evidence-record"
     },
-    "scripts/benchmark/evidence-runs/README.md": {
-      "count": 3,
-      "reason": "evidence-record"
-    },
-    "scripts/benchmark/semantic-perf/expected.json": {
-      "count": 481,
-      "reason": "evidence-record"
-    },
     "scripts/benchmark/semantic-perf/lib/bench-globals.d.ts": {
       "count": 1,
       "reason": "evidence-record"
