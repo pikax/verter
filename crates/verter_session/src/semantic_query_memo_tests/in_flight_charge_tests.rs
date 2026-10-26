@@ -282,8 +282,9 @@ fn crossing_a_small_ceiling_cannot_abort_the_admitted_read() {
 /// An inline member's flight holds the nodes of its decided value until
 /// its batch ends. A value of more operands than a root set keeps inline is
 /// held through the set's shared block, charged ACTIVE — in flight, never a
-/// pin — for exactly the bytes the block occupies, shared by every clone of
-/// the flight, and released with the counts it holds when the batch ends.
+/// pin — for exactly the bytes the block and the record carrying its charge
+/// occupy, shared by every clone of the flight, and released with the
+/// counts it holds when the batch ends.
 #[test]
 fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
     use verter_type_engine::semantic_query::{
@@ -321,15 +322,20 @@ fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
         let pinned_at_hold = account.snapshot().pinned_bytes;
         flight.hold_value_for_tests(store, &held_value);
         let after_hold = account.snapshot();
-        let block =
-            verter_type_engine::semantic_query_memo::node_roots::root_set_charge_bytes_for_tests(
+        let hold =
+            verter_type_engine::semantic_query_memo::inflight::inline_hold_charge_bytes_for_tests(
                 OPERANDS,
             );
-        assert!(block > 0, "premise: the value's set needs a shared block");
+        assert!(
+            verter_type_engine::semantic_query_memo::node_roots::root_set_charge_bytes_for_tests(
+                OPERANDS
+            ) > 0,
+            "premise: the value's set needs a shared block"
+        );
         assert_eq!(
             after_hold.active_bytes - after_flight,
-            block,
-            "the hold charges its set's shared block in flight, exactly: {after_hold:?}"
+            hold,
+            "the hold charges its set's shared block and its own record in flight, exactly: {after_hold:?}"
         );
         assert_eq!(
             after_hold.pinned_bytes, pinned_at_hold,
@@ -403,7 +409,9 @@ fn an_inline_member_hold_shared_with_a_delivery_is_charged_once() {
         flight.hold_value_for_tests(store, &held_value);
         assert_eq!(
             account.snapshot().active_bytes - before_hold.active_bytes,
-            block
+            verter_type_engine::semantic_query_memo::inflight::inline_hold_charge_bytes_for_tests(
+                OPERANDS
+            )
         );
 
         // A delivery of one operand costs its owner's block alone.

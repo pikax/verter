@@ -41,13 +41,15 @@ pub(crate) type RootIds = smallvec::SmallVec<[SemanticNodeId; INLINE_ROOTS]>;
 /// cloning one never touches the arena, and the block is an owned
 /// allocation charged by its own cell, once, however many holders reach it.
 /// An empty set is a shared block that is absent. The inline variant's
-/// arena pointer tells the variants apart, so a set is five words.
+/// arena pointer tells the variants apart, so on a 64-bit target a set is
+/// five words.
 #[derive(Clone)]
 enum RootOwner {
     Inline(InlineRoots),
     Shared(Option<verter_session_query::retention::owned::Owned<SpilledRoots>>),
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<RootOwner>() == 5 * std::mem::size_of::<usize>());
 
 /// A short operand list kept in place, with one count per operand. Unused
@@ -244,7 +246,9 @@ impl Default for NodeRootSet {
 /// under a cache table's guard. A shared block is shared outright; an
 /// inline set's operands are copied and counted only once the guard is
 /// released ([`Self::into_set`]).
-pub(crate) enum RootShare {
+pub struct RootShare(ShareRepr);
+
+enum ShareRepr {
     Set(NodeRootSet),
     Operands(Arc<NodeArenaCore>, RootIds),
 }
@@ -253,9 +257,23 @@ impl RootShare {
     /// The set this share names, counted now. An operand a release
     /// destroyed after the share was taken refuses the whole set as stale.
     pub(crate) fn into_set(self) -> Result<NodeRootSet, QueryError> {
-        match self {
-            Self::Set(set) => Ok(set),
-            Self::Operands(arena, ids) => NodeRootSet::acquire(arena, ids),
+        match self.0 {
+            ShareRepr::Set(set) => Ok(set),
+            ShareRepr::Operands(arena, ids) => NodeRootSet::acquire(arena, ids),
+        }
+    }
+
+    /// Keep the shared operands alive in the active issuing graph
+    /// construction scope, counting them now. `false` when a release
+    /// destroyed an operand after the share was taken: the caller treats
+    /// the cache entry it came from as a miss.
+    pub fn retain_for_construction(self) -> bool {
+        match self.into_set() {
+            Ok(set) => {
+                set.capture_into_scope();
+                true
+            }
+            Err(_) => false,
         }
     }
 }
@@ -515,6 +533,16 @@ impl NodeRootSet {
         }
     }
 
+    /// What an inline set roots — its arena's address and its operand
+    /// slots — which every clone of it shares; `None` for a shared block or
+    /// an empty set.
+    fn inline_identity(&self) -> Option<InlineIdentity> {
+        match &self.0 {
+            RootOwner::Inline(inline) => Some((Arc::as_ptr(&inline.arena) as usize, inline.ids)),
+            RootOwner::Shared(_) => None,
+        }
+    }
+
     /// The address of this set's shared block, which every clone of a long
     /// set names; `None` for an inline or empty set.
     fn shared_block_identity(&self) -> Option<usize> {
@@ -547,13 +575,13 @@ impl NodeRootSet {
     }
 
     /// A second handle on this set that takes no lock: see [`RootShare`].
-    pub(crate) fn share(&self) -> RootShare {
-        match &self.0 {
+    pub fn share(&self) -> RootShare {
+        RootShare(match &self.0 {
             RootOwner::Inline(inline) => {
-                RootShare::Operands(Arc::clone(&inline.arena), RootIds::from_slice(inline.ids()))
+                ShareRepr::Operands(Arc::clone(&inline.arena), RootIds::from_slice(inline.ids()))
             }
-            RootOwner::Shared(_) => RootShare::Set(self.clone()),
-        }
+            RootOwner::Shared(_) => ShareRepr::Set(self.clone()),
+        })
     }
 
     /// Hand this set's counts on `arena` to `batch`, whose owner releases
@@ -842,6 +870,7 @@ impl ScopeStack {
             let _ = heir.adopt(lease);
         }
         owners.delivered = DeliveredOwners::default();
+        owners.delivered_inline = None;
         None
     }
 
@@ -864,12 +893,14 @@ impl ScopeStack {
             if heir.deliveries.len() < owners.deliveries.len() {
                 std::mem::swap(&mut heir.deliveries, &mut owners.deliveries);
                 std::mem::swap(&mut heir.delivered, &mut owners.delivered);
+                std::mem::swap(&mut heir.delivered_inline, &mut owners.delivered_inline);
             }
             for lease in owners.deliveries.drain(..) {
                 // A repeat is another handle on an owner the heir keeps.
                 let _ = heir.adopt(lease);
             }
             owners.delivered = DeliveredOwners::default();
+            owners.delivered_inline = None;
         }
         owners
     }
@@ -948,7 +979,18 @@ struct ConstructionOwners {
     /// of one delivery names the same owner, so an owner keeps it once
     /// however often it is read or cloned under this owner.
     delivered: DeliveredOwners,
+    /// The inline sets `deliveries` already holds, once the list is too
+    /// long to scan: an inline set names no shared owner, so a repeat is
+    /// known by what it roots and kept once too.
+    delivered_inline: Option<rustc_hash::FxHashSet<InlineIdentity>>,
 }
+
+/// An inline set's arena address and operand slots.
+type InlineIdentity = (usize, [SemanticNodeId; INLINE_ROOTS]);
+
+/// Deliveries [`ConstructionOwners::adopt`] scans for a repeated inline set
+/// before it indexes them.
+const DELIVERED_SCAN: usize = 16;
 
 /// The owner a construction consumes: a full public delivery, or the
 /// counted roots an internal node-only memo already owns. Both use the
@@ -962,9 +1004,14 @@ impl ConstructionDelivery {
     fn owner_identity(&self) -> Option<usize> {
         match self {
             Self::Lease(lease) => lease.owner_identity(),
-            // A shared block is kept once however often it is delivered; an
-            // inline set's every clone holds counts of its own.
             Self::Roots(roots) => roots.shared_block_identity(),
+        }
+    }
+
+    fn inline_identity(&self) -> Option<InlineIdentity> {
+        match self {
+            Self::Lease(_) => None,
+            Self::Roots(roots) => roots.inline_identity(),
         }
     }
 
@@ -1051,6 +1098,7 @@ impl ConstructionOwners {
             deliveries: Vec::new(),
             held: Vec::new(),
             delivered: Default::default(),
+            delivered_inline: None,
         }
     }
 
@@ -1064,13 +1112,41 @@ impl ConstructionOwners {
     /// Keep `lease` unless this owner already holds its delivery; a
     /// repeat is handed back for the caller to drop.
     fn adopt(&mut self, lease: ConstructionDelivery) -> Option<ConstructionDelivery> {
-        match lease.owner_identity() {
-            Some(owner) if !self.delivered.insert(owner) => Some(lease),
-            _ => {
-                self.deliveries.push(lease);
-                None
-            }
+        let repeat = match lease.owner_identity() {
+            Some(owner) => !self.delivered.insert(owner),
+            None => lease
+                .inline_identity()
+                .is_some_and(|inline| !self.record_inline(inline)),
+        };
+        if repeat {
+            return Some(lease);
         }
+        self.deliveries.push(lease);
+        None
+    }
+
+    /// Record an inline set about to join `deliveries`; `false` when an
+    /// equal one is already there. A short list is scanned; past
+    /// [`DELIVERED_SCAN`] its inline sets are indexed once and the index
+    /// kept from then on.
+    fn record_inline(&mut self, inline: InlineIdentity) -> bool {
+        if self.delivered_inline.is_none() {
+            if self.deliveries.len() < DELIVERED_SCAN {
+                return !self
+                    .deliveries
+                    .iter()
+                    .any(|held| held.inline_identity() == Some(inline));
+            }
+            self.delivered_inline = Some(
+                self.deliveries
+                    .iter()
+                    .filter_map(ConstructionDelivery::inline_identity)
+                    .collect(),
+            );
+        }
+        self.delivered_inline
+            .as_mut()
+            .is_some_and(|index| index.insert(inline))
     }
 }
 
