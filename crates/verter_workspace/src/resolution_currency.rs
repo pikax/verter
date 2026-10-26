@@ -379,12 +379,13 @@ type FactVersionLedger = imbl::GenericHashMap<
     imbl::shared_ptr::DefaultSharedPtr,
 >;
 
-/// One derived node's edge set, or one dependency's dependent set.
+/// One dependency's dependent set, a retired-node set, or one owner's
+/// decision set.
 ///
 /// The graph's persistent containers hold each key behind an `Arc`, as the
 /// version ledger does. A HAMT node reserves its full slot width inline, so
 /// an inline key multiplies its own size by that width in every node; behind
-/// an `Arc` a slot costs a pointer, and the forward and reverse sets of one
+/// an `Arc` a slot costs a pointer, and the forward and reverse sides of one
 /// publication share a single allocation of each key.
 type ResolutionEdgeSet = imbl::GenericHashSet<
     Arc<ResolutionFactKey>,
@@ -392,8 +393,8 @@ type ResolutionEdgeSet = imbl::GenericHashSet<
     imbl::shared_ptr::DefaultSharedPtr,
 >;
 
-/// Persistent adjacency. `imbl` maps are HAMTs, so cloning a root shares
-/// their nodes structurally and a mutation costs
+/// Persistent reverse adjacency. `imbl` maps are HAMTs, so cloning a root
+/// shares their nodes structurally and a mutation costs
 /// `O(changed keys × log n)` — the bound the decision DAG is sized
 /// against.
 type ResolutionEdgeMap = imbl::GenericHashMap<
@@ -402,6 +403,145 @@ type ResolutionEdgeMap = imbl::GenericHashMap<
     rustc_hash::FxBuildHasher,
     imbl::shared_ptr::DefaultSharedPtr,
 >;
+
+/// Persistent forward adjacency: each derived node's published record.
+type DerivedNodeMap = imbl::GenericHashMap<
+    Arc<ResolutionFactKey>,
+    Arc<DerivedNodeRecord>,
+    rustc_hash::FxBuildHasher,
+    imbl::shared_ptr::DefaultSharedPtr,
+>;
+
+/// One published derived node: its COMPLETE direct dependency set and, for a
+/// decision, the retention charge covering its bytes.
+///
+/// Written once and replaced whole, never edited in place, so the edge set
+/// is a flat slice rather than a persistent set: a republication replaces
+/// the record, and a reader holding the old one keeps seeing the old
+/// computation's edges entire. One record is shared by every root that
+/// holds the node, folded or not, so its charge is held once however many
+/// roots share it.
+#[derive(Debug)]
+struct DerivedNodeRecord {
+    node: Arc<ResolutionFactKey>,
+    /// Deduplicated, never the node itself, in first-observation order.
+    dependencies: Box<[Arc<ResolutionFactKey>]>,
+    /// Held, never read: the charge stays taken while any root holds the
+    /// record and is released when the last one drops it.
+    #[allow(dead_code)]
+    charge:
+        Option<Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>>,
+}
+
+/// One publication not yet folded into the persistent adjacency: a
+/// persistent list, newest first, so cloning a root shares it whole and
+/// appending costs one small node.
+#[derive(Debug)]
+struct PendingPublication {
+    record: Arc<DerivedNodeRecord>,
+    /// The node's hash, compared before the key when looking a node up.
+    hash: u64,
+    /// Publications in this list, this one included.
+    len: usize,
+    older: Option<Arc<PendingPublication>>,
+}
+
+impl PendingPublication {
+    /// Newest first.
+    fn iter(head: Option<&Arc<Self>>) -> impl Iterator<Item = &Self> {
+        std::iter::successors(head.map(AsRef::as_ref), |entry| entry.older.as_deref())
+    }
+}
+
+/// Publications a root takes before folding them into its persistent
+/// adjacency in one pass.
+///
+/// Every publication runs against a root the previous published root still
+/// shares, so writing its edges straight into the persistent maps copies
+/// the whole HAMT path to each of them — the root node and one interior
+/// node per edge, and every shared dependency's dependent-set path — only
+/// for the next publication to copy the same nodes again. A batch copies
+/// each node it touches once. Readers see a batch exactly as they would see
+/// it folded, and every structural edit folds first, so the persistent
+/// state after a fold is the state sequential publication would have built.
+const PUBLICATION_BATCH: usize = 64;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's batch size, so one root can be compared against another
+    /// that folds every publication at once.
+    static PUBLICATION_BATCH_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn publication_batch() -> usize {
+    #[cfg(test)]
+    if let Some(batch) = PUBLICATION_BATCH_OVERRIDE.with(std::cell::Cell::get) {
+        return batch;
+    }
+    PUBLICATION_BATCH
+}
+
+/// The dependents of a key across a root's folded reverse map and its
+/// unfolded publications.
+struct DependentIndex<'a> {
+    reverse: &'a ResolutionEdgeMap,
+    pending: Option<&'a Arc<PendingPublication>>,
+    /// The unfolded publications' reverse edges, built on the first lookup
+    /// that needs them.
+    unfolded: std::cell::OnceCell<
+        rustc_hash::FxHashMap<&'a ResolutionFactKey, Vec<&'a Arc<ResolutionFactKey>>>,
+    >,
+}
+
+impl<'a> DependentIndex<'a> {
+    fn new(reverse: &'a ResolutionEdgeMap, pending: Option<&'a Arc<PendingPublication>>) -> Self {
+        Self {
+            reverse,
+            pending,
+            unfolded: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn unfolded(
+        &self,
+    ) -> &rustc_hash::FxHashMap<&'a ResolutionFactKey, Vec<&'a Arc<ResolutionFactKey>>> {
+        self.unfolded.get_or_init(|| {
+            let mut index: rustc_hash::FxHashMap<_, Vec<_>> = rustc_hash::FxHashMap::default();
+            // Oldest first, as a fold would attach them.
+            let mut batch: Vec<&'a PendingPublication> =
+                PendingPublication::iter(self.pending).collect();
+            batch.reverse();
+            for entry in batch {
+                for dependency in entry.record.dependencies.iter() {
+                    index
+                        .entry(dependency.as_ref())
+                        .or_default()
+                        .push(&entry.record.node);
+                }
+            }
+            index
+        })
+    }
+
+    /// Every derived node directly depending on `key`, folded ones first.
+    fn dependents(&self, key: &ResolutionFactKey) -> Vec<Arc<ResolutionFactKey>> {
+        let folded = self.reverse.get(key);
+        let unfolded = match self.pending {
+            Some(_) => self.unfolded().get(key),
+            None => None,
+        };
+        let mut dependents =
+            Vec::with_capacity(folded.map_or(0, |set| set.len()) + unfolded.map_or(0, Vec::len));
+        if let Some(folded) = folded {
+            dependents.extend(folded.iter().cloned());
+        }
+        if let Some(unfolded) = unfolded {
+            dependents.extend(unfolded.iter().map(|node| Arc::clone(node)));
+        }
+        dependents
+    }
+}
 
 /// Retired derived nodes below which [`ResolutionFactRoot`] never folds
 /// its history into the floor, however small the live graph is.
@@ -419,19 +559,26 @@ pub(crate) struct DerivedGraphResidency {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolutionFactRoot {
     versions: FactVersionLedger,
-    /// derived node → its COMPLETE direct dependency set.
-    forward: ResolutionEdgeMap,
-    /// dependency → the derived nodes that directly depend on it.
+    /// derived node → its published record. Holds folded nodes only; the
+    /// publications in [`Self::pending`] are live nodes too.
+    forward: DerivedNodeMap,
+    /// dependency → the folded derived nodes that directly depend on it.
     reverse: ResolutionEdgeMap,
-    /// owner canonical + population -> that owner's published child
+    /// owner canonical + population -> that owner's folded child
     /// decisions. The index exists so an owner-set publication is
     /// `O(owner's decisions)` rather than a scan of the whole ledger.
     owner_decisions: imbl::GenericHashMap<
-        (String, ResolutionPopulation),
+        (CanonicalResolutionId, ResolutionPopulation),
         ResolutionEdgeSet,
         rustc_hash::FxBuildHasher,
         imbl::shared_ptr::DefaultSharedPtr,
     >,
+    /// Publications of NEW derived nodes not yet folded into
+    /// [`Self::forward`], [`Self::reverse`] and [`Self::owner_decisions`]:
+    /// at most [`PUBLICATION_BATCH`] of them, each a node no other
+    /// publication in the list or the folded maps holds. Every reader
+    /// consults them, so a batch is observable exactly as its fold.
+    pending: Option<Arc<PendingPublication>>,
     /// Removed derived nodes whose tombstone version is still stored in
     /// [`Self::versions`]: the retirement history. A republished node
     /// leaves it (its stored version is a live node's version again), and
@@ -449,16 +596,6 @@ pub(crate) struct ResolutionFactRoot {
     /// Total direct edges across [`Self::forward`], maintained at every
     /// attach and detach so the count is an occupancy read, not a scan.
     edge_count: usize,
-    /// Each published decision's retention charge, shared with the
-    /// workspace-lane candidate that serves it. A root holds the charge for
-    /// as long as it holds the node, so a snapshot that outlives the
-    /// node's retirement keeps its bytes charged until the snapshot drops.
-    decision_charges: imbl::GenericHashMap<
-        Arc<ResolutionFactKey>,
-        Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
-        rustc_hash::FxBuildHasher,
-        imbl::shared_ptr::DefaultSharedPtr,
-    >,
     /// Direct fact keys advanced since the enclosing mutation batch
     /// began, drained by [`Self::take_pending_seeds`] at the publication
     /// protocol's propagation step.
@@ -473,13 +610,13 @@ impl Default for ResolutionFactRoot {
     fn default() -> Self {
         Self {
             versions: FactVersionLedger::default(),
-            forward: ResolutionEdgeMap::default(),
+            forward: DerivedNodeMap::default(),
             reverse: ResolutionEdgeMap::default(),
             owner_decisions: imbl::GenericHashMap::default(),
+            pending: None,
             retired_nodes: ResolutionEdgeSet::default(),
             derived_floor: ResolutionFactVersion::INITIAL,
             edge_count: 0,
-            decision_charges: imbl::GenericHashMap::default(),
             pending_seeds: Vec::new(),
         }
     }
@@ -524,9 +661,9 @@ impl ResolutionFactRoot {
 
     /// **Atomic direct-edge replacement.**
     ///
-    /// The node's COMPLETE prior edge set is detached from both maps and
-    /// the new one attached in the same mutation, so no reader can ever
-    /// observe a node holding a mixture of two computations' edges.
+    /// The node's COMPLETE prior edge set is detached and the new one
+    /// attached in the same mutation, so no reader can ever observe a node
+    /// holding a mixture of two computations' edges.
     ///
     /// Publication does NOT mint a version, and that is a correctness
     /// choice. A resolution publishes its own decision, so a minted
@@ -545,52 +682,7 @@ impl ResolutionFactRoot {
         node: ResolutionFactKey,
         dependencies: impl IntoIterator<Item = ResolutionFactKey>,
     ) -> bool {
-        self.publish_shared_derived(Arc::new(node), dependencies)
-    }
-
-    /// [`Self::publish_derived`] over a node key already behind its shared
-    /// allocation.
-    fn publish_shared_derived(
-        &mut self,
-        node: Arc<ResolutionFactKey>,
-        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
-    ) -> bool {
-        verter_debug_assert!(
-            node.is_derived_node(),
-            "only a derived DAG node carries direct edges"
-        );
-        let replaced = self.forward.contains_key(node.as_ref());
-        self.detach_edges(&node);
-        self.retired_nodes.remove(node.as_ref());
-        let mut direct = ResolutionEdgeSet::default();
-        for dependency in dependencies {
-            // A node is never its own dependency: a recompute of Q that
-            // reuses Q's own prior answer is the SAME decision, not a
-            // child of itself, and a self-edge would make propagation
-            // advance the node that seeded it.
-            if dependency == *node {
-                continue;
-            }
-            // A dependency already indexed keeps its one allocation.
-            let dependency = match self.reverse.get_key_value(&dependency) {
-                Some((shared, _)) => Arc::clone(shared),
-                None => Arc::new(dependency),
-            };
-            self.reverse
-                .entry(Arc::clone(&dependency))
-                .or_default()
-                .insert(Arc::clone(&node));
-            direct.insert(dependency);
-        }
-        if let Some(owner) = node.owner_canonical() {
-            self.owner_decisions
-                .entry((owner.to_owned(), node.population()))
-                .or_default()
-                .insert(Arc::clone(&node));
-        }
-        self.edge_count += direct.len();
-        self.forward.insert(node, direct);
-        replaced
+        self.publish_record(Arc::new(node), dependencies, None)
     }
 
     /// [`Self::publish_derived`] for a decision node whose bytes `charge`
@@ -602,9 +694,169 @@ impl ResolutionFactRoot {
         dependencies: impl IntoIterator<Item = ResolutionFactKey>,
         charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
     ) -> bool {
-        let node = Arc::new(node);
-        self.decision_charges.insert(Arc::clone(&node), charge);
-        self.publish_shared_derived(node, dependencies)
+        self.publish_record(Arc::new(node), dependencies, Some(charge))
+    }
+
+    /// A NEW node joins the unfolded batch; a node the root already holds
+    /// is replaced in the folded maps, after the batch, exactly where
+    /// sequential publication would replace it.
+    fn publish_record(
+        &mut self,
+        node: Arc<ResolutionFactKey>,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+        charge: Option<
+            Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+        >,
+    ) -> bool {
+        verter_debug_assert!(
+            node.is_derived_node(),
+            "only a derived DAG node carries direct edges"
+        );
+        let hash = node_hash(&node);
+        let replaced = self.forward.contains_key(node.as_ref()) || self.pending_holds(&node, hash);
+        // `imbl` copies the path to a key it is asked to remove even when
+        // the key is absent, so only a node that is there is removed.
+        if self.retired_nodes.contains(node.as_ref()) {
+            self.retired_nodes.remove(node.as_ref());
+        }
+        let record = Arc::new(DerivedNodeRecord {
+            dependencies: self.shared_dependencies(&node, dependencies),
+            node,
+            charge,
+        });
+        if replaced {
+            self.fold_pending();
+            self.attach(record);
+            return true;
+        }
+        let len = self.pending.as_ref().map_or(0, |head| head.len) + 1;
+        self.pending = Some(Arc::new(PendingPublication {
+            record,
+            hash,
+            len,
+            older: self.pending.take(),
+        }));
+        if len >= publication_batch() {
+            self.fold_pending();
+        }
+        false
+    }
+
+    /// The node's dependencies, deduplicated in first-observation order,
+    /// without the node itself, each behind the allocation the reverse map
+    /// already holds for it when there is one.
+    fn shared_dependencies(
+        &self,
+        node: &ResolutionFactKey,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+    ) -> Box<[Arc<ResolutionFactKey>]> {
+        /// Below this many, a duplicate is found by scanning the slice.
+        const SCAN_LIMIT: usize = 16;
+        let dependencies = dependencies.into_iter();
+        let mut shared: Vec<Arc<ResolutionFactKey>> =
+            Vec::with_capacity(dependencies.size_hint().0);
+        let mut seen: Option<rustc_hash::FxHashSet<Arc<ResolutionFactKey>>> = None;
+        for dependency in dependencies {
+            // A node is never its own dependency: a recompute of Q that
+            // reuses Q's own prior answer is the SAME decision, not a
+            // child of itself, and a self-edge would make propagation
+            // advance the node that seeded it.
+            if dependency == *node {
+                continue;
+            }
+            let duplicate = match &seen {
+                Some(seen) => seen.contains(&dependency),
+                None => shared.iter().any(|known| **known == dependency),
+            };
+            if duplicate {
+                continue;
+            }
+            // A dependency already indexed keeps its one allocation.
+            let dependency = match self.reverse.get_key_value(&dependency) {
+                Some((indexed, _)) => Arc::clone(indexed),
+                None => Arc::new(dependency),
+            };
+            match &mut seen {
+                Some(seen) => {
+                    seen.insert(Arc::clone(&dependency));
+                }
+                None if shared.len() >= SCAN_LIMIT => {
+                    let mut set: rustc_hash::FxHashSet<_> = shared.iter().cloned().collect();
+                    set.insert(Arc::clone(&dependency));
+                    seen = Some(set);
+                }
+                None => {}
+            }
+            shared.push(dependency);
+        }
+        shared.into_boxed_slice()
+    }
+
+    /// Whether an unfolded publication holds `node`.
+    fn pending_holds(&self, node: &ResolutionFactKey, hash: u64) -> bool {
+        self.pending_record(node, hash).is_some()
+    }
+
+    fn pending_record(
+        &self,
+        node: &ResolutionFactKey,
+        hash: u64,
+    ) -> Option<&Arc<DerivedNodeRecord>> {
+        PendingPublication::iter(self.pending.as_ref())
+            .find(|entry| entry.hash == hash && *entry.record.node == *node)
+            .map(|entry| &entry.record)
+    }
+
+    /// The live record of `node`, folded or not.
+    fn node_record(&self, node: &ResolutionFactKey) -> Option<&Arc<DerivedNodeRecord>> {
+        match self.forward.get(node) {
+            Some(record) => Some(record),
+            None if self.pending.is_some() => self.pending_record(node, node_hash(node)),
+            None => None,
+        }
+    }
+
+    /// Fold every unfolded publication into the persistent maps, oldest
+    /// first: the maps end exactly as sequential publication would have
+    /// left them, and each HAMT node the batch touches is copied once.
+    fn fold_pending(&mut self) {
+        let Some(head) = self.pending.take() else {
+            return;
+        };
+        let mut batch: Vec<Arc<DerivedNodeRecord>> = PendingPublication::iter(Some(&head))
+            .map(|entry| Arc::clone(&entry.record))
+            .collect();
+        drop(head);
+        batch.reverse();
+        for record in batch {
+            self.attach(record);
+        }
+    }
+
+    /// Replace `record.node`'s folded edges with `record`'s.
+    fn attach(&mut self, record: Arc<DerivedNodeRecord>) {
+        let node = &record.node;
+        self.detach_edges(node);
+        for dependency in record.dependencies.iter() {
+            self.reverse
+                .entry(Arc::clone(dependency))
+                .or_default()
+                .insert(Arc::clone(node));
+        }
+        if let Some(owner) = node.owner_canonical() {
+            let index_key = (owner.clone(), node.population());
+            match self.owner_decisions.get_mut(&index_key) {
+                Some(decisions) => {
+                    decisions.insert(Arc::clone(node));
+                }
+                None => {
+                    self.owner_decisions
+                        .insert(index_key, ResolutionEdgeSet::unit(Arc::clone(node)));
+                }
+            }
+        }
+        self.edge_count += record.dependencies.len();
+        self.forward.insert(Arc::clone(node), record);
     }
 
     /// Drop a derived node: ADVANCE its version, then drop its complete
@@ -633,15 +885,16 @@ impl ResolutionFactRoot {
         node: &ResolutionFactKey,
         version: ResolutionFactVersion,
     ) -> bool {
-        if !self.forward.contains_key(node) {
+        if self.node_record(node).is_none() {
             return false;
         }
+        self.fold_pending();
         self.detach_edges(node);
+        // The record, and with it the node's charge, leaves this root.
         self.forward.remove(node);
-        self.decision_charges.remove(node);
         let mut orphaned_owner_set = None;
         if let Some(owner) = node.owner_canonical() {
-            let index_key = (owner.to_owned(), node.population());
+            let index_key = (owner.clone(), node.population());
             let empty = match self.owner_decisions.get_mut(&index_key) {
                 Some(decisions) => {
                     decisions.remove(node);
@@ -652,7 +905,7 @@ impl ResolutionFactRoot {
             if empty {
                 self.owner_decisions.remove(&index_key);
                 orphaned_owner_set = Some(ResolutionFactKey::owner_resolution_set(
-                    CanonicalResolutionId::new(owner),
+                    owner.clone(),
                     node.population(),
                 ));
             }
@@ -684,9 +937,10 @@ impl ResolutionFactRoot {
         &mut self,
         fresh: impl FnOnce() -> ResolutionFactVersion,
     ) -> bool {
-        if self.retired_nodes.len() <= self.forward.len().max(TOMBSTONE_RETIREMENT_MINIMUM) {
+        if self.retired_nodes.len() <= self.live_nodes().max(TOMBSTONE_RETIREMENT_MINIMUM) {
             return false;
         }
+        self.fold_pending();
         let floor = self.derived_floor;
         for node in self.forward.keys() {
             if !self.versions.contains_key(node) {
@@ -700,12 +954,28 @@ impl ResolutionFactRoot {
         true
     }
 
+    /// Live derived nodes, folded or not.
+    fn live_nodes(&self) -> usize {
+        self.forward.len() + self.pending.as_ref().map_or(0, |head| head.len)
+    }
+
     /// Current occupancy of this root's derived graph.
     pub(crate) fn residency(&self) -> DerivedGraphResidency {
+        let mut edges = self.edge_count;
+        let mut unfolded_buckets: rustc_hash::FxHashSet<&ResolutionFactKey> =
+            rustc_hash::FxHashSet::default();
+        for entry in PendingPublication::iter(self.pending.as_ref()) {
+            edges += entry.record.dependencies.len();
+            for dependency in entry.record.dependencies.iter() {
+                if !self.reverse.contains_key(dependency.as_ref()) {
+                    unfolded_buckets.insert(dependency);
+                }
+            }
+        }
         DerivedGraphResidency {
-            derived_nodes: self.forward.len(),
-            edges: self.edge_count,
-            dependency_buckets: self.reverse.len(),
+            derived_nodes: self.live_nodes(),
+            edges,
+            dependency_buckets: self.reverse.len() + unfolded_buckets.len(),
             retired_nodes: self.retired_nodes.len(),
         }
     }
@@ -714,9 +984,9 @@ impl ResolutionFactRoot {
         let Some(previous) = self.forward.get(node).cloned() else {
             return;
         };
-        self.edge_count -= previous.len();
-        for dependency in previous {
-            let empty = match self.reverse.get_mut(&dependency) {
+        self.edge_count -= previous.dependencies.len();
+        for dependency in previous.dependencies.iter() {
+            let empty = match self.reverse.get_mut(dependency.as_ref()) {
                 Some(dependents) => {
                     dependents.remove(node);
                     dependents.is_empty()
@@ -724,7 +994,7 @@ impl ResolutionFactRoot {
                 None => false,
             };
             if empty {
-                self.reverse.remove(&dependency);
+                self.reverse.remove(dependency.as_ref());
             }
         }
     }
@@ -735,13 +1005,27 @@ impl ResolutionFactRoot {
         owner: &str,
         population: ResolutionPopulation,
     ) -> Vec<ResolutionFactKey> {
-        self.owner_decisions
-            .get(&(
-                verter_session_query::resolution::normalize_canonical_id(owner),
-                population,
-            ))
+        let owner = CanonicalResolutionId::new(
+            verter_session_query::resolution::normalize_canonical_id(owner),
+        );
+        let mut decisions: Vec<ResolutionFactKey> = self
+            .owner_decisions
+            .get(&(owner.clone(), population))
             .map(|decisions| decisions.iter().map(|node| (**node).clone()).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut unfolded: Vec<&PendingPublication> =
+            PendingPublication::iter(self.pending.as_ref()).collect();
+        unfolded.reverse();
+        decisions.extend(
+            unfolded
+                .into_iter()
+                .map(|entry| entry.record.node.as_ref())
+                .filter(|node| {
+                    node.owner_canonical() == Some(&owner) && node.population() == population
+                })
+                .cloned(),
+        );
+        decisions
     }
 
     /// One derived node's complete direct dependency set.
@@ -749,9 +1033,13 @@ impl ResolutionFactRoot {
         &self,
         node: &ResolutionFactKey,
     ) -> Option<Vec<ResolutionFactKey>> {
-        self.forward
-            .get(node)
-            .map(|deps| deps.iter().map(|dep| (**dep).clone()).collect())
+        self.node_record(node).map(|record| {
+            record
+                .dependencies
+                .iter()
+                .map(|dependency| (**dependency).clone())
+                .collect()
+        })
     }
 
     /// Every `ContextSelection` key some derived node depends on.
@@ -760,11 +1048,33 @@ impl ResolutionFactRoot {
     /// selections. Bounded by the graph's own context edges — never by
     /// the project set, and never by the whole fact ledger.
     pub(crate) fn registered_context_selection_keys(&self) -> Vec<ResolutionFactKey> {
-        self.reverse
+        let is_context =
+            |key: &ResolutionFactKey| matches!(key, ResolutionFactKey::ContextSelection { .. });
+        let mut keys: Vec<ResolutionFactKey> = self
+            .reverse
             .keys()
-            .filter(|key| matches!(key.as_ref(), ResolutionFactKey::ContextSelection { .. }))
+            .filter(|key| is_context(key))
             .map(|key| (**key).clone())
-            .collect()
+            .collect();
+        let mut unfolded: rustc_hash::FxHashSet<&ResolutionFactKey> =
+            rustc_hash::FxHashSet::default();
+        for entry in PendingPublication::iter(self.pending.as_ref()) {
+            for dependency in entry.record.dependencies.iter() {
+                if is_context(dependency)
+                    && !self.reverse.contains_key(dependency.as_ref())
+                    && unfolded.insert(dependency)
+                {
+                    keys.push((**dependency).clone());
+                }
+            }
+        }
+        keys
+    }
+
+    /// The dependents of any key, over the folded maps and the unfolded
+    /// batch alike.
+    fn dependent_index(&self) -> DependentIndex<'_> {
+        DependentIndex::new(&self.reverse, self.pending.as_ref())
     }
 
     /// Seed this mutation batch's propagation from `key` without claiming
@@ -780,10 +1090,11 @@ impl ResolutionFactRoot {
     /// The derived nodes directly depending on `key`.
     #[cfg(test)]
     pub(crate) fn direct_dependents(&self, key: &ResolutionFactKey) -> Vec<ResolutionFactKey> {
-        self.reverse
-            .get(key)
-            .map(|dependents| dependents.iter().map(|node| (**node).clone()).collect())
-            .unwrap_or_default()
+        self.dependent_index()
+            .dependents(key)
+            .into_iter()
+            .map(|node| (*node).clone())
+            .collect()
     }
 
     /// Drain the direct fact keys this mutation batch advanced.
@@ -812,11 +1123,11 @@ impl ResolutionFactRoot {
         let mut queue: std::collections::VecDeque<ResolutionFactKey> = seeds.into_iter().collect();
         let mut visited: rustc_hash::FxHashSet<ResolutionFactKey> = queue.iter().cloned().collect();
         let mut advanced = Vec::new();
+        // Only the version ledger is written, so the adjacency is read
+        // through one index for the whole walk.
+        let index = DependentIndex::new(&self.reverse, self.pending.as_ref());
         while let Some(key) = queue.pop_front() {
-            let Some(dependents) = self.reverse.get(&key).cloned() else {
-                continue;
-            };
-            for dependent in dependents {
+            for dependent in index.dependents(&key) {
                 if !visited.insert((*dependent).clone()) {
                     continue;
                 }
@@ -828,6 +1139,12 @@ impl ResolutionFactRoot {
         }
         advanced
     }
+}
+
+/// A derived node's hash under the graph's hasher.
+fn node_hash(node: &ResolutionFactKey) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(node)
 }
 
 #[derive(Debug, Clone)]
@@ -1102,19 +1419,18 @@ impl RequestOverlayRoot {
                 queue.push_back(key.in_population(world.population));
             }
         }
+        let graphs: Vec<DependentIndex<'_>> = std::iter::once(&world.base.facts)
+            .chain(world.session.as_deref().map(|session| &session.facts))
+            .map(ResolutionFactRoot::dependent_index)
+            .collect();
         while let Some(key) = queue.pop_front() {
-            let graphs = std::iter::once(&world.base.facts)
-                .chain(world.session.as_deref().map(|session| &session.facts));
-            for graph in graphs {
-                let Some(dependents) = graph.reverse.get(&key) else {
-                    continue;
-                };
-                for dependent in dependents {
+            for graph in &graphs {
+                for dependent in graph.dependents(&key) {
                     if derived.contains_key(dependent.as_ref()) {
                         continue;
                     }
-                    derived.insert((**dependent).clone(), mint_overlay_version());
-                    queue.push_back((**dependent).clone());
+                    derived.insert((*dependent).clone(), mint_overlay_version());
+                    queue.push_back((*dependent).clone());
                 }
             }
         }
@@ -4780,5 +5096,336 @@ mod root_graph_tests {
             Ok(ResolveContextId::unowned())
         );
         assert_eq!(memo.evaluations("/a.ts"), 1);
+    }
+
+    fn decision_from(importer: &str, specifier: &str) -> ResolutionFactKey {
+        ResolutionFactKey::decision(ResolutionQueryKey::importer(
+            importer,
+            specifier,
+            ResolutionContext {
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+            },
+            ResolveContextId::from_hashes([0xA1; 16], [0xA2; 16]),
+            ResolutionPopulation::Base,
+        ))
+    }
+
+    fn scope(prefix: &str) -> ResolutionFactKey {
+        ResolutionFactKey::RecoveryScope {
+            canonical_prefix: CanonicalResolutionId::new(prefix),
+            population: ResolutionPopulation::Base,
+        }
+    }
+
+    fn context(importer: &str) -> ResolutionFactKey {
+        ResolutionFactKey::ContextSelection {
+            entry: ResolutionEntry::Importer(CanonicalResolutionId::new(importer)),
+            population: ResolutionPopulation::Base,
+        }
+    }
+
+    /// Run `f` with roots folding every `batch` publications.
+    fn with_batch<T>(batch: usize, f: impl FnOnce() -> T) -> T {
+        PUBLICATION_BATCH_OVERRIDE.with(|cell| cell.set(Some(batch)));
+        let value = f();
+        PUBLICATION_BATCH_OVERRIDE.with(|cell| cell.set(None));
+        value
+    }
+
+    /// The allocations and bytes of publishing `decisions` barrel-shaped
+    /// decisions, each into a clone of the root while the previous
+    /// generation is still held — as a captured view holds it while its
+    /// resolution publishes.
+    fn held_root_publication_cost(decisions: usize) -> (usize, usize) {
+        const DIRECTORY: &str = "/w/a/b/c/d/e/f/g/h/i/src";
+        let importer = format!("{DIRECTORY}/index.ts");
+        // Every decision shares the importer's ancestor recovery scopes
+        // and its context selection, and has four edges of its own.
+        let mut shared: Vec<ResolutionFactKey> = std::iter::successors(Some(DIRECTORY), |prefix| {
+            prefix
+                .rsplit_once('/')
+                .map(|(parent, _)| parent)
+                .filter(|parent| !parent.is_empty())
+        })
+        .map(scope)
+        .collect();
+        shared.push(scope("/"));
+        shared.push(context(&importer));
+        let publications: Vec<(ResolutionFactKey, Vec<ResolutionFactKey>)> = (0..decisions)
+            .map(|index| {
+                let target = format!("{DIRECTORY}/leaf-{index}.ts");
+                let mut dependencies = vec![
+                    ResolutionFactKey::ExactResolution {
+                        entry: ResolutionEntry::Importer(CanonicalResolutionId::new(
+                            importer.as_str(),
+                        )),
+                        specifier: RawSpecifier::new(format!("./leaf-{index}")),
+                        phase: ResolvePhase::ProviderGraph,
+                        kind: ResolveRequestKind::EsmImport,
+                        population: ResolutionPopulation::Base,
+                    },
+                    leaf(&target),
+                ];
+                dependencies.extend(shared.iter().cloned());
+                dependencies.push(ResolutionFactKey::Realpath {
+                    requested: CanonicalResolutionId::new(target.as_str()),
+                    population: ResolutionPopulation::Base,
+                });
+                dependencies.push(context(&target));
+                (
+                    decision_from(&importer, &format!("./leaf-{index}")),
+                    dependencies,
+                )
+            })
+            .collect();
+        let mut root = ResolutionFactRoot::default();
+        let ((), allocations, bytes) = crate::test_allocator::measure_allocations(|| {
+            for (node, dependencies) in publications {
+                let held = root.clone();
+                root.publish_derived(node, dependencies);
+                drop(held);
+            }
+        });
+        assert_eq!(root.residency().derived_nodes, decisions);
+        (allocations, bytes)
+    }
+
+    /// **A publication into a root the previous generation still shares
+    /// costs a bounded number of bytes, however many edges it shares with
+    /// its siblings.**
+    ///
+    /// Each resolution publishes its decision into a clone of the
+    /// published root while captured views hold the previous one. A
+    /// barrel's imports each have a few edges of their own and a dozen
+    /// shared with every sibling: the importer's ancestor recovery scopes
+    /// and its context selection. Writing each publication straight into
+    /// the persistent maps copied the HAMT path to every edge — the
+    /// reverse map's root and interior nodes, every shared dependent
+    /// set's path — on every publication.
+    ///
+    /// Mutation recipe: make `publication_batch` return 1, so every
+    /// publication folds at once. Both bounds fail several times over.
+    #[test]
+    fn publishing_into_held_roots_costs_bounded_bytes_per_decision() {
+        const DECISIONS: usize = 512;
+        let (allocations, bytes) = held_root_publication_cost(DECISIONS);
+        let (per_decision_allocations, per_decision_bytes) =
+            (allocations / DECISIONS, bytes / DECISIONS);
+        assert!(
+            per_decision_bytes < 12 * 1024,
+            "a publication must not copy a persistent path per edge: \
+             {per_decision_bytes} bytes per decision"
+        );
+        assert!(
+            per_decision_allocations < 32,
+            "{per_decision_allocations} allocations per decision"
+        );
+    }
+
+    /// **A root reads its unfolded publications exactly as it reads them
+    /// folded**, through every read the engine makes, across
+    /// publications, republications, removals, propagation, tombstone
+    /// retirement and held snapshots, and it holds each decision's charge
+    /// exactly as long.
+    ///
+    /// The reference root folds every publication at once — the
+    /// sequential publication the batch replaces. The batched root folds
+    /// every few, so the script crosses fold boundaries in every state.
+    ///
+    /// Mutation recipe: drop the unfolded publications from
+    /// `owner_child_decisions`, `direct_dependencies`, `residency`,
+    /// `registered_context_selection_keys` or `DependentIndex::dependents`,
+    /// or skip `fold_pending` in `remove_derived`. Each makes a read here
+    /// differ.
+    #[test]
+    fn a_publication_batch_reads_exactly_as_its_fold() {
+        struct Charge(Arc<std::sync::atomic::AtomicIsize>);
+        impl Drop for Charge {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        fn charge(
+            held: &Arc<std::sync::atomic::AtomicIsize>,
+        ) -> Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>
+        {
+            held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Arc::new(
+                verter_session_query::retention::resolution_charge::ResolutionRetentionCharge::new(
+                    Charge(Arc::clone(held)),
+                ),
+            )
+        }
+
+        let importers = ["/p/a.ts", "/p/b.ts", "/p/c/d.ts"];
+        let nodes: Vec<ResolutionFactKey> = (0..48)
+            .map(|index| decision_from(importers[index % 3], &format!("./m{index}")))
+            .collect();
+        let owner_sets: Vec<ResolutionFactKey> = importers
+            .iter()
+            .map(|importer| {
+                ResolutionFactKey::owner_resolution_set(
+                    CanonicalResolutionId::new(*importer),
+                    ResolutionPopulation::Base,
+                )
+            })
+            .collect();
+        let leaves: Vec<ResolutionFactKey> = (0..10)
+            .map(|index| leaf(&format!("/p/leaf-{index}.ts")))
+            .chain([scope("/p"), scope("/"), scope("/p/c")])
+            .chain(importers.iter().map(|importer| context(importer)))
+            .collect();
+        let keys: Vec<ResolutionFactKey> = nodes
+            .iter()
+            .chain(&owner_sets)
+            .chain(&leaves)
+            .cloned()
+            .collect();
+
+        let reads = |root: &ResolutionFactRoot| {
+            let mut reads = vec![format!("{:?}", root.residency())];
+            for key in &keys {
+                reads.push(format!(
+                    "{key:?}: {:?} {:?} {:?}",
+                    root.version(key),
+                    root.direct_dependencies(key),
+                    sorted(root.direct_dependents(key)),
+                ));
+            }
+            for importer in importers {
+                reads.push(format!(
+                    "{importer}: {:?}",
+                    sorted(root.owner_child_decisions(importer, ResolutionPopulation::Base))
+                ));
+            }
+            reads.push(format!(
+                "{:?}",
+                sorted(root.registered_context_selection_keys())
+            ));
+            reads
+        };
+
+        // A deterministic script over every structural operation.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        let mut script = Vec::new();
+        for _ in 0..1000 {
+            let op = next(20);
+            let node = next(nodes.len());
+            let dependencies: Vec<usize> = (0..next(6)).map(|_| next(keys.len())).collect();
+            script.push((op, node, dependencies, next(leaves.len())));
+        }
+
+        let reference_charges = Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        let batched_charges = Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        let mut reference = ResolutionFactRoot::default();
+        let mut batched = ResolutionFactRoot::default();
+        // Each held snapshot is held on both sides, as each keeps its charges.
+        let mut snapshots: Vec<(ResolutionFactRoot, ResolutionFactRoot, Vec<String>)> = Vec::new();
+        let mut folds = 0_usize;
+        let (mut unfolded_republications, mut unfolded_removals) = (0_usize, 0_usize);
+        for (step, (op, node, dependencies, seed)) in script.into_iter().enumerate() {
+            let version = ResolutionFactVersion::fresh(step as u64 + 1);
+            // Every other step aims at a node the batch holds unfolded.
+            let node = match PendingPublication::iter(batched.pending.as_ref()).nth(node % 4) {
+                Some(entry) if step % 2 == 0 => nodes
+                    .iter()
+                    .position(|candidate| *candidate == *entry.record.node)
+                    .unwrap_or(node),
+                _ => node,
+            };
+            let apply = |root: &mut ResolutionFactRoot,
+                         charges: &Arc<std::sync::atomic::AtomicIsize>| {
+                match op {
+                    // Publication, charged or not, with duplicates and
+                    // self-edges among the dependencies.
+                    0..=9 => {
+                        let dependencies: Vec<ResolutionFactKey> = dependencies
+                            .iter()
+                            .map(|&index| keys[index].clone())
+                            .collect();
+                        if op % 2 == 0 {
+                            root.publish_charged_decision(
+                                nodes[node].clone(),
+                                dependencies,
+                                charge(charges),
+                            );
+                        } else {
+                            root.publish_derived(nodes[node].clone(), dependencies);
+                        }
+                    }
+                    // An owner set over the owner's current decisions.
+                    10 => {
+                        let mut children = root
+                            .owner_child_decisions(importers[node % 3], ResolutionPopulation::Base);
+                        children.sort();
+                        if !children.is_empty() {
+                            root.publish_derived(owner_sets[node % 3].clone(), children);
+                        }
+                    }
+                    11..=16 => {
+                        root.remove_derived(&nodes[node], version);
+                    }
+                    17 => {
+                        root.propagate([leaves[seed].clone()], || version);
+                    }
+                    _ => {
+                        root.retire_tombstones_if_due(|| version);
+                    }
+                }
+            };
+            let unfolded = batched.forward.get(&nodes[node]).is_none()
+                && batched.node_record(&nodes[node]).is_some();
+            match op {
+                0..=9 => unfolded_republications += usize::from(unfolded),
+                11..=16 => unfolded_removals += usize::from(unfolded),
+                _ => {}
+            }
+            with_batch(1, || apply(&mut reference, &reference_charges));
+            let unfolded_before = batched.pending.is_some();
+            with_batch(6, || apply(&mut batched, &batched_charges));
+            folds += usize::from(unfolded_before && batched.pending.is_none());
+
+            let expected = reads(&reference);
+            assert_eq!(reads(&batched), expected, "step {step}: op {op}");
+            assert_eq!(
+                batched_charges.load(std::sync::atomic::Ordering::SeqCst),
+                reference_charges.load(std::sync::atomic::Ordering::SeqCst),
+                "step {step}: the batch holds exactly the charges its fold holds"
+            );
+            if step % 50 == 0 {
+                snapshots.push((batched.clone(), reference.clone(), expected));
+            }
+        }
+        assert!(
+            folds > 20 && unfolded_republications > 10 && unfolded_removals > 10,
+            "fixture invariant: the script crossed folds ({folds}), and republished \
+             ({unfolded_republications}) and removed ({unfolded_removals}) unfolded nodes"
+        );
+        for (snapshot, _, expected) in &snapshots {
+            assert_eq!(
+                &reads(snapshot),
+                expected,
+                "a held root reads what it read when it was taken"
+            );
+        }
+        drop(snapshots);
+        drop(reference);
+        drop(batched);
+        assert_eq!(
+            batched_charges.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "every charge is released once, with its last root"
+        );
+        assert_eq!(
+            reference_charges.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 }
