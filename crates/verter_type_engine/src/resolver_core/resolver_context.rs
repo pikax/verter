@@ -426,8 +426,10 @@ pub fn observe_program_file_order(
 /// `bubble_fact_signature_via_tls` and other warm-hit bubble-up paths.
 /// No-op when the stack is empty or `sig` is empty.
 #[inline]
-pub fn observe_fan_out_borrowed(sig: &[verter_session_query::facts::fact_cache::FactVersionRef]) {
-    tracer_stack::observe_fan_out_borrowed(sig);
+pub fn observe_fan_out_borrowed<'s>(
+    sig: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
+) {
+    tracer_stack::observe_fan_out_facts(sig.into());
 }
 
 /// Whether any fact tracer is installed on the current thread's stack.
@@ -447,7 +449,7 @@ pub fn fact_tracer_installed() -> bool {
 pub struct RecordedFactReads {
     /// Every distinct fact fanned out while the computation ran: its own
     /// reads, and the receipt of each completed result it consumed.
-    pub facts: std::sync::Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+    pub facts: verter_session_query::facts::fact_set::FactSet,
     /// Whether any non-cacheable read was marked, local-only included.
     pub non_cacheable: bool,
 }
@@ -486,7 +488,9 @@ pub(crate) fn complete_with_receipt(
     reads: &RecordedFactReads,
 ) -> verter_session_query::facts::fact_cache::FactVersionRef {
     let receipt = verter_session_query::facts::fact_cache::FactVersionRef::Receipt(
-        verter_session_query::facts::fact_cache::ResultReceipt::new(reads.facts.to_vec()),
+        verter_session_query::facts::fact_cache::ResultReceipt::new(
+            reads.facts.iter().cloned().collect(),
+        ),
     );
     tracer_stack::collapse_evidence(start, end, &receipt);
     receipt

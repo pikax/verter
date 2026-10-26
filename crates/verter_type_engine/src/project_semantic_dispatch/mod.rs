@@ -4241,7 +4241,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         build_local: BuildLocalTaint,
-        finalise: impl Into<verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise>,
+        finalise: impl Into<verter_session_query::facts::fact_read_set::FactReadSetFinalise>,
         carrier_prelude: &CarrierNormalizationPrelude,
     ) -> (
         crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
@@ -4330,9 +4330,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // flows to the caller; the memo refuses admission.
         output.cache_suppress |= matches!(
             &finalise,
-            verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::NonCacheable(
-                _
-            )
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         if cfg!(any(test, feature = "test-support"))
             || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
@@ -5831,7 +5829,7 @@ pub(super) enum ServedAdmission {
 /// fenced-serve prelude) forces the entry out of the memo.
 #[derive(Clone)]
 pub struct CarrierNormalizationPrelude {
-    facts: Option<Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>>,
+    facts: Option<verter_session_query::facts::fact_set::FactSet>,
     cache_suppress: bool,
     partial_reasons: crate::semantic_query::PartialReasonSet,
     normalized_source: Option<carrier::CarrierResolution>,
@@ -5886,7 +5884,7 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
 fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
-    finalise: impl Into<verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise>,
+    finalise: impl Into<verter_session_query::facts::fact_read_set::FactReadSetFinalise>,
     carrier_prelude: &CarrierNormalizationPrelude,
 ) -> (
     crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
@@ -5897,7 +5895,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
     let mut rooting = None;
     let finalised_cleanly = matches!(
         &finalise,
-        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::Ok(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_)
     ) && !carrier_prelude.is_partial()
         && !carrier_prelude.cache_suppress();
     if carrier_prelude.is_partial() {
@@ -5913,12 +5911,12 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
     output.cache_suppress |= carrier_prelude.cache_suppress();
     let finalise_is_non_cacheable = matches!(
         &finalise,
-        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     output.cache_suppress |= finalise_is_non_cacheable;
     match finalise {
-        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::Ok(traced_facts)
-        | verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::NonCacheable(
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(traced_facts)
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
             traced_facts,
         ) => {
             // Fold the build's `dep_signature` fence into the traced
@@ -5946,33 +5944,22 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             // any of them misses the warm read — without them a memoized resolved
             // key could be admitted whose rewrite depended on untracked indexed /
             // augmentation state (cache poisoning).
-            let prelude_facts: &[verter_session_query::facts::fact_cache::FactVersionRef] =
-                carrier_prelude.facts.as_deref().unwrap_or(&[]);
-            // Built once for the carrier; built again only when the entry
-            // cannot be rooted and the facts ride a non-admitted carrier.
-            let merged_facts =
-                || -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
-                    if fence_facts.is_empty() && prelude_facts.is_empty() {
-                        traced_facts.iter().cloned().collect()
-                    } else {
-                        let mut merged: Vec<
-                            verter_session_query::facts::fact_cache::FactVersionRef,
-                        > = Vec::with_capacity(
-                            traced_facts.len() + fence_facts.len() + prelude_facts.len(),
-                        );
-                        merged.extend(traced_facts.iter().cloned());
-                        for fact in fence_facts.iter().chain(prelude_facts.iter()) {
-                            if !merged.iter().any(|existing| existing == fact) {
-                                merged.push(fact.clone());
-                            }
-                        }
-                        merged
-                    }
-                };
+            let empty_prelude = verter_session_query::facts::fact_set::FactSet::empty();
+            let prelude_facts = carrier_prelude.facts.as_ref().unwrap_or(&empty_prelude);
+            // What the carrier adds to the traced set, which it shares: the
+            // fence and the prelude.
+            let extra_facts = || -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+                fence_facts
+                    .iter()
+                    .chain(prelude_facts.iter())
+                    .filter(|fact| !traced_facts.contains(fact))
+                    .cloned()
+                    .collect()
+            };
             // A traced set that already holds the fence and every observed
             // self-root is its own completed carrier.
             let shared = if prelude_facts.is_empty() {
-                crate::fact_signature_helpers::shared_completed_structural_carrier_sealed(
+                crate::fact_signature_helpers::shared_completed_structural_carrier(
                     &output.observed_self_roots,
                     &traced_facts,
                     &fence_facts,
@@ -5982,7 +5969,11 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             };
             let completed = match shared {
                 Some(completed) => Ok(completed),
-                None => ctx.complete_graph_signature(&output.observed_self_roots, merged_facts()),
+                None => ctx.complete_graph_signature(
+                    &output.observed_self_roots,
+                    &traced_facts,
+                    extra_facts(),
+                ),
             };
             match completed {
                 Ok((facts, self_root_canonicals)) => {
@@ -6040,8 +6031,9 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                     output.cache_suppress = true;
                     output.graph_carrier = Some(Box::new(
                         verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                            verter_session_query::facts::fact_read_set::seal_canonical_signature(
-                                merged_facts(),
+                            verter_session_query::facts::fact_read_set::seal_onto(
+                                &traced_facts,
+                                extra_facts(),
                             ),
                         ),
                     ));
@@ -6050,7 +6042,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
         }
         // A domain moved under the build: no fact list it observed can root
         // the entry.
-        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::MutationUnstable => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             crate::request_context::observe_execution_abort(
                 crate::semantic_query::ExecutionAbort::Superseded,
             );

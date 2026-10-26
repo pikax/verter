@@ -56,7 +56,7 @@ fn regression_guard_read_set_signature_has_no_generation_field() {
             names,
             vec!["facts".to_string()],
             "ReadSetSignature MUST have exactly one field: `facts` (the \
-             path-precise fact rail, paged when wide). Generation belongs \
+             path-precise fact rail, one canonical set at any width). Generation belongs \
              on `CacheEntry<V>`, not on the signature carrier."
         );
         // Belt-and-suspenders: assert no `validated_at_generation` field.

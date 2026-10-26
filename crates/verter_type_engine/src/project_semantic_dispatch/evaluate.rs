@@ -11,8 +11,6 @@
 
 use std::sync::Arc;
 
-use verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise;
-#[cfg(any(test, feature = "test-support"))]
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
 use super::ProjectSemanticDispatch;
@@ -560,15 +558,14 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
 /// is the only way its observations reach them.
 fn deliver_evaluation_facts<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
     tracers: &mut [crate::fact_signature_helpers::StepwiseFactTracer<'_, W>],
-    finalise: &CanonicalFactReadSetFinalise,
+    finalise: &FactReadSetFinalise,
 ) {
-    let (CanonicalFactReadSetFinalise::Ok(facts)
-    | CanonicalFactReadSetFinalise::NonCacheable(facts)) = finalise
+    let (FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts)) = finalise
     else {
         return;
     };
     let _scope = tracers.last_mut().map(|parent| parent.install());
-    crate::fact_tracing::tracing::observe_fan_out_sealed(facts);
+    crate::fact_tracing::tracing::observe_fan_out_canonical(facts);
 }
 
 /// Deliver the facts every unfinished frame of a stopped evaluation
@@ -2322,42 +2319,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
-        finalise: impl Into<CanonicalFactReadSetFinalise>,
+        finalise: impl Into<FactReadSetFinalise>,
     ) -> EvaluateDeferredOutcome {
         let finalise = finalise.into();
-        let mutation_unstable = matches!(&finalise, CanonicalFactReadSetFinalise::MutationUnstable);
+        let mutation_unstable = matches!(&finalise, FactReadSetFinalise::MutationUnstable);
         let evidence = match finalise {
-            CanonicalFactReadSetFinalise::Ok(facts) => {
-                use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
+            FactReadSetFinalise::Ok(facts) => {
+                use verter_session_query::facts::fact_cache::FactVersionRef;
 
                 let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
-                // including whole-file facts retained on evidence pages.
-                crate::fact_signature_helpers::shared_completed_carrier_rooting_sealed_files(
+                // including whole-file facts of a wide traced set.
+                crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
                     &roots, &facts,
                 )
                 .map(Ok)
                 .unwrap_or_else(|| {
-                    roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                    roots.extend(facts.iter().filter_map(|fact| match fact {
                         FactVersionRef::FileWholeHash { canonical_id, hash } => {
                             Some((verter_type_expr::OwnedStr::from(&**canonical_id), *hash))
                         }
                         _ => None,
                     }));
                     self.ctx
-                        .complete_graph_signature(&roots, facts.to_vec())
-                        .and_then(|raw| {
-                            crate::fact_signature_helpers::CompletedStructuralEvidence::verify(raw)
-                                .ok_or(
-                                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-                                )
-                        })
+                        .complete_graph_signature(&roots, &facts, Vec::new())
                 })
                 .ok()
             }
-            CanonicalFactReadSetFinalise::NonCacheable(_) => None,
-            CanonicalFactReadSetFinalise::MutationUnstable => {
+            FactReadSetFinalise::NonCacheable(_) => None,
+            FactReadSetFinalise::MutationUnstable => {
                 crate::request_context::observe_execution_abort(
                     crate::semantic_query::ExecutionAbort::Superseded,
                 );

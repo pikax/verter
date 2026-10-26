@@ -220,7 +220,7 @@ fn merged_interface_indexed_access_work_is_linear() {
                 "collection plus probe work must grow linearly: {work:?}"
             );
         }
-        // Strict-world compaction starts only above an evidence page's width.
+        // Strict-world compaction starts only above the wide-signature width.
         // Preserve the structural-work ratios, and bound the completed probe
         // by one linear envelope that includes the compaction allowance at
         // every size, including sizes where compaction does no work.

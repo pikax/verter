@@ -151,15 +151,15 @@ fn family_a_entries_carry_fact_dep_signature() {
          survive as a second stored validity rail on the entry. Window:\n{cache_entry}"
     );
 
-    // 3. The imported-registry producer entry still carries the raw
-    //    `fact_dep_signature: Arc<[FactVersionRef]>` it lowers at
-    //    admission into `CacheAdmission::Cacheable { signature:
-    //    ReadSetSignature::new(...), ... }`.
+    // 3. The imported-registry producer entry carries the sealed
+    //    `fact_dep_signature: FactSet` it lowers at admission into
+    //    `CacheAdmission::Cacheable { signature: ReadSetSignature::new(...), ... }`.
     let import_entry = struct_window(&src, "pub struct ImportedRegistryEntry {");
     assert!(
-        import_entry.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
-        "ImportedRegistryEntry must carry `fact_dep_signature: Arc<[FactVersionRef]>` — \
-         the producer's transient carrier lowered to a `ReadSetSignature` at admission. \
+        import_entry.contains("fact_dep_signature: verter_session_query::facts::fact_set::FactSet")
+            || import_entry.contains("fact_dep_signature: FactSet"),
+        "ImportedRegistryEntry must carry its sealed `fact_dep_signature: FactSet` — \
+         the producer's canonical read set lowered to a `ReadSetSignature` at admission. \
          Window:\n{import_entry}"
     );
     // Negative: the surviving entry struct must NOT carry the legacy

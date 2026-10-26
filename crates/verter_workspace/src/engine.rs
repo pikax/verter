@@ -4585,7 +4585,7 @@ impl Engine {
                         cache_key.clone(),
                         entry.clone(),
                         bytes,
-                        &entry.signature.facts,
+                        (&entry.signature.facts).into(),
                         overlay.authority(),
                     );
                     published = seq.is_some();
@@ -4623,7 +4623,7 @@ impl Engine {
                         Err(None)
                     } else {
                         self.retention
-                            .reserve_with_evidence(bytes, &entry.signature.facts)
+                            .reserve_with_evidence(bytes, (&entry.signature.facts).into())
                             .map_err(|crate::overlay_residency::RetentionRefused| {
                                 Some(verter_audit::NonAdmissionReason::RetentionPressure)
                             })

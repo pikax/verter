@@ -49,9 +49,9 @@ impl crate::retention::resolution_charge::ResolutionRetentionAccount for Resolut
     fn reserve_retained_with_evidence(
         &self,
         bytes: usize,
-        facts: &[crate::facts::fact_cache::FactVersionRef],
+        facts: crate::facts::fact_set::FactsRef<'_>,
     ) -> Option<crate::retention::resolution_charge::ResolutionRetentionCharge> {
-        crate::facts::receipt::reserve_retained_with_evidence(&self.0, bytes, &[facts])
+        crate::facts::receipt::reserve_retained_with_evidence(&self.0, bytes, &[&facts])
             .admitted()
             .map(crate::retention::resolution_charge::ResolutionRetentionCharge::new)
     }

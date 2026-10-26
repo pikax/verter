@@ -3102,11 +3102,11 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
-/// A completed carrier wider than one evidence page — a traced set that
-/// already filled a page, plus the structural self-root merged in after
-/// finalisation — is paged and published whole, never refused for its width.
+/// A completed carrier wider than `WIDE_SIGNATURE_WIDTH` — a traced set
+/// already that wide, plus the structural self-root merged in after
+/// finalisation — is published whole, never refused for its width.
 #[test]
-fn semantic_publication_pages_a_post_finalise_wide_carrier() {
+fn semantic_publication_seals_a_post_finalise_wide_carrier_whole() {
     let canonical = "/w/semantic-publish.ts";
     let host = host();
     upsert_ts(&host, canonical, "export type Root = string;\n");
@@ -3114,7 +3114,7 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .ensure_indexed_ready(canonical)
         .expect("semantic root is indexed")
         .whole_hash;
-    let traced = crate::semantic_graph_self_root_tests::page_width_terminal_witness_facts();
+    let traced = crate::semantic_graph_self_root_tests::wide_width_terminal_witness_facts();
     let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
         QueryResult::Error(QueryError::Miss),
         verter_type_engine::semantic_query::DepSignature::default(),
@@ -3125,9 +3125,9 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
     let completed = finalise_traced_build_output(
         &host,
         output,
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(
-            traced.clone(),
-        )),
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::fact_set::FactSet::from(traced.clone()),
+        ),
         &CarrierNormalizationPrelude::none(),
     );
 
@@ -3139,17 +3139,16 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .graph_carrier
         .expect("the wide carrier is published");
     assert!(
-        carrier.facts.len() <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
-        "the published carrier's top level fits one page"
+        carrier.facts.len() > verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH,
+        "the published carrier is one set as wide as what it read"
     );
-    let entries: Vec<_> = carrier.entries().cloned().collect();
     assert!(
-        traced.iter().all(|fact| entries.contains(fact)),
-        "every traced fact survives into the paged carrier"
+        traced.iter().all(|fact| carrier.facts.contains(fact)),
+        "every traced fact survives into the carrier"
     );
 }
 
-/// A work-refused build that read more than one evidence page delivers its
+/// A work-refused build that read a wide set of facts delivers its
 /// WHOLE proving prefix: the broadcast carrier holds every traced fact, and
 /// the refusal is certified on that complete evidence — never on an empty
 /// or truncated signature.
@@ -3164,7 +3163,7 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
         .expect("the root is indexed")
         .whole_hash;
     let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 1)
             .map(|generation| {
                 verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
                     generation: generation as u64,
@@ -3245,7 +3244,9 @@ fn a_torn_self_root_never_certifies_a_refusal() {
         output
     };
     let traced = || {
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(Vec::new()))
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::fact_set::FactSet::from(Vec::new()),
+        )
     };
 
     let torn = || {

@@ -71,7 +71,7 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.read_set_signature.facts),
+        view.validates_fact_signature((&entry.read_set_signature.facts).into()),
         "permissive view must accept a ModuleAugmentationIndexShape \
          fact in the entry's read_set_signature.facts"
     );

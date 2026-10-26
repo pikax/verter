@@ -94,10 +94,10 @@ impl ComponentApiProjectionWitness {
         );
         let admitted_valid = current_view
             .view()
-            .validates_fact_signature(&self.admitted_read_set.facts);
+            .validates_fact_signature((&self.admitted_read_set.facts).into());
         let output_valid = current_view
             .view()
-            .validates_fact_signature(&self.output_read_set.facts);
+            .validates_fact_signature((&self.output_read_set.facts).into());
         if owner_whole_hash != self.owner_whole_hash
             || result_key != self.result_key
             || !admitted_valid

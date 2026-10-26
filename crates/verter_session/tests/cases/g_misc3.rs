@@ -45,8 +45,8 @@ mod repo_first_pass_diagnosis_corpus;
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 mod shallow_walk_no_over_materialise;
-#[path = "g_misc3/signature_width_pages.rs"]
-mod signature_width_pages;
+#[path = "g_misc3/signature_width.rs"]
+mod signature_width;
 #[path = "g_misc3/slot_binding_graph_fact_tracer_emission.rs"]
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]

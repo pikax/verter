@@ -99,7 +99,7 @@ fn validator_warms_then_invalidates_after_source_edit() {
 
     let warm_view = host.snapshot_view();
     assert!(
-        warm_view.validates_fact_signature(&warm_sig),
+        warm_view.validates_fact_signature((&warm_sig).into()),
         "warm-hit path: validator must return true against the admitted entry",
     );
 
@@ -119,7 +119,7 @@ fn validator_warms_then_invalidates_after_source_edit() {
 
     let post_edit_view = host.snapshot_view();
     assert!(
-        !post_edit_view.validates_fact_signature(&warm_sig),
+        !post_edit_view.validates_fact_signature((&warm_sig).into()),
         "after the owner's source edits, the fact ref must NOT validate (R5/R26 — content_hash changed)",
     );
 }

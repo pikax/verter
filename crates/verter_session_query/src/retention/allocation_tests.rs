@@ -38,8 +38,8 @@ fn strings_and_vectors_cost_their_capacity_not_their_length() {
 fn a_fact_signature_is_charged_for_its_variable_canonical_text() {
     let short: Arc<[FactVersionRef]> = Arc::from(vec![whole_hash("/a.ts".into())]);
     let long: Arc<[FactVersionRef]> = Arc::from(vec![whole_hash("x".repeat(10_000))]);
-    let short_bytes = fact_slice_bytes(&short, &mut AliasSet::new());
-    let long_bytes = fact_slice_bytes(&long, &mut AliasSet::new());
+    let short_bytes = fact_arc_slice_bytes(&short, &mut AliasSet::new());
+    let long_bytes = fact_arc_slice_bytes(&long, &mut AliasSet::new());
     // The former per-fact proxy charged both alike (64 bytes a fact); a
     // complete charge covers the ten-kilobyte canonical the long one owns.
     assert!(long_bytes >= short_bytes + 9_900);
@@ -62,14 +62,14 @@ fn one_charge_counts_a_shared_name_and_a_shared_slice_once() {
     };
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![parse("/a.ts"), parse("/b.ts")]);
     let mut aliases = AliasSet::new();
-    let once = fact_slice_bytes(&facts, &mut aliases);
+    let once = fact_arc_slice_bytes(&facts, &mut aliases);
     assert!(once >= 4_000, "the shared name is charged");
     assert!(
         once < 8_000,
         "two facts naming one interned name charge its text once"
     );
     assert_eq!(
-        fact_slice_bytes(&facts, &mut aliases),
+        fact_arc_slice_bytes(&facts, &mut aliases),
         0,
         "an alias of an allocation this charge already counted costs nothing more"
     );
@@ -77,17 +77,17 @@ fn one_charge_counts_a_shared_name_and_a_shared_slice_once() {
 
 #[test]
 fn an_evidence_receipt_costs_only_its_slot() {
-    let page = crate::facts::receipt::ResultReceipt::page_on(
+    let receipt = crate::facts::receipt::ResultReceipt::new_on(
         vec![whole_hash("y".repeat(5_000))],
         &crate::retention::SemanticRetentionAccount::new(
             crate::retention::RetentionLimits::defaults(),
         ),
     );
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Receipt(page)]);
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Receipt(receipt)]);
     assert_eq!(
-        fact_slice_bytes(&facts, &mut AliasSet::new()),
+        fact_arc_slice_bytes(&facts, &mut AliasSet::new()),
         arc_block_bytes(std::mem::size_of::<FactVersionRef>()),
-        "a page carries its own charge, so its holder is charged only the slot"
+        "a receipt carries its own charge, so its holder is charged only the slot"
     );
 }
 

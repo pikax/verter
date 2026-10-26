@@ -11,8 +11,8 @@
 //!
 //! [`ReceiptReverseIndex`] registers the graph's edges instead, each once:
 //!
-//! - **canonical → evidence**: a canonical names the evidence (a receipt, a
-//!   page, or a candidate's carrier) whose OWN facts read it;
+//! - **canonical → evidence**: a canonical names the evidence (a receipt or
+//!   a candidate's carrier) whose OWN facts read it;
 //! - **child → parent**: a consumed receipt names each evidence that
 //!   consumed it, including receipts no cache holds (uncached
 //!   intermediates);
@@ -104,10 +104,10 @@ enum Holder {
 
 /// The evidence an evidence node keeps alive while it is indexed.
 enum EvidenceOwner {
-    /// A consumed result's receipt, or a page of a wide signature.
+    /// A consumed result's receipt.
     Receipt(ResultReceipt),
-    /// A candidate's top-level carrier.
-    Carrier(Arc<[FactVersionRef]>),
+    /// A candidate's carrier.
+    Carrier(verter_session_query::facts::fact_set::FactSet),
     /// A candidate's dispatch fence, shared by every candidate holding the
     /// same allocation.
     Fence(DepSignature),
@@ -132,7 +132,7 @@ impl EvidenceOwner {
     fn addr(&self) -> EvidenceAddr {
         match self {
             Self::Receipt(receipt) => receipt.facts().as_ptr() as EvidenceAddr,
-            Self::Carrier(facts) => facts.as_ptr() as EvidenceAddr,
+            Self::Carrier(facts) => facts.address() as EvidenceAddr,
             Self::Fence(fence) => fence.as_ptr() as EvidenceAddr,
         }
     }
@@ -143,31 +143,45 @@ impl EvidenceOwner {
     /// edge however many of the file's facts it read.
     fn for_each_read<'a>(&'a self, mut visit: impl FnMut(EvidenceRead<'a>)) {
         let mut visited = FirstSeen::default();
-        let mut canonical_once = |canonical: &'a str, visit: &mut dyn FnMut(EvidenceRead<'a>)| {
-            if visited.insert(canonical) {
-                visit(EvidenceRead::Canonical(canonical));
+        match self {
+            Self::Receipt(receipt) => {
+                for fact in receipt.facts() {
+                    if let Some(read) = read_fact(fact, &mut visited) {
+                        visit(read);
+                    }
+                }
             }
-        };
-        let facts = match self {
-            Self::Receipt(receipt) => receipt.facts(),
-            Self::Carrier(facts) => facts,
+            // A carrier set is read in place.
+            Self::Carrier(facts) => {
+                for fact in facts.iter() {
+                    if let Some(read) = read_fact(fact, &mut visited) {
+                        visit(read);
+                    }
+                }
+            }
             Self::Fence(fence) => {
                 for crate::semantic_query::DepEntry(canonical, _) in fence.iter() {
-                    canonical_once(canonical, &mut visit);
-                }
-                return;
-            }
-        };
-        for fact in facts {
-            match fact {
-                FactVersionRef::Receipt(child) => visit(EvidenceRead::Receipt(child)),
-                leaf => {
-                    if let Some(canonical) = leaf.canonical_id() {
-                        canonical_once(canonical, &mut visit);
+                    if visited.insert(canonical) {
+                        visit(EvidenceRead::Canonical(canonical));
                     }
                 }
             }
         }
+    }
+}
+
+/// What reading `fact` visits: a consumed receipt, or its canonical the
+/// first time any fact of the node names it.
+fn read_fact<'a>(
+    fact: &'a FactVersionRef,
+    visited: &mut FirstSeen<'a>,
+) -> Option<EvidenceRead<'a>> {
+    match fact {
+        FactVersionRef::Receipt(child) => Some(EvidenceRead::Receipt(child)),
+        leaf => leaf
+            .canonical_id()
+            .filter(|canonical| visited.insert(canonical))
+            .map(EvidenceRead::Canonical),
     }
 }
 
@@ -308,7 +322,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 pub struct ReverseIndexOccupancy {
     /// Canonicals some node reads directly.
     pub canonicals: usize,
-    /// Evidence nodes: carriers, receipts and pages, cached or not.
+    /// Evidence nodes: carriers and receipts, cached or not.
     pub evidence: usize,
     /// Registered candidates.
     pub candidates: usize,
@@ -701,7 +715,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
         &self,
         key: K,
         payload: P,
-        carrier: &Arc<[FactVersionRef]>,
+        carrier: &verter_session_query::facts::fact_set::FactSet,
         extras: impl IntoIterator<Item = &'a str>,
     ) {
         self.register_fenced(key, payload, carrier, &DepSignature::default(), extras);
@@ -714,7 +728,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
         &self,
         key: K,
         payload: P,
-        carrier: &Arc<[FactVersionRef]>,
+        carrier: &verter_session_query::facts::fact_set::FactSet,
         fence: &DepSignature,
         extras: impl IntoIterator<Item = &'a str>,
     ) {
@@ -731,8 +745,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                     .iter()
                     .map(|canonical| state.link_canonical(canonical, holder))
                     .collect();
-                let carrier =
-                    state.link_evidence(EvidenceOwner::Carrier(Arc::clone(carrier)), holder);
+                let carrier = state.link_evidence(EvidenceOwner::Carrier(carrier.clone()), holder);
                 let fence = state.link_evidence(EvidenceOwner::Fence(fence.clone()), holder);
                 state.candidate_ids.table.insert(key.clone(), id);
                 state.candidate_ids.note_inserted();

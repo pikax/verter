@@ -69,7 +69,7 @@ fn component_meta_result_signature_carries_import_ref() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.read_set_signature.facts),
+        view.validates_fact_signature((&entry.read_set_signature.facts).into()),
         "permissive view must accept an ImportRef fact in the entry's \
          fact_dep_signature"
     );

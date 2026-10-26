@@ -12,8 +12,8 @@
 //!
 //! * graph nodes (`SemanticNodeId` operands) — the node arena owns their
 //!   storage; a carrier holds an ordinal and, through its lease, a root;
-//! * evidence pages and cost receipts — each carries its own charge for as
-//!   long as it lives;
+//! * result receipts, sealed-set tree nodes and cost receipts — each
+//!   carries its own charge for as long as it lives;
 //! * a signature epoch's tables — the epoch's owner;
 //! * the inline bytes of a field — the block of the value embedding it.
 

@@ -56,7 +56,7 @@ fn fallthrough_signature_carries_import_ref() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "fallthrough matrix slice: the permissive view MUST accept an \
          `ImportRef` fact in the Arc-stored fallthrough signature."
     );

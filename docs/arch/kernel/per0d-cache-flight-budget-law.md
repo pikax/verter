@@ -199,7 +199,7 @@ returned Complete and uncached. Pressure does not truncate admitted computation,
 revoke a caller's result or create a deterministic cached budget refusal.
 
 **L10 — bounded retention.** Candidates, profile variants, refusal entries,
-receipt/evidence pages, interned identities, staged contributions and flight
+result receipts, fact-set tree nodes, interned identities, staged contributions and flight
 tables obey the existing family caps and aggregate ownership account.
 Count caps and byte accounting complement one another; neither supplies an
 unbounded exception to the other. Live reader/external pins retain their charges
