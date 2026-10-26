@@ -214,11 +214,15 @@ pub fn mimalloc_owns(ptr: *const u8) -> bool {
 /// committed. Calling this once when the process goes quiet brings idle
 /// commit back toward the platform heap's level.
 ///
+/// Scope: mimalloc v3 cannot collect process-wide. `mi_collect` frees the
+/// calling thread's own empty and retired pages and force-purges every
+/// arena, which returns all pages already freed back to the OS. Pages another
+/// thread still retains stay committed until that thread allocates again.
+///
 /// Safe from any thread at any time, and never moves or frees a live
-/// allocation. It is not free: it walks every heap's pages, so call it off
-/// the request path and once per idle period, never in a loop. Allocations
-/// on other threads keep running during it and may briefly contend on the
-/// arena locks it takes. Does nothing on `wasm32` and `system-allocator`
+/// allocation. It is not free, so call it off the request path and once per
+/// idle period, never in a loop. Allocations on other threads keep running
+/// during it and may briefly contend on the arena locks it takes. Does nothing on `wasm32` and `system-allocator`
 /// builds.
 pub fn collect_idle_memory() {
     selected::collect_idle_memory();

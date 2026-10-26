@@ -321,13 +321,14 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
 
     // Return idle memory to the OS once per idle period (off when the client
     // configured `memory.idleCollectSeconds` to 0).
-    if let Some(delay) = server.idle_collect.lock().delay {
-        drop(crate::idle_collect::spawn_idle_collect(
+    let idle_delay = server.idle_collect.lock().delay;
+    *server.idle_collect_task.lock() = idle_delay.map(|delay| {
+        crate::idle_collect::spawn_idle_collect(
             Arc::clone(&server.handler_activity),
             delay,
             verter_alloc::collect_idle_memory,
-        ));
-    }
+        )
+    });
 
     // B. Send immediate non-blocking notifications
     let tp_label = server.type_provider_kind.to_string();

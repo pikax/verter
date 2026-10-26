@@ -483,6 +483,8 @@ pub struct ServerCore {
     inlay_hints_enabled: std::sync::atomic::AtomicBool,
     /// Idle memory-collection policy (from initializationOptions, default on).
     idle_collect: parking_lot::Mutex<crate::config::IdleCollectOptions>,
+    /// The running idle-collect task, aborted with the server.
+    idle_collect_task: parking_lot::Mutex<Option<crate::idle_collect::IdleCollectTask>>,
     /// The editor re-pulls semantic tokens when asked to (`workspace.semanticTokens.refreshSupport`).
     pub(crate) client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool,
     /// The editor re-pulls inlay hints when asked to (`workspace.inlayHint.refreshSupport`).
@@ -1394,6 +1396,7 @@ impl VerterLanguageServer {
             ),
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             idle_collect: parking_lot::Mutex::new(crate::config::IdleCollectOptions::default()),
+            idle_collect_task: parking_lot::Mutex::new(None),
             client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool::new(false),
             client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
             client_applies_versioned_edits: std::sync::atomic::AtomicBool::new(false),

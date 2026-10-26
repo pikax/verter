@@ -7,15 +7,26 @@
 //! finishing, collects once, then sleeps until the next handler event. There
 //! is no polling: both waits are woken by the handler guard.
 //!
-//! Never on the request path: the collect runs on a blocking-pool thread, and
-//! nothing awaits it. A request arriving mid-collect starts immediately; the
-//! only coupling is that its allocations may briefly contend on the arena
-//! locks the collect holds.
+//! Never on the request path: the collect runs on a blocking-pool thread that
+//! only this task awaits, so collections never overlap, and a request arriving
+//! mid-collect starts immediately; the only coupling is that its allocations
+//! may briefly contend on the arena locks the collect holds. The task is owned
+//! by the server through [`IdleCollectTask`] and ends with it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::server::HandlerActivity;
+
+/// The running idle-collect task; aborted when dropped, so it cannot outlive
+/// the server that owns it.
+pub(crate) struct IdleCollectTask(tokio::task::JoinHandle<()>);
+
+impl Drop for IdleCollectTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Spawn the idle-collect task. `collect` is
 /// `verter_alloc::collect_idle_memory` in production; tests inject a probe.
@@ -23,14 +34,16 @@ pub(crate) fn spawn_idle_collect(
     activity: Arc<HandlerActivity>,
     delay: Duration,
     collect: fn(),
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> IdleCollectTask {
+    IdleCollectTask(tokio::spawn(async move {
         loop {
             let epoch = activity.wait_quiet_unbounded(delay).await;
-            tokio::task::spawn_blocking(collect);
+            // Awaited here, not on any handler path; a panic in `collect`
+            // only ends this one collection.
+            let _ = tokio::task::spawn_blocking(collect).await;
             activity.wait_for_activity_after(epoch).await;
         }
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -76,8 +89,22 @@ mod tests {
         );
         drop(held);
 
+        // A handler that starts and finishes mid-window restarts it from its
+        // own end: the collect is due one full delay later, not at the old
+        // deadline plus another delay.
+        tokio::task::yield_now().await;
+        tokio::time::advance(delay * 6 / 10).await;
+        drop(HandlerGuard::new(&activity, "test"));
+        tokio::time::advance(delay - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            COLLECTS.load(Ordering::SeqCst),
+            0,
+            "collected before a full quiet window"
+        );
+
         // Idle: exactly one collect, however long the idle period lasts.
-        tokio::time::advance(delay).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
         EVENTS.notified().await;
         assert_eq!(COLLECTS.load(Ordering::SeqCst), 1);
         tokio::time::advance(delay * 50).await;
@@ -90,6 +117,6 @@ mod tests {
         EVENTS.notified().await;
         assert_eq!(COLLECTS.load(Ordering::SeqCst), 2);
 
-        task.abort();
+        drop(task);
     }
 }
