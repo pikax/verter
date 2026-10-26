@@ -52,6 +52,21 @@ enum HostWorkerPoolSource {
     Shared(Arc<crate::TestHostWorkerPools>),
 }
 
+/// Who advances the native scheduler's dispatch.
+///
+/// `Thread` is every production constructor: the scheduler's own driver
+/// thread dispatches admitted work as soon as it arrives. `Caller` starts no
+/// driver thread, so work dispatches only where the calling thread pumps (a
+/// root's dispatch step, an inline drive). A test that drives roots on one
+/// thread needs that: with a driver thread beside it, the interleaving it
+/// asserts and the wakes it counts depend on how that thread is scheduled.
+#[derive(Clone, Copy)]
+enum SchedulerDriver {
+    Thread,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    Caller,
+}
+
 pub(crate) fn next_host_instance_id() -> u64 {
     static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
@@ -367,6 +382,7 @@ impl VerterHost {
             scheduler_config,
             HostWorkerPoolSource::Fresh,
             MemoFamilyBound::Production,
+            SchedulerDriver::Thread,
         )
     }
 
@@ -390,6 +406,7 @@ impl VerterHost {
             scheduler_config,
             HostWorkerPoolSource::Shared(worker_pools),
             MemoFamilyBound::Production,
+            SchedulerDriver::Thread,
         )
     }
 
@@ -399,6 +416,7 @@ impl VerterHost {
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
         worker_pool_source: HostWorkerPoolSource,
         memo_family_bound: MemoFamilyBound,
+        scheduler_driver: SchedulerDriver,
     ) -> Self {
         // A build without optional capture cannot record audits, timings or
         // footprints: the request-time flags would carry nothing.
@@ -559,15 +577,29 @@ impl VerterHost {
                         Arc::clone(&worker_pools.scheduler_io_pool),
                     ),
                 };
-                let scheduler =
-                    verter_scheduler::scheduler::Scheduler::with_executor_and_task_registry(
-                        scheduler_config,
-                        loader,
-                        executor,
-                        scheduler_cpu_pool,
-                        scheduler_io_pool,
-                        task_registry.clone(),
-                    );
+                let scheduler = match scheduler_driver {
+                    SchedulerDriver::Thread => {
+                        verter_scheduler::scheduler::Scheduler::with_executor_and_task_registry(
+                            scheduler_config,
+                            loader,
+                            executor,
+                            scheduler_cpu_pool,
+                            scheduler_io_pool,
+                            task_registry.clone(),
+                        )
+                    }
+                    #[cfg(test)]
+                    SchedulerDriver::Caller => {
+                        verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_task_registry(
+                            scheduler_config,
+                            loader,
+                            executor,
+                            scheduler_cpu_pool,
+                            scheduler_io_pool,
+                            task_registry.clone(),
+                        )
+                    }
+                };
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::ThreadedSchedulerPools,
@@ -581,6 +613,7 @@ impl VerterHost {
             }
             #[cfg(target_arch = "wasm32")]
             {
+                let _ = scheduler_driver;
                 let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_task_registry(
                     scheduler_config,
                     loader,
@@ -822,6 +855,25 @@ impl VerterHost {
             verter_scheduler::scheduler::SchedulerConfig::default(),
             HostWorkerPoolSource::Fresh,
             MemoFamilyBound::ForTest(memo_family_cap),
+            SchedulerDriver::Thread,
+        )
+    }
+
+    /// TEST-ONLY: a standalone host whose scheduler starts no driver thread
+    /// ([`SchedulerDriver::Caller`]). Its worker pools are the production
+    /// ones; admitted work dispatches only where the calling thread pumps.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn new_standalone_caller_driven_for_test(config: HostConfig) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig::default(),
+            HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::Production,
+            SchedulerDriver::Caller,
         )
     }
 
