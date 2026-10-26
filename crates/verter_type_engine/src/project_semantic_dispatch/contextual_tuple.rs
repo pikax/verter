@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
 use verter_session_query::retention::{
     ChargeClass, RetentionAdmission, RetentionCharge, SemanticRetentionAccount,
     ENTRY_OVERHEAD_BYTES,
@@ -26,13 +27,18 @@ pub(in crate::project_semantic_dispatch) struct Charged<T: ?Sized> {
 }
 
 impl<T: ?Sized> Charged<T> {
-    /// `payload`, charged to `account` for `bytes` of its own allocations.
+    /// `payload`, charged to `account` for its own heap block of
+    /// `payload_bytes`, the `Arc` block that holds it, and the map slot it
+    /// is kept in.
     fn reserve(
         account: &Arc<SemanticRetentionAccount>,
-        bytes: usize,
+        payload_bytes: usize,
         payload: Box<T>,
     ) -> Arc<Self> {
-        let charge = match account.reserve(ChargeClass::Retained, bytes + ENTRY_OVERHEAD_BYTES) {
+        let bytes = heap_block_bytes(payload_bytes)
+            + arc_block_bytes(std::mem::size_of::<Self>())
+            + ENTRY_OVERHEAD_BYTES;
+        let charge = match account.reserve(ChargeClass::Retained, bytes) {
             RetentionAdmission::Admitted(charge) => Some(charge),
             RetentionAdmission::Refused(_) => None,
         };
@@ -293,7 +299,13 @@ mod tests {
         assert!(kept.admitted());
         let held = Arc::clone(&kept);
         drop(kept);
-        assert!(account.snapshot().retained_bytes > 0);
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            heap_block_bytes(2 * std::mem::size_of::<SemanticNodeId>())
+                + arc_block_bytes(std::mem::size_of::<Charged<[SemanticNodeId]>>())
+                + ENTRY_OVERHEAD_BYTES,
+            "the charge covers the payload's block, its Arc block and its map slot"
+        );
         assert_eq!(&**held, &[SemanticNodeId(1), SemanticNodeId(2)][..]);
         drop(held);
         assert_eq!(account.snapshot().retained_bytes, 0);
