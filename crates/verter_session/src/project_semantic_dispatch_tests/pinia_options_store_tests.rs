@@ -26,8 +26,9 @@
 //! an object relating to a `Record` over index keys, inference through
 //! `Pick` / `Omit` of an object or an interface, the keys of an interface
 //! applied to an open type parameter, a callback typed by the one arm of a
-//! union of signatures its arity admits, and a statement call through an
-//! object literal's contextual `this`.
+//! union of signatures its arity admits, a statement call through an
+//! object literal's contextual `this`, and a member read keeping an
+//! intersection's generic-interface contributor.
 
 use std::sync::Arc;
 
@@ -298,8 +299,8 @@ fn state_equivalence(state: &str) -> String {
 }
 
 /// Every failure of a marker-typed store: each member prints as the
-/// checker's, `$state` is the unwrapped state and equivalent to the
-/// checker's, and the whole store answers element by element alike.
+/// checker's, `$state` retains its generic-interface contributor and full
+/// denotation, and the whole store answers element by element alike.
 fn marked_store_mismatches(project: &Project<'_>) -> Vec<String> {
     let equivalence = state_equivalence("St['$state']");
     let whole_equivalence = state_equivalence(&format!("({WHOLE_STORE})[7]"));
@@ -350,13 +351,10 @@ fn marked_store_mismatches(project: &Project<'_>) -> Vec<String> {
     failures
 }
 
-/// Why `state` is not the store's unwrapped state — `count`, `items` and
-/// `name` as the state declares them, nothing degraded or `any` — if it is
-/// not. The checker's `$state` also intersects the empty custom-state
-/// interface, which publication expands away; the equivalence probe holds
-/// the two to one denotation.
+/// Check display independently of denotation: dropping the empty generic
+/// interface preserves assignability but loses the checker's identity.
 fn state_mismatch(state: &TypeExpr) -> Option<String> {
-    answer_mismatch(state, STATE)
+    answer_mismatch(state, &custom_state())
 }
 
 /// Measured on TypeScript 7.0.2 with the marker declared by the library,
@@ -635,6 +633,29 @@ fn a_nested_access_reads_through_a_transparent_alias_member() {
         ("{ x: Box<{ inner: 2 }>['v'] }", "{ x: 2; }"),
         ("Box<{ a: 1 }>['v']", "{ a: 1; }"),
         ("[Box<{ a: 1 }>['n']]", "[Named<{ a: 1; }>]"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A generic-interface application contributing to an intersection keeps
+/// its name through the access that reads the intersection: `C2['m']` over
+/// `m: { a: 1 } & E<{ a: 1 }>` answers `{ a: 1 } & E<{ a: 1 }>` as the
+/// bare alias does — never the application's structural surface alone,
+/// which assignability could not tell apart — and a member demand still
+/// reads through the intersection. Measured on TypeScript 7.0.2, all four
+/// settings.
+#[test]
+fn a_nested_access_keeps_an_intersections_generic_interface_contributor() {
+    let failures = Project::module(
+        "interface E<T> {}\n\
+         type A = { a: 1 } & E<{ a: 1 }>;\n\
+         interface C2 { m: { a: 1 } & E<{ a: 1 }> }\n\
+         type B2 = C2['m'];\n",
+    )
+    .mismatches(&[
+        ("A", "{ a: 1; } & E<{ a: 1; }>"),
+        ("B2", "{ a: 1; } & E<{ a: 1; }>"),
+        ("B2['a']", "1"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
