@@ -155,6 +155,9 @@ pub struct TsgoLspConnection {
     /// `None` for an [`ConnectionOwnership::AttachedNonOwning`] connection —
     /// the editor owns the process; Verter holds no kill handle.
     child: Option<tokio::process::Child>,
+    /// The process-tree kill armed at spawn: dropping the connection at any
+    /// point, mid-handshake included, kills every descendant too.
+    tree: Option<crate::process::TreeKill>,
     /// Whether Verter owns the engine behind this connection.
     ownership: ConnectionOwnership,
 }
@@ -169,6 +172,7 @@ impl TsgoLspConnection {
         Self {
             conn,
             child,
+            tree: None,
             ownership,
         }
     }
@@ -218,6 +222,9 @@ impl TsgoLspConnection {
     /// [`TsgoAttach`].
     pub(crate) async fn terminate(mut self) {
         let _ = self.conn.close().await;
+        // The guard armed at spawn kills the tree while the child is still
+        // unreaped, so it never fires at a pid the reap released.
+        drop(self.tree.take());
         if let Some(mut child) = self.child.take() {
             let _ =
                 crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
@@ -281,19 +288,22 @@ impl TsgoLspConnectionSource for SpawnOwnTsgoLsp {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = TsgoApiResult<TsgoLspConnection>> + Send + '_>,
     > {
-        Box::pin(async move { spawn_own_lsp_connection(&self.exe, &self.cwd).await })
+        Box::pin(async move { spawn_own_lsp_connection(&self.exe, &self.cwd, None).await })
     }
 }
 
 /// Spawn `tsgo --lsp --stdio` and wrap its stdio in a [`JsonRpcConnection`].
 ///
 /// `pub(crate)` for the toolchain validator's capability smoke
-/// ([`crate::toolchain::validation`]). The child is `kill_on_drop`: a dropped
-/// connection (e.g. a bounded validation timing out mid-handshake) never leaks
-/// the engine process.
+/// ([`crate::toolchain::validation`]). A dropped connection (e.g. a bounded
+/// validation timing out mid-handshake, or a cancelled one) never leaks the
+/// engine process or its descendants: the child is `kill_on_drop` and the
+/// connection holds a process-tree kill armed at spawn. With `held`, the
+/// child's stderr is piped through it instead of inherited.
 pub(crate) async fn spawn_own_lsp_connection(
     exe: &Path,
     cwd: &Path,
+    held: Option<&std::sync::Arc<crate::process::HeldStderr>>,
 ) -> TsgoApiResult<TsgoLspConnection> {
     let mut command = tokio::process::Command::new(exe);
     command
@@ -302,14 +312,22 @@ pub(crate) async fn spawn_own_lsp_connection(
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(if held.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
         .kill_on_drop(true);
-    // Own process group / job: the teardown tree kill reaches any descendant
-    // that inherited the pipes.
+    // Own process group / job: the tree kill reaches any descendant that
+    // inherited the pipes.
     crate::process::configure_tree_spawn(&mut command);
     let mut child = command.spawn().map_err(|e| {
         TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))
     })?;
+    let tree = crate::process::TreeKill::arm(child.id().unwrap_or(0));
+    if let (Some(held), Some(stderr)) = (held, child.stderr.take()) {
+        held.drain(stderr);
+    }
 
     let stdin = child
         .stdin
@@ -321,7 +339,9 @@ pub(crate) async fn spawn_own_lsp_connection(
         .ok_or_else(|| TsgoApiError::Spawn("tsgo --lsp child stdout not piped".into()))?;
 
     let conn = JsonRpcConnection::connect(stdout, stdin);
-    Ok(TsgoLspConnection::new_owned(conn, Some(child)))
+    let mut connection = TsgoLspConnection::new_owned(conn, Some(child));
+    connection.tree = Some(tree);
+    Ok(connection)
 }
 
 /// The result of `custom/initializeAPISession`: the minted pipe path + session id.
@@ -606,6 +626,9 @@ impl TsgoAttach<Owned> {
         let _ = self.api.close().await;
         let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
         let _ = self.lsp.conn.close().await;
+        // The guard armed at spawn kills the tree while the child is still
+        // unreaped, so it never fires at a pid the reap released.
+        drop(self.lsp.tree.take());
         if let Some(mut child) = self.lsp.child.take() {
             let _ =
                 crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
