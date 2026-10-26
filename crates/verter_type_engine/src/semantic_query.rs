@@ -1739,7 +1739,7 @@ impl CanonicalTypeSubstitution {
         verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of_val::<
             [(SemanticNodeId, SemanticNodeId)],
         >(&self.0))
-            + self.1 .0.heap_bytes()
+            + self.1.heap_bytes()
     }
 
     /// The empty substitution.

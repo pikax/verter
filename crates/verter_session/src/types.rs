@@ -3332,7 +3332,7 @@ pub(crate) struct CompileSlot {
     /// pre-filter.
     pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     /// The slot's own allocations — its map slot, its diagnostics, its
-    /// override text, its fact slice and the evidence pages it reaches —
+    /// override text, its fact set and the storage that set reaches —
     /// on one refusable reservation that also holds the products' cell.
     pub(crate) _retention: Arc<verter_session_query::retention::RetentionCharge>,
 }
@@ -3888,7 +3888,7 @@ impl DerivedRawState {
             .as_ref()
             .is_none_or(|entry| entry.source_version <= source_version);
         if supersedes {
-            if verter_session_query::facts::receipt::claim_evidence_pages(
+            if verter_session_query::facts::receipt::claim_retained_storage(
                 account,
                 &template_class_signature.facts,
             )

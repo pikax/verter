@@ -1,11 +1,11 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  // Vitest 4 uses OXC for import analysis. Tell it to transform JSX so it can
+  // Vitest uses OXC for import analysis. Tell it to transform JSX so it can
   // parse .tsx files. The actual type checking uses tsconfig's jsx: "preserve"
   // via the tsc checker — this only affects Vite's internal module graph.
   oxc: {
-    jsx: "automatic",
+    jsx: { runtime: "automatic" },
   },
   test: {
     globals: false,

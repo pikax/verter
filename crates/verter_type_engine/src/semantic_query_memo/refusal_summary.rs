@@ -33,7 +33,6 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use verter_session_query::retention::RetentionAdmission;
 
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::project_semantic_dispatch::cost_receipt::{BudgetProfile, BudgetProfileSpec};
@@ -105,9 +104,9 @@ impl RefusalSummary {
     /// slot and eviction-order record, and its request prefix's paid lists.
     /// Its read's delivery metadata charges itself; its carrier, self-roots
     /// and delivered allocations are shared allocations, held once through
-    /// the store's registry; a wide
-    /// carrier's evidence pages are claimed into this reservation, a page
-    /// being charged once however many summaries and candidates share it
+    /// the store's registry; the receipts and tree nodes a wide carrier
+    /// reaches are claimed into this reservation, each charged once however
+    /// many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
     fn own_retained_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
@@ -307,20 +306,16 @@ impl SemanticGraphStore {
             Err(refusal) => return refuse(refusal),
         };
         let own_footprint = summary.own_retained_footprint();
-        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        // The carrier's storage is claimed only once the summary's own names
+        // are held: a refused hold leaves it pinned and unclaimed.
+        match verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
             self.retention_account(),
             own_footprint.bytes,
             &[&summary.carrier.facts],
+            |own| own_footprint.handles.retained_with(own, self.charge_ctx()),
         ) {
-            RetentionAdmission::Admitted(own) => {
-                let own = match own_footprint.handles.retained_with(own, self.charge_ctx()) {
-                    Ok(own) => own,
-                    Err(refusal) => return refuse(refusal),
-                };
-                let retention = shared.with_own(own);
-                summary.retention = Some(retention);
-            }
-            RetentionAdmission::Refused(refusal) => return refuse(refusal),
+            Ok(own) => summary.retention = Some(shared.with_own(own)),
+            Err(refusal) => return refuse(refusal),
         }
         let key = (self.prepare_rooted_key(key), profile, site);
         let flags = ctx.request_flags();

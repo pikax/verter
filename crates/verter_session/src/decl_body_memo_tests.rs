@@ -2852,9 +2852,10 @@ fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
 
 /// The body parts a type demand keeps serve only that declaration in that
 /// scope of that source: a same-named `declare global` declaration, another
-/// declaration and another source each read their own body. A request
-/// releases a kept body, and its retention charge, as soon as a read takes
-/// it, and holds no more than its capacity.
+/// declaration and another source each read their own body. A kept body is
+/// charged while it waits; the read that takes it holds its charge until
+/// the deref reading it returns, and the charge is released when the
+/// reader drops it.
 #[test]
 fn a_kept_type_body_serves_only_its_own_declaration_scope_and_source() {
     let source = "type K = \"file\";
@@ -2884,22 +2885,20 @@ export {};
         crate::resolver_core::request_store_view::KeptTypeBodies::default(),
     );
     request.lock().keep(kept, &account);
-    assert!(
-        account.snapshot().active_bytes > 0,
-        "a kept body is charged while it waits"
-    );
+    let waiting = account.snapshot().retained_bytes;
+    assert!(waiting > 0, "a kept body is charged while it waits");
     let read = |locator: AuthoredBodyLocator| {
-        let derefed = memo
-            .deref_locator_body_with(&locator, &|owner, name, scope| {
-                request
-                    .lock()
-                    .take(&memo, owner, name, scope)
-                    .map(|(parts, _charge)| parts)
-            })
-            .expect("the body derefs");
-        format!("{:?}", single(&derefed))
+        let (derefed, charges) = crate::resolver_core::request_store_view::deref_taking(
+            &memo,
+            &locator,
+            |owner, name, scope| request.lock().take(&memo, owner, name, scope),
+        );
+        (
+            format!("{:?}", single(&derefed.expect("the body derefs"))),
+            charges,
+        )
     };
-    let global = read(aug_type_locator(
+    let (global, charges) = read(aug_type_locator(
         "K",
         AuthoredAugmentationScope::Global,
         Vec::new(),
@@ -2908,18 +2907,28 @@ export {};
         global.contains("global"),
         "the global K reads its own body: {global}"
     );
-    let a = read(type_body_locator("A", Vec::new()));
+    assert!(charges.is_empty(), "the global K took no kept body");
+    let (a, charges) = read(type_body_locator("A", Vec::new()));
     assert!(a.contains("\"a\""), "A reads its own body: {a}");
-    assert!(
-        account.snapshot().active_bytes > 0,
+    assert!(charges.is_empty(), "A took no kept body");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        waiting,
         "K's body still waits for its read"
     );
-    let k = read(type_body_locator("K", Vec::new()));
+    let (k, charges) = read(type_body_locator("K", Vec::new()));
     assert!(k.contains("file"), "the file's K reads its kept body: {k}");
+    assert_eq!(charges.len(), 1, "the read took K's body and its charge");
     assert_eq!(
-        account.snapshot().active_bytes,
+        account.snapshot().retained_bytes,
+        waiting,
+        "the charge is held through the deref that read the body"
+    );
+    drop(charges);
+    assert_eq!(
+        account.snapshot().retained_bytes,
         0,
-        "the read released the kept body"
+        "the reader released the charge"
     );
 }
 
@@ -2937,42 +2946,43 @@ export {};
     assert!(kept.is_none());
 }
 
-/// A request's kept type bodies stay within its byte budget: keeping a
-/// body past it releases the oldest, whose charge goes with it, and taken
-/// parts stay charged until their taker lets them go.
+/// A request keeps a body only when the retention account admits it: one
+/// the account declines is not kept, and its read lowers its body again.
+/// Taken parts stay charged until their taker lets them go.
 #[test]
-fn kept_type_bodies_release_the_oldest_past_their_budget() {
-    let members: String = (0..2000)
-        .map(|i| format!("\"m{i:05}\""))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let source: String = (0..3)
-        .map(|i| format!("type L{i} = {members};\n"))
-        .collect::<String>()
-        + "export {};\n";
-    let (memo, _) = memo_for(&source);
+fn a_kept_type_body_is_a_refusable_reservation() {
+    let (memo, _) = memo_for(
+        "type K = \"k\";
+type L = \"l\";
+export {};
+",
+    );
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let full = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits {
+            aggregate_ceiling_bytes: 1,
+            ..verter_session_query::retention::RetentionLimits::defaults()
+        },
+    );
+    let mut request = crate::resolver_core::request_store_view::KeptTypeBodies::default();
+    let (_, kept) = memo.type_decl_outcome_keeping_in(owner, "K", true);
+    request.keep(kept.expect("the demand lowered K"), &full);
+    assert_eq!(full.snapshot().retained_bytes, 0);
+    assert!(
+        request.take(&memo, owner, "K", None).is_none(),
+        "a declined body is not kept"
+    );
+
     let account = verter_session_query::retention::SemanticRetentionAccount::new(
         verter_session_query::retention::RetentionLimits::defaults(),
     );
-    let mut request = crate::resolver_core::request_store_view::KeptTypeBodies::default();
-    let mut charged = Vec::new();
-    for name in ["L0", "L1", "L2"] {
-        let (_, kept) = memo.type_decl_outcome_keeping_in(owner, name, true);
-        request.keep(kept.expect("the demand lowered it"), &account);
-        charged.push(account.snapshot().active_bytes);
-    }
+    let (_, kept) = memo.type_decl_outcome_keeping_in(owner, "L", true);
+    request.keep(kept.expect("the demand lowered L"), &account);
+    let taken = request.take(&memo, owner, "L", None).expect("L is kept");
     assert!(
-        charged[1] > charged[0] && charged[2] == charged[1],
-        "the third body released the first: {charged:?}"
-    );
-    assert!(request.take(&memo, owner, "L0", None).is_none());
-    let taken = request.take(&memo, owner, "L2", None).expect("L2 is kept");
-    assert!(request.take(&memo, owner, "L1", None).is_some());
-    assert!(
-        account.snapshot().active_bytes > 0,
+        account.snapshot().retained_bytes > 0,
         "taken parts stay charged while their taker holds them"
     );
     drop(taken);
-    assert_eq!(account.snapshot().active_bytes, 0);
+    assert_eq!(account.snapshot().retained_bytes, 0);
 }

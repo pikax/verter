@@ -21,8 +21,12 @@ path = "src/main.rs"
 # The coordinated, default-off observation opt-in
 # (docs/arch/semantic-observe.md): the MCP tools' audit records.
 semantic-observe = ["verter_session/semantic-observe"]
+# Build on the platform heap instead of mimalloc, for hardened builds
+# (crates/verter_alloc documents the trade-off).
+system-allocator = ["verter_alloc/system-allocator"]
 
 [dependencies]
+verter_alloc = { path = "../verter_alloc" }
 verter_session_query = { workspace = true }
 verter_session = { path = "../verter_session" }
 verter_semantic = { path = "../verter_semantic" }

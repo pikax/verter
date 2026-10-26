@@ -59,16 +59,24 @@ impl ScratchCache {
     }
 
     /// Lookup a URI. Bumps the entry's `last_access` tick on hit so
-    /// the next eviction sweep keeps freshly-touched entries.
-    pub fn get(&mut self, uri: &str) -> Option<SemanticNodeId> {
+    /// the next eviction sweep keeps freshly-touched entries. The hit's
+    /// roots come back as a share that counts nothing: the caller holds
+    /// this cache's lock, and counting takes the graph arena's, so the
+    /// caller retains the share for construction once the lock is gone.
+    pub fn get(
+        &mut self,
+        uri: &str,
+    ) -> Option<(
+        SemanticNodeId,
+        verter_type_engine::semantic_query_memo::node_roots::RootShare,
+    )> {
         if self.capacity == 0 {
             return None;
         }
         let now = self.tick.fetch_add(1, Ordering::Relaxed);
         let entry = self.entries.get_mut(uri)?;
         entry.last_access = now;
-        entry._roots.retain_for_construction();
-        Some(entry.node_id)
+        Some((entry.node_id, entry._roots.share()))
     }
 
     /// Insert a URI → node-id mapping. If insertion would exceed

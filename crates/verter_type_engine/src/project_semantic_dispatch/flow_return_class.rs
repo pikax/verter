@@ -33,6 +33,113 @@ pub(super) struct ClassReceiver {
     pub(super) infer_literal_members: bool,
     /// Set when a member body read a declared member not evaluated yet.
     pub(super) forward_read: std::cell::Cell<bool>,
+    /// The member reads made while a nested function's evaluation records
+    /// what it read off this receiver.
+    pub(super) reads: ReceiverReadLog,
+}
+
+/// What a read of member `name` off a receiver's evaluated members found
+/// ([`FlowEvaluator::receiver_member_read`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum ReceiverMemberRead {
+    /// The receiver's own evaluated member, as an object of its entries.
+    Own(SemanticNodeId),
+    /// A declared member not evaluated yet: a forward read.
+    Forward,
+    /// No own member: the read goes to the receiver's base.
+    Base(Option<SemanticNodeId>),
+}
+
+/// One member read off a receiver: the member's name and what it found.
+/// Reads compare by name — a recording window keeps each name once, since
+/// the receiver's members do not change while a body inside the window
+/// evaluates; a window that finds one name two ways is refused.
+#[derive(Clone)]
+pub(super) struct ReceiverRead {
+    pub(super) name: Arc<str>,
+    pub(super) read: ReceiverMemberRead,
+}
+
+impl PartialEq for ReceiverRead {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for ReceiverRead {}
+
+impl std::hash::Hash for ReceiverRead {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for ReceiverRead {
+    fn borrow(&self) -> &str {
+        &self.name
+    }
+}
+
+/// The member reads made off one receiver while a nested function's
+/// evaluation records them. Every read of a receiver's evaluated members and
+/// declared names goes through [`FlowEvaluator::this_member_source`], and a
+/// reused nested signature logs the reads it stands on again, so the log
+/// holds every way a recorded evaluation observed the receiver's growing
+/// state.
+#[derive(Default)]
+pub(super) struct ReceiverReadLog(std::cell::RefCell<super::nested::WindowedLog<ReceiverRead>>);
+
+impl ReceiverReadLog {
+    /// Open a recording window: the position later reads are logged from.
+    pub(super) fn begin(&self) -> usize {
+        self.0.borrow_mut().begin()
+    }
+
+    /// Close the window opened at `start`: each distinct read made in it,
+    /// `None` when it found one member two ways.
+    pub(super) fn finish(&self, start: usize) -> Option<Vec<ReceiverRead>> {
+        self.0
+            .borrow_mut()
+            .finish(start, |first, later| first.read == later.read)
+    }
+
+    /// Log the read of member `name`, which found `read`.
+    pub(super) fn log(&self, name: &str, read: ReceiverMemberRead) {
+        self.0.borrow_mut().log(
+            name,
+            || ReceiverRead {
+                name: Arc::from(name),
+                read,
+            },
+            |held| held.read == read,
+        );
+    }
+}
+
+impl ClassReceiver {
+    /// A receiver binding `binder` over `base`, declaring `declared`, whose
+    /// members are filled in as they evaluate.
+    pub(super) fn new(
+        binder: SemanticNodeId,
+        base: Option<SemanticNodeId>,
+        declared: rustc_hash::FxHashSet<Arc<str>>,
+        infer_literal_members: bool,
+    ) -> Self {
+        Self {
+            binder,
+            members: std::cell::RefCell::new(Vec::new()),
+            declared: std::cell::RefCell::new(declared),
+            base,
+            infer_literal_members,
+            forward_read: std::cell::Cell::new(false),
+            reads: ReceiverReadLog::default(),
+        }
+    }
+
+    /// A receiver whose members are those of `binder` alone.
+    pub(super) fn of_type(binder: SemanticNodeId, base: Option<SemanticNodeId>) -> Self {
+        Self::new(binder, base, rustc_hash::FxHashSet::default(), false)
+    }
 }
 
 /// A class expression's evaluation in progress, stepped by
@@ -374,26 +481,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Open the class's receiver and order its members.
     fn class_begin_members(&mut self, frame: &mut ClassEvalFrame<'_>) {
         let class = frame.class;
-        let receiver = std::rc::Rc::new(ClassReceiver {
-            binder: self
-                .dispatch
+        let receiver = std::rc::Rc::new(ClassReceiver::new(
+            self.dispatch
                 .this_binder(self.canonical, self.owner, &class.name, None),
-            members: std::cell::RefCell::new(Vec::new()),
-            declared: std::cell::RefCell::new(
-                class
-                    .members
-                    .iter()
-                    .filter(|member| !member.is_static)
-                    .filter_map(|member| match &member.key {
-                        SliceObjectKey::Static(name) => Some(Arc::clone(name)),
-                        SliceObjectKey::Computed { .. } => None,
-                    })
-                    .collect(),
-            ),
-            base: frame.base.as_ref().and_then(|base| base.instance),
-            infer_literal_members: true,
-            forward_read: std::cell::Cell::new(false),
-        });
+            frame.base.as_ref().and_then(|base| base.instance),
+            class
+                .members
+                .iter()
+                .filter(|member| !member.is_static)
+                .filter_map(|member| match &member.key {
+                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                    SliceObjectKey::Computed { .. } => None,
+                })
+                .collect(),
+            true,
+        ));
         frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
         frame.receiver = Some(receiver);
         frame.order = (0..class.members.len())
@@ -916,6 +1018,38 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
+    /// Member `name` off the members `bound` evaluated so far, without
+    /// recording the read: a class expression's own member reads the value
+    /// its class evaluated for it; one not evaluated yet is a forward read
+    /// the class retries; an inherited one reads off the base instance,
+    /// keeping the polymorphic `this` the reading receiver binds.
+    pub(super) fn receiver_member_read(
+        &self,
+        bound: &ClassReceiver,
+        name: &str,
+    ) -> ReceiverMemberRead {
+        let key = AuthoredPropertyKey::string(name);
+        let own: Vec<crate::semantic_query::SurfaceEntry> = bound
+            .members
+            .borrow()
+            .iter()
+            .filter(|member| member.key == key)
+            .map(SurfaceMember::clone)
+            .map(crate::semantic_query::SurfaceEntry::Member)
+            .collect();
+        if !own.is_empty() {
+            return ReceiverMemberRead::Own(self.dispatch.graph().intern_node(
+                SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                    own, None, false,
+                )),
+            ));
+        }
+        if bound.declared.borrow().contains(name) {
+            return ReceiverMemberRead::Forward;
+        }
+        ReceiverMemberRead::Base(bound.base)
+    }
+
     /// Where member `name` of `receiver` reads from when `receiver` is a
     /// class's polymorphic `this`: the class's own member position (or the
     /// base's), never the whole class body — whose lowering would re-enter
@@ -939,29 +1073,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             {
                 return bound.base;
             }
-            // A class expression's own member reads the value its class
-            // evaluated for it; one not evaluated yet is a forward read the
-            // class retries; an inherited one reads off the base instance,
-            // keeping the polymorphic `this` the reading receiver binds.
-            let key = AuthoredPropertyKey::string(name);
-            let own: Vec<crate::semantic_query::SurfaceEntry> = bound
-                .members
-                .borrow()
-                .iter()
-                .filter(|member| member.key == key)
-                .map(crate::semantic_query::SurfaceMember::clone)
-                .map(crate::semantic_query::SurfaceEntry::Member)
-                .collect();
-            if !own.is_empty() {
-                return Some(graph.intern_node(SemanticNodeData::Object(
-                    crate::semantic_query::SurfaceView::from_entries(own, None, false),
-                )));
-            }
-            if bound.declared.borrow().contains(name) {
-                bound.forward_read.set(true);
-                return None;
-            }
-            return bound.base;
+            let read = self.receiver_member_read(bound, name);
+            bound.reads.log(name, read);
+            return match read {
+                ReceiverMemberRead::Own(node) => Some(node),
+                ReceiverMemberRead::Forward => {
+                    bound.forward_read.set(true);
+                    None
+                }
+                ReceiverMemberRead::Base(base) => base,
+            };
         }
         let data = graph.node_data(receiver)?;
         let SemanticNodeData::TypeParam {

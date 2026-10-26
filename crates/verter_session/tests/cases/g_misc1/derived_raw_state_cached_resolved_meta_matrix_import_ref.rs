@@ -56,7 +56,7 @@ fn cached_resolved_meta_signature_carries_import_ref() {
     let signature: Arc<[FactVersionRef]> = Arc::from(vec![import_fact].into_boxed_slice());
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "permissive view must accept an ImportRef fact in the Arc-stored signature"
     );
 }

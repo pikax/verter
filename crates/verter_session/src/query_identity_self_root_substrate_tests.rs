@@ -245,7 +245,7 @@ fn exported_type_signature_is_provenance_pure() {
     .facts;
 
     assert!(
-        has_self_root(&signature, canonical, observed_hash),
+        has_self_root(&signature.to_vec(), canonical, observed_hash),
         "fact_signature_for_exported_type MUST lead with a FileWholeHash self-root \
          pinned to the caller-supplied observed hash ({canonical} @ {observed_hash:?}). \
          Signature was: {signature:?}",
@@ -321,7 +321,7 @@ fn canonical_member_signature_is_provenance_pure() {
         .facts;
 
     assert!(
-        has_self_root(&signature, canonical, observed_hash),
+        has_self_root(&signature.to_vec(), canonical, observed_hash),
         "fact_signature_for_canonical_member MUST lead with a FileWholeHash \
          self-root pinned to the caller-supplied observed hash ({canonical} @ \
          {observed_hash:?}). Signature was: {signature:?}",
@@ -389,7 +389,7 @@ fn canonical_surface_signature_is_provenance_pure() {
         .facts;
 
     assert!(
-        has_self_root(&signature, canonical, observed_hash),
+        has_self_root(&signature.to_vec(), canonical, observed_hash),
         "fact_signature_for_canonical_surface MUST lead with a FileWholeHash \
          self-root pinned to the caller-supplied observed hash ({canonical} @ \
          {observed_hash:?}). Signature was: {signature:?}",

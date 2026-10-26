@@ -119,7 +119,7 @@ pub struct AppConfigNoOverrideProofEntry {
     /// [`verter_type_engine::fact_signature_helpers::bubble_fact_signature`] on
     /// warm hit. Validated against the live store view on every
     /// warm-hit read.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
+    pub fact_dep_signature: verter_session_query::facts::fact_set::FactSet,
 }
 
 /// Host-owned cache. Sole authority for the proof state on
@@ -181,16 +181,17 @@ impl AppConfigNoOverrideProofDb {
     /// producer is the single authority for the entry's
     /// validation contract.
     ///
-    /// The entry retains the signature's evidence pages, so publication
-    /// first claims them into a refusable reservation; a refused claim
+    /// The entry retains the storage its signature reaches (tree nodes and
+    /// consumed receipts), so publication first claims it into a refusable
+    /// reservation; a refused claim
     /// publishes nothing.
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish(
         &self,
         key: AppConfigNoOverrideProofKey,
-        fact_dep_signature: Arc<[FactVersionRef]>,
+        fact_dep_signature: verter_session_query::facts::fact_set::FactSet,
     ) {
-        if verter_session_query::facts::receipt::claim_evidence_pages(
+        if verter_session_query::facts::receipt::claim_retained_storage(
             &verter_session_query::retention::SemanticRetentionAccount::process_local(),
             &fact_dep_signature,
         )
@@ -339,8 +340,8 @@ pub(crate) fn app_config_no_override_proof_get_or_compute<
     // the live store view. The peek bubbles the signature into any
     // active outer tracer on success.
     if let Some(entry) = proofs.candidate(key) {
-        if ctx.validates_fact_signature(&entry.fact_dep_signature) {
-            ctx.observe_borrowed_signature(&entry.fact_dep_signature);
+        if ctx.validates_fact_signature((&entry.fact_dep_signature).into()) {
+            ctx.observe_sealed_signature(&entry.fact_dep_signature);
             return Some(entry);
         }
     }
@@ -411,7 +412,7 @@ pub(crate) fn app_config_no_override_proof_get_or_compute<
                 // consumer must take the slow path.
                 return None;
             }
-            proofs.publish(key.clone(), Arc::clone(&fact_dep_signature));
+            proofs.publish(key.clone(), fact_dep_signature.clone());
             Some(Arc::new(
                 crate::app_config_proof_db::AppConfigNoOverrideProofEntry { fact_dep_signature },
             ))

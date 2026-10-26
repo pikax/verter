@@ -525,7 +525,7 @@ fn chunk_storage_bytes() -> usize {
     box_bytes::<Chunk>()
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<NodeData>>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<NodeScopeId>>())
-        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<usize>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<std::sync::atomic::AtomicUsize>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<bool>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<std::sync::atomic::AtomicBool>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<u64>())
@@ -726,7 +726,15 @@ const CHUNK_MASK: u64 = (CHUNK_LEN as u64) - 1;
 struct Chunk {
     nodes: Box<[Option<NodeData>]>,
     scopes: Box<[Option<NodeScopeId>]>,
-    owners: Box<[usize]>,
+    /// Each live slot's owner count. Atomic so a root adds its count under
+    /// the arena's read lock ([`NodeArenaCore::retain`],
+    /// [`NodeArenaCore::retain_held`]): a slot is destroyed only under the
+    /// write lock once its count is zero, so a slot seen live under the read
+    /// lock stays live while counts are added, and concurrent additions
+    /// commute. A release that leaves a slot still counted drops its count
+    /// under the read lock too ([`NodeArenaCore::release_roots`]); a count
+    /// reaching zero, and every other change, happens under the write lock.
+    owners: Box<[std::sync::atomic::AtomicUsize]>,
     permanent: Box<[bool]>,
     /// Slots a per-node sidecar describes: destroying one logs its id for
     /// sidecar cleanup. Atomic so a sidecar writer marks a slot under the
@@ -749,7 +757,9 @@ impl Chunk {
         Self {
             nodes: (0..CHUNK_LEN).map(|_| None).collect(),
             scopes: (0..CHUNK_LEN).map(|_| None).collect(),
-            owners: vec![0; CHUNK_LEN].into_boxed_slice(),
+            owners: (0..CHUNK_LEN)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
             permanent: vec![false; CHUNK_LEN].into_boxed_slice(),
             tracked: (0..CHUNK_LEN)
                 .map(|_| std::sync::atomic::AtomicBool::new(false))
@@ -1363,7 +1373,7 @@ impl ArenaInner {
         let scope = chunk.scopes[index]
             .take()
             .expect("a live slot has its scope");
-        chunk.owners[index] = 0;
+        *chunk.owners[index].get_mut() = 0;
         chunk.permanent[index] = false;
         let tracked = chunk.tracked[index].swap(false, std::sync::atomic::Ordering::Relaxed);
         chunk.live -= 1;
@@ -1840,7 +1850,7 @@ impl NodeArenaCore {
                     continue;
                 };
                 counts.live_nodes += 1;
-                owners += chunk.owners[index];
+                owners += chunk.owners[index].load(std::sync::atomic::Ordering::Relaxed);
                 counts.permanent_nodes += usize::from(chunk.permanent[index]);
                 data.for_each_retained_child(|child| {
                     if child.0 < UNALLOCATABLE_ID_FLOOR
@@ -1987,6 +1997,10 @@ impl NodeArenaCore {
         released
     }
 
+    /// One more count on each of `ids`, all or nothing: an id that names
+    /// no live slot refuses the whole set. The counts are added under the
+    /// read lock: a slot is destroyed only under the write lock, so a slot
+    /// seen live here stays live until its count is added.
     pub(super) fn retain(
         &self,
         ids: &[SemanticNodeId],
@@ -2001,7 +2015,7 @@ impl NodeArenaCore {
         validate: &[SemanticNodeId],
         retain: &[SemanticNodeId],
     ) -> Result<(), crate::semantic_query::QueryError> {
-        let mut inner = self.inner.write();
+        let inner = self.inner.read();
         // Validation finishes before any ownership count changes.
         let mut index = 0;
         while index < validate.len() {
@@ -2019,8 +2033,11 @@ impl NodeArenaCore {
         let mut index = 0;
         while index < retain.len() {
             let id = retain[index];
-            match inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) {
-                Some(chunk) => chunk.owners[(id.0 & CHUNK_MASK) as usize] += 1,
+            match inner.chunks.get(&(id.0 >> CHUNK_BITS)) {
+                Some(chunk) => {
+                    chunk.owners[(id.0 & CHUNK_MASK) as usize]
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 None => unreachable!("a live slot's chunk is held"),
             }
             index += 1;
@@ -2028,15 +2045,41 @@ impl NodeArenaCore {
         Ok(())
     }
 
+    /// One more count on each of `ids` for a holder that already counts
+    /// them (a root set's clone). A counted slot is live and stays live
+    /// while the caller's count does, so nothing is checked and nothing can
+    /// be refused, and the counts are added under the read lock: a slot is
+    /// destroyed only under the write lock, once its count is zero, so no
+    /// destruction can interleave, and concurrent additions commute.
+    pub(super) fn retain_held(&self, ids: &[SemanticNodeId]) {
+        let inner = self.inner.read();
+        let mut index = 0;
+        while index < ids.len() {
+            let id = ids[index];
+            let slot = (id.0 & CHUNK_MASK) as usize;
+            match inner.chunks.get(&(id.0 >> CHUNK_BITS)) {
+                Some(chunk) => {
+                    verter_debug_assert!(chunk.nodes[slot].is_some(), "a counted root is live");
+                    let before =
+                        chunk.owners[slot].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    verter_debug_assert!(before > 0, "a counted root has a count");
+                }
+                None => unreachable!("a counted root's chunk is live"),
+            }
+            index += 1;
+        }
+    }
+
     /// Keep only the live ids of `ids` and retain each of them, under one
-    /// hold of the arena: a tombstone or an unallocated ordinal owns no
-    /// storage, so it is dropped rather than refused.
+    /// hold of the arena's read lock (see [`Self::retain`]): a tombstone or
+    /// an unallocated ordinal owns no storage, so it is dropped rather than
+    /// refused.
     pub(super) fn retain_live(&self, ids: &mut super::node_roots::RootIds) {
-        let mut inner = self.inner.write();
+        let inner = self.inner.read();
         ids.retain(|id| matches!(inner.slot(*id), Slot::Live(..)));
         for id in ids.iter() {
-            inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
-                [(id.0 & CHUNK_MASK) as usize] += 1;
+            inner.chunks.get(&(id.0 >> CHUNK_BITS)).unwrap().owners[(id.0 & CHUNK_MASK) as usize]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -2059,7 +2102,7 @@ impl NodeArenaCore {
                         chunk.permanent[index] = false;
                         // Take one count so the release below runs the
                         // ordinary last-owner path, whoever else holds it.
-                        chunk.owners[index] += 1;
+                        *chunk.owners[index].get_mut() += 1;
                         held.push(SemanticNodeId((key << CHUNK_BITS) | index as u64));
                     }
                 }
@@ -2069,25 +2112,71 @@ impl NodeArenaCore {
         held.len()
     }
 
+    /// Drop one count of each of `ids`. A count that leaves its slot still
+    /// counted drops under the read lock: a slot is destroyed only under the
+    /// write lock once its count is zero, so a decrement that stops above
+    /// zero races no destruction, and it commutes with the read-locked
+    /// additions. Only the ids whose count would reach zero take the write
+    /// lock, where the count is dropped again and a slot left uncounted is
+    /// destroyed with the children it alone kept.
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
+        if ids.is_empty() {
+            return;
+        }
         if self.tearing_down.load(std::sync::atomic::Ordering::Acquire) {
             if let Some(deferred) = self.deferred_releases.lock().as_mut() {
                 deferred.extend_from_slice(ids);
                 return;
             }
         }
-        // Most releases only drop a count; the stack of dying nodes' children
-        // and the retired list allocate only once a node reaches zero.
-        let mut pending: Vec<SemanticNodeId> = Vec::new();
-        let mut retired: Vec<(SemanticNodeId, u64, bool)> = Vec::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),
         });
+        let mut last: SmallVec<[SemanticNodeId; 8]> = SmallVec::new();
+        {
+            let inner = self.inner.read();
+            let mut index = 0;
+            while index < ids.len() {
+                let id = ids[index];
+                index += 1;
+                let Some(chunk) = inner.chunks.get(&(id.0 >> CHUNK_BITS)) else {
+                    continue;
+                };
+                let slot = (id.0 & CHUNK_MASK) as usize;
+                if chunk.nodes[slot].is_none() {
+                    continue;
+                }
+                let owners = &chunk.owners[slot];
+                let mut current = owners.load(std::sync::atomic::Ordering::Relaxed);
+                loop {
+                    if current <= 1 {
+                        last.push(id);
+                        break;
+                    }
+                    match owners.compare_exchange_weak(
+                        current,
+                        current - 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(seen) => current = seen,
+                    }
+                }
+            }
+        }
+        if last.is_empty() {
+            return;
+        }
+        // Most releases only drop a count; the stack of dying nodes' children
+        // and the retired list allocate only once a node reaches zero.
+        let mut pending: Vec<SemanticNodeId> = Vec::new();
+        let mut retired: Vec<(SemanticNodeId, u64, bool)> = Vec::new();
         let mut inner = self.inner.write();
         // Last id first, each dying node's descendants before the next id:
         // the order of one stack seeded with `ids`.
-        for &id in ids.iter().rev() {
+        for &id in last.iter().rev() {
             Self::release_root_locked(&mut inner, id, &mut pending, &mut retired);
             while let Some(child) = pending.pop() {
                 Self::release_root_locked(&mut inner, child, &mut pending, &mut retired);
@@ -2141,9 +2230,10 @@ impl NodeArenaCore {
         if chunk.nodes[index].is_none() {
             return;
         }
-        assert!(chunk.owners[index] > 0, "live root released twice");
-        chunk.owners[index] -= 1;
-        if chunk.owners[index] != 0 || chunk.permanent[index] {
+        let owners = chunk.owners[index].get_mut();
+        assert!(*owners > 0, "live root released twice");
+        *owners -= 1;
+        if *owners != 0 || chunk.permanent[index] {
             return;
         }
         let data = chunk.nodes[index].as_ref().unwrap();
@@ -2319,7 +2409,7 @@ impl NodeArena {
                     self.race_event(ArenaRaceEvent::BeforeDedupRetain);
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
-                    chunk.owners[index] += 1;
+                    *chunk.owners[index].get_mut() += 1;
                     chunk.permanent[index] |= vocabulary;
                 });
             drop(inner);
@@ -2352,7 +2442,7 @@ impl NodeArena {
                     // Another thread beat us to it.
                     let chunk = inner.chunks.get_mut(&(existing.0 >> CHUNK_BITS)).unwrap();
                     let index = (existing.0 & CHUNK_MASK) as usize;
-                    chunk.owners[index] += 1;
+                    *chunk.owners[index].get_mut() += 1;
                     chunk.permanent[index] |= vocabulary;
                     (existing, false)
                 } else {
@@ -2382,11 +2472,12 @@ impl NodeArena {
                     // is never deep-cloned into the index.
                     let payload = NodeData::new(data);
                     for child in children {
-                        inner
+                        *inner
                             .chunks
                             .get_mut(&(child.0 >> CHUNK_BITS))
                             .unwrap()
-                            .owners[(child.0 & CHUNK_MASK) as usize] += 1;
+                            .owners[(child.0 & CHUNK_MASK) as usize]
+                            .get_mut() += 1;
                     }
                     let id = inner.allocate(
                         payload.clone(),
@@ -2396,7 +2487,7 @@ impl NodeArena {
                     );
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
-                    chunk.owners[index] = 1;
+                    *chunk.owners[index].get_mut() = 1;
                     chunk.permanent[index] = vocabulary;
                     drop(inner);
                     shard.insert_candidate(
@@ -2490,13 +2581,16 @@ impl NodeArena {
         super::node_roots::NodeRoot::adopt(Arc::clone(&self.core), id)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn owner_count(&self, id: SemanticNodeId) -> usize {
         self.inner
             .read()
             .chunks
             .get(&(id.0 >> CHUNK_BITS))
-            .map_or(0, |chunk| chunk.owners[(id.0 & CHUNK_MASK) as usize])
+            .map_or(0, |chunk| {
+                chunk.owners[(id.0 & CHUNK_MASK) as usize]
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
     }
 
     /// Read the payload for `id`. `None` for an id this arena never handed

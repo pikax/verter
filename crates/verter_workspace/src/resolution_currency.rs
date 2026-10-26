@@ -3364,7 +3364,7 @@ impl ResolutionTransaction {
     /// read precisely, before any aggregate compaction: an aggregate stamp
     /// cannot prove an unrelated advance harmless, the observations can.
     pub(crate) fn observations_hold_in(&self, world: &CapturedResolutionWorld) -> bool {
-        world.validates_fact_signature(&self.observations)
+        world.validates_fact_signature((&self.observations).into())
     }
 
     /// Every canonical an observation of this attempt reads, possibly
@@ -3435,8 +3435,8 @@ impl ResolutionTransaction {
         &mut self,
         witness: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) {
-        // Read through the witness's evidence pages: a wide witness restates
-        // exactly the facts a narrow one would.
+        // Every fact of the witness, in canonical order: a wide witness
+        // restates exactly the facts a narrow one would.
         for fact in witness.entries() {
             if let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) =
                 fact
@@ -3930,7 +3930,7 @@ mod transaction_contract_tests {
             signature.facts
         );
         assert!(matches!(
-            &signature.facts[0],
+            signature.facts.first().expect("one fact"),
             FactVersionRef::DomainGeneration(fact)
                 if fact.domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
         ));
@@ -4134,8 +4134,8 @@ mod transaction_contract_tests {
         decision_last.observe(ResolutionFactKey::decision(child.clone()));
 
         assert_eq!(
-            finished_signature(decision_first).facts.as_ref(),
-            finished_signature(decision_last).facts.as_ref()
+            finished_signature(decision_first).facts.to_vec(),
+            finished_signature(decision_last).facts.to_vec()
         );
     }
 
@@ -4283,8 +4283,8 @@ mod transaction_contract_tests {
         let repeated = finished_signature(repeated);
 
         assert_eq!(
-            repeated.facts.as_ref(),
-            once.facts.as_ref(),
+            repeated.facts.to_vec(),
+            once.facts.to_vec(),
             "repeating an observation must change neither the witness contents nor its order"
         );
 

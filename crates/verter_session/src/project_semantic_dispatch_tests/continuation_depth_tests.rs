@@ -465,17 +465,26 @@ fn cold_and_warm_displays(source: &str, probe: &str) -> [String; 2] {
 ///
 /// TypeScript 7.0.2 (all four settings at 500): no TS2589; under
 /// `strictNullChecks` `typeof c` and `gj`'s return are `"ok" | undefined`.
+/// Every row through 200 aliases, cold and warm alike, on the small stack:
+/// the gate version of the 500-alias, 1 MiB test in the nightly scale tier.
+/// The small stack leaves at most 224 KiB above a probe's fixed need of 416
+/// to 480 KiB (see [`on_a_small_stack`]); 1 MiB leaves at least 544 KiB.
+/// So a link evaluated one native level deeper may spend at most 1.12 KiB
+/// here before the 200-alias chain overflows, against 1.09 to 1.22 KiB over
+/// 500 aliases on 1 MiB: for every fixed need in that range the bound here is
+/// the tighter one, and a level evaluated in place costs several KiB. The
+/// chain is still past the checker's instantiation depth of 100.
 #[test]
-fn alias_chains_500_long_answer_every_row_cold_and_warm_on_a_one_mebibyte_stack() {
+fn alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let (mismatches, displays) = on_a_one_mebibyte_stack(|| {
-            let source = alias_chain(500);
+        let (mismatches, displays) = on_a_small_stack(|| {
+            let source = alias_chain(200);
             (
                 evaluated_mismatches(&source, ALIAS_CHAIN_ROWS),
                 cold_and_warm_displays(&source, "ReturnType<typeof gj>"),
             )
         });
-        assert_eq!(mismatches, Vec::<String>::new(), "a chain of 500 aliases");
+        assert_eq!(mismatches, Vec::<String>::new(), "a chain of 200 aliases");
         assert_eq!(displays[0], displays[1], "cold and warm answer alike");
     });
 }
@@ -555,37 +564,42 @@ fn call_initializer_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack
     });
 }
 
-/// Chains of 500 values whose member reads the same member of the one
-/// before — object literals, and classes' statics — evaluate on a 1 MiB
-/// thread, cold and warm alike: a member path's `typeof` lowers the member
-/// where the value declares it as its frame's projection, which needs the
-/// member-path `typeof` its value names from the runtime instead of
-/// evaluating it in place.
-///
-/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
-/// `noImplicitAny` off: `typeof y500.v` and `typeof C500.v` are `"ok"`.
+/// Chains `depth` values deep whose member reads the same member of the one
+/// before — object literals, and classes' statics — each answering `"ok"`,
+/// displayed cold and then warm.
+fn member_path_typeof_chain_displays(depth: usize) -> [(String, [String; 2]); 2] {
+    let mut literals = String::from("const y0 = { v: \"ok\" as const };\n");
+    let mut statics = String::from("class C0 { static v = \"ok\" as const; }\n");
+    for level in 1..=depth {
+        literals.push_str(&format!("const y{level} = {{ v: y{}.v }};\n", level - 1));
+        statics.push_str(&format!(
+            "class C{level} {{ static v = C{}.v; }}\n",
+            level - 1
+        ));
+    }
+    [
+        (literals, format!("typeof y{depth}.v")),
+        (statics, format!("typeof C{depth}.v")),
+    ]
+    .map(|(source, probe)| {
+        assert_eq!(
+            evaluated_mismatches(&source, &[(probe.as_str(), "\"ok\"")]),
+            Vec::<String>::new(),
+            "{probe}"
+        );
+        let displays = cold_and_warm_displays(&source, &probe);
+        (probe, displays)
+    })
+}
+
+/// Member-path `typeof` chains 200 deep, cold and warm alike, on the small
+/// stack: the gate version of the 500-deep, 1 MiB test in the nightly scale
+/// tier, under the same tighter per-level stack bound as
+/// [`alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack`].
 #[test]
-fn member_path_typeof_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+fn member_path_typeof_chains_200_deep_answer_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let mut literals = String::from("const y0 = { v: \"ok\" as const };\n");
-        let mut statics = String::from("class C0 { static v = \"ok\" as const; }\n");
-        for level in 1..=500 {
-            literals.push_str(&format!("const y{level} = {{ v: y{}.v }};\n", level - 1));
-            statics.push_str(&format!(
-                "class C{level} {{ static v = C{}.v; }}\n",
-                level - 1
-            ));
-        }
-        let displays = on_a_one_mebibyte_stack(move || {
-            [(literals, "typeof y500.v"), (statics, "typeof C500.v")].map(|(source, probe)| {
-                assert_eq!(
-                    evaluated_mismatches(&source, &[(probe, "\"ok\"")]),
-                    Vec::<String>::new(),
-                    "{probe}"
-                );
-                (probe, cold_and_warm_displays(&source, probe))
-            })
-        });
+        let displays = on_a_small_stack(|| member_path_typeof_chain_displays(200));
         for (probe, [cold, warm]) in displays {
             assert_eq!(cold, warm, "{probe}: cold and warm answer alike");
         }
@@ -635,32 +649,44 @@ fn conditional_chain(length: usize, branch: impl Fn(usize) -> String) -> String 
     source
 }
 
-/// Chains of non-generic conditional aliases, each deciding over the one
-/// before, evaluate on a 1 MiB thread, cold and warm alike: deciding a
-/// conditional needs its operands' instantiations from the runtime instead
-/// of normalizing them in place one native level deeper. Five hundred
-/// levels whose branch is a literal; a hundred whose branch selects the
-/// alias before, which a decided branch keeps as a carrier, so each level's
-/// decision walks the carriers below it — that walk, not the runtime, bounds
-/// its length here.
-///
-/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
-/// `noImplicitAny` off: `C500` over the literal branches and `C100` over the
-/// alias branches are `"ok"`.
+/// The literal-branch chain `literal_length` levels long and the alias-branch
+/// chain 100 levels long, each displayed cold and then warm.
+fn conditional_chain_displays(literal_length: usize) -> [(String, [String; 2]); 2] {
+    [
+        (
+            conditional_chain(literal_length, |_| "\"ok\"".to_owned()),
+            format!("C{literal_length}"),
+        ),
+        (
+            conditional_chain(100, |p| format!("C{p}")),
+            "C100".to_owned(),
+        ),
+    ]
+    .map(|(source, probe)| {
+        let displays = cold_and_warm_displays(&source, &probe);
+        (probe, displays)
+    })
+}
+
+fn assert_conditional_chains_decide(displays: [(String, [String; 2]); 2]) {
+    for (probe, [cold, warm]) in displays {
+        assert_eq!(cold, "\"ok\"", "{probe} decides cold");
+        assert_eq!(warm, cold, "{probe} decides warm as it does cold");
+    }
+}
+
+/// The literal-branch chain at 200 levels and the alias-branch chain at 100,
+/// cold and warm alike, on the small stack: the gate version of the 500- and
+/// 100-level, 1 MiB test in the nightly scale tier. The 200-level chain has
+/// the same tighter per-level stack bound as
+/// [`alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack`];
+/// the 100-level alias-branch chain keeps its length on a smaller stack, so
+/// its bound is tighter still.
 #[test]
-fn conditional_chains_decide_cold_and_warm_on_a_one_mebibyte_stack() {
+fn conditional_chains_decide_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let displays = on_a_one_mebibyte_stack(|| {
-            [
-                (conditional_chain(500, |_| "\"ok\"".to_owned()), "C500"),
-                (conditional_chain(100, |p| format!("C{p}")), "C100"),
-            ]
-            .map(|(source, probe)| (probe, cold_and_warm_displays(&source, probe)))
-        });
-        for (probe, [cold, warm]) in displays {
-            assert_eq!(cold, "\"ok\"", "{probe} decides cold");
-            assert_eq!(warm, cold, "{probe} decides warm as it does cold");
-        }
+        let displays = on_a_small_stack(|| conditional_chain_displays(200));
+        assert_conditional_chains_decide(displays);
     });
 }
 
@@ -1451,5 +1477,65 @@ fn circular_type_aliases_are_the_checkers_ts2456_and_tail_runs_its_ts2589() {
             Some(2589),
             "`{TAIL}` under {options}"
         );
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn alias_chains_500_long_answer_every_row_cold_and_warm_on_a_one_mebibyte_stack() {
+        in_a_fresh_process(test_path!(), || {
+            let (mismatches, displays) = on_a_one_mebibyte_stack(|| {
+                let source = alias_chain(500);
+                (
+                    evaluated_mismatches(&source, ALIAS_CHAIN_ROWS),
+                    cold_and_warm_displays(&source, "ReturnType<typeof gj>"),
+                )
+            });
+            assert_eq!(mismatches, Vec::<String>::new(), "a chain of 500 aliases");
+            assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+        });
+    }
+
+    /// Chains of 500 values whose member reads the same member of the one
+    /// before — object literals, and classes' statics — evaluate on a 1 MiB
+    /// thread, cold and warm alike: a member path's `typeof` lowers the member
+    /// where the value declares it as its frame's projection, which needs the
+    /// member-path `typeof` its value names from the runtime instead of
+    /// evaluating it in place.
+    ///
+    /// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+    /// `noImplicitAny` off: `typeof y500.v` and `typeof C500.v` are `"ok"`.
+    #[test]
+    fn member_path_typeof_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+        in_a_fresh_process(test_path!(), || {
+            let displays = on_a_one_mebibyte_stack(|| member_path_typeof_chain_displays(500));
+            for (probe, [cold, warm]) in displays {
+                assert_eq!(cold, warm, "{probe}: cold and warm answer alike");
+            }
+        });
+    }
+
+    /// Chains of non-generic conditional aliases, each deciding over the one
+    /// before, evaluate on a 1 MiB thread, cold and warm alike: deciding a
+    /// conditional needs its operands' instantiations from the runtime instead
+    /// of normalizing them in place one native level deeper. Five hundred
+    /// levels whose branch is a literal; a hundred whose branch selects the
+    /// alias before, which a decided branch keeps as a carrier, so each level's
+    /// decision walks the carriers below it — that walk, not the runtime, bounds
+    /// its length here.
+    ///
+    /// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+    /// `noImplicitAny` off: `C500` over the literal branches and `C100` over the
+    /// alias branches are `"ok"`.
+    #[test]
+    fn conditional_chains_decide_cold_and_warm_on_a_one_mebibyte_stack() {
+        in_a_fresh_process(test_path!(), || {
+            let displays = on_a_one_mebibyte_stack(|| conditional_chain_displays(500));
+            assert_conditional_chains_decide(displays);
+        });
     }
 }

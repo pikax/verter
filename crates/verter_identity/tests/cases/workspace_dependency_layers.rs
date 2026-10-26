@@ -47,6 +47,9 @@ const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     // through here, so it depends only on the leaf utilities above.
     "verter_retention",
     "verter_retention_derive",
+    // The process allocator selection that each native entry point installs
+    // as its global allocator; it depends on no workspace crate.
+    "verter_alloc",
 ];
 
 const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[

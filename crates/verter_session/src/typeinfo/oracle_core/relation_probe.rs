@@ -674,7 +674,7 @@ pub(crate) fn relation_value_canonical_form(value: &RelationVerdictValue) -> Str
             serde_json::json!({
                 "ordinal": b.ordinal,
                 "name": b.name,
-                "bound": b.bound.to_json_value(),
+                "bound": &b.bound,
             })
         })
         .collect();

@@ -1028,17 +1028,17 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
             })
             .collect();
         let facts = seal_canonical_signature(facts);
-        let pages: Vec<_> = facts
-            .iter()
-            .filter_map(|fact| match fact {
-                FactVersionRef::Receipt(page) => Some(page.clone()),
-                _ => None,
-            })
-            .collect();
-        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-        assert!(!pages.is_empty());
+        // The wide consumed result's evidence carries its own charge, which
+        // the compile's admission must claim whole.
+        let consumed = ResultReceipt::new(facts.iter().cloned().collect());
+        let evidence_bytes = consumed.retained_charge_bytes();
+        assert!(evidence_bytes > 1025 * std::mem::size_of::<FactVersionRef>());
         let account = SemanticRetentionAccount::new(RetentionLimits {
-            max_entry_bytes: if admitted { usize::MAX } else { page_bytes - 1 },
+            max_entry_bytes: if admitted {
+                usize::MAX
+            } else {
+                evidence_bytes - 1
+            },
             ..RetentionLimits::defaults()
         });
         host.project_type_store = Arc::new(
@@ -1054,8 +1054,8 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
         );
         let profile = CompileProfile::default();
         let profile_hash = crate::hash::compile_profile_hash(&profile);
-        let consumed = ResultReceipt::new(facts.to_vec());
         drop(facts);
+        let held = consumed.clone();
         let facts = Arc::from(vec![FactVersionRef::Receipt(consumed)]);
         let compile = || {
             host.get_virtual_file(VirtualQuery {
@@ -1073,15 +1073,13 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
         } else {
             ChargeClass::Pinned
         };
-        assert!(pages
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(expected)));
+        assert_eq!(held.retained_charge_class(), Some(expected));
         assert_eq!(
             host.compile_cache()
                 .get(canonical)
                 .and_then(|state| state
                     .compile_slot_for_node(profile_hash)
-                    .map(|slot| ReadSetSignature::new(Arc::clone(&slot.fact_dep_signature.facts))))
+                    .map(|slot| ReadSetSignature::new(slot.fact_dep_signature.facts.clone())))
                 .is_some(),
             admitted
         );
@@ -1100,7 +1098,7 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
             let recomputed = compile();
             assert_eq!(recomputed.code, output.code);
         }
-        drop((host, pages));
+        drop((host, held));
         assert_eq!(account.snapshot().retained_bytes, 0);
     }
 }

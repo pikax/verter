@@ -60,7 +60,7 @@ fn route_surface_signature_carries_import_ref() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&surface.fact_dep_signature),
+        view.validates_fact_signature((&surface.fact_dep_signature).into()),
         "route_surface matrix slice: the permissive view MUST accept \
          an `ImportRef` fact in the route-surface signature."
     );

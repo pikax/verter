@@ -624,7 +624,7 @@ pub struct SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
     /// Direct-edge reverse index: each canonical names the evidence
-    /// (carriers, receipts and pages, cached or not) whose own facts read
+    /// (carriers and receipts, cached or not) whose own facts read
     /// it, each consumed receipt names the evidence that consumed it, and
     /// each carrier names the candidates it validates. A candidate also
     /// registers under its dispatch-fence canonicals.
@@ -650,6 +650,11 @@ pub struct SemanticGraphStore {
     /// remains the semantic authority; candidate admission sequence identifies
     /// individual reverse-index registrations.
     dep_signature_interner: DepSignatureInterner,
+    /// The name every project-generation dependency entry of this store
+    /// carries, minted with the store and pinned to its account once: each
+    /// entry shares the one allocation and its charge rather than copying
+    /// the text per signature ([`Self::project_dep_entry`]).
+    project_dep_name: verter_type_expr::OwnedStr,
     /// Global insertion-ordered total-size budget for the family memo.
     /// Each `FamilyKey` is built from content-derived `SemanticNodeId`s
     /// / a `DeclIdentity` embedding the file whole-hash, so a content
@@ -819,6 +824,34 @@ impl AsRef<SemanticGraphStore> for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    /// A project-generation dependency entry at `version`: its name is this
+    /// store's one `"<project>"` allocation, shared by every such entry, so
+    /// a signature that records only the project generation copies no text.
+    ///
+    /// The store mints the name with itself and pins its cell to the
+    /// store's account, so the allocation is charged once, as the store's
+    /// own storage, until the store and the last entry naming it drop. A
+    /// cache retaining an entry holds the same cell, as it would any owned
+    /// name.
+    pub(crate) fn project_dep_entry(
+        &self,
+        version: crate::semantic_query::DepVersion,
+    ) -> crate::semantic_query::DepEntry {
+        crate::semantic_query::DepEntry(self.project_dep_name.clone(), version)
+    }
+
+    /// Bytes the store's project dependency name is pinned for while the
+    /// store alone charges it; a cache retaining an entry holds that charge
+    /// instead while it does.
+    pub(super) fn project_dep_name_pinned_bytes(&self) -> usize {
+        // Bytes and class read together: a cache hold or release between two
+        // reads would count the name in neither class or in both.
+        match self.project_dep_name.charge() {
+            Some((bytes, verter_session_query::retention::ChargeClass::Pinned)) => bytes,
+            _ => 0,
+        }
+    }
+
     /// The one store constructor: the store and its graph storage charge
     /// the same account, bound before the first node is interned. Binds
     /// signature-token ownership to the final arena before publishing the
@@ -836,6 +869,10 @@ impl SemanticGraphStore {
         let refusal_summaries =
             refusal_summary::RefusalSummaryTable::charged(retention_account.get());
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
+        let project_dep_name = verter_type_expr::OwnedStr::from("<project>");
+        project_dep_name.pin(verter_session_query::retention::owned::ChargeCtx::new(
+            retention_account.get(),
+        ));
         let unresolved_reach = Arc::new(release::SidecarMutex::new(
             unresolved_reach::StructureBits::new(retention_account.get()),
         ));
@@ -890,6 +927,7 @@ impl SemanticGraphStore {
             joiner_on_condvar_count: Default::default(),
             canonical_to_entries,
             dep_signature_interner,
+            project_dep_name,
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
             structural_domains: Default::default(),
@@ -991,8 +1029,8 @@ impl SemanticOperandEvidence {
 /// force's typed incomplete refusal — never a silently SHRUNK root set.
 /// A shrunk set would validate at mint/force and let a
 /// `mint -> force -> mint` chain drop a producer root, serving
-/// stale-complete after a dead-operand edit. The carrier's evidence pages
-/// are read through, so a wide carrier finds its roots like a narrow one.
+/// stale-complete after a dead-operand edit. Every fact of the carrier is
+/// read, so a wide carrier finds its roots like a narrow one.
 pub fn semantic_operand_evidence(
     read_set: &verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: &[Arc<str>],
@@ -2977,7 +3015,12 @@ pub fn semantic_graph_read_set_signature(
     crate::fact_signature_helpers::StructuralCarrierReadSet,
     crate::cache_runtime::NonAdmissionReason,
 > {
-    semantic_graph_carrier(view, observed_self_roots, traced_facts.to_vec())
+    semantic_graph_carrier(
+        view,
+        observed_self_roots,
+        &verter_session_query::facts::fact_set::FactSet::from_facts(traced_facts.to_vec()),
+        Vec::new(),
+    )
 }
 
 /// [`semantic_graph_read_set_signature`] over traced facts the caller
@@ -2985,7 +3028,8 @@ pub fn semantic_graph_read_set_signature(
 pub fn semantic_graph_carrier(
     view: &dyn verter_session_query::facts::store_view::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
-    traced_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+    traced: &verter_session_query::facts::fact_set::FactSet,
+    extra: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
 ) -> Result<
     crate::fact_signature_helpers::StructuralCarrierReadSet,
     crate::cache_runtime::NonAdmissionReason,
@@ -3012,54 +3056,57 @@ pub fn semantic_graph_carrier(
         }
     }
 
+    // Each root's canonical is interned once, for the probes below and the
+    // carrier's own strict roots.
+    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes
+        .iter()
+        .map(|(canonical, _)| Arc::<str>::from(canonical.as_str()))
+        .collect();
+
     // Every traced `FileWholeHash` for a self-root canonical MUST agree
     // with the observed hash (else the dependency rail and the observed
     // self-root disagree on the keyed file's version — a torn read). A
-    // wide traced set holds its facts on evidence pages, so the check
-    // reads through them: a page is part of the rail, not a place a torn
-    // root can hide.
-    if !self_root_hashes.is_empty() {
-        for fact in verter_session_query::facts::fact_cache::signature_entries(&traced_facts) {
+    // wide traced set is checked like a narrow one: every fact is part of
+    // the rail, so a torn root has nowhere to hide.
+    // The traced set is read in place: one file's whole-file facts sit side
+    // by side in canonical order, so each root reads only its own.
+    for ((_, observed), canonical) in self_root_hashes.iter().zip(&self_root_canonicals) {
+        let from = FactVersionRef::FileWholeHash {
+            canonical_id: Arc::clone(canonical),
+            hash: [0; 16],
+        };
+        let traced_root = traced.iter_from(&from).take_while(|fact| {
+            matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. }
+                if **canonical_id == **canonical)
+        });
+        for fact in traced_root.chain(extra.iter()) {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if let Some(index) = root_position(&self_root_hashes, canonical_id) {
-                    if *hash != self_root_hashes[index].1 {
-                        return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
-                    }
+                if **canonical_id == **canonical && hash != observed {
+                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
             }
         }
     }
 
     // One self-root `FileWholeHash` per observed self-root, pinned to the
-    // OBSERVED content version, beside the traced fact set kept verbatim (a
-    // page included) so transitive cross-file invalidation is preserved. A
-    // top-level traced `FileWholeHash` for a self-root canonical already
+    // OBSERVED content version, beside the traced fact set kept verbatim
+    // (shared, never copied) so transitive cross-file invalidation is
+    // preserved. A traced `FileWholeHash` for a self-root canonical already
     // is that fact — the check above proved its hash the observed one — so
     // only the roots the traced set does not name are added.
-    let mut named = smallvec::SmallVec::<[bool; 4]>::from_elem(false, self_root_hashes.len());
-    if !self_root_hashes.is_empty() {
-        for fact in &traced_facts {
-            if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
-                if let Some(index) = root_position(&self_root_hashes, canonical_id) {
-                    named[index] = true;
-                }
-            }
+    let mut facts = extra;
+    for ((_, observed_hash), canonical) in self_root_hashes.iter().zip(&self_root_canonicals) {
+        let fact = FactVersionRef::FileWholeHash {
+            canonical_id: Arc::clone(canonical),
+            hash: *observed_hash,
+        };
+        if !traced.contains(&fact) && !facts.contains(&fact) {
+            facts.push(fact);
         }
-    }
-    let mut facts = traced_facts;
-    let mut self_root_canonicals: Vec<Arc<str>> = Vec::with_capacity(self_root_hashes.len());
-    for (index, (canonical, observed_hash)) in self_root_hashes.iter().enumerate() {
-        let canonical = Arc::<str>::from(*canonical);
-        if !named[index] {
-            facts.push(FactVersionRef::FileWholeHash {
-                canonical_id: Arc::clone(&canonical),
-                hash: *observed_hash,
-            });
-        }
-        self_root_canonicals.push(canonical);
     }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
+        traced,
         facts,
         self_root_canonicals,
     )

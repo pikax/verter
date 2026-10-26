@@ -595,7 +595,9 @@ fn malformed_owner_result_is_self_rooted_and_same_canonical_repair_recovers() {
         "the inner malformed candidate must miss"
     );
     assert!(
-        !current_view.view().validates_fact_signature(&broken_mirror),
+        !current_view
+            .view()
+            .validates_fact_signature((&broken_mirror).into()),
         "the malformed legacy mirror must miss on its owner whole hash",
     );
     let broken_route_fact = broken_mirror
