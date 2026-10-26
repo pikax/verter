@@ -828,6 +828,56 @@ fn imported_reference_version_read_is_tracked_across_dependency_edits() {
     );
 }
 
+/// A bare imported reference returned as the answer (no member read) keeps
+/// the same tracked-version contract: the interned declaration version is
+/// observed, a dependency edit forces a recompute, and the served identity
+/// is the live one.
+#[test]
+fn bare_imported_reference_version_is_tracked_across_dependency_edits() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+    let other = "/ws/class-member-evidence/other.ts";
+    let reader = "import { Other } from './other'; export function f(o: Other) { return o; }";
+    let host = host_with("export class B { u = 1; }", reader);
+    upsert(&host, other, "export interface Other { value: string; }");
+    let cold = read_flow_return(&host, "f");
+    assert!(cold.complete, "cold answer must be exact");
+    let live = host
+        .authoritative_current_content_hash(other)
+        .expect("the dependency is indexed");
+    assert!(
+        cold.facts.iter().any(|fact| matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id.as_ref() == other && *hash == live
+        )),
+        "the version interned into the bare reference must be observed: {:?}",
+        cold.facts
+    );
+    let count = flow_evaluations_for_tests();
+    upsert(
+        &host,
+        other,
+        "// edit\nexport interface Other { value: string; }",
+    );
+    let live_after = host
+        .authoritative_current_content_hash(other)
+        .expect("the edited dependency is indexed");
+    assert_ne!(live_after, live);
+    let edited = read_flow_return(&host, "f");
+    assert!(
+        flow_evaluations_for_tests() > count,
+        "warm answer kept a superseded version"
+    );
+    assert_eq!(edited.return_identity_hash, Some(live_after));
+    let fresh = host_with("export class B { u = 1; }", reader);
+    upsert(
+        &fresh,
+        other,
+        "// edit\nexport interface Other { value: string; }",
+    );
+    assert_eq!(edited.ty, read_flow_return(&fresh, "f").ty);
+}
+
 #[test]
 fn precise_member_cosmetic_names_refresh_without_changing_semantic_evidence() {
     use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;

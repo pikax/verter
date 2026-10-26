@@ -3836,13 +3836,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(proof) => proof.value().clone(),
                     None => result,
                 };
-                let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::FlowReturn(
-                        verter_session_query::retention::owned::Owned::new(published),
-                    )),
-                    fence,
-                ))
-                .with_observed_self_roots(scc_self_roots);
+                let value = SemanticQueryValue::FlowReturn(
+                    verter_session_query::retention::owned::Owned::new(published),
+                );
+                self.observe_retained_reference_versions(&value);
+                let mut output: QueryBuildOutput<SemanticQueryValue> =
+                    QueryBuildOutput::from((QueryResult::Value(value), fence))
+                        .with_observed_self_roots(scc_self_roots);
                 // §3.4: the published entry's `satisfied_projection` is
                 // the point set the compute ACTUALLY produced — recorded
                 // by the evaluation, never the nominal request echoed at
@@ -3924,6 +3924,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             built.flow_completion = None;
         }
         built
+    }
+
+    /// Observe the live content version of every declaration reference the
+    /// retained answer interns.
+    ///
+    /// Reference routing and receiver-member selection stay content-free;
+    /// the version is only read where a `DeclRef` / `InstantiationRef`
+    /// becomes part of the value that is retained and served. A warm answer
+    /// whose only contact with a dependency is such a reference therefore
+    /// misses on that dependency's next edit and re-interns the live
+    /// version, instead of serving a superseded one.
+    fn observe_retained_reference_versions(&self, value: &SemanticQueryValue) {
+        let mut pending: Vec<SemanticNodeId> = Vec::new();
+        value.for_each_retained_node(|node| pending.push(node));
+        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = Default::default();
+        let mut observed: Vec<Arc<str>> = Vec::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = self.arena().node_data(node) else {
+                continue;
+            };
+            let identity = match &*data {
+                SemanticNodeData::DeclRef { identity } => Some(identity),
+                SemanticNodeData::InstantiationRef { base, .. } => Some(base),
+                _ => None,
+            };
+            if let Some(identity) = identity {
+                let canonical: &str = identity.canonical_id.as_ref();
+                if !observed.iter().any(|seen| seen.as_ref() == canonical) {
+                    observed.push(Arc::from(canonical));
+                    if let Some(hash) = self.ctx.authoritative_current_content_hash(canonical) {
+                        crate::resolver_core::resolver_context::observe_fan_out(
+                            FactVersionRef::FileWholeHash {
+                                canonical_id: Arc::from(canonical),
+                                hash,
+                            },
+                        );
+                    }
+                }
+            }
+            data.for_each_retained_child(|child| pending.push(child));
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

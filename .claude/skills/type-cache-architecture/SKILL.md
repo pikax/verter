@@ -2748,3 +2748,14 @@ pays the same first step and receipt as a stepped operand; only a cold operand
 creates a continuation and tracer. Proof recording, strict validation, cost
 admission and counted ownership are REQUIRED work. Frame-start counters are
 test-only work evidence; optional audit capture remains OPTIONAL.
+
+### Versioned reference identities (`DeclIdentity.whole_hash`)
+
+Reference routing and receiver-member selection stay content-free. The live
+`whole_hash` interned into a `DeclRef`/`InstantiationRef` is a versioned VALUE
+payload, so it is observed (`FileWholeHash` fan-out) where the reference
+becomes part of a retained answer: the precise member path observes each
+referenced target at its embed site, and `build_flow_return` observes every
+declaration reference reachable from the published value. A warm answer whose
+only contact with a dependency is such a reference misses on the dependency's
+next edit and re-interns the live version.
