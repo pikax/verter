@@ -1120,7 +1120,10 @@ fn final_capacity_release_wakes_progress_subscribers_after_lifecycle_unlock() {
 #[test]
 fn dispatch_before_aggregate_binding_keeps_earlier_owners_on_the_job() {
     let scheduler = scheduler();
-    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    let flight = ScopedCacheFlight::new(
+        Arc::clone(&scheduler.dag),
+        scheduler.task_registry.register_task(),
+    );
     let root = CancellationToken::new();
     let follower = CancellationToken::new();
     assert!(flight.try_add_owner(1, Some(root.clone())));
@@ -1139,7 +1142,10 @@ fn dispatch_before_aggregate_binding_keeps_earlier_owners_on_the_job() {
 
 fn bind_with_a_cancelled_owner(dispatch_first: bool) {
     let scheduler = scheduler();
-    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    let flight = ScopedCacheFlight::new(
+        Arc::clone(&scheduler.dag),
+        scheduler.task_registry.register_task(),
+    );
     assert!(flight.try_add_owner(1, Some(CancellationToken::new())));
     assert!(flight.try_add_owner(2, Some(CancellationToken::new())));
     // Cancel the first owner in this map's iteration order, after insertion
