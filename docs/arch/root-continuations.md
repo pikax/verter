@@ -659,13 +659,10 @@ producer on the existing CPU pool.
   the flight ahead of an existing live sibling.
 - **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
   same-path re-entry retain the existing typed outcomes. Cancellation is
-  checked and registered at each poll. A stop wakes only its subscriber;
-  shared-registry wait edges refuse cycles before suspension. Polling after
-  a terminal result is a contract violation.
-  checked at each poll, and a pending handoff is registered on its request's
-  cancellation, so cancelling the request wakes it and the next poll answers
-  `Cancelled` without disturbing the producer or sibling followers. Polling
-  after a terminal result is a contract violation.
+  checked and registered at each poll. Cancelling the request wakes its
+  subscriber, whose next poll answers `Cancelled` without disturbing the
+  producer or sibling followers. Shared-registry wait edges refuse cycles
+  before suspension. Polling after a terminal result is a contract violation.
 - **Wake ordering:** dispatch and settlement take registrations under the
   flight lock. Delivery uses the scheduler's deferral rail, after flight,
   scoped-incarnation and DAG locks release, including reset's outer hold.
