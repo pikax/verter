@@ -78,6 +78,12 @@ tracing = "0.1.44"
 walkdir = "2.5"
 verter_tsgo_api = { path = "../verter_tsgo_api" }
 
+# One attribute query per live path probe on Windows, instead of the open,
+# query and close `std::fs::metadata` performs. `windows-sys 0.61` is already
+# resolved in the workspace lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 # An isolated retention account with size-controlled limits for the
 # retention-refusal tests.
