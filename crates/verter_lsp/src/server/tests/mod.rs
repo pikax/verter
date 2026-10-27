@@ -83,12 +83,56 @@ fn carrier_manifest_strict(ws_root: &str) -> Option<crate::external_ts::Manifest
     })
 }
 
+/// Wait until `done` holds, re-checking it after every pending-sync drain
+/// pass. Each pass reports progress once it is finished with its queue —
+/// its publications committed and its settled carriers dequeued — so a state
+/// a pass produces is checked right after that pass. The timeout is a
+/// liveness watchdog only.
+async fn await_after_drain_passes(
+    server: &VerterLanguageServer,
+    done: impl Fn() -> bool,
+    failure: &str,
+) {
+    let mut progress = server
+        .carrier_transaction_coordinator
+        .subscribe_pending_sync_progress();
+    let reached = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        progress.wait_for(|_| done()),
+    )
+    .await;
+    assert!(matches!(reached, Ok(Ok(_))), "{failure}");
+}
+
+/// Wait until `done` holds, re-checking it each time a workspace scan
+/// settles: the settle lowers the scan flag and then notifies. The timeout is
+/// a liveness watchdog only.
+async fn await_scan_settlement(
+    server: &VerterLanguageServer,
+    done: impl Fn() -> bool,
+    failure: &str,
+) {
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let settled = server.workspace_scan_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if done() {
+                return;
+            }
+            settled.await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "{failure}");
+}
+
 /// Whether the store's manifest advertises a `.vue.tsx` companion for the
-/// configured project — the project ROW, not manifest existence. A wait that
-/// polls only manifest existence can observe the freshly written manifest
-/// before its `projects` map carries the row, and a follow-up
+/// configured project — the project ROW, not manifest existence. A check of
+/// manifest existence alone can observe the freshly written manifest before
+/// its `projects` map carries the row, and a follow-up
 /// `.projects.get(&tsconfig)` then blames the publish for the row's
-/// not-yet-landed write. Poll THIS for the fills these tests assert on.
+/// not-yet-landed write. Wait on THIS for the fills these tests assert on.
 fn carrier_manifest_advertises_vue_companion(ws_root: &str, tsconfig: &str) -> bool {
     carrier_manifest_strict(ws_root).is_some_and(|manifest| {
         manifest.projects.get(tsconfig).is_some_and(|project| {
@@ -4059,34 +4103,51 @@ fn ingress_measurement_server(
     service
 }
 
-/// Wait for the cold-compile rail to reach a value and STAY there, then return
-/// the delta from `before`.
+/// Wait until the coordinator has run every compile its queued work owed,
+/// then return the cold-compile delta from `before`.
 ///
-/// The debounced refresh is asynchronous, so a bare sleep either flakes short or
-/// pads every run. This polls for the first movement, then requires the rail to
-/// hold still across a full debounce window — so a per-notification storm cannot
-/// be sampled mid-flight and read as a small number.
+/// The coordinator reports when it holds no work — no inbox signal, no
+/// pending document, no diagnostics pull in flight — so the count read after
+/// that is final: a per-notification storm cannot be sampled mid-flight and
+/// read as a small number, and no elapsed time stands in for "settled".
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
-async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64 {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let quiet_for = std::time::Duration::from_millis(crate::sync_coordinator::DEBOUNCE_MS * 3);
-    loop {
-        let observed = cold_compile_runs(host) - before;
-        if observed > 0 {
-            tokio::time::sleep(quiet_for).await;
-            let again = cold_compile_runs(host) - before;
-            if again == observed {
-                return observed;
-            }
-            continue;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the debounced coordinator never compiled the settled revision"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+async fn await_settled_cold_compiles(
+    host: &Arc<VerterHost>,
+    coordinator: &crate::sync_coordinator::SyncCoordinatorHandle,
+    before: u64,
+) -> u64 {
+    coordinator
+        .await_until(
+            || coordinator.idle_for_test(),
+            || panic!("the debounced coordinator never settled its queued work"),
+        )
+        .await;
+    cold_compile_runs(host) - before
+}
+
+/// Wait until `canonical_id`'s committed source is `expected`. Each
+/// `didChange` commits its revision and then signals the coordinator, whose
+/// loop ticks on that signal, so the check runs after every commit.
+#[cfg(feature = "semantic-observe")]
+async fn await_committed_source(
+    host: &Arc<VerterHost>,
+    coordinator: &crate::sync_coordinator::SyncCoordinatorHandle,
+    canonical_id: &str,
+    expected: &str,
+) {
+    coordinator
+        .await_until(
+            || host.get_source(canonical_id).as_deref() == Some(expected),
+            || {
+                panic!(
+                    "precondition: every queued notification must be committed; the \
+                     document is still at {:?}",
+                    host.get_source(canonical_id)
+                )
+            },
+        )
+        .await;
 }
 
 /// Frame `count` full-document `didChange` notifications carrying revisions that
