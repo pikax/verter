@@ -85,6 +85,10 @@ struct TaskPool {
 
 #[derive(Debug, Default)]
 struct RegistryState {
+    /// TEST-ONLY: announced under this graph's lock when an edge is registered
+    /// or the graph forwards to a composed authority.
+    #[cfg(any(test, feature = "test-support"))]
+    wait_registered: Arc<parking_lot::Condvar>,
     // Composition joins graphs, never task identities or registration pools.
     pools: FxHashMap<u64, TaskPool>,
     parent: Option<Arc<Mutex<RegistryState>>>,
@@ -241,6 +245,11 @@ impl TaskRegistry {
                 Self::absorb_graph(&mut b, &mut a);
                 a.parent = Some(right.clone());
             }
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                a.wait_registered.notify_all();
+                b.wait_registered.notify_all();
+            }
             return;
         }
     }
@@ -323,6 +332,8 @@ impl TaskRegistry {
                 cursor = next;
             }
             state.link_wait(waiter, producer);
+            #[cfg(any(test, feature = "test-support"))]
+            state.wait_registered.notify_all();
             Ok(WaitEdge {
                 registry: self.clone(),
                 waiter,
@@ -410,6 +421,30 @@ impl TaskRegistry {
                 .count()
         })
     }
+
+    /// Wait until at least `edges` wait-for edges are registered. Edges are registered and
+    /// announced under one lock, so none is missed; the budget is a hang guard only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wait_for_wait_count_for_tests(&self, edges: usize, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut graph = self.owner.graph.clone();
+        loop {
+            let mut state = graph.lock();
+            if let Some(parent) = state.parent.clone() {
+                drop(state);
+                graph = parent;
+                continue;
+            }
+            if state.waits.len() >= edges {
+                return true;
+            }
+            let registered = state.wait_registered.clone();
+            if registered.wait_until(&mut state, deadline).timed_out() {
+                return state.waits.len() >= edges;
+            }
+        }
+    }
+
     /// How many wait-for edges are registered.
     #[cfg(any(test, feature = "test-support"))]
     pub fn wait_count_for_tests(&self) -> usize {

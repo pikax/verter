@@ -763,14 +763,20 @@ impl SemanticGraphStore {
             }
             let inflight = {
                 let mut table = self.site_inflight(attempt.site).lock();
-                table
+                let inflight = table
                     .entry(prepared.clone())
                     .or_insert_with(|| {
                         let mut cell = FlightCell::charged(self.retention_account());
                         cell.site = attempt.site;
                         Arc::new(cell)
                     })
-                    .clone()
+                    .clone();
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    *self.inflight_referenced.0.lock() += 1;
+                    self.inflight_referenced.1.notify_all();
+                }
+                inflight
             };
             {
                 let mut state = inflight.state.lock();
@@ -917,6 +923,8 @@ impl Subscription<'_> {
                 self.resolve(state, ctx, flags, attempt, capture, wait_start),
             );
         }
+        #[cfg(any(test, feature = "test-support"))]
+        let first_registration = self.parked.is_none();
         if self.parked.is_none() {
             if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return std::task::Poll::Ready(Joined::Recursive(Recursion::WaitCycle));
@@ -927,6 +935,10 @@ impl Subscription<'_> {
             .as_mut()
             .expect("a pending subscriber is parked");
         state.wakers.register(&mut parked.waker, waker);
+        #[cfg(any(test, feature = "test-support"))]
+        if first_registration {
+            self.store.announce_joiner_suspended();
+        }
         std::task::Poll::Pending
     }
 
@@ -958,12 +970,6 @@ impl Subscription<'_> {
             Some(rendezvous) => rendezvous.note_subscriber(key, &self.inflight),
             None => super::inflight::SubscriberRegistration::inactive(),
         };
-        // Test-only: record that this subscriber is about to SUSPEND (it
-        // holds `state` and returns pending with its waker registered).
-        #[cfg(any(test, feature = "test-support"))]
-        self.store
-            .joiner_on_condvar_count
-            .fetch_add(1, Ordering::SeqCst);
         self.parked = Some(Parked {
             _edge: edge,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]

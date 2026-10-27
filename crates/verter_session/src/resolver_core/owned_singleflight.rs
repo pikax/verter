@@ -162,6 +162,8 @@ impl<K: Eq + Hash, V, E> SingleflightGroup<K, V, E> {
         Self {
             flights: self.flights.clone(),
             registry: self.registry.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            lane_joined: self.lane_joined.clone(),
             #[cfg(test)]
             non_retained_seam_hook: self.non_retained_seam_hook.clone(),
             #[cfg(test)]
@@ -375,6 +377,8 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                         state
                             .pins
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(any(test, feature = "test-support"))]
+                        group.lane_joined.notify_all();
                         state.clone()
                     } else {
                         let state = Arc::new(FlightState {

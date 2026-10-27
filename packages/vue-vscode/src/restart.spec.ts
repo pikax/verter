@@ -270,16 +270,17 @@ describe("createRestartSupervisor", () => {
 
   it("refuses a concurrent restart instead of stacking a second one", async () => {
     let release: (value: boolean) => void = () => {};
-    const restart = vi.fn().mockImplementation(
-      () =>
-        new Promise<boolean>((resolve) => {
-          release = resolve;
-        }),
-    );
+    const started = signal();
+    const restart = vi.fn().mockImplementation(() => {
+      started.fire();
+      return new Promise<boolean>((resolve) => {
+        release = resolve;
+      });
+    });
     const { supervisor } = makeSupervisor(restart);
 
     const inFlight = supervisor.requestAutomaticRestart("no heartbeat");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await started.promise;
     expect(await supervisor.requestManualRestart()).toBe("in-progress");
     expect(await supervisor.requestAutomaticRestart("no heartbeat")).toBe("in-progress");
     expect(restart).toHaveBeenCalledTimes(1);
@@ -289,9 +290,13 @@ describe("createRestartSupervisor", () => {
   });
 });
 
-/** Let the microtask queue drain so an in-flight request reaches its next await. */
-function tick() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+/** A promise a mock resolves to report that it ran. */
+function signal() {
+  let fire: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    fire = resolve;
+  });
+  return { promise, fire };
 }
 
 /**
@@ -303,11 +308,13 @@ function tick() {
  */
 function makeHeldTimers() {
   const pendingSleeps: (() => void)[] = [];
+  const sleepWaiters: (() => void)[] = [];
   const scheduled: { ms: number; fn: () => void; cancelled: boolean }[] = [];
   const timers: RestartTimers = {
     sleep: () =>
       new Promise<void>((resolve) => {
         pendingSleeps.push(resolve);
+        for (const waiter of sleepWaiters.splice(0)) waiter();
       }),
     schedule: (ms, fn) => {
       const entry = { ms, fn, cancelled: false };
@@ -320,6 +327,11 @@ function makeHeldTimers() {
   return {
     timers,
     scheduled,
+    /** Resolves once a backoff sleep is pending. */
+    sleepRequested(): Promise<void> {
+      if (pendingSleeps.length > 0) return Promise.resolve();
+      return new Promise<void>((resolve) => sleepWaiters.push(resolve));
+    },
     /** The backoff delay elapses, exactly as the real `setTimeout` eventually would. */
     releaseSleeps() {
       for (const resolve of pendingSleeps.splice(0)) resolve();
@@ -357,7 +369,7 @@ describe("createRestartSupervisor disposal", () => {
     const { supervisor, clock } = makeHeldSupervisor(restart);
 
     const inFlight = supervisor.requestAutomaticRestart("no heartbeat");
-    await tick();
+    await clock.sleepRequested();
     expect(restart).not.toHaveBeenCalled(); // parked in the backoff
 
     // The user disables the extension / reloads the window mid-backoff.
@@ -376,7 +388,7 @@ describe("createRestartSupervisor disposal", () => {
     const { supervisor, clock } = makeHeldSupervisor(restart);
 
     const inFlight = supervisor.requestAutomaticRestart("no heartbeat");
-    await tick();
+    await clock.sleepRequested();
     expect(restart).not.toHaveBeenCalled();
 
     clock.releaseSleeps();
@@ -398,8 +410,10 @@ describe("createRestartSupervisor disposal", () => {
 
   it("stops the retry loop when disposal lands during an in-flight restart", async () => {
     let releaseFirst: ((started: boolean) => void) | undefined;
+    const firstStarted = signal();
     const restart = vi.fn().mockImplementation(() => {
       if (releaseFirst) return Promise.resolve(false);
+      firstStarted.fire();
       return new Promise<boolean>((resolve) => {
         releaseFirst = resolve;
       });
@@ -407,7 +421,7 @@ describe("createRestartSupervisor disposal", () => {
     const { supervisor, onGiveUp } = makeSupervisor(restart);
 
     const inFlight = supervisor.requestAutomaticRestart("no heartbeat");
-    await tick();
+    await firstStarted.promise;
     expect(restart).toHaveBeenCalledTimes(1);
 
     supervisor.dispose();
@@ -422,18 +436,19 @@ describe("createRestartSupervisor disposal", () => {
 
   it("arms no health-reset window for a restart that completes after disposal", async () => {
     let releaseFirst: ((started: boolean) => void) | undefined;
-    const restart = vi.fn().mockImplementation(
-      () =>
-        new Promise<boolean>((resolve) => {
-          releaseFirst = resolve;
-        }),
-    );
+    const started = signal();
+    const restart = vi.fn().mockImplementation(() => {
+      started.fire();
+      return new Promise<boolean>((resolve) => {
+        releaseFirst = resolve;
+      });
+    });
     const { supervisor, clock, log } = makeHeldSupervisor(restart);
 
     const inFlight = supervisor.requestAutomaticRestart("no heartbeat");
-    await tick();
+    await clock.sleepRequested();
     clock.releaseSleeps();
-    await tick();
+    await started.promise;
     expect(restart).toHaveBeenCalledTimes(1);
 
     supervisor.dispose();

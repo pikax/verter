@@ -444,6 +444,8 @@ pub(super) struct DispatchPauseState {
     pub(super) consumed: bool,
     /// `true` once the test has released the parked driver.
     pub(super) released: bool,
+    /// How many inbox re-drains the parked driver has completed.
+    pub(super) redrains: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -459,7 +461,7 @@ impl DispatchPauseHook {
     ///
     /// The single call site is in the native dispatch loop.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn()) {
+    pub(super) fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn(std::time::Duration)) {
         use std::time::{Duration, Instant};
         let mut state = self.state.lock();
         if !state.armed || state.consumed {
@@ -480,9 +482,14 @@ impl DispatchPauseHook {
             // Drop the lock around the re-drain so the test can observe
             // `paused`/`released` and so `redrain` (which locks the
             // scheduler DAG, not this state) cannot deadlock against it.
+            // The re-drain blocks until the next submission reaches the
+            // inbox; a release posts a wake there, so it never waits on a
+            // timer.
             drop(state);
-            redrain();
+            redrain(deadline.saturating_duration_since(Instant::now()));
             state = self.state.lock();
+            state.redrains += 1;
+            self.cv.notify_all();
             if state.released {
                 break;
             }
@@ -491,9 +498,6 @@ impl DispatchPauseHook {
                 "dispatch pause was never released within 10s — the test \
                  driver did not call test_release_dispatch_pause (deadlock)"
             );
-            // Park briefly on the condvar; a release wakes us promptly,
-            // otherwise we loop to re-drain and re-check the deadline.
-            let _ = self.cv.wait_for(&mut state, Duration::from_millis(2));
         }
     }
 }
@@ -602,6 +606,20 @@ impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn drain_inbox(&self) {
         let _ = self.drain_inbox_for_pump();
+    }
+
+    /// Test-only: wait up to `timeout` for the next submission, process it, then drain the
+    /// rest of the inbox.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    pub(super) fn drain_inbox_blocking(&self, timeout: std::time::Duration) {
+        if let Ok(submission) = self.inbox.receiver.recv_timeout(timeout) {
+            if self.shutdown.load(Ordering::Acquire) {
+                self.shutdown_drained_submission(submission);
+            } else {
+                self.process_submission(submission);
+            }
+        }
+        self.drain_inbox();
     }
 
     /// WASM build's drain_inbox (no cooperative-pump infrastructure
@@ -757,7 +775,7 @@ impl Scheduler {
             // unless a test has armed the hook; absent from release builds.
             #[cfg(any(test, feature = "test-support"))]
             self.dispatch_pause
-                .on_dispatch_and_maybe_pause(&|| self.drain_inbox());
+                .on_dispatch_and_maybe_pause(&|timeout| self.drain_inbox_blocking(timeout));
         }
         stats
     }
