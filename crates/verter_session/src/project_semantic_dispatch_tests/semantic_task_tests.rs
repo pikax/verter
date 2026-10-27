@@ -3148,6 +3148,187 @@ mod semantic_poll_contract {
         assert_eq!(read_summary(&dispatch, &read), synchronous);
     }
 
+    /// A class whose instance surface is its type-space half.
+    const INSTANCE_CLASS: &str = "export class C { marker: \"instance\" = \"instance\"; }\n";
+
+    fn instance_class_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CONTEXTUAL_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(INSTANCE_CLASS),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    /// `C`'s instance surface, and the type-space instantiation it reads.
+    fn class_instance_keys(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let slot = dispatch.type_slot_for(
+            CONTEXTUAL_FILE,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "C",
+        );
+        let env = host.host_view_env_hashes_for(CONTEXTUAL_FILE);
+        let surface = SemanticQueryKey::ResolveClassSurface {
+            decl_slot: slot.clone(),
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            side: verter_type_engine::semantic_query::ClassSurfaceSide::Instance,
+            context: verter_type_engine::semantic_query::ClassSurfaceContext {
+                parse_env_hash: env.parse_env_hash,
+                resolve_env_hash: env.resolve_env_hash,
+                mode: ProjectionMode::Shallow,
+            },
+        };
+        let instantiate =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                slot,
+                Arc::from(Vec::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    CONTEXTUAL_FILE,
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                ),
+            ));
+        (surface, instantiate)
+    }
+
+    /// A class instance surface whose instantiation another task is
+    /// producing returns `Pending` at the polled entry instead of waiting
+    /// that producer out; its `Send` task stays pending on another thread
+    /// while the producer holds. Once released it resumes at the
+    /// instantiation — the declaring file read once, the instantiation once
+    /// — and reads exactly what the synchronous entry, which drives the same
+    /// continuation in place, reads: answer, fact status, diagnostics and
+    /// receipt, logical work included. Released while pending instead, it
+    /// leaves nothing open and the dispatcher answers it afterwards as the
+    /// synchronous entry does; warm, it runs no stage.
+    #[test]
+    fn a_class_instance_surface_whose_instantiation_is_held_yields_and_reads_what_the_synchronous_entry_reads(
+    ) {
+        let synchronous = {
+            let host = instance_class_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (surface, _) = class_instance_keys(&host, &dispatch);
+            let before = continuation_stages(&host);
+            let read = dispatch.execute_via_cold_build_helper(surface);
+            let after = continuation_stages(&host);
+            assert_eq!(
+                (after.0 - before.0, after.1 - before.1),
+                (1, 2),
+                "the instance surface begins once, then reads its declaring file and its instantiation, each once"
+            );
+            read_summary(&dispatch, &read)
+        };
+        assert!(
+            synchronous.0.contains("marker") && !synchronous.2 && !synchronous.3,
+            "the instance surface is the class's admitted complete instance type: {synchronous:?}"
+        );
+
+        let host = instance_class_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (surface, instantiate) = class_instance_keys(&host, &dispatch);
+        let (tasks, leases): (Vec<_>, Vec<_>) = [
+            hold_producer(&host, graph, instantiate.clone()),
+            hold_producer_with(
+                &host,
+                graph,
+                instantiate.clone(),
+                ReadCapture::expression_for_tests(),
+            ),
+        ]
+        .into_iter()
+        .unzip();
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = continuation_stages(&host);
+        let mut entry = dispatch.poll_query(surface.clone());
+        let (first, frames, elsewhere) = while_held(leases, || {
+            let first = entry.poll(&waker).is_pending();
+            let task = entry.task();
+            let frames = task.as_ref().map(|task| task.live_frames_for_tests());
+            let elsewhere = task.map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, frames, elsewhere)
+        });
+        assert!(
+            first,
+            "the instance surface yields while its instantiation is held"
+        );
+        assert_eq!(frames, Some(1), "the instance surface's own frame waits");
+        assert_eq!(
+            elsewhere,
+            Some(true),
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken instance surface reads its instantiation itself"),
+        };
+        drop(entry);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (1, 2),
+            "no stage runs again: the declaring file and the instantiation are each read once"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+
+        let mut warm = dispatch.poll_query(surface.clone());
+        let Poll::Ready(warm_read) = warm.poll(&waker) else {
+            panic!("a warm instance surface answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(surface);
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+        assert_eq!(
+            continuation_stages(&host),
+            after,
+            "a warm instance surface runs no stage"
+        );
+        drop(tasks);
+
+        let host = instance_class_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (surface, instantiate) = class_instance_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, instantiate);
+        let mut entry = dispatch.poll_query(surface.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(&waker).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(
+            pending,
+            "the instance surface yields while its instantiation is held"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(surface);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+    }
+
     /// `defineProps` over two type arguments, owned by the chain's file, and
     /// the payload operation its value is read from: the intersection of its
     /// arguments.
@@ -3458,6 +3639,46 @@ mod semantic_poll_contract {
         }
     }
 
+    /// Counts its wakes and unparks the thread that waits on them, so a
+    /// test can wait for the wake a released load delivers before it polls
+    /// again: a poll re-registers its own waker, and a poll made before the
+    /// load completed would take that wake instead.
+    struct CountingThreadWaker {
+        wakes: std::sync::atomic::AtomicUsize,
+        thread: std::thread::Thread,
+    }
+
+    impl std::task::Wake for CountingThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.thread.unpark();
+        }
+    }
+
+    impl CountingThreadWaker {
+        fn for_current_thread() -> Arc<Self> {
+            Arc::new(Self {
+                wakes: std::sync::atomic::AtomicUsize::new(0),
+                thread: std::thread::current(),
+            })
+        }
+
+        /// Park until woken at least once, failing past [`HELD_DEADLINE`]
+        /// with `expectation` instead of hanging.
+        fn wait_for_wake(&self, expectation: &str) {
+            let deadline = std::time::Instant::now() + HELD_DEADLINE;
+            while self.wakes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                let now = std::time::Instant::now();
+                assert!(now < deadline, "{expectation}");
+                std::thread::park_timeout(deadline - now);
+            }
+        }
+    }
+
     /// Poll until ready, parking between polls until woken, failing past
     /// [`HELD_DEADLINE`] instead of hanging.
     fn poll_until_ready<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
@@ -3522,7 +3743,7 @@ mod semantic_poll_contract {
         gate.hold(UNLOADED_OWNER);
         let held = HeldSource(&gate);
         let mut entry = dispatch.poll_query(payload.clone());
-        let counter = Arc::new(CountingWaker::default());
+        let counter = CountingThreadWaker::for_current_thread();
         let counting = Waker::from(Arc::clone(&counter));
         let first = entry.poll(&counting).is_pending();
         let held_stages = continuation_stages(&host);
@@ -3541,12 +3762,9 @@ mod semantic_poll_contract {
         assert_eq!(held_stages, (1, 0), "the first stage ran once and waits");
         assert!(!loaded_while_held, "the owner's source read is still held");
         assert_eq!(elsewhere, Some(true));
+        counter.wait_for_wake("the completed load wakes the waiting poll");
         let read = poll_until_ready(|waker| entry.poll(waker));
         drop(entry);
-        assert!(
-            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-            "the completed load wakes the waiting poll"
-        );
         assert_eq!(
             continuation_stages(&host),
             (2, 2),
@@ -3689,7 +3907,7 @@ mod semantic_poll_contract {
         gate.hold(held);
         let guard = HeldSource(&gate);
         let mut entry = dispatch.poll_query(key(&dispatch));
-        let counter = Arc::new(CountingWaker::default());
+        let counter = CountingThreadWaker::for_current_thread();
         let counting = Waker::from(Arc::clone(&counter));
         let first = entry.poll(&counting).is_pending();
         let loaded_while_held = host.scheduler.try_get_source(held).is_some();
@@ -3709,12 +3927,9 @@ mod semantic_poll_contract {
             "the source read of {held} is still held"
         );
         assert_eq!(elsewhere, Some(true), "its task stays pending elsewhere");
+        counter.wait_for_wake("the completed load wakes the waiting poll");
         let read = poll_until_ready(|waker| entry.poll(waker));
         drop(entry);
-        assert!(
-            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-            "the completed load wakes the waiting poll"
-        );
         assert_eq!(
             (read_summary(&dispatch, &read), instantiations(&host)),
             synchronous,

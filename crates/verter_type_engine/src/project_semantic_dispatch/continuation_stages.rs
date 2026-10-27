@@ -168,6 +168,15 @@ struct ApparentScope {
     rootless: bool,
 }
 
+/// A class's instance surface between its stages: its declaration slot and
+/// type arguments, then the content version its declaring file served,
+/// which the surface roots on, while it reads the instantiation.
+pub(super) struct ClassInstanceSurfaceBuild {
+    decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
+    type_args: Arc<[SemanticNodeId]>,
+    observed: Option<verter_session_query::analysis::types::Hash16>,
+}
+
 /// What a macro payload's output is rooted on: the owning file at the
 /// content version its owner stage observed, and its type arguments.
 pub(super) struct MacroPayloadRooting {
@@ -1039,6 +1048,72 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             ),
             None => FamilyStep::Done(Box::new(self.apparent_miss())),
         }
+    }
+
+    /// The first stage of a class's instance surface: its declaring file's
+    /// indexed input is read next ([`Self::resume_class_instance_source`]).
+    #[inline(never)]
+    pub(super) fn begin_class_instance_surface(
+        &self,
+        decl_slot: &crate::semantic_query::ResolvedDeclSlotIdentity,
+        type_args: &Arc<[SemanticNodeId]>,
+    ) -> FamilyStep {
+        self.graph().record_continuation_begun();
+        FamilyStep::Load(
+            Arc::from(decl_slot.defining_canonical.as_ref()),
+            Box::new(FamilyBuild::ClassInstanceSurface(
+                ClassInstanceSurfaceBuild {
+                    decl_slot: decl_slot.clone(),
+                    type_args: Arc::clone(type_args),
+                    observed: None,
+                },
+            )),
+        )
+    }
+
+    /// Resume a class's instance surface with its declaring file's indexed
+    /// input (`None` when the live view serves none, and the surface is
+    /// then never admitted): the TYPE-space half's instantiation under
+    /// `Shallow` is read next.
+    #[inline(never)]
+    pub(super) fn resume_class_instance_source(
+        &self,
+        mut build: ClassInstanceSurfaceBuild,
+        serve: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+    ) -> FamilyStep {
+        build.observed = serve.map(|serve| serve.indexed.whole_hash);
+        let key = self.class_instance_key(&build.decl_slot, &build.type_args);
+        FamilyStep::Need(key, Box::new(FamilyBuild::ClassInstanceSurface(build)))
+    }
+
+    /// A class's instance surface from its instantiation's read: the
+    /// instantiated node itself (an identity projection), tainted by the
+    /// read's partiality and rooted on the declaring file.
+    #[inline(never)]
+    pub(super) fn finish_class_instance_surface(
+        &self,
+        build: ClassInstanceSurfaceBuild,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Two-signal fold: a budget/recursion/walker-fatal instantiation
+        // surfaces as a partial instead of returning through the identity
+        // projection as complete.
+        let partial = read.result_is_partial();
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+            (read.value, self.project_generation_signature()).into();
+        output.fold_partial(partial);
+        let observed_self_roots = match build.observed {
+            Some(whole_hash) => vec![(build.decl_slot.defining_canonical.clone(), whole_hash)],
+            // The declaration's live content version could not be observed:
+            // the value still flows to the caller, the memo refuses it.
+            None => {
+                output.cache_suppress = true;
+                Vec::new()
+            }
+        };
+        output
+            .with_observed_self_roots(observed_self_roots)
+            .with_positional_guarantee()
     }
 
     /// The miss an apparent type without a surface answers.

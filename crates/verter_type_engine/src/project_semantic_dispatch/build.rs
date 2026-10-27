@@ -3943,6 +3943,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         use crate::semantic_query::{ClassSurfaceSide, ProjectionReductionContext};
 
+        // Instance side = the TYPE-space half, instantiated under Shallow:
+        // a family continuation whose reads — the declaring file's indexed
+        // input and the instantiation — are its stages' transitions, driven
+        // here in place.
+        if side == ClassSurfaceSide::Instance {
+            return self.drive_family_in_place(
+                self.continuation_stage()
+                    .begin_class_instance_surface(decl_slot, type_args),
+            );
+        }
+
         // Self-root the composed surface on the class declaration's own
         // live content version (R6/R20 — the key is content-free).
         let defining_canonical = &decl_slot.defining_canonical;
@@ -3950,194 +3961,144 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .ensure_indexed_ready_serve(defining_canonical.as_ref())
             .map(|serve| serve.indexed);
-        let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
+        let mut observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             match &observed {
                 Some(indexed) => vec![(defining_canonical.clone(), indexed.whole_hash)],
                 None => Vec::new(),
             };
 
-        // Dual-space — both sides route through `execute` (the ONE shared
-        // engine). No query-time OXC. The env-bearing `ResolvedDeclSlotIdentity`
-        // base / `value_root_of` read only
-        // `(defining_canonical, merged_symbol_name)`, so the slot's
-        // `symbol_space` is not re-tagged here — `side` is the selector.
-        let composed = match side {
-            ClassSurfaceSide::Instance => {
-                // Instance side = the TYPE-space half: instantiate under
-                // Shallow. The class slot is already the env-bearing
-                // type-space slot; canonicalize its symbol space to `Type`
-                // for the `Instantiate` base (the dual-space selector is
-                // `side`, not the slot's space).
-                let base =
-                    decl_slot.with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Type);
-                let inst_ctx = self.instantiate_context_for(
-                    &decl_slot.defining_canonical,
-                    ProjectionReductionContext::published(ProjectionMode::Shallow),
-                );
-                self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
-                        base,
-                        Arc::clone(type_args),
-                        inst_ctx,
-                    ),
-                ))
+        // Static side — the OWNING composer. Own statics + own
+        // ctor come from the prepared VALUE decl's constructor
+        // shape (lowered directly — never a `TypeOf` re-dispatch,
+        // which would recurse: `build_typeof` delegates class
+        // values HERE). Base statics compose recursively through
+        // the SAME keyed query via the type-side heritage refs on
+        // the sibling slot's `PreparedTypeDecl.body` (Intersection
+        // fold, base-first), with shadow precedence: own members
+        // shadow base members; an own DECLARED ctor replaces the
+        // base's; a ctor-LESS subclass inherits the base ctor's
+        // parameters with the DERIVED instance return. Heritage
+        // type-arguments (`extends Base<string>`) lower in THIS
+        // class's defining scope and ride the recursive base key's
+        // `type_args` — instantiated surfaces are semantic meaning,
+        // so the substitution is part of the base query identity.
+        // The key's own `type_args` specialize THIS class's type
+        // parameters across the composed surface: statics cannot
+        // legally reference class type parameters (TS2302), so the
+        // substitution reaches only the constructor signatures the
+        // shells survive into (a static method's OWN same-name
+        // generic is protected by the shadow-aware collection).
+        // The composed surface carries the `prototype` property the
+        // checker gives every class constructor type
+        // ([`Self::with_class_prototype_property`]), so `keyof`,
+        // indexed access, property reads and relations all read it.
+        //
+        // Effective post-fallback identity (the ONE shared
+        // export-target fallback rail — `build_typeof` keys NEW
+        // slots with it already): a slot that still names a
+        // re-exporting canonical rebases HERE, so the constructor
+        // shape lowers in the DECLARING file's scope, heritage
+        // reads the declaring type-side sibling decl, and the
+        // entry self-roots on the declaring content version.
+        let effective = self.effective_prepared_value_decl(
+            defining_canonical.as_ref(),
+            decl_slot.owner,
+            decl_slot.merged_symbol_name.as_ref(),
+        );
+        let Some((own_canonical, own_owner, own_symbol, prepared)) = effective else {
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            if observed.is_none() {
+                output.cache_suppress = true;
             }
-            ClassSurfaceSide::Static => {
-                // Static side — the OWNING composer. Own statics + own
-                // ctor come from the prepared VALUE decl's constructor
-                // shape (lowered directly — never a `TypeOf` re-dispatch,
-                // which would recurse: `build_typeof` delegates class
-                // values HERE). Base statics compose recursively through
-                // the SAME keyed query via the type-side heritage refs on
-                // the sibling slot's `PreparedTypeDecl.body` (Intersection
-                // fold, base-first), with shadow precedence: own members
-                // shadow base members; an own DECLARED ctor replaces the
-                // base's; a ctor-LESS subclass inherits the base ctor's
-                // parameters with the DERIVED instance return. Heritage
-                // type-arguments (`extends Base<string>`) lower in THIS
-                // class's defining scope and ride the recursive base key's
-                // `type_args` — instantiated surfaces are semantic meaning,
-                // so the substitution is part of the base query identity.
-                // The key's own `type_args` specialize THIS class's type
-                // parameters across the composed surface: statics cannot
-                // legally reference class type parameters (TS2302), so the
-                // substitution reaches only the constructor signatures the
-                // shells survive into (a static method's OWN same-name
-                // generic is protected by the shadow-aware collection).
-                // The composed surface carries the `prototype` property the
-                // checker gives every class constructor type
-                // ([`Self::with_class_prototype_property`]), so `keyof`,
-                // indexed access, property reads and relations all read it.
-                //
-                // Effective post-fallback identity (the ONE shared
-                // export-target fallback rail — `build_typeof` keys NEW
-                // slots with it already): a slot that still names a
-                // re-exporting canonical rebases HERE, so the constructor
-                // shape lowers in the DECLARING file's scope, heritage
-                // reads the declaring type-side sibling decl, and the
-                // entry self-roots on the declaring content version.
-                let mut observed_self_roots = observed_self_roots;
-                let effective = self.effective_prepared_value_decl(
-                    defining_canonical.as_ref(),
-                    decl_slot.owner,
-                    decl_slot.merged_symbol_name.as_ref(),
-                );
-                let Some((own_canonical, own_owner, own_symbol, prepared)) = effective else {
-                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-                    if observed.is_none() {
-                        output.cache_suppress = true;
-                    }
-                    return output.with_observed_self_roots(observed_self_roots);
-                };
-                let mut effective_root_missing = false;
-                if own_canonical.as_ref() != defining_canonical.as_ref() {
-                    // Self-root derivation observes the declaring file's
-                    // whole hash; fenced-ness flows via the chokepoint flag
-                    // into the dispatch executor's admission gate.
-                    match self
-                        .ctx
-                        .ensure_indexed_ready_serve(own_canonical.as_ref())
-                        .map(|serve| serve.indexed)
-                    {
-                        Some(indexed) => {
-                            observed_self_roots.push((own_canonical.clone(), indexed.whole_hash))
-                        }
-                        // The declaring file's content version could not be
-                        // observed — refuse warm admission (the value would
-                        // otherwise survive a declaring-file edit).
-                        None => effective_root_missing = true,
-                    }
-                }
-                let own = self.lower_class_constructor_object(
-                    own_canonical.as_ref(),
-                    own_owner,
-                    own_symbol.as_ref(),
-                    &prepared,
-                    ProjectionReductionContext::published(context.mode),
-                );
-                let Some(own_node) = own else {
-                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-                    if observed.is_none() || effective_root_missing {
-                        output.cache_suppress = true;
-                    }
-                    return output.with_observed_self_roots(observed_self_roots);
-                };
-                let (base_surfaces, composed_partial) = self.class_base_static_surfaces(
-                    own_canonical.as_ref(),
-                    own_owner,
-                    own_symbol.as_ref(),
-                    context.mode,
-                );
-                let mut composed_node =
-                    base_surfaces.into_iter().fold(own_node, |composed, base| {
-                        self.merge_static_surfaces(composed, base)
-                    });
-                composed_node = self.with_class_prototype_property(
-                    own_canonical.as_ref(),
-                    own_owner,
-                    own_symbol.as_ref(),
-                    composed_node,
-                );
-                // Specialize THIS class's own type parameters with the key's
-                // `type_args` (produced by a derived class's heritage hop
-                // above, or any caller instantiating the static surface).
-                // With no key arguments, the class's type parameters are its
-                // construct signatures' OWN clause instead (`new <T>(v: T) =>
-                // C<T>`), so a `new C(…)` infers them from its arguments.
-                composed_node = if type_args.is_empty() {
-                    self.generic_class_construct_signatures(
-                        own_canonical.as_ref(),
-                        own_owner,
-                        own_symbol.as_ref(),
-                        composed_node,
-                    )
-                } else {
-                    self.apply_class_surface_type_args(
-                        own_canonical.as_ref(),
-                        own_owner,
-                        own_symbol.as_ref(),
-                        composed_node,
-                        type_args,
-                    )
-                };
-                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
-                    QueryResult::Value(composed_node),
-                    self.project_generation_signature(),
-                )
-                    .into();
-                output.fold_partial(composed_partial);
-                if observed.is_none() || effective_root_missing {
-                    output.cache_suppress = true;
-                }
-                output.approximation = Some(if composed_partial {
-                    super::projection_fact::ProjectionInterpretation::PresenceOnly
-                } else {
-                    super::projection_fact::ProjectionInterpretation::Positional
-                });
-                return output.with_observed_self_roots(observed_self_roots);
-            }
+            return output.with_observed_self_roots(observed_self_roots);
         };
-
-        // Two-signal fold: fold the composed sub-query read's partiality so
-        // a budget/recursion/walker-fatal nested side surfaces as a partial
-        // (it would otherwise return through the identity projection with
-        // `result_is_partial=false`).
-        let composed_is_partial = composed.result_is_partial();
-        // Identity projection: return the composed sub-query node directly.
-        let result = composed.value;
-        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-            (result, self.project_generation_signature()).into();
-        output.fold_partial(composed_is_partial);
-        if observed.is_none() {
-            // Could not self-root on the decl's live content version —
-            // refuse warm admission; the value still flows to the caller.
+        let mut effective_root_missing = false;
+        if own_canonical.as_ref() != defining_canonical.as_ref() {
+            // Self-root derivation observes the declaring file's
+            // whole hash; fenced-ness flows via the chokepoint flag
+            // into the dispatch executor's admission gate.
+            match self
+                .ctx
+                .ensure_indexed_ready_serve(own_canonical.as_ref())
+                .map(|serve| serve.indexed)
+            {
+                Some(indexed) => {
+                    observed_self_roots.push((own_canonical.clone(), indexed.whole_hash))
+                }
+                // The declaring file's content version could not be
+                // observed — refuse warm admission (the value would
+                // otherwise survive a declaring-file edit).
+                None => effective_root_missing = true,
+            }
+        }
+        let own = self.lower_class_constructor_object(
+            own_canonical.as_ref(),
+            own_owner,
+            own_symbol.as_ref(),
+            &prepared,
+            ProjectionReductionContext::published(context.mode),
+        );
+        let Some(own_node) = own else {
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            if observed.is_none() || effective_root_missing {
+                output.cache_suppress = true;
+            }
+            return output.with_observed_self_roots(observed_self_roots);
+        };
+        let (base_surfaces, composed_partial) = self.class_base_static_surfaces(
+            own_canonical.as_ref(),
+            own_owner,
+            own_symbol.as_ref(),
+            context.mode,
+        );
+        let mut composed_node = base_surfaces.into_iter().fold(own_node, |composed, base| {
+            self.merge_static_surfaces(composed, base)
+        });
+        composed_node = self.with_class_prototype_property(
+            own_canonical.as_ref(),
+            own_owner,
+            own_symbol.as_ref(),
+            composed_node,
+        );
+        // Specialize THIS class's own type parameters with the key's
+        // `type_args` (produced by a derived class's heritage hop
+        // above, or any caller instantiating the static surface).
+        // With no key arguments, the class's type parameters are its
+        // construct signatures' OWN clause instead (`new <T>(v: T) =>
+        // C<T>`), so a `new C(…)` infers them from its arguments.
+        composed_node = if type_args.is_empty() {
+            self.generic_class_construct_signatures(
+                own_canonical.as_ref(),
+                own_owner,
+                own_symbol.as_ref(),
+                composed_node,
+            )
+        } else {
+            self.apply_class_surface_type_args(
+                own_canonical.as_ref(),
+                own_owner,
+                own_symbol.as_ref(),
+                composed_node,
+                type_args,
+            )
+        };
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+            QueryResult::Value(composed_node),
+            self.project_generation_signature(),
+        )
+            .into();
+        output.fold_partial(composed_partial);
+        if observed.is_none() || effective_root_missing {
             output.cache_suppress = true;
         }
-        output
-            .with_observed_self_roots(observed_self_roots)
-            .with_positional_guarantee()
+        output.approximation = Some(if composed_partial {
+            super::projection_fact::ProjectionInterpretation::PresenceOnly
+        } else {
+            super::projection_fact::ProjectionInterpretation::Positional
+        });
+        output.with_observed_self_roots(observed_self_roots)
     }
 
     /// The EFFECTIVE prepared VALUE-decl identity for a `(canonical,

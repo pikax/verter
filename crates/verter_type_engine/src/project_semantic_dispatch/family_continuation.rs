@@ -36,7 +36,8 @@ use crate::semantic_query::{
 };
 
 use super::continuation_stages::{
-    ApparentTypeBuild, MacroPayloadBuild, OverloadSetBuild, ReduceIntersectionBuild,
+    ApparentTypeBuild, ClassInstanceSurfaceBuild, MacroPayloadBuild, OverloadSetBuild,
+    ReduceIntersectionBuild,
 };
 use super::ProjectSemanticDispatch;
 
@@ -120,6 +121,27 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         key
     }
 
+    /// The instantiation a class's instance surface reads: the TYPE-space
+    /// half of `decl_slot` under `Shallow`. The dual-space selector is the
+    /// surface's side, so the slot's symbol space is canonicalized to
+    /// `Type` for the `Instantiate` base.
+    pub(super) fn class_instance_key(
+        &self,
+        decl_slot: &crate::semantic_query::ResolvedDeclSlotIdentity,
+        type_args: &Arc<[SemanticNodeId]>,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            decl_slot.with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Type),
+            Arc::clone(type_args),
+            self.dispatch.instantiate_context_for(
+                &decl_slot.defining_canonical,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Shallow,
+                ),
+            ),
+        ))
+    }
+
     /// The project generation a fence pins.
     pub(super) fn project_generation(&self) -> u64 {
         self.dispatch.snapshot.current_project_generation()
@@ -193,6 +215,7 @@ pub(super) enum FamilyBuild {
     ReduceIntersection(ReduceIntersectionBuild),
     OverloadSet(OverloadSetBuild),
     ApparentType(ApparentTypeBuild),
+    ClassInstanceSurface(ClassInstanceSurfaceBuild),
 }
 
 /// A global declaration lookup a stage names: the first declaration of the
@@ -229,6 +252,11 @@ pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
         // Explicit type arguments instantiate each candidate through the
         // substitution engine, which still reads in place.
         SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
+        // The static side composes its constructor shape and its bases'
+        // static surfaces, which still read in place.
+        SemanticQueryKey::ResolveClassSurface { side, .. } => {
+            *side == crate::semantic_query::ClassSurfaceSide::Instance
+        }
         _ => false,
     }
 }
@@ -279,6 +307,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.continuation_stage()
                     .begin_apparent_type(*base, context),
             ),
+            SemanticQueryKey::ResolveClassSurface {
+                decl_slot,
+                type_args,
+                side: crate::semantic_query::ClassSurfaceSide::Instance,
+                ..
+            } => Some(
+                self.continuation_stage()
+                    .begin_class_instance_surface(decl_slot, type_args),
+            ),
             _ => None,
         }
     }
@@ -305,6 +342,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::ApparentType(build) => {
                 self.continuation_stage().resume_apparent_type(build, read)
             }
+            FamilyBuild::ClassInstanceSurface(build) => FamilyStep::Done(Box::new(
+                self.continuation_stage()
+                    .finish_class_instance_surface(build, super::narrow_value_cache_read(read)),
+            )),
         }
     }
 
@@ -328,6 +369,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::ApparentType(_) => {
                 unreachable!("an apparent type reads its files through its global lookup")
             }
+            FamilyBuild::ClassInstanceSurface(build) => self
+                .continuation_stage()
+                .resume_class_instance_source(build, serve),
         }
     }
 
@@ -343,7 +387,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .resume_apparent_global(build, found),
             FamilyBuild::MacroPayload(_)
             | FamilyBuild::ReduceIntersection(_)
-            | FamilyBuild::OverloadSet(_) => {
+            | FamilyBuild::OverloadSet(_)
+            | FamilyBuild::ClassInstanceSurface(_) => {
                 unreachable!("only an apparent type looks a global declaration up")
             }
         }

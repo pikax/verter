@@ -1919,7 +1919,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             key @ (SemanticQueryKey::ResolveMacroPayload { .. }
             | SemanticQueryKey::ReduceIntersection { .. }
             | SemanticQueryKey::ResolveOverloadSet { .. }
-            | SemanticQueryKey::ApparentType { .. }) => {
+            | SemanticQueryKey::ApparentType { .. }
+            | SemanticQueryKey::ResolveClassSurface { .. }) => {
                 super::family_continuation::builds_as_continuation(key)
                     && self.reads_as_frame_need(key)
                     && self

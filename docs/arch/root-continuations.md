@@ -1081,7 +1081,10 @@ replacement retired is read once more) and apparent types (`ApparentType`:
 the anchor walk's signature lists of an object surface, the base's call and
 construct lists choosing a `strictBindCallApply` interface, the global
 interface lookup with its `Function` fallback, then the interface's
-`Instantiate`) are written this way. The shared signature-list read
+`Instantiate`) and class instance surfaces (`ResolveClassSurface` on its
+`Instance` side: the declaring file's indexed input, which the surface roots
+on, then the type-space half's `Shallow` `Instantiate`) are written this way.
+The shared signature-list read
 (`SignatureListRead`) is one sub-continuation both overload sets and
 apparent types step, in resolution or declaration order.
 - **Global lookups.** A stage names a global declaration lookup as
@@ -1341,12 +1344,14 @@ Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
 
 Family continuations (above) cover macro payloads, intersection
-reductions, overload sets without explicit type arguments and apparent
-types (whose global interface lookup is still made in place). Every other
+reductions, overload sets without explicit type arguments, apparent
+types (whose global interface lookup is still made in place) and class
+instance surfaces. Every other
 family a frame or cold build reaches still builds in one synchronous step:
 path projection, mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
 through the substitution engine, whose template-literal fold reads in
-place), class surfaces, signature discovery,
+place), static class surfaces (the constructor shape, prepared value
+declarations and the bases' static surfaces), signature discovery,
 object-spread projection, locator lowering, relations, flow returns and the
 call walk below a suspension point. Their nested query reads and resolver
 port calls (`ensure_indexed_ready_serve`, prepared declarations, module
