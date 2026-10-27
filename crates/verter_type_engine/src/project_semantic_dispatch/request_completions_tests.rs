@@ -26,7 +26,9 @@ fn edit(content: u64) -> WorkspaceEdit {
 }
 
 fn completed() -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from(Vec::new()))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
+    )
 }
 
 fn store(limits: RetentionLimits) -> (Arc<SemanticRetentionAccount>, SemanticGraphStore) {

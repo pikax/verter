@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The tsc arm of the equivalent-demand semantic benchmark: answers one job
-// through TypeScript 7.0.2's native API (the `typescript/unstable/sync`
-// client driving the native `tsc --api` server) and writes one JSON record.
+// through the pinned TypeScript's native API (the `typescript/sync` client
+// driving the native `tsc --api` server) and writes one JSON record.
 //
 //   node tsc-probe.mjs --job <job.json> --out <result.json>
 //
@@ -17,7 +17,7 @@
 //                process start included; reported, never compared);
 //   engineStart  the API session's `initialize` request (server time): an
 //                empty engine, ready;
-//   setup        open the project (`updateSnapshot`, server time);
+//   setup        open the project (`createSnapshot`, server time);
 //   init         getTypeAtPosition on `__BenchInit`'s name (server time);
 //   cold         getTypeAtPosition on `__Probe`'s name — the declared type of
 //                the alias, exactly what the Verter arm resolves;
@@ -28,7 +28,8 @@
 //                elides very large types) and the error-type flag, outside
 //                every timer; then the server's statistics again
 //                (observation-inclusive, reported apart);
-//   teardown     close the API (terminates the server).
+//   teardown     dispose the snapshot, then close the API (terminates the
+//                server).
 // Request times are the server's own processing time (`collectTiming`),
 // which excludes the IPC an in-process engine does not pay; the client's
 // round trip is recorded beside each. The record is written as soon as the
@@ -83,9 +84,13 @@ async function main() {
   const job = JSON.parse(readFileSync(jobPath, "utf8"));
   if (job.schema !== 1) throw new Error(`job schema ${job.schema} is not 1`);
   if (job.probes.length < 1) throw new Error("a job demands at least one probe");
-  const { API } = await import(
-    pathToFileURL(join(job.tsPackageDir, "dist", "api", "sync", "api.js")).href
-  );
+  // The verified package's public `./sync` export (its `exports` map entry).
+  const tsPackage = JSON.parse(readFileSync(join(job.tsPackageDir, "package.json"), "utf8"));
+  const syncEntry = tsPackage.exports?.["./sync"];
+  if (typeof syncEntry !== "string") {
+    throw new Error(`${job.tsPackageDir} exports no ./sync entry (TypeScript 7.1 or later)`);
+  }
+  const { API } = await import(pathToFileURL(join(job.tsPackageDir, syncEntry)).href);
 
   const dir = job.dir.replace(/\\/g, "/");
   const scenarioFile = `${dir}/${job.scenario}`;
@@ -111,13 +116,13 @@ async function main() {
 
   phase("setup");
   t = performance.now();
-  const snapshot = api.updateSnapshot({ openProjects: [`${dir}/${job.tsconfig}`] });
+  const snapshot = api.createSnapshot({ openProjects: [`${dir}/${job.tsconfig}`] });
   const setupRoundTripMs = performance.now() - t;
-  const setupMs = serverTime("updateSnapshot");
+  const setupMs = serverTime("createSnapshot");
   const projects = snapshot.getProjects();
   if (projects.length !== 1) throw new Error(`expected one project, got ${projects.length}`);
   const project = projects[0];
-  const rootFiles = project.rootFiles.map((f) => f.replace(/\\/g, "/"));
+  const rootFiles = project.parsedCommandLine.fileNames.map((f) => f.replace(/\\/g, "/"));
 
   const request = (alias) => {
     const position = aliasNamePosition(text, alias);
@@ -279,6 +284,9 @@ async function main() {
 
   phase("teardown");
   t = performance.now();
+  // The snapshot (and every project/program it handed out) is released
+  // before the API closes; nothing reads it afterwards.
+  snapshot.dispose();
   api.close();
   result.phases.teardownMs = performance.now() - t;
   result.stage = "complete";

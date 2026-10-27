@@ -172,8 +172,10 @@ fn a_retained_signature_answers_its_settled_verdict() {
         hash: [2; 16],
     });
     let stale: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(facts);
-    let valid: verter_session_query::facts::fact_set::FactSet = (1..32).map(whole).collect();
+        verter_session_query::facts::policy::FactPolicy::production().set_of(facts);
+    let valid: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of((1..32).map(whole).collect::<Vec<_>>());
     let view = RequestStoreView::new(&base, overlay);
     let probe = |signature: &verter_session_query::facts::fact_set::FactSet| {
         let before = view.leaf_validations_for_tests();
@@ -269,7 +271,7 @@ fn uncertain_torn_and_refused_failures_settle_nothing() {
     let unproven = RequestStoreView::new_cold_seed(&base, overlay_through(33), false);
     assert_eq!(reads(&unproven, &deep, &[]), (Err(0), 0));
     let retained: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(deep);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(deep);
     assert!(!unproven.validates_retained_signature(&retained, &[]));
     assert_eq!(
         (
@@ -547,7 +549,7 @@ fn settled_verdicts_release_their_evidence_with_the_view() {
         let levels = stale_chain(|facts| ResultReceipt::new_on(facts, &account));
         let valid = ResultReceipt::new_on(vec![whole(32)], &account);
         let retained: verter_session_query::facts::fact_set::FactSet =
-            verter_session_query::facts::fact_set::FactSet::from(vec![
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                 FactVersionRef::Receipt(levels[31].clone()),
                 FactVersionRef::Receipt(valid.clone()),
             ]);

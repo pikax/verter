@@ -54,13 +54,13 @@ export function findLspBinary(extensionPath: string): string | undefined {
   return findWorkspaceBinary(extensionPath, "verter-lsp");
 }
 
-export interface FindWorkspaceRcTsgoOptions {
+export interface FindWorkspacePinnedTsgoOptions {
   env?: Record<string, string | undefined>;
   platform?: NodeJS.Platform;
   arch?: string;
 }
 
-function rcTsgoPlatformPackage(platform: NodeJS.Platform, arch: string): string | undefined {
+function pinnedTsgoPlatformPackage(platform: NodeJS.Platform, arch: string): string | undefined {
   if (platform === "win32" && arch === "x64") return "typescript-win32-x64";
   if (platform === "win32" && arch === "arm64") return "typescript-win32-arm64";
   if (platform === "linux" && arch === "x64") return "typescript-linux-x64";
@@ -71,14 +71,14 @@ function rcTsgoPlatformPackage(platform: NodeJS.Platform, arch: string): string 
 }
 
 /**
- * Resolve the pinned TypeScript RC native binary used by provider-parity E2E.
+ * Resolve the pinned TypeScript 7 native binary used by provider-parity E2E.
  * This intentionally accepts only `@typescript/typescript-<platform>` packages;
- * the retired `@typescript/native-preview-*` engine is protocol-incompatible and
+ * a `@typescript/native-preview-*` dev-channel package is never the pinned engine and
  * must never make a managed-tsgo rail appear available.
  */
-export function findWorkspaceRcTsgoBinary(
+export function findWorkspacePinnedTsgoBinary(
   extensionPath: string,
-  options: FindWorkspaceRcTsgoOptions = {},
+  options: FindWorkspacePinnedTsgoOptions = {},
 ): string | undefined {
   const env = options.env ?? process.env;
   const explicit = env.VERTER_TSGO_BIN;
@@ -91,7 +91,7 @@ export function findWorkspaceRcTsgoBinary(
 
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
-  const packageName = rcTsgoPlatformPackage(platform, arch);
+  const packageName = pinnedTsgoPlatformPackage(platform, arch);
   if (!packageName) return undefined;
   const binaryName = platform === "win32" ? "tsc.exe" : "tsc";
   const pnpmPrefix = `@typescript+${packageName}@`;

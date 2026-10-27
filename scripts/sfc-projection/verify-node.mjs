@@ -1278,8 +1278,20 @@ export function runJsEngine(resolved, probes, repoRoot) {
 
 async function loadNativeApi(repoRoot) {
   const require = createRequire(path.join(repoRoot, "package.json"));
-  const syncPath = require.resolve("typescript/unstable/sync");
+  const syncPath = require.resolve("typescript/sync");
   return import(pathToFileURL(syncPath).href);
+}
+
+// Open the probe project in a fresh snapshot. The API, the snapshot and every
+// project/program it hands out are Disposable: callers declare the API and the
+// snapshot with `using`, so both are released (snapshot first) on every exit
+// path, and nothing is read from a snapshot after it is disposed.
+function openNativeProject(snapshot, tsconfig, probes) {
+  const project = snapshot.getConfiguredProject(tsconfig);
+  if (!project) {
+    throw new Error(`native engine did not open ${posix(probes.tsconfig)}`);
+  }
+  return project;
 }
 
 export async function runNativeEngine(resolved, probes, repoRoot) {
@@ -1288,34 +1300,26 @@ export async function runNativeEngine(resolved, probes, repoRoot) {
   const tsconfig = repoPath(repoRoot, probes.tsconfig);
   const positive = repoPath(repoRoot, probes.positive);
   const negative = repoPath(repoRoot, probes.negative);
-  const api = new API({ tsserverPath: resolved.executable, cwd: probesDir });
-  try {
-    const snap = api.updateSnapshot({ openProject: tsconfig });
-    const project = snap.getProject(tsconfig);
-    if (!project) {
-      throw new Error(`native engine did not open ${posix(probes.tsconfig)}`);
-    }
-    const checkCounts = {};
-    const pos = observeNative(project, positive, probes, checkCounts, probes.positive);
-    const neg = observeNative(project, negative, probes, checkCounts, probes.negative);
-    const twin = cleanTwinTarget(probes);
-    const cleanTwin =
-      twin.sharedWith === "positive"
-        ? pos
-        : twin.sharedWith === "negative"
-          ? neg
-          : observeNative(project, repoPath(repoRoot, twin.rel), probes, checkCounts, twin.rel);
-    snap.dispose();
-    return {
-      engine: resolved.id,
-      positive: pos,
-      negative: neg,
-      cleanTwin,
-      checkCounts,
-    };
-  } finally {
-    api.close();
-  }
+  using api = new API({ tsserverPath: resolved.executable, cwd: probesDir });
+  using snap = api.createSnapshot({ openProjects: [tsconfig] });
+  const project = openNativeProject(snap, tsconfig, probes);
+  const checkCounts = {};
+  const pos = observeNative(project, positive, probes, checkCounts, probes.positive);
+  const neg = observeNative(project, negative, probes, checkCounts, probes.negative);
+  const twin = cleanTwinTarget(probes);
+  const cleanTwin =
+    twin.sharedWith === "positive"
+      ? pos
+      : twin.sharedWith === "negative"
+        ? neg
+        : observeNative(project, repoPath(repoRoot, twin.rel), probes, checkCounts, twin.rel);
+  return {
+    engine: resolved.id,
+    positive: pos,
+    negative: neg,
+    cleanTwin,
+    checkCounts,
+  };
 }
 
 function nativeSemanticDiagnostics(project, fileAbs, checkCounts, fileKey) {
@@ -1476,34 +1480,26 @@ export async function runNativeStp2(resolved, probes, repoRoot, cases) {
   const { API } = await loadNativeApi(repoRoot);
   const probesDir = path.dirname(repoPath(repoRoot, probes.tsconfig));
   const tsconfig = repoPath(repoRoot, probes.tsconfig);
-  const api = new API({ tsserverPath: resolved.executable, cwd: probesDir });
-  try {
-    const snap = api.updateSnapshot({ openProject: tsconfig });
-    const project = snap.getProject(tsconfig);
-    if (!project) {
-      throw new Error(`native engine did not open ${posix(probes.tsconfig)}`);
-    }
-    const checkCounts = {};
-    const files = {};
-    const wanted = caseProbeFiles(cases);
-    if (probes.positive) wanted.unshift(posix(probes.positive));
-    if (probes.negative) wanted.push(posix(probes.negative));
-    const unique = [...new Set(wanted)];
-    for (const rel of unique) {
-      const abs = repoPath(repoRoot, rel);
-      files[rel] = observeNative(project, abs, probes, checkCounts, rel);
-    }
-    snap.dispose();
-    return {
-      engine: resolved.id,
-      positive: files[posix(probes.positive)],
-      negative: files[posix(probes.negative)],
-      files,
-      checkCounts,
-    };
-  } finally {
-    api.close();
+  using api = new API({ tsserverPath: resolved.executable, cwd: probesDir });
+  using snap = api.createSnapshot({ openProjects: [tsconfig] });
+  const project = openNativeProject(snap, tsconfig, probes);
+  const checkCounts = {};
+  const files = {};
+  const wanted = caseProbeFiles(cases);
+  if (probes.positive) wanted.unshift(posix(probes.positive));
+  if (probes.negative) wanted.push(posix(probes.negative));
+  const unique = [...new Set(wanted)];
+  for (const rel of unique) {
+    const abs = repoPath(repoRoot, rel);
+    files[rel] = observeNative(project, abs, probes, checkCounts, rel);
   }
+  return {
+    engine: resolved.id,
+    positive: files[posix(probes.positive)],
+    negative: files[posix(probes.negative)],
+    files,
+    checkCounts,
+  };
 }
 
 function fileResult(run, rel) {

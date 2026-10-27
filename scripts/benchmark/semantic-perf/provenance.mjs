@@ -1,5 +1,5 @@
 // Provenance of one benchmark run: the source tree, the host, the pinned
-// TypeScript 7.0.2 packages, the Verter probe binaries and the supervisor —
+// TypeScript packages, the Verter probe binaries and the supervisor —
 // each identified by content, so the validator can prove the run measured
 // the artifacts it names.
 
@@ -10,7 +10,10 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 
-export const TYPESCRIPT_VERSION = "7.0.2";
+import { readPin } from "../../typescript-pin.mjs";
+
+/** The workspace TypeScript pin (root `package.json`, see scripts/typescript-pin.mjs). */
+export const TYPESCRIPT_VERSION = readPin();
 
 /** Features no production build enables; a probe built with one is not the production library. */
 export const FORBIDDEN_FEATURES = {

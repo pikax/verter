@@ -1921,8 +1921,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// abbreviated as the checker's node builder abbreviates it: past the
     /// truncation length a union's or an intersection's remaining members
     /// print as `... N more ...` before its last, an object's remaining
-    /// properties likewise, a type-argument or tuple list as `...`, and the
-    /// whole text is clipped at twice that length (TypeScript 7.0.2).
+    /// properties likewise, an object type it begins past the length, a
+    /// type-argument or tuple list as `...`, and the whole text is clipped at
+    /// twice that length (TypeScript 7.1.0-beta).
     /// `None` when the print cannot be the checker's: a part whose
     /// node-builder count is not modelled could move where it abbreviates,
     /// or the display depth cap cut a part the message keeps.

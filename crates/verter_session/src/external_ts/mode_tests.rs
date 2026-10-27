@@ -31,8 +31,8 @@ fn facts(version: &str, pin: u64, generation: u64) -> EngineSessionFacts {
 /// [`SharedSessionFacts`]) the slots require.
 fn candidates() -> EngineSessionCandidates {
     EngineSessionCandidates {
-        owned: OwnedSessionFacts::new(facts("7.0.1", 1, 0)),
-        shared: Some(SharedSessionFacts::new(facts("7.0.1", 7, 3))),
+        owned: OwnedSessionFacts::new(facts("7.1.1", 1, 0)),
+        shared: Some(SharedSessionFacts::new(facts("7.1.1", 7, 3))),
     }
 }
 
@@ -398,7 +398,7 @@ fn all_eligible_but_no_shared_session_fails_closed() {
         (b, ProjectEligibility::Eligible, &[]),
     ]);
     let no_shared = EngineSessionCandidates {
-        owned: OwnedSessionFacts::new(facts("7.0.1", 1, 0)),
+        owned: OwnedSessionFacts::new(facts("7.1.1", 1, 0)),
         shared: None,
     };
     let decision = select_component_mode(&g, &a, &no_shared);
@@ -563,7 +563,7 @@ fn component_member_order_is_canonical_and_insertion_independent() {
 /// the identity can never launder one engine's facts into the other's.
 #[test]
 fn engine_identity_is_mode_keyed_never_equal_across_modes() {
-    let same = facts("7.0.1", 42, 5);
+    let same = facts("7.1.1", 42, 5);
     let owned = EngineIdentity::for_mode(ServeMode::Owned, &same);
     let shared = EngineIdentity::for_mode(ServeMode::Shared, &same);
     assert_ne!(owned, shared);
@@ -612,7 +612,7 @@ fn session_provenance_and_failover_cause_are_type_enforced() {
     // accessor: constructing from `f` and reading `.facts()` back round-trips
     // to the same value (a real check — a wrong accessor would return a
     // different or fabricated fact set).
-    let f = facts("7.0.1", 9, 4);
+    let f = facts("7.1.1", 9, 4);
     assert_eq!(OwnedSessionFacts::new(f.clone()).facts(), &f);
     assert_eq!(SharedSessionFacts::new(f.clone()).facts(), &f);
 
@@ -634,7 +634,7 @@ fn session_provenance_and_failover_cause_are_type_enforced() {
     let g = graph(&[(a, ProjectEligibility::Eligible, &[])]);
     let prior = select_component_mode(&g, &a, &candidates());
     assert_eq!(prior.mode(), ServeMode::Shared);
-    let owned_session = OwnedSessionFacts::new(facts("7.0.1", 1, 0));
+    let owned_session = OwnedSessionFacts::new(facts("7.1.1", 1, 0));
     let failed = failover_component_to_owned(&prior, FailoverCause::RedirectClosed, &owned_session);
     assert_eq!(failed.mode(), ServeMode::Owned);
     assert_eq!(failed.owned_reason(), Some(OwnedReason::RedirectClosed));

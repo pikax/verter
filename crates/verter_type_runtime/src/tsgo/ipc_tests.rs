@@ -309,7 +309,7 @@ async fn silence_watchdog_restarts_without_timing_out_the_request() {
     let (tx, _rx) = oneshot::channel();
     assert!(pending.insert(1, tx));
     let liveness = Arc::new(EngineLiveness::since(
-        std::time::Instant::now() - std::time::Duration::from_millis(50),
+        tokio::time::Instant::now() - std::time::Duration::from_millis(50),
     ));
     let notify = Arc::new(Notify::new());
     let teardown = Arc::new(AtomicBool::new(false));
@@ -349,7 +349,7 @@ async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
     let (tx, _rx) = oneshot::channel();
     assert!(pending.insert(1, tx));
     let liveness = Arc::new(EngineLiveness::since(
-        std::time::Instant::now() - std::time::Duration::from_millis(50),
+        tokio::time::Instant::now() - std::time::Duration::from_millis(50),
     ));
     let notify = Arc::new(Notify::new());
     let teardown = Arc::new(AtomicBool::new(true));
@@ -377,19 +377,33 @@ async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
         .expect("once teardown intent clears, a silent provider must restart");
 }
 
-/// Decode the JSON body of a framed stdin message.
-fn frame_body(msg: &StdinMessage) -> serde_json::Value {
+/// Decode every JSON body a stdin lane message carries, in wire order. A
+/// document's first `didOpen` carries the `custom/projectInfo` lead frame in
+/// front of it; every other message is one frame.
+fn frame_bodies(msg: &StdinMessage) -> Vec<serde_json::Value> {
     let bytes = match msg {
         StdinMessage::Frame(bytes) | StdinMessage::Document(bytes, _) => bytes,
         StdinMessage::Query(_) => panic!("a query frame exists only once the writer places it"),
         StdinMessage::Shutdown => panic!("expected a framed message, got a control signal"),
     };
-    let text = String::from_utf8(bytes.clone()).expect("frame is utf8");
-    let body = text
-        .split_once("\r\n\r\n")
-        .expect("frame has a header/body split")
-        .1;
-    serde_json::from_str(body).expect("frame body is json")
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    framer.push(bytes);
+    let mut bodies = Vec::new();
+    while let Some(body) = framer.next_message().expect("frame body is json") {
+        bodies.push(body);
+    }
+    assert!(
+        !bodies.is_empty(),
+        "a lane message carries at least one frame"
+    );
+    bodies
+}
+
+/// Decode the JSON body of a framed stdin message: for a document delivery,
+/// the document notification itself (its lead frame, if any, is checked by
+/// [`a_first_open_leads_with_its_project_and_nothing_else_does`]).
+fn frame_body(msg: &StdinMessage) -> serde_json::Value {
+    frame_bodies(msg).pop().expect("at least one frame")
 }
 
 // ===========================================================================
@@ -418,12 +432,13 @@ async fn dropping_an_in_flight_request_releases_its_pending_slot() {
             Some(30),
             ProviderPriority::Interactive,
         ));
-        // Poll once so the id is registered and the future is parked on the
-        // response that never comes.
-        tokio::select! {
-            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
+        // Poll once: the first poll registers the id and enqueues the frame
+        // before its first await, leaving the future parked on the response
+        // that never comes.
+        assert!(
+            futures_util::poll!(fut.as_mut()).is_pending(),
+            "no response was ever written; the request cannot complete"
+        );
         assert_eq!(
             pending.len(),
             1,
@@ -454,10 +469,10 @@ async fn dropping_an_in_flight_request_cancels_it_at_the_engine() {
             Some(30),
             ProviderPriority::Interactive,
         ));
-        tokio::select! {
-            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
+        assert!(
+            futures_util::poll!(fut.as_mut()).is_pending(),
+            "no response was ever written; the request cannot complete"
+        );
     }
 
     let sent = stdin_rx.try_recv().expect("the request frame was enqueued");
@@ -500,10 +515,10 @@ async fn cancellation_does_not_queue_behind_the_lane_it_cancels() {
             Some(30),
             ProviderPriority::Interactive,
         ));
-        tokio::select! {
-            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
+        assert!(
+            futures_util::poll!(fut.as_mut()).is_pending(),
+            "no response was ever written; the request cannot complete"
+        );
         // Do not drain the interactive lane — it stays full across the drop.
     }
 
@@ -526,17 +541,20 @@ async fn an_answered_request_emits_no_cancellation() {
     let pending = Arc::new(PendingRequestTable::default());
     let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
 
+    // The request registers its pending slot before it enqueues its frame, so
+    // the frame's arrival is the answerer's cue.
     let answerer = {
         let pending = Arc::clone(&pending);
         tokio::spawn(async move {
-            for _ in 0..100 {
-                if let Some(tx) = pending.take(1) {
-                    let _ = tx.send(serde_json::json!({ "id": 1, "result": "ok" }));
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            panic!("the request never registered its pending slot");
+            let frame = stdin_rx
+                .recv()
+                .await
+                .expect("the request frame was enqueued");
+            let tx = pending
+                .take(1)
+                .expect("the request registered its pending slot");
+            let _ = tx.send(serde_json::json!({ "id": 1, "result": "ok" }));
+            frame
         })
     };
 
@@ -550,10 +568,11 @@ async fn an_answered_request_emits_no_cancellation() {
         .await
         .expect("the answered request succeeds");
     assert_eq!(result, serde_json::json!("ok"));
-    answerer.await.unwrap();
+    let frame = answerer.await.unwrap();
 
-    assert!(
-        stdin_rx.try_recv().is_ok(),
+    assert_eq!(
+        frame_body(&frame).get("method").and_then(|v| v.as_str()),
+        Some("textDocument/hover"),
         "the request frame was enqueued"
     );
     assert!(
@@ -636,25 +655,22 @@ async fn a_hop_times_out_inside_the_callers_request_deadline() {
 /// Production feature requests are cancellation-driven, not latency-budgeted.
 /// An ambient legacy deadline may elapse while a cold project is still validly
 /// loading; the eventual engine response must remain observable.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn production_tsgo_request_outlives_the_ambient_deadline() {
     let (stdin_tx, _stdin_rx) = mpsc::channel(16);
     let pending = Arc::new(PendingRequestTable::default());
-    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
-    let request = {
-        let transport = Arc::clone(&transport);
-        tokio::spawn(async move {
-            crate::deadline::with_deadline(
-                std::time::Duration::from_millis(20),
-                transport.request("textDocument/hover", serde_json::json!({})),
-            )
-            .await
-        })
-    };
+    let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
+    let mut request = Box::pin(crate::deadline::with_deadline(
+        std::time::Duration::from_millis(20),
+        transport.request("textDocument/hover", serde_json::json!({})),
+    ));
 
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    // The request registers and parks; the clock then moves well past the
+    // 20 ms ambient budget, and the request is polled again after it.
+    assert!(futures_util::poll!(request.as_mut()).is_pending());
+    tokio::time::advance(std::time::Duration::from_millis(60)).await;
     assert!(
-        !request.is_finished(),
+        futures_util::poll!(request.as_mut()).is_pending(),
         "the ambient latency budget must not cancel a production tsgo request"
     );
     pending
@@ -663,7 +679,7 @@ async fn production_tsgo_request_outlives_the_ambient_deadline() {
         .send(serde_json::json!({ "id": 1, "result": { "contents": "ok" } }))
         .expect("request still awaits its response");
     assert_eq!(
-        request.await.unwrap().unwrap(),
+        request.await.unwrap(),
         serde_json::json!({ "contents": "ok" })
     );
 }
@@ -1323,8 +1339,8 @@ async fn test_tsgo_hover_on_ts_file() {
         .await
         .unwrap();
 
-    // Give TSGO a moment to process
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    // The engine handles the open before any request sent after it: an LSP
+    // server processes a document notification and later requests in order.
 
     // Hover on "msg" (offset 6 on line 0)
     let hover = provider
@@ -1377,9 +1393,20 @@ async fn test_tsgo_survives_workspace_configuration() {
         .await
         .unwrap();
 
-    // Wait long enough for tsgo to send workspace/configuration and process our reply.
-    // Previously, tsgo would crash here because we replied with `null`.
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    // Wait until tsgo has asked for workspace/configuration and our reply is
+    // queued: the hover below is written after that reply, so tsgo handles the
+    // reply first. Previously, tsgo would crash on it because we replied with
+    // `null`. The timeout is a liveness watchdog only.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider
+            .transport
+            .pending
+            .answered_server_requests
+            .wait_for("workspace/configuration"),
+    )
+    .await
+    .expect("tsgo must ask for workspace/configuration after initialization");
 
     // If tsgo crashed, this will fail with a pipe error.
     let hover_result = provider
@@ -3684,10 +3711,9 @@ async fn stdin_writer_loop_exits_on_shutdown() {
     tx.send(StdinMessage::Frame(b"hello\n".to_vec()))
         .await
         .unwrap();
-    // Small delay for the writer to process
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Send Shutdown
+    // Send Shutdown. The channel is FIFO, so the writer handles the frame
+    // before it sees this.
     tx.send(StdinMessage::Shutdown).await.unwrap();
 
     // The writer task should complete within 1s
@@ -4021,8 +4047,8 @@ async fn e2e_concurrent_requests_complete_without_deadlock() {
         .await
         .unwrap();
 
-    // Give TSGO a moment to process
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // The engine handles the open before any request sent after it: an LSP
+    // server processes a document notification and later requests in order.
 
     // Fire 5 concurrent hover requests at different offsets
     let (r1, r2, r3, r4, r5) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -4094,9 +4120,13 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         stdin_rx,
     ));
 
+    // A sentinel request the read loop answers only after every frame written
+    // before its response: the loop handles stdout in order.
+    let (sentinel_tx, sentinel_rx) = oneshot::channel();
+    assert!(pending.insert(999, sentinel_tx));
     tokio::spawn(read_loop(
         client_stdout_reader,
-        pending,
+        Arc::clone(&pending),
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
         mpsc::unbounded_channel().0,
@@ -4144,10 +4174,18 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
     let body = serde_json::to_string(&tsx_notif).unwrap();
     let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
     mock_writer.write_all(frame.as_bytes()).await.unwrap();
-    mock_writer.flush().await.unwrap();
 
-    // Give read_loop time to process both messages
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The sentinel's response follows both notifications, so once it is
+    // delivered the read loop has handled them.
+    let sentinel = serde_json::json!({ "jsonrpc": "2.0", "id": 999, "result": null });
+    let body = serde_json::to_string(&sentinel).unwrap();
+    let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    mock_writer.write_all(frame.as_bytes()).await.unwrap();
+    mock_writer.flush().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), sentinel_rx)
+        .await
+        .expect("the read loop must reach the sentinel response")
+        .expect("the sentinel's pending slot stays registered until answered");
 
     let cache = diagnostics_cache.lock().await;
 
@@ -5070,14 +5108,26 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
                 Ok(0) => break,
                 Ok(n) => {
                     seen.extend_from_slice(&chunk[..n]);
-                    if let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let header = std::str::from_utf8(&seen[..end]).unwrap();
+                    // Walk the complete frames: the document's first open
+                    // leads with a small project frame, and the drain ends
+                    // with the frame that carries the payload.
+                    let mut offset = 0;
+                    while let Some(end) = seen[offset..].windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = std::str::from_utf8(&seen[offset..offset + end]).unwrap();
                         let length: usize = header
                             .strip_prefix("Content-Length: ")
                             .unwrap()
                             .parse()
                             .unwrap();
-                        expected_len = Some(end + 4 + length);
+                        let frame_end = offset + end + 4 + length;
+                        if length >= payload_len {
+                            expected_len = Some(frame_end);
+                            break;
+                        }
+                        if seen.len() < frame_end {
+                            break;
+                        }
+                        offset = frame_end;
                     }
                 }
                 Err(_) => break,
@@ -5292,6 +5342,104 @@ async fn the_ledger_opens_once_changes_on_edit_and_reopens_only_after_a_close() 
     assert_eq!(reopened[0].0, "textDocument/didOpen");
     assert_eq!(reopened[0].1["textDocument"]["version"], 1);
     assert_eq!(reopened[0].1["textDocument"]["text"], "const a = 2;\n");
+}
+
+/// Every lane message of one document, as `(method, params, id)` per frame.
+fn drained_frames(
+    stdin_rx: &mut mpsc::Receiver<StdinMessage>,
+) -> Vec<Vec<(String, serde_json::Value, serde_json::Value)>> {
+    let mut messages = Vec::new();
+    while let Ok(message) = stdin_rx.try_recv() {
+        messages.push(
+            frame_bodies(&message)
+                .into_iter()
+                .map(|body| {
+                    (
+                        body["method"].as_str().unwrap_or_default().to_string(),
+                        body["params"].clone(),
+                        body["id"].clone(),
+                    )
+                })
+                .collect(),
+        );
+    }
+    messages
+}
+
+/// A document's first `didOpen` reaches the engine right behind a
+/// `custom/projectInfo` request for the same document, in the SAME lane
+/// message, so the engine has loaded the configured project before the open
+/// could create it, and program order (where TS2432 lands on merged enum
+/// blocks) is the project's, not the editor's open order. The request carries
+/// an id, as a request must, and nothing waits on it: the open returned above
+/// with no peer answering anything.
+///
+/// Discriminance: dropping the lead fails the first and the reopen halves;
+/// sending it on every write fails the change and close halves; sending it
+/// as its own lane message fails the one-message assertions.
+#[tokio::test]
+async fn a_first_open_leads_with_its_project_and_nothing_else_does() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/Widget.vue.tsx";
+    let uri = TsgoTypeProvider::path_to_uri(path);
+
+    provider.open_file(path, "const a = 1;\n").await.unwrap();
+    let opened = drained_frames(&mut stdin_rx);
+    assert_eq!(opened.len(), 1, "the first open is one lane message");
+    let methods: Vec<&str> = opened[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(methods, ["custom/projectInfo", "textDocument/didOpen"]);
+    assert_eq!(opened[0][0].1["textDocument"]["uri"], uri.as_str());
+    assert!(
+        opened[0][0].2.is_i64(),
+        "the project lead is a request: it carries an id"
+    );
+    assert!(opened[0][1].2.is_null(), "the didOpen stays a notification");
+
+    provider.update_file(path, "const a = 2;\n").await.unwrap();
+    let changed = drained_frames(&mut stdin_rx);
+    assert_eq!(changed.len(), 1);
+    let methods: Vec<&str> = changed[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        ["textDocument/didChange"],
+        "an edit owes no project lead"
+    );
+
+    provider.close_file(path).await.unwrap();
+    let closed = drained_frames(&mut stdin_rx);
+    assert_eq!(closed.len(), 1);
+    let methods: Vec<&str> = closed[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        ["textDocument/didClose"],
+        "a close owes no project lead"
+    );
+
+    provider.open_file(path, "const a = 2;\n").await.unwrap();
+    let reopened = drained_frames(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    let methods: Vec<&str> = reopened[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        ["custom/projectInfo", "textDocument/didOpen"],
+        "a reopen is a first open again"
+    );
+    assert_ne!(
+        reopened[0][0].2, opened[0][0].2,
+        "each project lead takes its own request id"
+    );
 }
 
 /// `load_file` caches content for local position conversion and deliberately
@@ -5523,8 +5671,8 @@ async fn tsgo_sends_no_workspace_configuration_notification() {
 // readonly=2, static=3, deprecated=4, abstract=5, async=6, modification=7,
 // documentation=8, defaultLibrary=9, local=10.
 //
-// tsgo emits tokens in ITS OWN server-advertised legend (observed live on the
-// pinned 7.0.2: interface=3, variable=8, function=13 — a DIFFERENT order), so
+// tsgo emits tokens in ITS OWN server-advertised legend (observed live on
+// 7.1.0-beta: interface=3, variable=8, function=13 — a DIFFERENT order), so
 // the provider must retain the `initialize`-result legend and remap BOTH the
 // type index and the modifier bitset by NAME before returning. An unmapped
 // token type or modifier bit drops the token (fail closed — absent beats
@@ -5554,8 +5702,8 @@ async fn tsgo_semantic_tokens_arrive_in_verter_legend_space() {
     let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
     let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
     let file_path = ts_path.to_str().unwrap().replace('\\', "/");
+    // The engine handles the open before the request that follows it.
     provider.open_file(&file_path, content).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let tokens = provider
         .get_semantic_tokens(&crate::provider_query::ProviderQuery::at_engine_surface(
@@ -5651,8 +5799,21 @@ async fn tsgo_inlay_hints_appear_for_inferred_types() {
     let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
     let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
     let file_path = ts_path.to_str().unwrap().replace('\\', "/");
+    // The engine handles the open before the request that follows it.
     provider.open_file(&file_path, content).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    // Inlay hints are preference-gated, and the preferences arrive in our
+    // workspace/configuration reply: wait until that reply is queued, so the
+    // request below is written after it. The timeout is a liveness watchdog only.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider
+            .transport
+            .pending
+            .answered_server_requests
+            .wait_for("workspace/configuration"),
+    )
+    .await
+    .expect("tsgo must ask for workspace/configuration after initialization");
 
     let hints = provider
         .get_inlay_hints(
@@ -5779,7 +5940,7 @@ async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_a
 
 /// The tsgo `initialize` client capabilities must advertise
 /// `textDocument.semanticTokens` — the engine gates the ENTIRE feature on it
-/// (verified live on the pinned 7.0.2: without the capability the initialize
+/// (verified live on 7.1.0-beta: without the capability the initialize
 /// result advertises an EMPTY legend and `semanticTokens/full` returns zero
 /// data for every file). The advertised vocabulary is Verter's PUBLISHED
 /// legend, so the server's negotiated echo can only contain names the shared

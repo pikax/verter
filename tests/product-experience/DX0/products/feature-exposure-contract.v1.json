@@ -330,7 +330,7 @@
         "replayCase": "verter-tsc project fixtures",
         "test": "crates/verter_tsc test suite"
       },
-      "enginePin": ">=7.0.2, <7.1.0 (tsgo; no tsc fallback)",
+      "enginePin": ">=7.1.0-beta, <7.2.0 (tsgo; no tsc fallback)",
       "playground": {
         "status": "missing",
         "promotionBlocked": true,
@@ -364,7 +364,7 @@
         "replayCase": "verter-tsc project fixtures",
         "test": "crates/verter_tsc test suite"
       },
-      "enginePin": ">=7.0.2, <7.1.0 (tsgo; no tsc fallback)",
+      "enginePin": ">=7.1.0-beta, <7.2.0 (tsgo; no tsc fallback)",
       "playground": {
         "status": "missing",
         "promotionBlocked": true,
@@ -723,7 +723,7 @@
         "replayCase": "verter-tsc engine-resolution fixtures",
         "test": "crates/verter_tsc test suite"
       },
-      "enginePin": ">=7.0.2, <7.1.0",
+      "enginePin": ">=7.1.0-beta, <7.2.0",
       "playground": {
         "status": "missing",
         "promotionBlocked": true,

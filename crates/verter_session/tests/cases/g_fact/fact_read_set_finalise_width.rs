@@ -9,8 +9,12 @@ use verter_session::for_tests::{
 use verter_session::VerterHost;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ReadSetSignature},
-    fact_read_set::{FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
+    fact_read_set::FactReadSetFinalise,
 };
+
+/// The production fresh-slice width these fixtures straddle.
+const WIDE_SIGNATURE_WIDTH: usize =
+    verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max();
 
 fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())

@@ -6,7 +6,7 @@
 //! differs where the body reads it — a receiver member, the contextual
 //! `this`, the method body after an edit — evaluates the body again.
 //!
-//! Every expected answer is TypeScript 7.0.2's, measured on this exact
+//! Every expected answer is TypeScript 7.1.0-beta's, measured on this exact
 //! fixture under `--strict` with `export const a: { __nope: 1 } = null as
 //! any as <probe>;` read off the TS2741 message.
 

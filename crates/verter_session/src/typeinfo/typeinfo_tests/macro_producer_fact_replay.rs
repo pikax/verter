@@ -379,7 +379,7 @@ fn both_flight_arms_replay_the_producer_footprint() {
 fn factless_footprints_refuse_rooting_instead_of_replaying_nothing() {
     let host = make_host();
     let empty_non_cacheable = MacroFactFootprint::from_finalise(FactReadSetFinalise::NonCacheable(
-        verter_session_query::facts::fact_set::FactSet::from(Vec::new()),
+        verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
     ));
     let mutation_unstable =
         MacroFactFootprint::from_finalise(FactReadSetFinalise::MutationUnstable);
@@ -508,7 +508,7 @@ fn non_cacheable_footprint_replays_facts_and_the_refusal() {
     };
     let (canonicals, footprint) =
         MacroFactFootprint::from_finalise(FactReadSetFinalise::NonCacheable(
-            verter_session_query::facts::fact_set::FactSet::from(vec![fact]),
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![fact]),
         ));
     assert_eq!(canonicals, vec![INNER.to_string()]);
     assert!(
@@ -546,7 +546,7 @@ fn rooted_footprint_replays_facts_without_refusing() {
         hash: [5u8; 16],
     };
     let (canonicals, footprint) = MacroFactFootprint::from_finalise(FactReadSetFinalise::Ok(
-        verter_session_query::facts::fact_set::FactSet::from(vec![fact]),
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![fact]),
     ));
     assert_eq!(canonicals, vec![PROPS.to_string()]);
     assert!(matches!(footprint, MacroFactFootprint::Rooted(_)));

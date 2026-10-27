@@ -139,18 +139,12 @@ fn assert_the_retry_is_current(workspace: &MemoryWorkspace) {
 
 fn await_subscribers(workspace: &MemoryWorkspace, count: usize) {
     let population = WorkspaceRead::resolution_population(workspace);
-    let deadline = Instant::now() + WAIT;
-    while workspace
-        .engine
-        .flight_subscribers_for_test(MAIN, "./dep", CONTEXT, population, false)
-        < count
-    {
-        assert!(
-            Instant::now() < deadline,
-            "{count} subscribers never joined the flight"
-        );
-        std::thread::yield_now();
-    }
+    assert!(
+        workspace.engine.wait_for_flight_subscribers_for_test(
+            MAIN, "./dep", CONTEXT, population, false, count,
+        ),
+        "{count} subscribers never joined the flight"
+    );
 }
 
 /// A request cancelled while it waits on the publication gate (a writer

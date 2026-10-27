@@ -65,7 +65,7 @@ fn warm_read_validates_outside_entries_mutex() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         0,

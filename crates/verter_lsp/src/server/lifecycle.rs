@@ -1421,10 +1421,16 @@ pub(super) async fn handle_did_change_watched_files(
     let importers: Vec<String> = importer_closure.into_iter().collect();
     let resync_owes_importer_refresh =
         !non_carrier_resync_ids.is_empty() && server.project_sync.is_some();
+    // The provider learns of the disk changes here, before this handler
+    // returns: an LSP engine (TSGO) then holds created files in its project's
+    // own order, as `tsc` does, before the editor's later didOpen or the
+    // resync below publishes them. Published first, they would join its
+    // program in publication order, and an order-dependent diagnostic (TS2432
+    // on merged enum blocks) would land on whichever file was opened first.
+    server
+        .forward_watched_files_to_provider(&provider_changes)
+        .await;
     if !resync_owes_importer_refresh {
-        server
-            .forward_watched_files_to_provider(&provider_changes)
-            .await;
         server.refresh_open_importers_after_disk_change(&importers);
     }
     if !non_carrier_resync_ids.is_empty() {
@@ -1451,9 +1457,6 @@ pub(super) async fn handle_did_change_watched_files(
                 }
                 // The importers are checked only once every changed
                 // dependency has reached the provider.
-                refresh_server
-                    .forward_watched_files_to_provider(&provider_changes)
-                    .await;
                 refresh_server.refresh_open_importers_after_disk_change(&importers);
             });
         }

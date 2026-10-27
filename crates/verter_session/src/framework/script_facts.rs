@@ -607,13 +607,14 @@ impl FrameworkScriptFactStore {
         payload: ExactScriptFacts<dyn FrameworkScriptFactPayload>,
         admission: &SignatureAdmission,
         generation: u64,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Arc<StoredResolvedFact> {
         let stored = Arc::new(StoredResolvedFact {
             payload,
             read_set_signature: admission
                 .cacheable()
                 .cloned()
-                .unwrap_or_else(ReadSetSignature::empty),
+                .unwrap_or_else(|| ReadSetSignature::empty(fact_policy)),
             validated_at_generation: generation,
         });
         if admission.cacheable().is_some() {
@@ -1365,6 +1366,7 @@ fn resolve_script_facts_inner<
         exact_payload,
         &admission,
         generation,
+        host.project_type_store().fact_policy(),
     );
     match stored.payload.clone().downcast::<T>() {
         Some(exact) => ScriptFactEvidence::Exact(exact),

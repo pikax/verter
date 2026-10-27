@@ -34,9 +34,8 @@ fn file(canonical: &str) -> FactVersionRef {
 }
 
 fn carrier(receipt: &ResultReceipt) -> verter_session_query::facts::fact_set::FactSet {
-    verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::Receipt(
-        receipt.clone(),
-    )])
+    verter_session_query::facts::policy::FactPolicy::production()
+        .set_of(vec![FactVersionRef::Receipt(receipt.clone())])
 }
 
 /// `n` results, each reading its own file and consuming the one before.
@@ -72,7 +71,7 @@ impl Measured {
         warm.register(
             0,
             (),
-            &verter_session_query::facts::fact_set::FactSet::empty(),
+            &verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ["/w/warm.ts"],
         );
         assert_eq!(warm.unregister(&0), Some(()));
@@ -166,7 +165,7 @@ fn reverse_index_singleton_extras_and_holder_sets_are_charged_by_their_blocks() 
     const N: u32 = 4096;
     for owner_charges_candidates in [false, true] {
         let names: Vec<String> = (0..N).map(|i| format!("/w/extra{i}.ts")).collect();
-        let empty = verter_session_query::facts::fact_set::FactSet::empty();
+        let empty = verter_session_query::facts::policy::FactPolicy::production().empty_set();
         let mut measured = Measured::new(owner_charges_candidates);
         reset_live_block_bytes();
         for (key, name) in names.iter().enumerate() {
@@ -221,7 +220,7 @@ fn reverse_index_singleton_parent_sets_are_charged_by_their_blocks() {
 fn reverse_index_drain_through_tombstones_stays_covered_and_releases_everything() {
     const N: u32 = 3500;
     for owner_charges_candidates in [false, true] {
-        let empty = verter_session_query::facts::fact_set::FactSet::empty();
+        let empty = verter_session_query::facts::policy::FactPolicy::production().empty_set();
         let mut random = 0x1234_5678_u64;
         let fences: Vec<&str> = (0..N)
             .map(|_| {

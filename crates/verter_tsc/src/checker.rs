@@ -834,7 +834,7 @@ impl CarrierAdmission {
 /// ([`run_declaration_stage`]) because tsgo `--api` exposes no emit surface.
 ///
 /// Returns [`Err`] when the in-memory `--api` typecheck stage cannot run (engine
-/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure),
+/// absent, or a connect/init/createSnapshot/protocol/project-not-found failure),
 /// or when the declaration/emit stage fails (engine unresolvable, invocation
 /// failure, or an error exit with no parseable diagnostics) — the caller surfaces
 /// it as a non-zero process exit. This fail-closed contract is why a
@@ -1296,7 +1296,7 @@ fn resolve_explicit_engine(
         }) => {
             let mut msg = format!(
                 "--tsgo-bin engine at {} is not a supported tsgo (Verter supports tsgo \
-                 (TypeScript 7 native) stable {SUPPORTED_TSGO_RANGE_LABEL})",
+                 (TypeScript 7 native) {SUPPORTED_TSGO_RANGE_LABEL})",
                 flag_path.display()
             );
             for note in &notes {
@@ -1322,7 +1322,7 @@ fn resolve_explicit_engine(
 /// the primary next step.
 fn render_resolve_failure(error: &verter_tsgo_api::toolchain::discovery::ResolveError) -> String {
     use verter_tsgo_api::toolchain::discovery::{ResolveError, ENV_OVERRIDE_VAR};
-    use verter_tsgo_api::toolchain::policy::{BUNDLED_TSGO_VERSION, SUPPORTED_TSGO_RANGE_LABEL};
+    use verter_tsgo_api::toolchain::policy::{SUPPORTED_TSGO_RANGE_LABEL, TYPESCRIPT_PIN};
 
     match error {
         ResolveError::NoUsableCandidate {
@@ -1332,7 +1332,7 @@ fn render_resolve_failure(error: &verter_tsgo_api::toolchain::discovery::Resolve
         } => {
             let mut msg = format!(
                 "no supported tsgo engine found for the `{requirement}` surface.\n\
-                 Verter supports tsgo (TypeScript 7 native) stable {SUPPORTED_TSGO_RANGE_LABEL}.\n\
+                 Verter supports tsgo (TypeScript 7 native) {SUPPORTED_TSGO_RANGE_LABEL}.\n\
                  searched: {ENV_OVERRIDE_VAR}, PATH, project-local node_modules"
             );
             for note in notes {
@@ -1342,8 +1342,8 @@ fn render_resolve_failure(error: &verter_tsgo_api::toolchain::discovery::Resolve
                 msg.push_str(&format!("\n  - {rejection}"));
             }
             msg.push_str(&format!(
-                "\ninstall it: npm install -D typescript@{BUNDLED_TSGO_VERSION} (or any newer \
-                 7.0.x) — tsgo ships with the TypeScript 7 package and is then found via \
+                "\ninstall it: npm install -D typescript@{TYPESCRIPT_PIN} — tsgo ships with \
+                 the TypeScript 7 package and is then found via \
                  project-local node_modules.\n\
                  for an engine in a non-standard location, use --tsgo-bin <PATH> or set \
                  {ENV_OVERRIDE_VAR}."
@@ -3454,7 +3454,7 @@ for arg in "$@"; do
       body=$(dd bs=1 count="$len" 2>/dev/null)
       id=$(printf '%s' "$body" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [ -n "$id" ] || continue
-      resp="{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"capabilities\":{},\"serverInfo\":{\"name\":\"mock-tsc\",\"version\":\"7.0.2\"}}}"
+      resp="{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"capabilities\":{},\"serverInfo\":{\"name\":\"mock-tsc\",\"version\":\"__TYPESCRIPT_PIN__\"}}}"
       printf 'Content-Length: %s\r\n\r\n%s' "${#resp}" "$resp"
     done
     exit 0
@@ -3487,7 +3487,7 @@ if ($Args -contains '--lsp') {
         }
         $body = -join $buf
         if ($body -match '"id"\s*:\s*(\d+)') {
-            $resp = '{"jsonrpc":"2.0","id":' + $Matches[1] + ',"result":{"capabilities":{},"serverInfo":{"name":"mock-tsc","version":"7.0.2"}}}'
+            $resp = '{"jsonrpc":"2.0","id":' + $Matches[1] + ',"result":{"capabilities":{},"serverInfo":{"name":"mock-tsc","version":"__TYPESCRIPT_PIN__"}}}'
             $writer.Write("Content-Length: " + $resp.Length + "`r`n`r`n" + $resp)
             $writer.Flush()
         }
@@ -3561,7 +3561,7 @@ if ($Args -contains '--lsp') {
     /// Install a mock checker the DECLARATION stage resolves through the
     /// toolchain resolver's project-local `.bin` shim tier. Its `--version` +
     /// `--lsp` handshake arms make it pass the capability smoke (version
-    /// `7.0.2`, matching `serverInfo`); its `--project`/`--declaration`
+    /// the TypeScript pin, matching `serverInfo`); its `--project`/`--declaration`
     /// behavior is the fixture under test. It does NOT speak the `--api`
     /// wire, so the in-memory typecheck stage cannot run against it — these
     /// tests drive [`run_declaration_stage`] directly (see
@@ -3574,8 +3574,8 @@ if ($Args -contains '--lsp') {
     }
 
     /// The on-disk path of the mock installed by [`write_mock_tsc`] /
-    /// [`write_mock_tsc_error_with_emit`] — the resolver's `legacy_bin_shim`
-    /// name (`tsgo` / `tsgo.cmd`).
+    /// [`write_mock_tsc_error_with_emit`] — `tsgo` / `tsgo.cmd`, a name no
+    /// resolver tier enumerates.
     ///
     /// Declaration-stage fixtures name this path EXPLICITLY through the
     /// `--tsgo-bin` seam rather than hoping the project-local tier wins the
@@ -3613,7 +3613,7 @@ if ($Args -contains '--lsp') {
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 
 if ($Args -contains '--version') {
-    Write-Output 'Version 7.0.2'
+    Write-Output 'Version __TYPESCRIPT_PIN__'
     exit 0
 }
 
@@ -3661,7 +3661,11 @@ $emitted = Join-Path $declarationDir ($tscTsx.Name + '.d.ts')
 Set-Content -Path $emitted -Value 'export declare const ok: number;'
 exit 0
 "#
-                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1),
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1)
+                .replace(
+                    "__TYPESCRIPT_PIN__",
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                ),
             )
             .unwrap();
             fs::write(
@@ -3683,7 +3687,7 @@ declaration_dir=""
 
 for arg in "$@"; do
   if [ "$arg" = "--version" ]; then
-    echo "Version 7.0.2"
+    echo "Version __TYPESCRIPT_PIN__"
     exit 0
   fi
 done
@@ -3726,7 +3730,11 @@ fi
 mkdir -p "$declaration_dir"
 printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc_tsx").d.ts"
 "#
-                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH),
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH)
+                .replace(
+                    "__TYPESCRIPT_PIN__",
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                ),
             )
             .unwrap();
 
@@ -3754,7 +3762,7 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 
 if ($Args -contains '--version') {
-    Write-Output 'Version 7.0.2'
+    Write-Output 'Version __TYPESCRIPT_PIN__'
     exit 0
 }
 
@@ -3799,7 +3807,11 @@ Set-Content -Path $emitted -Value 'export declare const ok: number;'
 Write-Output "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'."
 exit 1
 "#
-                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1),
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1)
+                .replace(
+                    "__TYPESCRIPT_PIN__",
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                ),
             )
             .unwrap();
             fs::write(
@@ -3821,7 +3833,7 @@ declaration_dir=""
 
 for arg in "$@"; do
   if [ "$arg" = "--version" ]; then
-    echo "Version 7.0.2"
+    echo "Version __TYPESCRIPT_PIN__"
     exit 0
   fi
 done
@@ -3863,7 +3875,11 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
 printf "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'.\n"
 exit 1
 "#
-                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH),
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH)
+                .replace(
+                    "__TYPESCRIPT_PIN__",
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                ),
             )
             .unwrap();
 
@@ -3905,7 +3921,7 @@ exit 1
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 
 if ($Args -contains '--version') {
-    Write-Output 'Version 7.0.2'
+    Write-Output 'Version __TYPESCRIPT_PIN__'
     exit 0
 }
 
@@ -3917,6 +3933,10 @@ Write-Output "decoy_c.ts(3,3): error TS9003: __PATH_DECOY_MARKER__ was resolved.
 exit 2
 "#
                 .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1)
+                .replace(
+                    "__TYPESCRIPT_PIN__",
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                )
                 .replace("__PATH_DECOY_MARKER__", PATH_DECOY_MARKER),
             )
             .unwrap();
@@ -3937,7 +3957,7 @@ exit 2
                 r#"#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "--version" ]; then
-    echo "Version 7.0.2"
+    echo "Version __TYPESCRIPT_PIN__"
     exit 0
   fi
 done
@@ -3950,6 +3970,10 @@ printf "decoy_c.ts(3,3): error TS9003: __PATH_DECOY_MARKER__ was resolved.\n"
 exit 2
 "#
                 .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH)
+                .replace(
+                    "__TYPESCRIPT_PIN__",
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                )
                 .replace("__PATH_DECOY_MARKER__", PATH_DECOY_MARKER),
             )
             .unwrap();
@@ -7291,19 +7315,24 @@ const props = defineProps<{ msg: string }>()
         use verter_tsgo_api::toolchain::discovery::{
             Candidate, CandidateRejection, Provenance, ResolveError,
         };
-        use verter_tsgo_api::toolchain::policy::{PolicyRejection, TsgoVersion};
+        use verter_tsgo_api::toolchain::policy::{
+            pinned_version, PolicyRejection, TsgoVersion, SUPPORTED_TSGO_RANGE_LABEL,
+            TYPESCRIPT_PIN,
+        };
         use verter_tsgo_api::toolchain::validation::{Capability, RejectionReason};
 
+        let pin = pinned_version();
+        let below = TsgoVersion::new(pin.major, pin.minor - 1, 9);
         let error = ResolveError::NoUsableCandidate {
             rejections: vec![CandidateRejection {
                 candidate: Candidate {
-                    path: PathBuf::from("/usr/local/bin/tsgo"),
+                    path: PathBuf::from("/usr/local/bin/tsc"),
                     provenance: Provenance::SharedPath,
                 },
                 reason: RejectionReason::PolicyRejected {
-                    version: "7.0.1".to_string(),
+                    version: below.to_string(),
                     rejection: PolicyRejection::BelowSupportedFloor {
-                        version: TsgoVersion::new(7, 0, 1),
+                        version: below.clone(),
                     },
                 },
             }],
@@ -7314,7 +7343,7 @@ const props = defineProps<{ msg: string }>()
 
         // The primary, actionable next step is the install request…
         assert!(
-            msg.contains("npm install -D typescript@7.0.2"),
+            msg.contains(&format!("npm install -D typescript@{TYPESCRIPT_PIN}")),
             "must request the install: {msg}"
         );
         // …with the flag and the env var as alternatives…
@@ -7325,12 +7354,12 @@ const props = defineProps<{ msg: string }>()
         );
         // …accurate supported-range facts…
         assert!(
-            msg.contains(">=7.0.2, <7.1.0"),
+            msg.contains(SUPPORTED_TSGO_RANGE_LABEL),
             "must state the supported range: {msg}"
         );
         // …and the genuinely useful below-floor diagnostic is retained.
         assert!(
-            msg.contains("7.0.1"),
+            msg.contains(&below.to_string()),
             "must keep the found-but-below-floor detail: {msg}"
         );
         // Tiers that can never succeed for verter-tsc are not advertised.

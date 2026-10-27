@@ -896,8 +896,12 @@ fn soft_byte_and_retention_refusals_stay_distinct() {
     );
     Arc::get_mut(&mut host)
         .expect("a fresh host is not shared")
-        .project_type_store =
-        Arc::new(crate::project_type_store::ProjectTypeStore::with_retention_account(account));
+        .project_type_store = Arc::new(
+        crate::project_type_store::ProjectTypeStore::with_retention_account(
+            account,
+            host.project_type_store().fact_policy(),
+        ),
+    );
     let _scope = host
         .project_type_store()
         .semantic_graph()

@@ -884,6 +884,13 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
     // post-accept disarm is buffered and observed by the steady-state select (which reaps the
     // child); any fallible setup step in between instead unwinds through this armed guard.
     let mut child_guard = ChildSetupGuard::new(OwnedChild::new(child));
+    // A setup failure from here on names the engine the guard reaps, so the report identifies the
+    // process an operator (or a test) can confirm is gone.
+    let engine_pid = child_guard.child_mut().id();
+    let naming_engine = |message: String| match engine_pid {
+        Some(pid) => format!("{message} (engine pid {pid})"),
+        None => message,
+    };
 
     // The fallible post-spawn setup: take the child's piped stdio, start the relay, mint the
     // rendezvous witnesses, bind the control endpoint, publish the advertisement, and spawn the
@@ -999,12 +1006,12 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
                 child_guard.kill_and_reap().await;
                 return Ok(ShimExit::Signal(signum));
             }
-            SetupResolution::Error(message) => return Err(message),
+            SetupResolution::Error(message) => return Err(naming_engine(message)),
             SetupResolution::Proceed(handles) => handles,
         }
     };
     #[cfg(not(unix))]
-    let (relay, advertisement_path, accept_task) = setup.await?;
+    let (relay, advertisement_path, accept_task) = setup.await.map_err(naming_engine)?;
 
     // Steady-state hand-off: the accept loop is running and every fallible setup step
     // (including the Unix signal-handler install above) has SUCCEEDED, so disarm the guard and

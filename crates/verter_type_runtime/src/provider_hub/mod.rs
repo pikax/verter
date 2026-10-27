@@ -61,7 +61,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
@@ -335,6 +336,8 @@ struct Lifecycle {
     /// Advanced by every deliberate shutdown. Establishments, recoveries and
     /// crash monitors captured at an older value are abandoned.
     teardown_generation: u64,
+    /// When the last establishment failed, and why. Stamped on the Tokio clock,
+    /// so the on-demand cooldown measured from it follows a paused test clock.
     last_failure: Option<(Instant, String)>,
     /// The re-arm gate of a lazily-attached transport
     /// ([`HubPolicy::lazy_attach`]): the generation discriminant of the last

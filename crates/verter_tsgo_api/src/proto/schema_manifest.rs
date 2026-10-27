@@ -20,23 +20,23 @@
 /// message-type tag) flips the pin and trips the gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FramingConstants {
-    /// `MSGPACK_FIXARRAY3` (msgpack.js:4).
+    /// `MSGPACK_FIXARRAY3` (msgpack.js:5).
     pub fixarray3: u8,
-    /// `MSGPACK_BIN8` (msgpack.js:5).
+    /// `MSGPACK_BIN8` (msgpack.js:6).
     pub bin8: u8,
-    /// `MSGPACK_BIN16` (msgpack.js:6).
+    /// `MSGPACK_BIN16` (msgpack.js:7).
     pub bin16: u8,
-    /// `MSGPACK_BIN32` (msgpack.js:7).
+    /// `MSGPACK_BIN32` (msgpack.js:8).
     pub bin32: u8,
-    /// `MSGPACK_UINT8` (msgpack.js:8).
+    /// `MSGPACK_UINT8` (msgpack.js:9).
     pub uint8: u8,
-    /// `MSG_REQUEST` (syncChannel.js:17).
+    /// `MSG_REQUEST` (syncChannel.js:18).
     pub msg_request: u8,
-    /// `MSG_RESPONSE` (syncChannel.js:21).
+    /// `MSG_RESPONSE` (syncChannel.js:22).
     pub msg_response: u8,
-    /// `MSG_ERROR` (syncChannel.js:22).
+    /// `MSG_ERROR` (syncChannel.js:23).
     pub msg_error: u8,
-    /// `MSG_CALL` (syncChannel.js:23).
+    /// `MSG_CALL` (syncChannel.js:24).
     pub msg_call: u8,
 }
 
@@ -44,34 +44,34 @@ pub struct FramingConstants {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaManifest {
     /// The REFERENCE `typescript` distribution version this codec was verified
-    /// against (e.g. `7.0.2`). The gate accepts versions satisfying the
-    /// supported-version policy ([`crate::toolchain::policy`] — stable
-    /// `>=7.0.2, <7.1.0`), not this one build; this field documents the build
-    /// the hand-written codec was checked against and appears in gate refusal
-    /// messages.
+    /// against: the TypeScript pin
+    /// ([`crate::toolchain::policy::TYPESCRIPT_PIN`]). The gate accepts every
+    /// version the supported-version policy admits (the pin's release line,
+    /// [`crate::toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL`]), not this one
+    /// build; this field documents the build the hand-written codec was checked
+    /// against and appears in gate refusal messages.
     pub engine_version: &'static str,
     /// The framing constants the codec emits/accepts.
     pub framing: FramingConstants,
     /// The high-level op method-name strings the codec hand-writes, sorted.
     /// Mirrors the `apiRequest(...)` call sites in `sync/api.js`.
     pub ops: &'static [&'static str],
-    /// The host-callback names the codec services, in the exact wire order
-    /// (`fs.js:3`).
+    /// The host-callback names the codec services, in the engine's callback
+    /// table order (`fsCallbacks.js:2-19`).
     pub callbacks: &'static [&'static str],
     /// Per-op REQUEST field-name schedule: for each op the codec SENDS, its
-    /// SORTED request-payload field-name set (the normalized wire AFTER the JS
-    /// client shims — e.g. `updateSnapshot` carries `openProjects`, never the
-    /// deprecated pre-shim `openProject`). Entries are kept sorted by op name so
-    /// the fingerprint is order-stable.
+    /// SORTED request-payload field-name set (the wire the JS client sends —
+    /// e.g. `updateSnapshot` carries `{ snapshot, changes }`). Entries are kept
+    /// sorted by op name so the fingerprint is order-stable.
     ///
-    /// This is the dimension the op-NAME-only fingerprint was BLIND to: the op
-    /// name `updateSnapshot` was unchanged while its param schema flipped
-    /// `openProject`→`openProjects`, so the pre-widening fingerprint accepted the
-    /// broken codec. Only fields the codec SENDS are scheduled — additive
+    /// This is the dimension an op-NAME-only fingerprint is BLIND to: an op can
+    /// keep its name while its param schema changes (`updateSnapshot` did, from a
+    /// base-less change set to `{ snapshot, changes }`), so a name-only
+    /// fingerprint would accept the broken codec. Only fields the codec SENDS are scheduled — additive
     /// response fields the codec tolerates-by-ignoring are deliberately excluded
     /// (hashing them would manufacture false breakages on benign upstream drift).
     pub request_fields: &'static [(&'static str, &'static [&'static str])],
-    /// The tsgo `--api` binary `PROTOCOL_VERSION` (`node/protocol.d.ts:1`). A
+    /// The tsgo `--api` binary-AST `PROTOCOL_VERSION` (`node/protocol.d.ts:1`). A
     /// protocol-version bump is a wire event the op/callback inventory cannot
     /// express, so it enters the fingerprint as its own scalar dimension.
     pub protocol_version: u32,
@@ -178,8 +178,10 @@ const fn fnv1a_request_fields(mut h: u64, schedule: &[(&str, &[&str])]) -> u64 {
 /// the fingerprint is order-stable. Mirrors `sync/api.js` (see
 /// [`crate::proto::types::method`] for per-op line citations).
 pub const PINNED_OPS: &[&str] = &[
+    "createSnapshot",
     "echo",
     "getConfigFileParsingDiagnostics",
+    "getCurrentLanguageServerSnapshot",
     "getDefaultProjectForFile",
     "getSemanticDiagnostics",
     "getSourceFile",
@@ -190,9 +192,13 @@ pub const PINNED_OPS: &[&str] = &[
     "parseConfigFile",
     "release",
     "typeToString",
+    "updateSnapshot",
 ];
 
-/// The host-callback inventory in wire order (`fs.js:3`).
+/// The host callbacks the codec services, in the engine's callback-table order
+/// (`fsCallbacks.js:2-19`). The table's remaining entries (`stat`, `writeFile`,
+/// `removeFile`) are not enabled on `--callbacks=`, so the engine serves them
+/// from the host filesystem (the `useOS` default, `fsCallbacks.js:21-40`).
 pub const PINNED_CALLBACKS: &[&str] = &[
     "readFile",
     "fileExists",
@@ -201,19 +207,34 @@ pub const PINNED_CALLBACKS: &[&str] = &[
     "realpath",
 ];
 
-/// The per-op REQUEST field-name schedule the codec SENDS — the normalized wire
-/// shape AFTER the JS client shims. Entries are sorted by op name, and each
+/// The per-op REQUEST field-name schedule the codec SENDS — the wire shape the
+/// JS client sends (sync/api.js). Entries are sorted by op name, and each
 /// field-name set is sorted, so the fingerprint is order-stable. Only ops Verter
 /// actually sends appear (the never-sent `echo`/`getDefaultProjectForFile`/
 /// `getSourceFile`/`parseConfigFile` ops carry no request-field row).
 pub const PINNED_REQUEST_FIELDS: &[(&str, &[&str])] = &[
+    (
+        "createSnapshot",
+        &[
+            "closeFiles",
+            "closeProjects",
+            "ensurePrograms",
+            "fileNotifications",
+            "openFiles",
+            "openProjects",
+        ],
+    ),
     ("getConfigFileParsingDiagnostics", &["project", "snapshot"]),
-    ("getSemanticDiagnostics", &["file", "project", "snapshot"]),
+    (
+        "getCurrentLanguageServerSnapshot",
+        &["baseSnapshot", "changes"],
+    ),
+    ("getSemanticDiagnostics", &["files", "project", "snapshot"]),
     (
         "getSymbolAtPosition",
         &["file", "position", "project", "snapshot"],
     ),
-    ("getSyntacticDiagnostics", &["file", "project", "snapshot"]),
+    ("getSyntacticDiagnostics", &["files", "project", "snapshot"]),
     (
         "getTypeAtPosition",
         &["file", "position", "project", "snapshot"],
@@ -221,33 +242,21 @@ pub const PINNED_REQUEST_FIELDS: &[(&str, &[&str])] = &[
     ("initialize", &[]),
     ("release", &["snapshot"]),
     ("typeToString", &["project", "snapshot", "type"]),
-    (
-        "updateSnapshot",
-        &[
-            "closeFiles",
-            "closeProjects",
-            "fileChanges",
-            "openFiles",
-            "openProjects",
-        ],
-    ),
+    ("updateSnapshot", &["changes", "snapshot"]),
 ];
 
 /// The maintained wire pin for the currently supported tsgo `--api` wire.
 ///
-/// On a version bump the maintainer re-verifies the hand-written codec, then
-/// updates `engine_version` (and the op/callback inventory if the surface
-/// changed). `engine_version` is `typescript@7.0.2` — the REFERENCE build
-/// within the supported window ([`crate::toolchain::policy`], stable
-/// `>=7.0.2, <7.1.0`), not the sole accepted version: the gate admits every
-/// stable build in the window, all of which share the
-/// bare-integer opaque-handle wire the codec
-/// ([`crate::proto::types::OpaqueHandle`]) targets. The op inventory
-/// carries `getConfigFileParsingDiagnostics` (the project config-parse /
-/// compiler-options diagnostic surface the codec now hand-writes); the
-/// fingerprint reflects that op set.
+/// On a version bump the maintainer re-verifies the hand-written codec against
+/// the pinned build's `dist/api`, then updates the op/callback inventory, the
+/// request schedule and `protocol_version` if the surface changed.
+/// `engine_version` is the TypeScript pin — the REFERENCE build within the
+/// supported window ([`crate::toolchain::policy`]), not the sole accepted
+/// version: the gate admits every build on the pin's release line, all of
+/// which share the bare-integer opaque-handle wire the codec
+/// ([`crate::proto::types::OpaqueHandle`]) targets.
 pub const PINNED: SchemaManifest = SchemaManifest {
-    engine_version: "7.0.2",
+    engine_version: crate::toolchain::policy::TYPESCRIPT_PIN,
     framing: FramingConstants {
         fixarray3: crate::proto::msgpack::MSGPACK_FIXARRAY3,
         bin8: crate::proto::msgpack::MSGPACK_BIN8,
@@ -262,7 +271,7 @@ pub const PINNED: SchemaManifest = SchemaManifest {
     ops: PINNED_OPS,
     callbacks: PINNED_CALLBACKS,
     request_fields: PINNED_REQUEST_FIELDS,
-    protocol_version: 5,
+    protocol_version: 9,
 };
 
 #[cfg(test)]
@@ -301,7 +310,7 @@ mod tests {
         // Two manifests that differ ONLY in version share a fingerprint: the
         // gate treats version and wire shape as separate dimensions.
         let mut m = PINNED;
-        m.engine_version = "7.0.0-dev.20260526.1";
+        m.engine_version = "7.1.9";
         assert_ne!(
             m.engine_version, PINNED.engine_version,
             "the injected version must differ from the pin for this to discriminate"
@@ -350,12 +359,12 @@ mod tests {
 
     // ── HEADLINE §1a: the widened fingerprint CATCHES the exact request-field
     //    miss the old scheme shipped. Two manifests identical in framing / ops /
-    //    callbacks / protocol, differing ONLY in `updateSnapshot`'s request field
-    //    name (`openProject` fork vs `openProjects` GA wire). ────────────────────
+    //    callbacks / protocol, differing ONLY in `updateSnapshot`'s request
+    //    fields (a base-less change set vs the `{ snapshot, changes }` wire). ──
     #[test]
     fn fingerprint_catches_request_field_flip_that_old_scheme_missed() {
-        const BROKEN_SCHEDULE: &[(&str, &[&str])] = &[("updateSnapshot", &["openProject"])];
-        const GA_SCHEDULE: &[(&str, &[&str])] = &[("updateSnapshot", &["openProjects"])];
+        const BROKEN_SCHEDULE: &[(&str, &[&str])] = &[("updateSnapshot", &["openProjects"])];
+        const GA_SCHEDULE: &[(&str, &[&str])] = &[("updateSnapshot", &["changes", "snapshot"])];
 
         let mut broken = PINNED;
         broken.request_fields = BROKEN_SCHEDULE;
@@ -369,11 +378,12 @@ mod tests {
             legacy_framing_ops_callbacks_hash(&broken),
             legacy_framing_ops_callbacks_hash(&ga),
             "the pre-widening framing+op-name+callback-only scheme is BLIND to the \
-             request field flip — the coverage gap that shipped the openProject fork"
+             request field flip — the coverage gap the widened scheme closes"
         );
 
         // 2. WIDENED FINGERPRINT CATCHES IT: folding the request-field schedule in
-        //    makes `openProject` vs `openProjects` flip the fingerprint.
+        //    makes the base-less change set vs `{ snapshot, changes }` flip the
+        //    fingerprint.
         assert_ne!(
             broken.wire_fingerprint(),
             ga.wire_fingerprint(),

@@ -3,7 +3,7 @@
 //! Distinct from the crate's STANDALONE MessagePack tuple wire ([`crate::proto`]):
 //! the attach path connects to a server-minted pipe (named pipe on Windows, a
 //! Unix-domain socket on macOS/Linux) and exchanges JSON-RPC 2.0 envelopes framed
-//! with `Content-Length` headers — the framing the shipped rc `typescript`
+//! with `Content-Length` headers — the framing the pinned `typescript`
 //! async client uses (`createMessageConnection` over a `net.Socket`).
 //!
 //! ## Layout

@@ -1038,6 +1038,7 @@ fn shape_value_and_fact_sig_for_scope(
     );
     let fact_sig =
         match verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+            verter_session_query::facts::policy::FactPolicy::production(),
             &observed,
             parse_fact,
             value.dep_signature(),
@@ -1736,7 +1737,7 @@ fn shape_cache_close_drops_rooted_closed_subject_and_dependent_entries() {
     let (value_a, sig_a) = shape_value_and_fact_sig_for_scope(ctx, "/rel_a.ts", false);
     let (value_b, sig_b) = shape_value_and_fact_sig_for_scope(ctx, "/rel_b.ts", false);
     let sig_b_and_a: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(
             sig_b
                 .iter()
                 .chain(sig_a.iter())

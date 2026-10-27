@@ -26,12 +26,14 @@ fn carrier_naming(
     canonical: &str,
     hash: u8,
 ) -> verter_session_query::facts::fact_cache::ReadSetSignature {
-    verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: [hash; 16],
-        },
-    ]))
+    verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [hash; 16],
+            },
+        ]),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1095,7 +1097,9 @@ fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
         };
         store.insert_relation_payload_for_tests(
             RelateMemoKey::assignable(*source, *target, RelationContext::default()),
-            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
             store.relation_payload_for_tests(outcome),
             0,
@@ -1150,7 +1154,9 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
             result,
             crate::semantic_query::RelationContext::default(),
         ),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         0,
@@ -1228,7 +1234,9 @@ fn invalidate_all_clears_memo_budget_under_entries_lock() {
             name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from([]),
     );
     assert_eq!(store.memo_family_count_for_test(), 1, "seeded one family");
@@ -1315,7 +1323,9 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
                 name: verter_type_expr::OwnedStr::from("Pub"),
             }),
             QueryResult::Value(node),
-            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             Arc::from([]),
         )
     });
@@ -1656,13 +1666,14 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
         scope: scope("/w/a.ts"),
         name: verter_type_expr::OwnedStr::from("A"),
     });
-    let carrier_a =
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+    let carrier_a = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
             FactVersionRef::FileWholeHash {
                 canonical_id: "/w/a.ts".into(),
                 hash: [1u8; 16],
             },
-        ]));
+        ]),
+    );
     store.publish_with_carrier_and_dispatch_for_tests(
         key_a,
         QueryResult::Value(node_a),
@@ -1678,13 +1689,14 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
         scope: scope("/w/b.ts"),
         name: verter_type_expr::OwnedStr::from("B"),
     });
-    let carrier_b =
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+    let carrier_b = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
             FactVersionRef::FileWholeHash {
                 canonical_id: "/w/b.ts".into(),
                 hash: [2u8; 16],
             },
-        ]));
+        ]),
+    );
     store.publish_with_carrier_for_tests(
         key_b,
         QueryResult::Value(node_b),
@@ -1726,13 +1738,14 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
         scope: scope("/w/c.ts"),
         name: verter_type_expr::OwnedStr::from("C"),
     });
-    let carrier_c =
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+    let carrier_c = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
             FactVersionRef::FileWholeHash {
                 canonical_id: "/w/c.ts".into(),
                 hash: [3u8; 16],
             },
-        ]));
+        ]),
+    );
     let populated = store.publish_with_carrier_for_tests(
         key_c,
         QueryResult::Value(node_c),
@@ -3149,16 +3162,18 @@ fn close_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     );
 
     let aggregate_only = || {
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-            FactVersionRef::DomainGeneration(DomainGenerationFact {
-                domain: CompactionDomain::Resolution,
-                population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
-                stamp: AggregateStamp::ResolutionRoots {
-                    base: ResolutionWorldId::from_raw(1),
-                    session: None,
-                },
-            }),
-        ]))
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+                FactVersionRef::DomainGeneration(DomainGenerationFact {
+                    domain: CompactionDomain::Resolution,
+                    population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
+                    stamp: AggregateStamp::ResolutionRoots {
+                        base: ResolutionWorldId::from_raw(1),
+                        session: None,
+                    },
+                }),
+            ]),
+        )
     };
     let no_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
     let roots_c: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/consumer.vue")]);

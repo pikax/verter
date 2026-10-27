@@ -465,7 +465,7 @@ The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-l
 
 CLI arg `--type-provider=auto|shared-tsgo|tsgo|tsserver|extension|off` (from VS Code `verter.typeProvider` setting):
 
-- **auto**: the managed fallback is CAPABILITY-driven (`probe_managed_engine` + `choose_managed_engine`): a supported tsgo (stable `>=7.0.2, <7.1.0`) wins; otherwise the project tsserver router serves; `None` only when neither is obtainable. The lazy managed activation applies the same order at demand time (a candidate that fails validation — e.g. `VERTER_TSGO_BIN`/`PATH` naming a TypeScript 5.x/6.x `tsc` — falls through to tsserver, and the client is sent an updated `$/verter/typeProviderStatus`).
+- **auto**: the managed fallback is CAPABILITY-driven (`probe_managed_engine` + `choose_managed_engine`): a supported tsgo (the pinned TypeScript release line, `toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL`) wins; otherwise the project tsserver router serves; `None` only when neither is obtainable. The lazy managed activation applies the same order at demand time (a candidate that fails validation — e.g. `VERTER_TSGO_BIN`/`PATH` naming a TypeScript 5.x/6.x `tsc` — falls through to tsserver, and the client is sent an updated `$/verter/typeProviderStatus`).
 - **tsgo**: explicit managed tsgo; falls back to the project tsserver router when no supported tsgo validates, `None` only when tsserver is also unavailable.
 - **tsserver**: explicit tsserver; a workspace whose ONLY resolvable TypeScript is TS7+ reclassifies to the managed tsgo route (the native family is never served over the Node protocol).
 - **off**: verter-only mode

@@ -32,14 +32,15 @@ impl Lcg {
 #[test]
 fn one_content_is_one_set_whatever_its_history() {
     let forward: Vec<_> = (0..200).map(fact).collect();
-    let direct = FactSet::from_facts(forward.clone());
+    let direct = crate::facts::policy::FactPolicy::production().set_of(forward.clone());
     // Built link by link, each link the one below plus one fact.
-    let mut chained = FactSet::empty();
+    let mut chained = crate::facts::policy::FactPolicy::production().empty_set();
     for index in (0..200).rev() {
         chained = chained.union_with_facts(&[fact(index)]);
     }
     // Built from shuffled halves with repetitions.
-    let mut halves = FactSet::from_facts((100..200).rev().map(fact).collect());
+    let mut halves = crate::facts::policy::FactPolicy::production()
+        .set_of((100..200).rev().map(fact).collect::<Vec<_>>());
     halves = halves.union_with_facts(&(0..150).map(fact).collect::<Vec<_>>());
     assert!(
         chained.tree_storage().is_some(),
@@ -64,8 +65,10 @@ fn one_content_is_one_set_whatever_its_history() {
 
 #[test]
 fn equal_digests_still_compare_content() {
-    let left = FactSet::from_facts((0..64).map(fact).collect());
-    let right = FactSet::from_facts((1..65).map(fact).collect());
+    let left = crate::facts::policy::FactPolicy::production()
+        .set_of((0..64).map(fact).collect::<Vec<_>>());
+    let right = crate::facts::policy::FactPolicy::production()
+        .set_of((1..65).map(fact).collect::<Vec<_>>());
     assert_eq!(left.len(), right.len());
     assert_ne!(left, right);
 }
@@ -78,7 +81,7 @@ fn equal_digests_still_compare_content() {
 fn the_tree_reads_exactly_as_an_ordered_set() {
     let mut rng = Lcg(7);
     let mut oracle: BTreeSet<FactVersionRef> = BTreeSet::new();
-    let mut set = FactSet::empty();
+    let mut set = crate::facts::policy::FactPolicy::production().empty_set();
     let mut history: Vec<(FactSet, BTreeSet<FactVersionRef>)> = Vec::new();
     for round in 0..600 {
         let mut edit = set.edit();
@@ -142,7 +145,8 @@ fn the_tree_reads_exactly_as_an_ordered_set() {
 fn a_chain_of_sets_shares_its_storage_and_charges_each_link_its_own_part() {
     let links = 1000;
     let mut sets: Vec<FactSet> = Vec::with_capacity(links);
-    let mut set = FactSet::from_facts((0..40).map(fact).collect());
+    let mut set = crate::facts::policy::FactPolicy::production()
+        .set_of((0..40).map(fact).collect::<Vec<_>>());
     for index in 40..40 + links {
         let next = set.union_with_facts(&[fact(index)]);
         if set.tree_storage().is_some() {
@@ -174,7 +178,8 @@ fn a_chain_of_sets_shares_its_storage_and_charges_each_link_its_own_part() {
 /// allocator.)
 #[test]
 fn every_node_charges_exactly_its_own_bytes() {
-    let base = FactSet::from_facts((0..500).map(fact).collect());
+    let base = crate::facts::policy::FactPolicy::production()
+        .set_of((0..500).map(fact).collect::<Vec<_>>());
     let mut sets = vec![base.union_with_facts(&[fact(10_000)])];
     for index in 0..50 {
         let next = sets[index].union_with_facts(&[fact(20_000 + index)]);
@@ -205,7 +210,8 @@ fn every_node_charges_exactly_its_own_bytes() {
 /// added back unnoticed.
 #[test]
 fn a_tree_set_offers_no_flat_copy() {
-    let set = FactSet::from_facts((0..10).map(fact).collect())
+    let set = crate::facts::policy::FactPolicy::production()
+        .set_of((0..10).map(fact).collect::<Vec<_>>())
         .union_with_facts(&(10..100).map(fact).collect::<Vec<_>>());
     assert!(set.tree_storage().is_some());
     assert!(set.as_flat().is_none(), "a tree set has no slice");
@@ -255,7 +261,9 @@ fn fact_set_cpu_direction() {
     for n in [100usize, 1_000, 10_000] {
         let facts: Vec<FactVersionRef> = (0..n).map(fact).collect();
         let flat: Arc<[FactVersionRef]> = Arc::from(facts.clone());
-        let tree = FactSet::from_facts(facts[..1].to_vec()).union_with_facts(&facts[1..]);
+        let tree = crate::facts::policy::FactPolicy::production()
+            .set_of(facts[..1].to_vec())
+            .union_with_facts(&facts[1..]);
         let rounds = (2_000_000 / n).max(20);
         let flat_iter = per(rounds, || {
             flat.iter()
@@ -290,7 +298,7 @@ fn fact_set_cpu_direction() {
         }
         let flat_chain = start.elapsed().as_secs_f64() * 1e9 / links as f64;
         let start = Instant::now();
-        let mut tree_link = FactSet::from_facts(base);
+        let mut tree_link = crate::facts::policy::FactPolicy::production().set_of(base);
         for index in 0..links {
             tree_link = tree_link.union_with_facts(&[fact(100_000 + index)]);
         }
@@ -303,4 +311,103 @@ fn fact_set_cpu_direction() {
             tree_chain / flat_chain,
         );
     }
+}
+
+/// A policy narrow enough that small fixtures cross every storage boundary
+/// a production-width set crosses: a fresh seal past 40 facts and an
+/// extension past 4 are trees of several leaves under a branch.
+fn narrow_policy() -> crate::facts::policy::FactPolicy {
+    crate::facts::policy::FactPolicy::with_widths(crate::facts::policy::FactWidths {
+        fresh_slice_max: 40,
+        strict_root_threshold: 40,
+        precise_domain_max: 40,
+        extension_slice_max: 4,
+    })
+    .expect("valid widths")
+}
+
+/// A narrow policy changes only which storage a set takes, at exactly its
+/// own widths, along both construction histories: a fresh seal is one slice
+/// up to the fresh limit and a charged multi-node tree one fact beyond it;
+/// an extension is one slice up to the extension limit and a tree one fact
+/// beyond it, shrinking back to a slice when an edit narrows it again.
+/// Every set built from another inherits the policy.
+#[test]
+fn a_narrow_policy_moves_both_storage_boundaries_and_nothing_else() {
+    let policy = narrow_policy();
+    let at_fresh = policy.set_of((0..40).map(fact).collect::<Vec<_>>());
+    let past_fresh = policy.set_of((0..41).map(fact).collect::<Vec<_>>());
+    assert!(
+        at_fresh.as_flat().is_some(),
+        "a fresh seal at the limit is one slice"
+    );
+    assert!(
+        past_fresh.tree_storage().is_some(),
+        "one fact past it is a tree"
+    );
+    let footprint = past_fresh.tree_footprint();
+    assert!(
+        footprint.nodes > 1,
+        "the tree spans several leaves under a branch: {footprint:?}"
+    );
+    assert!(
+        past_fresh.tree_node_charges() > 0,
+        "its nodes charge their own allocations from birth"
+    );
+    // The same facts under production widths are one slice, and equal.
+    let production = crate::facts::policy::FactPolicy::production()
+        .set_of((0..41).map(fact).collect::<Vec<_>>());
+    assert!(production.as_flat().is_some());
+    assert_eq!(
+        production, past_fresh,
+        "content defines equality, not storage"
+    );
+    assert_eq!(production.digest(), past_fresh.digest());
+    assert_eq!(hash_of(&production), hash_of(&past_fresh));
+
+    let base = policy.empty_set();
+    let at_extension = base.union_with_facts(&(0..4).map(fact).collect::<Vec<_>>());
+    let past_extension = at_extension.union_with_facts(&[fact(4)]);
+    assert!(
+        at_extension.as_flat().is_some(),
+        "an extension at its limit is one slice"
+    );
+    assert!(
+        past_extension.tree_storage().is_some(),
+        "one fact past it is a tree"
+    );
+    assert!(past_extension.tree_node_charges() > 0);
+    let mut narrowed = past_extension.edit();
+    narrowed.remove(&fact(4));
+    let narrowed = narrowed.finish();
+    assert!(
+        narrowed.as_flat().is_some(),
+        "narrowed back, it is one slice again"
+    );
+    assert_eq!(narrowed, at_extension);
+    for set in [
+        &at_fresh,
+        &past_fresh,
+        &at_extension,
+        &past_extension,
+        &narrowed,
+    ] {
+        assert_eq!(
+            set.policy(),
+            policy,
+            "every set built here inherits the policy"
+        );
+    }
+    assert_eq!(past_fresh.edit().finish().policy(), policy);
+}
+
+/// Sets of different policies compare by content, but combining them is a
+/// defect: it is refused before the shared-storage shortcut could answer.
+#[test]
+#[should_panic(expected = "different fact policies")]
+fn combining_sets_of_different_policies_is_refused_before_any_shortcut() {
+    let narrow = narrow_policy().set_of((0..8).map(fact).collect::<Vec<_>>());
+    let production =
+        crate::facts::policy::FactPolicy::production().set_of((0..8).map(fact).collect::<Vec<_>>());
+    let _ = production.is_superset(&narrow);
 }

@@ -65,7 +65,7 @@ fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) ->
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         a.clone(),
         QueryResult::Value(node),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,

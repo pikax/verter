@@ -93,7 +93,7 @@ const SERVER_PIN = `sha256:${"ab".repeat(32)}`;
 const RECEIPT: ProductReceiptBasis = {
   sourceRevisions: LARGE_WORKLOAD.sourcePin,
   projectConfiguration: LARGE_WORKLOAD.configurationPin,
-  engineIdentity: `verter-lsp ${SERVER_PIN} / 7.0.2`,
+  engineIdentity: `verter-lsp ${SERVER_PIN} / 7.1.0-beta`,
   hostIdentity: "real-lapce:0.4.6+Nightly.126d356",
   completenessState: "complete",
 };
@@ -133,7 +133,7 @@ function largeRun(overrides: Partial<LargeRunObservation> = {}): LargeRunObserva
     usedSleepForReadiness: false,
     versionsPinned: true,
     serverBuildPin: SERVER_PIN,
-    providerEnginePin: "7.0.2",
+    providerEnginePin: "7.1.0-beta",
     interactionKinds: [...CHURN_KINDS],
     reopenAfterClose: true,
     sameDocumentReopen: true,
@@ -660,7 +660,7 @@ describe("captured-line semantic oracle extract", () => {
     expect(oracle.providerPid).toBe(4242);
     expect(oracle.providerKind).toBe("tsgo");
     expect(oracle.providerVersion).toBeNull();
-    expect(pinProviderEngine(oracle, "7.0.2")).toBe("tsgo 7.0.2");
+    expect(pinProviderEngine(oracle, "7.1.0-beta")).toBe("tsgo 7.1.0-beta");
     expect(oracle.outboundBytes).toBeGreaterThan(0);
     const answers = typedAnswersFromOracle(oracle, ISSUE93_ORACLE_EXPECTATION);
     expect(answers.every((answer) => answer.match)).toBe(true);
@@ -969,7 +969,7 @@ describe("captured-line request freshness and document lifetime", () => {
     expect(oracle.providerPid).toBe(11);
     expect(oracle.providerKind).toBe("tsgo");
     expect(oracle.providerVersion).toBeNull();
-    expect(pinProviderEngine(oracle, "7.0.2")).toBe("tsgo 7.0.2");
-    expect(pinProviderEngine({ providerKind: null }, "7.0.2")).toBe("");
+    expect(pinProviderEngine(oracle, "7.1.0-beta")).toBe("tsgo 7.1.0-beta");
+    expect(pinProviderEngine({ providerKind: null }, "7.1.0-beta")).toBe("");
   });
 });

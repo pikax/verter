@@ -5185,9 +5185,9 @@ fn render_widened_stub_tail(
     let construct = widened_construct_surface(component_ty, declared_keys, fallthrough)?;
     Some(format!(
         "type __OmitNew<T> = {omit_new}\n\
-         declare const {name}: __OmitNew<{component_ty}> & {{\n  \
+         declare const {name}: {{\n  \
          {construct}\n\
-         }}\n\
+         }} & __OmitNew<{component_ty}>\n\
          export default {name}\n",
         omit_new = omit_new_body!(),
     ))
@@ -5255,7 +5255,7 @@ fn render_widened_stub_tail_jsdoc(
     let construct = widened_construct_surface(&component_ty, declared_keys, fallthrough)?;
     Some(format!(
         "/**\n * @template T\n * @typedef {{{omit_new}}} __OmitNew\n */\n\
-         /** @type {{__OmitNew<{component_ty}> & {{ {construct} }}}} */\n\
+         /** @type {{{{ {construct} }} & __OmitNew<{component_ty}>}} */\n\
          const {name} = /** @type {{any}} */ ({binding})\n\
          export default {name}\n",
         omit_new = omit_new_body!(),
@@ -5968,8 +5968,8 @@ fn generate_testing_code(
 
     out.push_str("})\n\n");
     out.push_str(&format!(
-        "declare const {name}: __OmitNew<typeof __comp> & {{\n",
-        name = component_name,
+        "declare const {name}: {{\n",
+        name = component_name
     ));
 
     let full_props = render_full_props_type(
@@ -6028,7 +6028,7 @@ fn generate_testing_code(
     }
     out.push_str("    $refs: {},\n");
     out.push_str("  } & __Verter_TestBindings\n");
-    out.push_str("}\n");
+    out.push_str(PUBLIC_SURFACE_CLOSE);
     out.push_str(&format!("export default {}\n", component_name));
 
     let (mut code, mappings) = out.into_parts();
@@ -6222,13 +6222,14 @@ fn generate_code(
     out.push_str("})\n\n");
 
     // ── declare const ComponentName ───────────────────────────────────
-    // Uses `__OmitNew<typeof __comp>` to strip the construct signature from
-    // DefineComponent, then provides a single `new()` that returns the
-    // intersection of ComponentPublicInstance and the typed instance shape.
+    // The explicit instance shape (a single `new()` returning the typed
+    // instance) intersected with `__OmitNew<typeof __comp>`, which strips the
+    // construct signature from DefineComponent and keeps its static members.
     // This ensures barrel re-exports preserve the correct $props/$emit types.
+    // The instance shape comes FIRST: see [`PUBLIC_SURFACE_CLOSE`].
     out.push_str(&format!(
-        "declare const {name}: __OmitNew<typeof __comp> & {{\n",
-        name = component_name,
+        "declare const {name}: {{\n",
+        name = component_name
     ));
 
     // Build generic params for new(), appending narrowing generics if present
@@ -6257,9 +6258,9 @@ fn generate_code(
         generic_params.map(|s| s.to_string())
     };
     // Render the explicit instance shape (`new(...)` + `$props`/`$emit`/… +
-    // the expose tail + closing `}`). This is the SAME public surface the
-    // declaration path renders — the only `Public`-vs-`Declaration` difference
-    // is the value-bearing `__OmitNew<typeof __comp> &` prefix above, which the
+    // the expose tail). This is the SAME public surface the declaration path
+    // renders — the only `Public`-vs-`Declaration` difference is the
+    // value-bearing `& __OmitNew<typeof __comp>` close below, which the
     // declaration path omits.
     render_instance_shape_body(
         &mut out,
@@ -6273,6 +6274,7 @@ fn generate_code(
         // actually emitted.
         needs_setup_body,
     );
+    out.push_str(PUBLIC_SURFACE_CLOSE);
     out.push_str(&format!("export default {}\n", component_name));
 
     // ── Inline source map ─────────────────────────────────────────────
@@ -6301,17 +6303,32 @@ fn generate_code(
     }
 }
 
+/// How a value-bearing surface closes its `declare const Component: { … }`
+/// instance shape: by intersecting it with `__OmitNew<typeof __comp>`, the
+/// component's static members without its construct signature.
+///
+/// The instance shape is the FIRST member on purpose. An editor hover prints
+/// this type, and TypeScript 7.1 elides whatever of an over-long type begins
+/// past its truncation point as `...`. `typeof __comp` prints as the full
+/// `DefineComponent<…>` with the props declaration spelled out twice, so a
+/// shape placed after it is the part that disappears, and with it the
+/// `$props` contract a consumer hovers for. Intersection order changes no
+/// type: only the shape carries a construct signature, and members merge the
+/// same either way.
+const PUBLIC_SURFACE_CLOSE: &str = "} & __OmitNew<typeof __comp>\n";
+
 /// Render the explicit instance-shape body of the `declare const Component`
 /// declaration: the `new(...)` construct signature, the `$props`/`$emit`/
 /// `$slots`/`$data`/`$attrs`/`$refs`/`$root` instance members, and the expose
-/// tail, followed by the object's closing `}`.
+/// tail. The caller closes the object.
 ///
 /// This is the SINGLE renderer for the public instance surface — BOTH the
 /// runtime `Public` path ([`generate_code`]) and the declaration-only path
 /// ([`generate_declaration_code`]) call it, so the two cannot drift. The
-/// caller is responsible for opening the `declare const Name: …{` line (the
-/// `Public` path prefixes the value-bearing `__OmitNew<typeof __comp> &`; the
-/// declaration path opens a bare `{`).
+/// caller opens the `declare const Name: {` line and closes the object: the
+/// `Public` path with [`PUBLIC_SURFACE_CLOSE`], which appends the
+/// value-bearing `& __OmitNew<typeof __comp>`, and the declaration path with a
+/// bare `}`.
 #[allow(clippy::too_many_arguments)]
 fn render_instance_shape_body(
     out: &mut TscWriter,
@@ -6489,7 +6506,6 @@ fn render_instance_shape_body(
     } else {
         out.push_str("  }\n");
     }
-    out.push_str("}\n");
 }
 
 /// Generate the declaration-only public surface (`.d.<ext>.ts`).
@@ -6511,7 +6527,7 @@ fn render_instance_shape_body(
 /// props/emits/slots/expose a consumer needs to type-check `<Component />`,
 /// `createApp(Component)`, and instance/prop access — projected through the
 /// explicit `new(...)` construct signature. It deliberately does NOT reproduce
-/// the `Public` path's `__OmitNew<typeof __comp> &` prefix: that prefix is a
+/// the `Public` path's `& __OmitNew<typeof __comp>` member: that member is a
 /// value-bearing `typeof` over the runtime `defineComponent` const and is not
 /// declaration-legal, so non-constructor component/static members it carried are
 /// NOT projected here. The instance/public-props surface is the load-bearing
@@ -6574,7 +6590,7 @@ fn generate_declaration_code(
 
     // ── declare const ComponentName ───────────────────────────────────
     // The declaration form is the explicit instance shape WITHOUT the
-    // value-bearing `__OmitNew<typeof __comp> &` prefix the runtime path uses:
+    // value-bearing `& __OmitNew<typeof __comp>` member the runtime path uses:
     // a `.d.ts` has no runtime `__comp` value to take `typeof` of, so the
     // declaration opens a bare object type whose `new(...)` carries the full
     // public `$props`/`$emit`/`$slots`/… surface.
@@ -6596,6 +6612,7 @@ fn generate_declaration_code(
         // unbound — render exposed members with a declaration-legal placeholder.
         false,
     );
+    out.push_str("}\n");
     out.push_str(&format!("export default {component_name}\n"));
 
     // ── Inline source map ─────────────────────────────────────────────

@@ -1,15 +1,16 @@
 //! The checker's two recursion rules of one relation: the depth limit —
 //! the 101st nested structured relation of one `checkTypeRelatedTo` call
-//! overflows, the relation is false and TS2321 is reported — and
+//! answers `Maybe`, which holds and reports nothing, so a pair that fails
+//! only below the limit relates once it is nested past it — and
 //! `isDeeplyNestedType`, which answers `Maybe` once three instantiations of
 //! one recursion identity, each newer than the last, are on both recursion
 //! stacks.
 //!
-//! Every expected answer is TypeScript 7.0.2's, measured with
-//! `tsc --ignoreConfig --noEmit --strict` under `strictNullChecks` and
-//! `noImplicitAny` both on and both off (the settings agree on every probe)
-//! as `const s: "q" = null! as <probe>;` read off the TS2322 message, each
-//! probe in a file of its own unless a test says otherwise.
+//! Every expected answer is TypeScript 7.1.0-beta's, measured with
+//! `tsc --noEmit --strict` as `const s: "q" = null! as <probe>;` read off
+//! the TS2322 message, each probe in a file of its own unless a test says
+//! otherwise. A depth probe relates a leaf that fails (`1` to `string`)
+//! under the nesting: `2` below the limit, `1` past it.
 
 use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host};
 
@@ -46,12 +47,12 @@ fn repeated_method_signatures_count_without_counting_finite_reference_descent() 
 /// A nesting shape: a type nested `depth` levels around an inner type.
 type Shape = fn(usize, &str) -> String;
 
-/// `[B] extends [<B's shape around number>] ? 1 : 2` over `type B` of
+/// `[B] extends [<B's shape around string>] ? 1 : 2` over `type B` of
 /// `depth` levels around `1`.
 fn depth_row(shape: Shape, depth: usize) -> (String, String) {
     (
         format!("{BOX}type B = {};\n", shape(depth, "1")),
-        format!("[B] extends [{}] ? 1 : 2", shape(depth, "number")),
+        format!("[B] extends [{}] ? 1 : 2", shape(depth, "string")),
     )
 }
 
@@ -69,35 +70,36 @@ fn assert_rows(rows: &[(Shape, usize, &str)]) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Nested object types relate up to the checker's depth and overflow at it.
+/// Nested object types relate structurally up to the checker's depth and
+/// answer `Maybe` past it.
 ///
-/// Measured: over `{ v: … }` nested 97, 98 and 99 times the relation is
-/// `1`; nested 100, 101 and 102 times it is `2` with TS2321 (the tuple
+/// Measured: over `{ v: … }` nested 98 and 99 times the failing leaf
+/// fails, `2`; nested 100 and 101 times the relation is `1` (the tuple
 /// wrapper is the 1st level, so 100 nested literals are the 101st).
 #[test]
 fn nested_object_types_overflow_at_the_checkers_depth() {
     assert_rows(&[
-        (nested, 98, "1"),
-        (nested, 99, "1"),
-        (nested, 100, "2"),
-        (nested, 101, "2"),
+        (nested, 98, "2"),
+        (nested, 99, "2"),
+        (nested, 100, "1"),
+        (nested, 101, "1"),
     ]);
 }
 
-/// Nested generic applications relate up to the checker's depth and
-/// overflow at it, on the default test stack: the limit bounds the
-/// relation's native recursion.
+/// Nested generic applications relate structurally up to the checker's
+/// depth and answer `Maybe` past it, on the default test stack: the limit
+/// bounds the relation's native recursion.
 ///
-/// Measured: over `Box<…>` applied 90, 98 and 99 times the relation is
-/// `1`; applied 100, 101 and 500 times it is `2` with TS2321.
+/// Measured: over `Box<…>` applied 90 and 99 times the failing leaf fails,
+/// `2`; applied 100, 101 and 500 times the relation is `1`.
 #[test]
 fn nested_generic_applications_overflow_at_the_checkers_depth() {
     assert_rows(&[
-        (boxed, 90, "1"),
-        (boxed, 99, "1"),
-        (boxed, 100, "2"),
-        (boxed, 101, "2"),
-        (boxed, 500, "2"),
+        (boxed, 90, "2"),
+        (boxed, 99, "2"),
+        (boxed, 100, "1"),
+        (boxed, 101, "1"),
+        (boxed, 500, "1"),
     ]);
 }
 
@@ -193,24 +195,21 @@ fn an_infinitely_recursive_interface_relates_by_its_variance() {
 /// on query order. The checker's own relation cache does make it depend:
 /// its answers in ONE file, in order, are what the rows below call warm.
 ///
-/// Measured: `[Box<…99…<1>>] extends [Box<…99…<number>>] ? 1 : 2` is `1`
-/// and the 100-deep relation is `2` with TS2321, each in a file (and a
-/// checker) of its own. In one file, the 99-deep relation first makes the
-/// 100-deep one `1` (the cached 99-deep pair spares it the depth that
-/// overflows it), and the 100-deep relation first makes the 99-deep one
-/// `2` (the failures its overflow cached). Here both orders answer the
-/// cold answers: an entry is replayed inside a relation only where its
+/// Measured: `[Box<…99…<1>>] extends [Box<…99…<string>>] ? 1 : 2` is `2`
+/// and the 100-deep relation is `1` (`Maybe` past the depth), each in a
+/// file (and a checker) of its own. Here both orders answer the cold
+/// answers: an entry is replayed inside a relation only where its
 /// recorded height fits the depth left.
 #[test]
 fn a_relation_answers_its_cold_answer_in_either_order_around_the_depth_limit() {
-    let (b99, t99) = (boxed(99, "1"), boxed(99, "number"));
-    let (b100, t100) = (boxed(100, "1"), boxed(100, "number"));
+    let (b99, t99) = (boxed(99, "1"), boxed(99, "string"));
+    let (b100, t100) = (boxed(100, "1"), boxed(100, "string"));
     let shallow = format!("[{b99}] extends [{t99}] ? 1 : 2");
     let deep = format!("[{b100}] extends [{t100}] ? 1 : 2");
     let mut failures = Vec::new();
     for rows in [
-        [(shallow.as_str(), "1"), (deep.as_str(), "2")],
-        [(deep.as_str(), "2"), (shallow.as_str(), "1")],
+        [(shallow.as_str(), "2"), (deep.as_str(), "1")],
+        [(deep.as_str(), "1"), (shallow.as_str(), "2")],
     ] {
         failures.extend(mismatches_in_one_host(BOX, &rows));
     }
@@ -248,20 +247,21 @@ fn a_relation_answers_its_cold_answer_in_either_order_around_a_deeply_nested_sta
 /// answer.
 ///
 /// Measured, each probe in a file of its own: over `Box` applied 98, 99,
-/// 100 and 101 times the relation is `1`, `1`, `2`, `2`; over
+/// 100 and 101 times around a failing leaf the relation is `2`, `2`, `1`,
+/// `1`; over
 /// [`NESTED_ALIAS`], `[N<1, D>] extends [N<string, D>]` is `2` for `D` of
 /// length 2 and 1 and `1` for `[]`.
 #[test]
 fn one_snapshot_answers_every_query_order_alike() {
     let source = format!("{BOX}{NESTED_ALIAS}");
-    let box_rows: Vec<(String, &str)> = [(98, "1"), (99, "1"), (100, "2"), (101, "2")]
+    let box_rows: Vec<(String, &str)> = [(98, "2"), (99, "2"), (100, "1"), (101, "1")]
         .into_iter()
         .map(|(depth, answer)| {
             (
                 format!(
                     "[{}] extends [{}] ? 1 : 2",
                     boxed(depth, "1"),
-                    boxed(depth, "number")
+                    boxed(depth, "string")
                 ),
                 answer,
             )
@@ -305,24 +305,21 @@ fn one_snapshot_answers_every_query_order_alike() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Written inline on both sides, nested object types overflow at the same
-/// depth as through an alias: the tuple's element pair is the checker's
-/// second nested structured relation.
+/// Written inline on both sides, nested object types reach the depth at
+/// the same nesting as through an alias: the tuple's element pair is the
+/// checker's second nested structured relation.
 ///
-/// Measured: `[{ v: …99…1… }] extends [{ v: …99…number… }] ? 1 : 2` is `1`
-/// and over 100 nested literals it is `2` with TS2321. This engine relates
-/// a tuple's or an array's element pair of two object literal types inside
-/// the enclosing relation's frame, so that pair never counts toward the
-/// depth: the 100-deep relation answers `1`.
+/// Measured: `[{ v: …99…1… }] extends [{ v: …99…string… }] ? 1 : 2` is `2`
+/// and over 100 nested literals it is `1` (`Maybe` past the depth).
 #[test]
 fn inline_nested_object_types_overflow_at_the_checkers_depth() {
-    let failures: Vec<String> = [(99, "1"), (100, "2")]
+    let failures: Vec<String> = [(99, "2"), (100, "1")]
         .into_iter()
         .flat_map(|(depth, expected)| {
             let probe = format!(
                 "[{}] extends [{}] ? 1 : 2",
                 nested(depth, "1"),
-                nested(depth, "number")
+                nested(depth, "string")
             );
             mismatches("", &[(probe.as_str(), expected)])
                 .into_iter()
@@ -332,12 +329,12 @@ fn inline_nested_object_types_overflow_at_the_checkers_depth() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `[S] extends [<S's shape around number>] ? 1 : 2` for a shape around `1`
+/// `[S] extends [<S's shape around leaf>] ? 1 : 2` for a shape around `1`
 /// nested `depth` times, written inline on both sides.
-fn inline_row(open: &str, close: &str, depth: usize) -> (String, String) {
+fn inline_row(open: &str, close: &str, depth: usize, leaf: &str) -> (String, String) {
     let wrap = |inner: &str| format!("{}{inner}{}", open.repeat(depth), close.repeat(depth));
     (
-        format!("[{}] extends [{}] ? 1 : 2", wrap("1"), wrap("number")),
+        format!("[{}] extends [{}] ? 1 : 2", wrap("1"), wrap(leaf)),
         format!("{open}…{close} × {depth}"),
     )
 }
@@ -345,12 +342,12 @@ fn inline_row(open: &str, close: &str, depth: usize) -> (String, String) {
 #[track_caller]
 fn assert_inline_rows(
     project: super::checker_probe_lane_tests::ProbeProject<'_>,
-    rows: &[(&str, &str, usize, &str)],
+    rows: &[(&str, &str, usize, &str, &str)],
 ) {
     let failures: Vec<String> = rows
         .iter()
-        .flat_map(|&(open, close, depth, expected)| {
-            let (probe, label) = inline_row(open, close, depth);
+        .flat_map(|&(open, close, depth, leaf, expected)| {
+            let (probe, label) = inline_row(open, close, depth, leaf);
             super::checker_probe_lane_tests::mismatches_in(
                 project,
                 "",
@@ -368,34 +365,35 @@ fn assert_inline_rows(
 /// or its inline worklist relates it: an element pair of two tuples or two
 /// arrays, and a union pair the checker caches.
 ///
-/// Measured (all four settings agree unless noted): with the tuple wrapper
-/// as the first entry, `[[{ v: …n…1… }]]`-style `[{ v: … }]` nested 48 and
-/// 49 times relates (`1`) and 50 times overflows (`2`, TS2321) — two
-/// entries a level; `{ v: … }[]` nested 49 times relates and 50 and 51
-/// overflow; tuples `[…]` nested 98 and 99 times relate and 100
-/// overflow; `{ v: … } | null` nested 49 times relates and 50 overflows
-/// under `strictNullChecks` (the union pair and the object pair each
-/// count; the member-to-union step, `typeRelatedToSomeType`, does not);
-/// `{ v: … } | null | undefined | 0` nested 33 and 49 times relates and 50
-/// overflows.
+/// Measured under `--strict`, around a failing leaf (`1` to `string`),
+/// with the tuple wrapper as the first entry: `[{ v: … }]` nested 48 and
+/// 49 times fails (`2`) and 50 times answers `Maybe` (`1`) — two entries
+/// a level; `{ v: … }[]` nested 49 times fails and 50 and 51 times holds;
+/// tuples `[…]` nested 99 times fail; `{ v: … } | null` nested 49 times
+/// fails and 50 holds (the union pair and the object pair each count; the
+/// member-to-union step, `typeRelatedToSomeType`, does not);
+/// `{ v: … } | null | undefined | 0` nested 33 and 49 times fails and 50
+/// holds. Tuples nested 100 times are probed around a holding leaf
+/// (`number`, `1`): around `string` the pinned checker resolves that
+/// conditional type to `never`, which this lane does not model.
 #[test]
 fn inline_element_and_union_pairs_count_toward_the_checkers_depth() {
     assert_inline_rows(
         Default::default(),
         &[
-            ("[{ v: ", " }]", 48, "1"),
-            ("[{ v: ", " }]", 49, "1"),
-            ("[{ v: ", " }]", 50, "2"),
-            ("{ v: ", " }[]", 49, "1"),
-            ("{ v: ", " }[]", 50, "2"),
-            ("{ v: ", " }[]", 51, "2"),
-            ("[", "]", 99, "1"),
-            ("[", "]", 100, "2"),
-            ("{ v: ", " } | null", 49, "1"),
-            ("{ v: ", " } | null", 50, "2"),
-            ("{ v: ", " } | null | undefined | 0", 33, "1"),
-            ("{ v: ", " } | null | undefined | 0", 49, "1"),
-            ("{ v: ", " } | null | undefined | 0", 50, "2"),
+            ("[{ v: ", " }]", 48, "string", "2"),
+            ("[{ v: ", " }]", 49, "string", "2"),
+            ("[{ v: ", " }]", 50, "string", "1"),
+            ("{ v: ", " }[]", 49, "string", "2"),
+            ("{ v: ", " }[]", 50, "string", "1"),
+            ("{ v: ", " }[]", 51, "string", "1"),
+            ("[", "]", 99, "string", "2"),
+            ("[", "]", 100, "number", "1"),
+            ("{ v: ", " } | null", 49, "string", "2"),
+            ("{ v: ", " } | null", 50, "string", "1"),
+            ("{ v: ", " } | null | undefined | 0", 33, "string", "2"),
+            ("{ v: ", " } | null | undefined | 0", 49, "string", "2"),
+            ("{ v: ", " } | null | undefined | 0", 50, "string", "1"),
         ],
     );
 }
@@ -403,9 +401,9 @@ fn inline_element_and_union_pairs_count_toward_the_checkers_depth() {
 /// Without `strictNullChecks` the checker's union of an object type and
 /// `null` is the object type alone, one entry a level.
 ///
-/// Measured with `strictNullChecks` off (`noImplicitAny` on and off):
-/// `{ v: … } | null` nested 50 and 99 times relates (`1`) and 100 times
-/// overflows (`2`).
+/// Measured with `strictNullChecks` off, around a failing leaf:
+/// `{ v: … } | null` nested 50 and 99 times fails (`2`) and 100 times
+/// answers `Maybe` (`1`).
 #[test]
 fn a_union_erased_without_strict_null_checks_counts_as_its_object() {
     assert_inline_rows(
@@ -414,9 +412,9 @@ fn a_union_erased_without_strict_null_checks_counts_as_its_object() {
             ..Default::default()
         },
         &[
-            ("{ v: ", " } | null", 50, "1"),
-            ("{ v: ", " } | null", 99, "1"),
-            ("{ v: ", " } | null", 100, "2"),
+            ("{ v: ", " } | null", 50, "string", "2"),
+            ("{ v: ", " } | null", 99, "string", "2"),
+            ("{ v: ", " } | null", 100, "string", "1"),
         ],
     );
 }
@@ -474,16 +472,16 @@ fn relating_wide_tuples_of_object_pairs_costs_the_same_per_element() {
 /// union is no recursion entry of its own (`skipCaching`): only each
 /// member's relation to the target is.
 ///
-/// Measured over `type S0 = 1; type T0 = number;` and for `i` from 1 to
+/// Measured over `type S0 = 1; type T0 = string;` and for `i` from 1 to
 /// `n`, `type Si = { v: S(i-1) } | Ti;` and `type Ti = { v: T(i-1) };`:
-/// `[Sn] extends [Tn] ? 1 : 2` is `1` at `n` 49, 50, 98 and 99 and `2`
-/// with TS2321 at 100 — one entry a level after the tuple's.
+/// `[Sn] extends [Tn] ? 1 : 2` is `2` at `n` 50 and 99 and `1` at 100 —
+/// one entry a level after the tuple's.
 #[test]
 fn a_small_union_source_is_no_recursion_entry_of_its_own() {
-    let failures: Vec<String> = [(50, "1"), (99, "1"), (100, "2")]
+    let failures: Vec<String> = [(50, "2"), (99, "2"), (100, "1")]
         .into_iter()
         .flat_map(|(depth, expected)| {
-            let mut source = String::from("type S0 = 1;\ntype T0 = number;\n");
+            let mut source = String::from("type S0 = 1;\ntype T0 = string;\n");
             for level in 1..=depth {
                 source.push_str(&format!(
                     "type S{level} = {{ v: S{} }} | T{level};\ntype T{level} = {{ v: T{} }};\n",
@@ -591,21 +589,23 @@ fn doubling_unions(depth: usize) -> String {
 
 /// A union whose every member reaches the same pair relates that pair once:
 /// a pair already decided in the relation answers from the relation's own
-/// settled results, as the checker's relation cache serves it, so `2ⁿ`
-/// paths to one pair cost one relation of it.
+/// settled results, as the checker's relation cache serves it, and a pair
+/// that held on a `Maybe` answers `Maybe` again, as its `maybeKeys` do,
+/// so `2ⁿ` paths to one pair cost one relation of it.
 ///
-/// Measured over [`doubling_unions`] (all four settings agree):
-/// `[Sn] extends [Tn] ? 1 : 2` and `[Un] extends [Tn] ? 1 : 2` are `1` at
-/// `n` 10, 20, 50 and 99 and `2` with TS2321 at 100 (one entry a level
-/// after the tuple's); `[Tn] extends [Sn] ? 1 : 2` is `2` at every `n`.
+/// Measured over [`doubling_unions`]: `[Sn] extends [Tn] ? 1 : 2` and
+/// `[Un] extends [Tn] ? 1 : 2` are `1` at `n` 10, 20, 50, 99 and 100
+/// (`Maybe` past the depth at 100); `[Tn] extends [Sn] ? 1 : 2` is `2` at
+/// 10 and 20 and `1` from 50 — two entries a level, the object pair and
+/// the union target, so its depth is reached at 50.
 #[test]
 fn a_pair_every_union_member_reaches_is_related_once() {
     let mut failures = Vec::new();
-    for (depth, holds) in [(10, "1"), (20, "1"), (50, "1"), (99, "1"), (100, "2")] {
+    for (depth, reverse) in [(10, "2"), (20, "2"), (50, "1"), (99, "1"), (100, "1")] {
         let rows = [
-            (format!("[S{depth}] extends [T{depth}] ? 1 : 2"), holds),
-            (format!("[U{depth}] extends [T{depth}] ? 1 : 2"), holds),
-            (format!("[T{depth}] extends [S{depth}] ? 1 : 2"), "2"),
+            (format!("[S{depth}] extends [T{depth}] ? 1 : 2"), "1"),
+            (format!("[U{depth}] extends [T{depth}] ? 1 : 2"), "1"),
+            (format!("[T{depth}] extends [S{depth}] ? 1 : 2"), reverse),
         ];
         let rows: Vec<(&str, &str)> = rows
             .iter()
@@ -707,12 +707,12 @@ fn a_union_over_2000_aliases_of_unions_relates_as_one_union() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `type S0 = 1; type T0 = number;` and for `i` from 1 to `depth`,
+/// `type S0 = 1; type T0 = string;` and for `i` from 1 to `depth`,
 /// `type Si = Ai | Ti; type Ti = { v: T(i-1) };`, the arm `Ai` written as
 /// `{ v: S(i-1) }`, as an alias `Oi` of it, or as `Box<S(i-1)>` over
 /// `type Box<X> = { v: X }`.
 fn small_union_chain(depth: usize, arm: &str) -> String {
-    let mut source = String::from("type S0 = 1;\ntype T0 = number;\ntype Box<X> = { v: X };\n");
+    let mut source = String::from("type S0 = 1;\ntype T0 = string;\ntype Box<X> = { v: X };\n");
     for level in 1..=depth {
         let below = level - 1;
         let written = match arm {
@@ -736,15 +736,14 @@ fn small_union_chain(depth: usize, arm: &str) -> String {
 /// unions holds one obligation frame open per recursion entry, whatever
 /// its arms are written as.
 ///
-/// Measured over [`small_union_chain`] (all four settings agree):
-/// `[Sn] extends [Tn] ? 1 : 2` is `1` at 49, 50, 98 and 99 and `2` with
-/// TS2321 at 100 for the literal and the alias arms; `1` at 10, 50 and 99
-/// and `2` with TS2321 at 100 for the generic one.
+/// Measured over [`small_union_chain`] (its leaf `T0 = string` fails):
+/// `[Sn] extends [Tn] ? 1 : 2` is `2` at 99 and `1` (`Maybe`) at 100 for
+/// the literal, the alias and the generic arms.
 #[test]
 fn a_small_union_source_opens_no_frame_of_its_own() {
     let mut failures = Vec::new();
     for arm in ["literal", "alias", "generic"] {
-        for (depth, expected) in [(99, "1"), (100, "2")] {
+        for (depth, expected) in [(99, "2"), (100, "1")] {
             let probe = format!("[S{depth}] extends [T{depth}] ? 1 : 2");
             super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::take_most_open_frames_for_tests();
             failures.extend(

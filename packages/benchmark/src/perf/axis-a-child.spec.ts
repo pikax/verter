@@ -363,7 +363,7 @@ describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", ()
     return {
       methodologyVersion: "test",
       corpusHash: `sha256:${"0".repeat(64)}`,
-      tsgoVersion: "typescript@7.0.1-rc",
+      tsgoVersion: "typescript@7.1.0-beta",
       samplesPerSide: 7,
       workloads,
       ...over,
@@ -375,8 +375,8 @@ describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", ()
       workloads: [],
       smoke: false,
       selfCheck: true,
-      engineResolved: "typescript@7.0.1-rc",
-      baselineEngineResolved: "typescript@7.0.1-rc",
+      engineResolved: "typescript@7.1.0-beta",
+      baselineEngineResolved: "typescript@7.1.0-beta",
       meta: {
         corpusHash: `sha256:${"0".repeat(64)}`,
         candidateBin: "candidate",

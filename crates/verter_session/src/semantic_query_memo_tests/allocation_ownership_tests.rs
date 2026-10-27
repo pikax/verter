@@ -754,7 +754,9 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
             profile,
             store.refusal_entry_for_tests(&host),
             read,
-            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([])),
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production().set_of([])
+            ),
         ));
     });
     let sealed = account.snapshot();
@@ -824,10 +826,14 @@ fn an_scc_batch_never_publishes_without_a_member_whose_family_was_evicted_meanwh
     // Three resident families at most: keying two more evicts the oldest.
     let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)))
         .with_memo_family_bound(MemoFamilyBound::ForTest(3));
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/w/scc.ts".into(),
-        hash: [5; 16],
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/w/scc.ts".into(),
+                hash: [5; 16],
+            },
+        ]),
+    );
     let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/scc.ts")]);
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let key_for = |kind| {

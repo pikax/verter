@@ -66,6 +66,9 @@ impl WorkspaceRead for ReconfiguringWorkspace {
 }
 
 impl WorkspaceAccess for ReconfiguringWorkspace {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.0.fact_policy()
+    }
     fn record_parsed_edges(&self, id: &str, edges: &[verter_workspace::ParsedEdge]) {
         self.0.record_parsed_edges(id, edges);
     }

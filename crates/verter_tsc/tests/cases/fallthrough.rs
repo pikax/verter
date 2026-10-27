@@ -471,7 +471,7 @@ fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
     // The CHILD's exit status is evidence, not decoration. `verter-tsc` exits
     // 0 when the project checks clean, 1 when it reported type errors, and 2
     // when the engine itself failed (absent tsgo, connect / init /
-    // updateSnapshot / protocol / project-not-found, or an unreadable config);
+    // createSnapshot / protocol / project-not-found, or an unreadable config);
     // a signal death leaves no code at all. This fixture ALWAYS has errors (the
     // Reject* half), so 1 is the ONLY status that means "the engine ran and
     // checked". Without this, expected-looking diagnostics followed by an

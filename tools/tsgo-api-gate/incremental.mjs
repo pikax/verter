@@ -3,33 +3,16 @@
 // (case-insensitive compare), and (3) an UNCHANGED dependency's source file is
 // retained (same content hash / identity) — i.e. not re-parsed/rebuilt.
 
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
-import fs from "node:fs";
+
+import { loadSyncApi, openSnapshotLineage, overlayFileSystem } from "./sync-api.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(ROOT, "fixture");
 const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
-const require = createRequire(import.meta.url);
-const opts = { paths: (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean) };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
-// Import via the PUBLIC `<pkg>/unstable/sync` export (parameterized over the
-// source package), honouring the package `exports` map — not a hand-built dist/ path.
-let syncApiPath;
-for (const p of sourcePkgs) {
-  try {
-    syncApiPath = require.resolve(`${p}/unstable/sync`, opts);
-    break;
-  } catch {
-    /* try next */
-  }
-}
-if (!syncApiPath)
-  throw new Error(
-    `could not resolve a TS>=7 sync API (<pkg>/unstable/sync) from ${JSON.stringify(sourcePkgs)}`,
-  );
-const { API } = await import(pathToFileURL(syncApiPath).href);
+// The public `<pkg>/sync` + `<pkg>/fs` exports (see ./sync-api.mjs).
+const { API, serverFS } = await loadSyncApi();
 
 const TSCONFIG = path.join(FIXTURE, "tsconfig.json");
 const CARRIER_PATH = path.join(FIXTURE, "src", "components", "Widget.carrier.tsx");
@@ -42,20 +25,7 @@ export const label = formatLabel("hello", opts);
 `;
 
 let content = CARRIER;
-const overlayFs = {
-  readFile: (f) => (norm(f) === norm(CARRIER_PATH) ? content : undefined),
-  fileExists: (f) => (norm(f) === norm(CARRIER_PATH) ? true : undefined),
-  getAccessibleEntries: (d) => {
-    if (norm(d) !== norm(path.dirname(CARRIER_PATH))) return undefined;
-    const e = fs.readdirSync(d, { withFileTypes: true });
-    const r = {
-      files: e.filter((x) => x.isFile()).map((x) => x.name),
-      directories: e.filter((x) => x.isDirectory()).map((x) => x.name),
-    };
-    if (!r.files.includes(path.basename(CARRIER_PATH))) r.files.push(path.basename(CARRIER_PATH));
-    return r;
-  },
-};
+const overlayFs = overlayFileSystem(serverFS, { [CARRIER_PATH]: () => content });
 
 // Observable signal that the carrier source-file identity changed across the
 // edit, version-tolerant: prefer a `.version`/`.end` field if the binary exposes
@@ -69,10 +39,12 @@ function carrierFingerprint(sf) {
   return `len${text.length}`;
 }
 
-const api = new API({ tsserverPath: process.env.TSGO_PATH, cwd: FIXTURE, fs: overlayFs });
-try {
-  const snap1 = api.updateSnapshot({ openProject: TSCONFIG });
-  const p1 = snap1.getProject(TSCONFIG);
+{
+  using api = new API({ tsserverPath: process.env.TSGO_PATH, cwd: FIXTURE, fs: overlayFs });
+  // One lineage: the edit advances the active snapshot, disposing the first.
+  using lineage = openSnapshotLineage(api, { openProjects: [TSCONFIG] });
+  const p1 = lineage.current.getConfiguredProject(TSCONFIG);
+  const p1Id = p1.id;
   const dep1 = p1.program.getSourceFile(DEP);
   const car1 = p1.program.getSourceFile(CARRIER_PATH);
   const dep1Fp = carrierFingerprint(dep1);
@@ -87,12 +59,9 @@ try {
   // string-typed value to a number-typed const -> TS2322. (Observable via the
   // public diagnostics API; does not depend on any private response field.)
   content = CARRIER + "\nexport const broken: number = label;\n";
-  const snap2 = api.updateSnapshot({
-    openProject: TSCONFIG,
-    fileChanges: { changed: [CARRIER_PATH] },
-  });
-  const p2 = snap2.getProject(TSCONFIG);
-  const handleStable = p2.id === p1.id;
+  const snap2 = lineage.advance({ fileNotifications: { changed: [CARRIER_PATH] } });
+  const p2 = snap2.getConfiguredProject(TSCONFIG);
+  const handleStable = p2.id === p1Id;
 
   const dep2 = p2.program.getSourceFile(DEP);
   const car2 = p2.program.getSourceFile(CARRIER_PATH);
@@ -135,6 +104,4 @@ try {
     }`,
   );
   if (!ok) process.exitCode = 1;
-} finally {
-  api.close();
 }

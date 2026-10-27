@@ -30,7 +30,10 @@ fn host() -> VerterHost {
 }
 
 fn sig(facts: Vec<FactVersionRef>) -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from(facts.into_boxed_slice()))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(facts.into_boxed_slice()),
+    )
 }
 
 fn import_route_fact() -> FactVersionRef {

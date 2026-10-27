@@ -262,14 +262,32 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
 }
 
 /// The tsgo engine is the GA `typescript` package, pinned to the EXACT version
-/// the snapshots are validated against (`7.0.2`). A floating `"latest"` would
-/// let an upgrade silently change tsgo answers without invalidating any
-/// snapshot. Discriminating: reverting the workspace `package.json` to
-/// `"latest"` (or any other version) FAILS this guard. The retired
+/// the snapshots are validated against — the version the oracle toolchain
+/// record (`oracle_toolchain.json`) names. A floating `"latest"` or a range
+/// would let an upgrade silently change tsgo answers without invalidating any
+/// snapshot. Discriminating: setting the workspace `package.json` to
+/// `"latest"` (or any version other than the record's) FAILS this guard. The
 /// `@typescript/native-preview` dev channel must NOT be declared.
 #[test]
 fn tsgo_version_is_pinned() {
-    const PINNED_TSGO_VERSION: &str = "7.0.2";
+    let record_path =
+        Path::new(MANIFEST_DIR).join("src/typeinfo/typeinfo_tests/oracle_toolchain.json");
+    let record: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&record_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", record_path.display())),
+    )
+    .expect("parse the oracle toolchain record");
+    let pinned_tsgo_version = record["typescript"]
+        .as_str()
+        .expect("the oracle toolchain record names its typescript version")
+        .to_string();
+    assert!(
+        pinned_tsgo_version
+            .split(['.', '-'])
+            .take(3)
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
+        "the oracle toolchain record must name an exact version, not `{pinned_tsgo_version}`"
+    );
 
     // MANIFEST_DIR is `crates/verter_session`; the workspace `package.json` is at
     // the repo root (two levels up).
@@ -289,9 +307,9 @@ fn tsgo_version_is_pinned() {
         .expect("package.json declares typescript");
 
     assert_eq!(
-        pinned, PINNED_TSGO_VERSION,
-        "the rc `typescript` engine MUST be pinned to the exact oracle version \
-         `{PINNED_TSGO_VERSION}`, not `{pinned}` — a floating version would let \
+        pinned, pinned_tsgo_version,
+        "the `typescript` engine MUST be pinned to the exact oracle version \
+         `{pinned_tsgo_version}`, not `{pinned}` — a floating version would let \
          an upgrade silently change tsgo hover answers without invalidating the \
          checked-in snapshots"
     );
@@ -300,7 +318,7 @@ fn tsgo_version_is_pinned() {
         "the tsgo pin must not be the floating `latest` tag"
     );
 
-    // NEGATIVE: the retired native-preview dev channel must be gone.
+    // NEGATIVE: the native-preview dev channel must not be declared.
     let np_dev = parsed
         .get("devDependencies")
         .and_then(|d| d.get("@typescript/native-preview"));
@@ -309,8 +327,8 @@ fn tsgo_version_is_pinned() {
         .and_then(|d| d.get("@typescript/native-preview"));
     assert!(
         np_dev.is_none() && np_dep.is_none(),
-        "the retired `@typescript/native-preview` dev channel must NOT be declared \
-         in package.json (rc-only)"
+        "the `@typescript/native-preview` dev channel must NOT be declared \
+         in package.json"
     );
 }
 

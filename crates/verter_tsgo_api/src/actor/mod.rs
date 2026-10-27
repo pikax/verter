@@ -565,7 +565,7 @@ impl<T: DuplexTransport> Actor<T> {
             match decoded.msg_type {
                 MessageType::Response => {
                     // Name correlation: the response name must match the request
-                    // method (syncChannel.js:208-214).
+                    // method (syncChannel.js:236-240).
                     if decoded.name != method.as_bytes() {
                         return Err(ServeError::fatal(TsgoApiError::Codec(format!(
                             "response name mismatch: expected `{method}`"
@@ -609,8 +609,9 @@ impl<T: DuplexTransport> Actor<T> {
     }
 
     /// Build the `CALL_RESPONSE`/`CALL_ERROR` frame for a host callback, reading
-    /// the published overlay snapshot synchronously. Mirrors the host-side wrap
-    /// semantics in `sync/client.js:34-44`.
+    /// the published overlay snapshot synchronously. Mirrors the host-side
+    /// callback registration in `sync/client.js:31-48` and the result encoding
+    /// in `fsCallbacks.js:47-98`.
     fn service_callback(&self, name: &str, arg_payload: &[u8]) -> Vec<u8> {
         let snapshot = self.snapshot.load();
         match service_fs_callback(&snapshot, name, arg_payload) {
@@ -627,8 +628,14 @@ impl<T: DuplexTransport> Actor<T> {
 }
 
 /// Pure callback servicing: given the snapshot, a callback name, and the JSON
-/// argument bytes (a JSON-encoded path string), produce the JSON response
-/// string the host must send back. Mirrors `sync/client.js:34-44`.
+/// argument bytes (a JSON-encoded path string, `sync/client.js:46`), produce
+/// the JSON result the host must send back.
+///
+/// Every result is a tagged object (`encodeFileSystemCallbackResult`,
+/// `fsCallbacks.js:47-98`): `{"kind":"value","value":…}` for an answer the
+/// overlay owns, `{"kind":"missing"}` for a definitively-absent `readFile`,
+/// and `{"kind":"useOS"}` for a path the overlay does not know — the engine
+/// then answers from the host filesystem.
 ///
 /// Extracted as a free function so it is unit-testable without an actor.
 pub(crate) fn service_fs_callback(
@@ -636,62 +643,55 @@ pub(crate) fn service_fs_callback(
     name: &str,
     arg_payload: &[u8],
 ) -> Result<String, String> {
-    // The wire arg is a JSON-encoded string path (client.js:34 `JSON.parse(arg)`).
     let path: String = serde_json::from_slice(arg_payload)
         .map_err(|e| format!("callback `{name}`: bad argument JSON: {e}"))?;
 
-    match name {
-        "readFile" => {
-            // readFile wraps: undefined -> "" (fall through), null -> {content:null},
-            // string -> {content:"…"} (client.js:36-42).
-            match snapshot.read_file(&path) {
-                ReadFileResult::FallThrough => Ok(String::new()),
-                ReadFileResult::NotFound => Ok(r#"{"content":null}"#.to_string()),
-                ReadFileResult::Found(content) => serde_json::to_string(&ReadFileWrap {
-                    content: Some(content),
+    let result = match name {
+        "readFile" => match snapshot.read_file(&path) {
+            ReadFileResult::FallThrough => CallbackResult::UseOs,
+            ReadFileResult::NotFound => CallbackResult::Missing,
+            ReadFileResult::Found(content) => CallbackResult::Value(content.into()),
+        },
+        "fileExists" => CallbackResult::from_option(snapshot.file_exists(&path)),
+        "directoryExists" => CallbackResult::from_option(snapshot.directory_exists(&path)),
+        "realpath" => CallbackResult::from_option(snapshot.realpath(&path)),
+        "getAccessibleEntries" => {
+            CallbackResult::from_option(snapshot.get_accessible_entries(&path).map(|entries| {
+                serde_json::json!({
+                    "files": entries.files,
+                    "directories": entries.directories,
                 })
-                .map_err(|e| e.to_string()),
-            }
+            }))
         }
-        "fileExists" => encode_optional_bool(snapshot.file_exists(&path)),
-        "directoryExists" => encode_optional_bool(snapshot.directory_exists(&path)),
-        "realpath" => match snapshot.realpath(&path) {
-            Some(p) => serde_json::to_string(&p).map_err(|e| e.to_string()),
-            None => Ok(String::new()),
-        },
-        "getAccessibleEntries" => match snapshot.get_accessible_entries(&path) {
-            Some(entries) => serde_json::to_string(&AccessibleEntriesWire {
-                files: entries.files,
-                directories: entries.directories,
-            })
-            .map_err(|e| e.to_string()),
-            None => Ok(String::new()),
-        },
-        other => Err(format!("unknown callback `{other}`")),
+        other => return Err(format!("unknown callback `{other}`")),
+    };
+    Ok(result.encode())
+}
+
+/// One encoded callback result (`fsCallbacks.js:47-98`).
+enum CallbackResult {
+    /// The overlay's own answer.
+    Value(serde_json::Value),
+    /// A definitively-absent file (`readFile` only).
+    Missing,
+    /// Not the overlay's path: the engine serves it from the host filesystem.
+    UseOs,
+}
+
+impl CallbackResult {
+    fn from_option(value: Option<impl Into<serde_json::Value>>) -> Self {
+        match value {
+            Some(v) => Self::Value(v.into()),
+            None => Self::UseOs,
+        }
     }
-}
 
-/// Encode an `Option<bool>` callback result: `Some` -> `"true"`/`"false"`,
-/// `None` -> empty string (fall through). Mirrors the generic
-/// `JSON.stringify(result) ?? ""` path (client.js:43).
-fn encode_optional_bool(v: Option<bool>) -> Result<String, String> {
-    match v {
-        Some(b) => Ok(if b {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        }),
-        None => Ok(String::new()),
+    fn encode(self) -> String {
+        match self {
+            Self::Value(value) => serde_json::json!({ "kind": "value", "value": value }),
+            Self::Missing => serde_json::json!({ "kind": "missing" }),
+            Self::UseOs => serde_json::json!({ "kind": "useOS" }),
+        }
+        .to_string()
     }
-}
-
-#[derive(serde::Serialize)]
-struct ReadFileWrap {
-    content: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct AccessibleEntriesWire {
-    files: Vec<String>,
-    directories: Vec<String>,
 }

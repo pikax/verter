@@ -45,7 +45,7 @@ pub trait DuplexTransport: Send {
 /// Read exactly one complete tuple frame from an [`AsyncRead`], returning its
 /// bytes (including the leading `0x93`). Returns `Ok(None)` on a clean EOF at a
 /// frame boundary. This is the shared framing logic for any byte-stream backend
-/// (the OS pipe), mirroring `readTuple` (syncChannel.js:324-368): the frame is
+/// (the OS pipe), mirroring `readTuple` (syncChannel.js:362-408): the frame is
 /// `[fixarray3, type, name-bin, payload-bin]`, and the two bin fields' lengths
 /// tell us exactly how many bytes the frame occupies.
 pub async fn read_one_frame<R>(reader: &mut R) -> TsgoApiResult<Option<Vec<u8>>>
