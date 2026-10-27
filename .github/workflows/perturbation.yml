@@ -1,0 +1,240 @@
+name: Perturbation
+
+# Perturbation reruns of the core nextest suite, and the hermetic candidate
+# list they propose.
+#
+# One archive is built once; each rerun job runs the whole core suite from it,
+# unprivileged, on its own runner, with the environment cleared to the
+# allow-list, HOME and TMPDIR in fresh per-job directories, network isolation
+# beyond loopback where an unprivileged namespace is available, and its own
+# temporary directory, runner-supplied variable values, host, and wall clock
+# and time zone. `scripts/manifests/perturbation.json` fixes the number of
+# reruns and their clock and time-zone values; `scripts/perturbation.mjs`
+# applies and records each variation.
+#
+# The comparison job lines the reruns up per test, with each rerun's JUnit
+# metadata document, and proposes the next version of
+# `scripts/manifests/ci-hermetic-candidates.json`: the tests that passed in
+# every rerun and that no exclusion names. The proposal is unapproved; only an
+# operator-approved list sets a test's hermetic flag.
+#
+# A separate, non-required workflow: disabling it stops the reruns and changes
+# no required check.
+
+on:
+  schedule:
+    - cron: "30 2 * * 0" # 2:30 AM UTC every Sunday
+  workflow_dispatch:
+  # A change to the perturbation machinery runs it on its own pull request and
+  # branch pushes, so the change shows its reruns before it lands.
+  pull_request:
+    paths:
+      - .github/workflows/perturbation.yml
+      - .github/actions/nextest-evidence/**
+      - scripts/perturbation.mjs
+      - scripts/ci-junit-metadata.mjs
+      - scripts/lib/hermetic-list.mjs
+      - scripts/manifests/perturbation.json
+      - scripts/manifests/ci-hermetic-candidates.json
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - .github/workflows/perturbation.yml
+      - .github/actions/nextest-evidence/**
+      - scripts/perturbation.mjs
+      - scripts/ci-junit-metadata.mjs
+      - scripts/lib/hermetic-list.mjs
+      - scripts/manifests/perturbation.json
+      - scripts/manifests/ci-hermetic-candidates.json
+
+concurrency:
+  group: perturbation-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan reruns
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      reruns: ${{ steps.plan.outputs.reruns }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Check the candidate list
+        run: node scripts/perturbation.mjs check-list
+      - name: Read the configured reruns
+        id: plan
+        run: echo "reruns=$(node scripts/perturbation.mjs plan)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build the test archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-rust-test-v1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: perturbation
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Build the Rust test archive
+        run: |
+          mkdir -p artifacts
+          node scripts/run-cached.mjs -- 'node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
+      - name: Upload the Rust test archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: perturbation-nextest-archive
+          path: artifacts/rust-nextest-archive.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  rerun:
+    name: Rerun ${{ matrix.rerun }}
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    strategy:
+      fail-fast: false
+      matrix:
+        rerun: ${{ fromJSON(needs.plan.outputs.reruns) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Download the Rust test archive
+        uses: ./.github/actions/download-artifact
+        with:
+          name: perturbation-nextest-archive
+          path: artifacts
+      - name: Fetch locked Cargo dependencies
+        run: cargo fetch --locked
+      # Built from the pinned release source in the job's own temporary
+      # directory: no package install, no elevation. When it cannot be built
+      # the rerun still varies the time zone and records the clock shift as
+      # not applied.
+      - name: Build libfaketime
+        id: faketime
+        continue-on-error: true
+        env:
+          LIBFAKETIME_VERSION: 0.9.12
+          LIBFAKETIME_SHA256: 4fc32218697c052adcdc5ee395581f2554ca56d086ac817ced2be0d6f1f8a9fa
+        run: |
+          dir="$RUNNER_TEMP/libfaketime"
+          mkdir -p "$dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$dir/source.tar.gz" \
+            "https://github.com/wolfcw/libfaketime/archive/refs/tags/v${LIBFAKETIME_VERSION}.tar.gz"
+          echo "${LIBFAKETIME_SHA256}  $dir/source.tar.gz" | sha256sum --check --strict
+          tar -xzf "$dir/source.tar.gz" -C "$dir"
+          make -C "$dir/libfaketime-${LIBFAKETIME_VERSION}/src" libfaketime.so.1
+          echo "library=$dir/libfaketime-${LIBFAKETIME_VERSION}/src/libfaketime.so.1" >> "$GITHUB_OUTPUT"
+      - name: Run the core suite perturbed
+        id: nextest
+        timeout-minutes: 60
+        env:
+          NEXTEST_PROFILE: ci
+          RERUN: ${{ matrix.rerun }}
+          FAKETIME_LIB: ${{ steps.faketime.outputs.library }}
+        run: |
+          mkdir -p target/rust-nextest-archive
+          nextest_argv=(nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)")
+          echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
+          run_args=(--rerun "$RERUN" --work-dir "$RUNNER_TEMP/perturbation"
+            --record "$RUNNER_TEMP/perturbation-record.json"
+            --env-snapshot "$RUNNER_TEMP/nextest-env.json")
+          if [ -n "$FAKETIME_LIB" ]; then
+            run_args+=(--faketime-lib "$FAKETIME_LIB")
+          fi
+          node scripts/perturbation.mjs run "${run_args[@]}" -- cargo "${nextest_argv[@]}"
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: perturbation-rerun-${{ matrix.rerun }}-nextest-evidence
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+          matrix-json: ${{ toJSON(matrix) }}
+      - name: Upload the rerun record
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: perturbation-rerun-${{ matrix.rerun }}-record
+          path: ${{ runner.temp }}/perturbation-record.json
+          if-no-files-found: error
+
+  compare:
+    name: Compare reruns
+    needs: [plan, rerun]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Download the rerun evidence
+        uses: actions/download-artifact@v7
+        with:
+          pattern: perturbation-rerun-*
+          path: artifacts
+      - name: Compare the reruns per test
+        run: |
+          set -o pipefail
+          mkdir -p comparison
+          node scripts/perturbation.mjs compare --input artifacts \
+            --out comparison/perturbation-comparison.json \
+            --proposed comparison/ci-hermetic-candidates.proposed.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      # The comparison, the proposed list, and each rerun's JUnit metadata
+      # document and perturbation record, also when the reruns were not
+      # comparable.
+      - name: Upload the comparison
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: perturbation-comparison
+          path: |
+            comparison/
+            artifacts/*/junit-metadata.json
+            artifacts/*/perturbation-record.json
+          if-no-files-found: error
