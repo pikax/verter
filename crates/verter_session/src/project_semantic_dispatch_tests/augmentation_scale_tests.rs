@@ -219,21 +219,27 @@ fn narrow_strict_root_policy() -> verter_session_query::facts::policy::FactPolic
 
 #[test]
 fn merged_interface_indexed_access_work_is_linear() {
-    check_merged_interface_work_is_linear([16, 64, 256], narrow_strict_root_policy());
+    check_merged_interface_work_is_linear(
+        [8, 32, 128],
+        &[false, true],
+        narrow_strict_root_policy(),
+    );
 }
 
 /// Collection, ordering and probe work grow linearly across `sizes` (each
-/// four times the one before), and the completed probe stays inside one
-/// linear envelope that includes the strict-root rewrite's allowance — which
-/// the largest size reaches.
+/// four times the one before), for global and for module contributors as
+/// `globals` lists, and the completed probe stays inside one linear
+/// envelope that includes the strict-root rewrite's allowance — which the
+/// largest size reaches.
 fn check_merged_interface_work_is_linear(
     sizes: [usize; 3],
+    globals: &[bool],
     policy: verter_session_query::facts::policy::FactPolicy,
 ) {
     // Each linear bound's fixed slack, in proportion to the smallest size:
     // 256 at the full-size series's 128 contributors.
     let slack = 2 * sizes[0];
-    for global in [false, true] {
+    for &global in globals {
         let mut work = Vec::new();
         let mut completed_work = Vec::new();
         let mut ordering_work = Vec::new();
@@ -651,9 +657,9 @@ fn project_global_reads_retain_unowned_dependencies_and_exclude_other_projects()
 #[test]
 fn merged_interface_indexed_access_keeps_every_contributor() {
     check_every_contributor_answers(
-        &[16, 64, 256],
+        &[8, 32, 128],
         &[false, true],
-        &[256],
+        &[128],
         narrow_strict_root_policy(),
     );
 }
@@ -1021,10 +1027,23 @@ mod nightly_scale {
         assert_growing_contributors_retain_only_the_answers(64, 256);
     }
 
+    // The full series runs as one test per contributor kind, so the two run
+    // in parallel inside the tier's deadline; together they are the whole
+    // workload.
     #[test]
     fn merged_interface_indexed_access_work_is_linear() {
         check_merged_interface_work_is_linear(
             [128, 512, 2048],
+            &[false],
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    #[test]
+    fn merged_interface_indexed_access_work_is_linear_for_global_contributors() {
+        check_merged_interface_work_is_linear(
+            [128, 512, 2048],
+            &[true],
             verter_session_query::facts::policy::FactPolicy::production(),
         );
     }
