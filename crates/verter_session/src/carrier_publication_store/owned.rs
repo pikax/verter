@@ -192,24 +192,16 @@ impl OwnedPublication {
                 PublicationAuditKind::PublicationRequested,
             );
             let mut lanes = store.lanes.lock().expect("publication table");
-            let expired = lanes.get(&inputs.id).is_some_and(|lane| {
-                lane.state
-                    .lock()
-                    .expect("publication state")
-                    .terminal
-                    .as_ref()
-                    .is_some_and(|t| matches!(t, Ok(t) if t.artifact_expired()))
-            });
-            if expired {
-                lanes.remove(&inputs.id);
-                store.audit.push(
-                    &inputs.request,
-                    &inputs.id,
-                    PublicationAuditKind::LiveRecordRetired,
-                );
-            }
-            if let Some(lane) = lanes.get(&inputs.id) {
+            let attached = lanes.get(&inputs.id).and_then(|lane| {
                 let mut state = lane.state.lock().expect("publication state");
+                if state.delivery.is_none() {
+                    if let Some(Ok(terminal)) = &state.terminal {
+                        // Pin before attaching: a previous consumer may drop
+                        // its envelope before this subscriber's first poll.
+                        // Failed upgrade means production must restart.
+                        state.delivery = Some(terminal.outcome()?);
+                    }
+                }
                 state.subscribers += 1;
                 let kind = if state.terminal.is_some() {
                     PublicationAuditKind::LiveHit
@@ -218,7 +210,17 @@ impl OwnedPublication {
                 };
                 store.audit.push(&inputs.request, &inputs.id, kind);
                 Some(lane.clone())
+            });
+            if let Some(lane) = attached {
+                Some(lane)
             } else {
+                if lanes.remove(&inputs.id).is_some() {
+                    store.audit.push(
+                        &inputs.request,
+                        &inputs.id,
+                        PublicationAuditKind::LiveRecordRetired,
+                    );
+                }
                 let canonical = inputs.id.source.canonical_digest();
                 lanes.retain(|id, lane| {
                     if id.source.canonical_digest() != canonical { return true; }

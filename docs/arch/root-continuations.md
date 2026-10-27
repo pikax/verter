@@ -578,7 +578,10 @@ adopted and shared products; a verified stable unit remains reusable despite a
 losing generation. Retention denial still returns the complete envelope.
 
 Successful publication delivery stays strong while attached consumers remain,
-then returns to the existing weak terminal retention. Stable lanes stay listed
+then returns to the existing weak terminal retention. Attaching to a completed
+lane pins its live envelope atomically with subscription registration, before
+the first poll; if the envelope already expired, attachment restarts production.
+Stable lanes stay listed
 through each registered consumer's envelope finishing. The retirement interest
 moves into the actual Finish Work and survives dropping the P continuation;
 retirement rechecks consumer/producer state under table → lane locks and removes
@@ -861,6 +864,12 @@ rounds. The synchronous `StoreViewManager::base_view` drives this same core,
 retaining its execution-scoped reentry refusal and external reclamation.
 Completed handoffs release their host, task and cancellation interests; the
 opaque result retains only its captured view and exposes no blocking driver.
+When a subscriber releases the final host, it pins the lowering service through
+host teardown, then closes its queues without joining. Already admitted jobs
+drain on their existing workers, so cancellation never waits for those jobs.
+The owned poll also pins that service through its transient cached views and
+result mapping, covering warm completion and failed production cleanup.
+Ordinary external service owners retain their joining release semantics.
 
 Caller conversion above this boundary remains with DISPATCH for shared
 `capture_batch_fixed_view`/resolver contexts, META for component metadata

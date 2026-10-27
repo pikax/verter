@@ -109,6 +109,58 @@ fn a_sibling_can_claim_after_the_unpolled_initiator_detaches() {
 }
 
 #[test]
+fn completed_publication_attachment_pins_delivery_until_its_first_poll() {
+    for retain_previous in [true, false] {
+        let (source, grammar) = authorities();
+        let accepted = accepted(&source, &grammar, 1, "<template>delivery</template>");
+        let registry = TaskRegistry::default();
+        let store = CarrierPublicationStore::with_stable_unit_retention(
+            source,
+            grammar,
+            0,
+            registry.clone(),
+        );
+        let mut first = store.begin_publication(
+            accepted.clone(),
+            request(1, &accepted),
+            registry.register_task(),
+        );
+        drain(&mut producer(&mut first));
+        let envelope = outcome(&mut first).into_envelope().unwrap();
+        let weak = Arc::downgrade(&envelope);
+        let mut attached = store.begin_publication(
+            accepted.clone(),
+            request(2, &accepted),
+            registry.register_task(),
+        );
+        let previous = retain_previous.then_some(envelope);
+        let delivered = outcome(&mut attached)
+            .into_envelope()
+            .expect("attached subscriber owns a complete envelope even when retention is denied");
+        assert!(std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(&delivered)));
+        drop(previous);
+        drop(delivered);
+        assert!(
+            weak.upgrade().is_none(),
+            "drained delivery must not retain the envelope"
+        );
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+        assert_eq!(registry.active_task_count_for_tests(), 0);
+
+        let mut retry = store.begin_publication(
+            accepted.clone(),
+            request(3, &accepted),
+            registry.register_task(),
+        );
+        drain(&mut producer(&mut retry));
+        assert!(
+            outcome(&mut retry).into_envelope().is_some(),
+            "an already expired publication must produce again"
+        );
+    }
+}
+
+#[test]
 fn composed_registry_rejects_foreign_cold_waiters_but_ready_answers_need_no_edge() {
     let (source, grammar) = authorities();
     let accepted = accepted(&source, &grammar, 1, "<template>authority</template>");
