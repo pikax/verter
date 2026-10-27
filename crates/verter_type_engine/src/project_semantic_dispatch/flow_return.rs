@@ -3701,13 +3701,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Anything else runs exactly as before and is never reused.
         let completeness_scope_active =
             crate::request_context::cold_compute_completeness_scope_active();
-        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+        let policy = crate::resolver_core::resolver_context::installed_fact_policy();
+        let recordable = policy.is_some()
             && !self.build_local_taint.borrow().is_empty()
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
-        if !recordable {
+        let Some(policy) = policy.filter(|_| recordable) else {
             return run();
-        }
+        };
         // Completeness: a live scope that is still complete turns partial on
         // any partial fold (the merge is monotone), so it is read in place —
         // a nested scope would change which reason a reason-less fold adds
@@ -3721,7 +3722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
         let started = crate::resolver_core::resolver_context::mark_evidence();
-        let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
+        let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(policy, run);
         let ended = crate::resolver_core::resolver_context::mark_evidence();
         let refused = refusals.observed();
         drop(refusals);
@@ -3765,9 +3766,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         reuse,
                         replay: super::dispatch_txn::FlowMemberReuse {
                             reads: crate::resolver_core::resolver_context::RecordedFactReads {
-                                facts: verter_session_query::facts::fact_set::FactSet::from(vec![
-                                    receipt,
-                                ]),
+                                facts: reads.facts.policy().set_of(vec![receipt]),
                                 non_cacheable: reads.non_cacheable,
                             },
                             observed_self_roots: observed.observed_self_roots,

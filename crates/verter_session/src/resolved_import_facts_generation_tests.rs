@@ -333,3 +333,57 @@ export const owner = dep;
         "a second close finds nothing"
     );
 }
+
+/// An identical recomputation is skipped whatever order its witness lists
+/// the owner's import routes in. The witness names the routes in the order
+/// the owner imports them (`./b` before `./a`), while an admitted candidate
+/// stores its signature canonically, so the producer's dedupe must compare
+/// them as the same set: a recorded-order comparison would miss, re-admit,
+/// advance the domain generation and age real candidates out of the slot.
+#[test]
+fn an_identical_recomputation_with_routes_out_of_canonical_order_is_skipped() {
+    let host = make_host();
+    upsert_ts(host.as_ref(), "/a.ts", "export const a = 1;\n");
+    upsert_ts(host.as_ref(), "/b.ts", "export const b = 2;\n");
+    upsert_ts(
+        host.as_ref(),
+        "/owner.ts",
+        "import { b } from './b'\nimport { a } from './a'\nexport const c = a + b;\n",
+    );
+    let mut routes = FxHashMap::default();
+    for (specifier, canonical) in [("./b", "/b.ts"), ("./a", "/a.ts")] {
+        routes.insert(
+            specifier.to_string(),
+            DependencyResolution {
+                specifier: specifier.to_string(),
+                resolved_canonical_id: Some(canonical.to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        );
+    }
+    assert!(
+        host.admit_resolved_import_facts_for_owner("/owner.ts", &routes),
+        "fixture invariant: the cold producer run must admit a candidate"
+    );
+    let db = host.project_type_store().resolved_import_facts();
+    let key = producer_key(&host, "/owner.ts");
+    let witness: Vec<FactVersionRef> = host
+        .resolved_import_facts_witness_for(key.canonical.as_ref(), key.content_hash)
+        .expect("the production witness must be rootable for the owner");
+    let mut canonical = witness.clone();
+    canonical.sort();
+    assert_ne!(
+        witness, canonical,
+        "fixture invariant: the witness lists the owner's routes out of canonical order"
+    );
+    let before = db.stable_generation().expect("quiescent");
+    assert!(
+        !host.admit_resolved_import_facts_for_owner("/owner.ts", &routes),
+        "an identical recomputation must be skipped by the producer's dedupe"
+    );
+    assert_eq!(
+        db.stable_generation(),
+        Some(before),
+        "skipping the identical recomputation leaves the domain generation where it was"
+    );
+}

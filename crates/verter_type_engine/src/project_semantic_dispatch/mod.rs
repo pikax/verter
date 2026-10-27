@@ -5944,7 +5944,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             // any of them misses the warm read — without them a memoized resolved
             // key could be admitted whose rewrite depended on untracked indexed /
             // augmentation state (cache poisoning).
-            let empty_prelude = verter_session_query::facts::fact_set::FactSet::empty();
+            let empty_prelude = traced_facts.policy().empty_set();
             let prelude_facts = carrier_prelude.facts.as_ref().unwrap_or(&empty_prelude);
             // What the carrier adds to the traced set, which it shares: the
             // fence and the prelude.

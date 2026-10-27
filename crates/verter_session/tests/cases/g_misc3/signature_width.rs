@@ -7,8 +7,11 @@ use rustc_hash::FxHashSet;
 
 use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::facts::fact_cache::FactVersionRef;
-use verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH;
 use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
+
+/// The production fresh-slice width these fixtures straddle.
+const WIDE_SIGNATURE_WIDTH: usize =
+    verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max();
 
 #[derive(Debug)]
 struct TestView {

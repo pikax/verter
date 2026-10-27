@@ -70,7 +70,6 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
 use verter_type_engine::component_meta_caches::ComputedEntry;
-use verter_type_engine::fact_signature_helpers::empty_fact_signature;
 use verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use verter_type_engine::resolver_core::{MaterializeScopeObservation, ResolverContext};
 use verter_type_engine::semantic_query::ProjectionMode;
@@ -115,10 +114,12 @@ fn host_with_unrelated_file() -> VerterHost {
 /// A one-fact signature whose sole entry is a self-root
 /// `FileWholeHash` for `canonical` at [`PLANTED_HASH`].
 fn planted_self_root(canonical: &str) -> verter_session_query::facts::fact_set::FactSet {
-    verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: PLANTED_HASH,
-    }])
+    verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: canonical.into(),
+            hash: PLANTED_HASH,
+        },
+    ])
 }
 
 /// Assert the probe canonical is genuinely untracked by the live
@@ -188,7 +189,10 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
-            ComputedEntry::Rooted(decl("recomputed", c), empty_fact_signature())
+            ComputedEntry::Rooted(
+                decl("recomputed", c),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+            )
         })
         .expect("warm path produces a value");
 
@@ -277,7 +281,8 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
                     value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                         imported_symbol(c, "recomputed"),
                     )),
-                    fact_dep_signature: empty_fact_signature(),
+                    fact_dep_signature:
+                        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
                     validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
             )
@@ -330,7 +335,10 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
-            ComputedEntry::Rooted(true, empty_fact_signature())
+            ComputedEntry::Rooted(
+                true,
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+            )
         })
         .expect("warm path produces a value");
 
@@ -407,7 +415,7 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
             cold_ran = true;
             ComputedEntry::Rooted(
                 Some(owner_collection_marker_locator(c, "recomputed")),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             )
         })
         .expect("warm path produces a value");
@@ -552,7 +560,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("warm path produces a value");
@@ -614,7 +622,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("warm path produces a value");
@@ -693,7 +701,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("warm path produces a value");
@@ -809,6 +817,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
             // admitted.
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let sig = engine_fact_signature_for_materialize_memo(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 &observed_scope,
                 export_set,
                 &primed_dep_sig,
@@ -843,7 +852,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("warm path produces a value");
@@ -1021,7 +1030,10 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
         .fixture(ctx2)
         .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
-            ComputedEntry::Rooted(decl("recomputed", c), empty_fact_signature())
+            ComputedEntry::Rooted(
+                decl("recomputed", c),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+            )
         })
         .expect("warm path produces a value");
 
@@ -1102,7 +1114,8 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                     value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                         imported_symbol(c, "recomputed"),
                     )),
-                    fact_dep_signature: empty_fact_signature(),
+                    fact_dep_signature:
+                        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
                     validated_at_generation: ctx2.request_flags().current_project_generation(),
                 },
             )
@@ -1171,7 +1184,10 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
         .fixture(ctx2)
         .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
-            ComputedEntry::Rooted(true, empty_fact_signature())
+            ComputedEntry::Rooted(
+                true,
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+            )
         })
         .expect("warm path produces a value");
 
@@ -1240,7 +1256,7 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
             cold_ran = true;
             ComputedEntry::Rooted(
                 Some(owner_collection_marker_locator(c, "recomputed")),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             )
         })
         .expect("warm path produces a value");
@@ -1343,7 +1359,7 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
             reuse_cold_ran = true;
             ComputedEntry::Rooted(
                 Some(owner_collection_marker_locator(c, "should-not-run")),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             )
         })
         .expect("warm read produces a value");
@@ -1460,6 +1476,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
             // rooted on the observation's content version.
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let sig = engine_fact_signature_for_materialize_memo(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 &observed_scope,
                 export_set,
                 &empty_dep_signature(),
@@ -1480,7 +1497,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("warm path produces a value");
@@ -1581,6 +1598,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // `Some(...)` and this assertion trips.
     let observed_scope = observe_scope(ctx, scope);
     let sig = engine_fact_signature_for_materialize_memo(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &observed_scope,
         observed_scope
             .syntactic_export_set
@@ -1608,6 +1626,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
         .get_or_compute_traced_for_test(&key, move || {
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 &observed_scope,
                 export_set,
                 &primed_dep_sig,
@@ -1642,7 +1661,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("the follow-up request still computes and returns a value");
@@ -1735,6 +1754,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     // Half 1 — signature shape.
     let observed_scope = observe_scope(ctx, scope);
     let sig = engine_fact_signature_for_materialize_memo(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &observed_scope,
         observed_scope
             .syntactic_export_set
@@ -1772,6 +1792,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
         .get_or_compute_traced_for_test(&key, move || {
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 &observed_scope,
                 export_set,
                 &primed_dep_sig,
@@ -1816,7 +1837,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("warm path produces a value");
@@ -1932,6 +1953,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // `dep` is recorded as `DepVersion::WholeHash`, so the signature
     // builder admits the entry (`Some`).
     let sig = engine_fact_signature_for_materialize_memo(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &observed_scope,
         observed_scope
             .syntactic_export_set
@@ -2054,6 +2076,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
         .clone()
         .expect("the pre-edit observation carries the scope's SyntacticExportSet parse fact");
     let sig = engine_fact_signature_for_materialize_memo(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &observed_scope,
         observed_export_set,
         &empty_dep_signature(),
@@ -2173,6 +2196,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
         .get_or_compute_traced_for_test(&key, move || {
             let export_set = observed_scope_h1.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 &observed_scope_h1,
                 export_set,
                 &empty_dep_signature(),
@@ -2205,7 +2229,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("the follow-up request still computes a value");
@@ -2275,6 +2299,7 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
         ]);
 
     let sig = engine_fact_signature_for_materialize_memo(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &observed_scope,
         observed_scope
             .syntactic_export_set
@@ -2332,6 +2357,7 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
     );
 
     let sig = engine_fact_signature_for_materialize_memo(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &observed_scope,
         mismatched_export_set,
         &empty_dep_signature(),
@@ -3019,6 +3045,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
             let observed_scope = ctx.observe_materialize_scope(scope_owned.as_str())?;
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 &observed_scope,
                 export_set,
                 &empty_dep_signature(),
@@ -3046,7 +3073,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         })
         .expect("the follow-up request still computes and returns a value");
@@ -3258,10 +3285,12 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
 
     // Base-view publish — self-roots the keyed canonical at its BASE hash.
     let base_self_root: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: base_hash,
-        }]);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: base_hash,
+            },
+        ]);
     {
         let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
@@ -3327,12 +3356,13 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                         value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                             imported_symbol(canonical, "follower-overlay"),
                         )),
-                        fact_dep_signature: verter_session_query::facts::fact_set::FactSet::from(
-                            vec![FactVersionRef::FileWholeHash {
-                                canonical_id: canonical.into(),
-                                hash: overlay_hash,
-                            }],
-                        ),
+                        fact_dep_signature:
+                            verter_session_query::facts::policy::FactPolicy::production().set_of(
+                                vec![FactVersionRef::FileWholeHash {
+                                    canonical_id: canonical.into(),
+                                    hash: overlay_hash,
+                                }],
+                            ),
                         validated_at_generation: host
                             .project_type_store()
                             .current_project_generation(),
@@ -3421,10 +3451,12 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 
     // Base publish.
     let base_self_root: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: base_hash,
-        }]);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: base_hash,
+            },
+        ]);
     {
         let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
@@ -3473,12 +3505,13 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
                         value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                             imported_symbol(canonical, "follower-overlay"),
                         )),
-                        fact_dep_signature: verter_session_query::facts::fact_set::FactSet::from(
-                            vec![FactVersionRef::FileWholeHash {
-                                canonical_id: canonical.into(),
-                                hash: overlay_hash,
-                            }],
-                        ),
+                        fact_dep_signature:
+                            verter_session_query::facts::policy::FactPolicy::production().set_of(
+                                vec![FactVersionRef::FileWholeHash {
+                                    canonical_id: canonical.into(),
+                                    hash: overlay_hash,
+                                }],
+                            ),
                         validated_at_generation: host
                             .project_type_store()
                             .current_project_generation(),
@@ -3765,7 +3798,8 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
             verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: None,
-                    fact_dep_signature: empty_fact_signature(),
+                    fact_dep_signature:
+                        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
                     validated_at_generation,
                 },
             )
@@ -3870,7 +3904,8 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
             verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: None,
-                    fact_dep_signature: empty_fact_signature(),
+                    fact_dep_signature:
+                        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
                     validated_at_generation,
                 },
             )
@@ -4010,7 +4045,10 @@ fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
     // substrate's `revalidate_after_compute` rejects the publish.
     let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
-        ComputedEntry::Rooted(decl("stale", c), empty_fact_signature())
+        ComputedEntry::Rooted(
+            decl("stale", c),
+            verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+        )
     });
     assert!(
         outcome.is_none(),
@@ -4056,7 +4094,10 @@ fn resolvability_failed_revalidation_does_not_leak_live_counter() {
 
     let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
-        ComputedEntry::Rooted(true, empty_fact_signature())
+        ComputedEntry::Rooted(
+            true,
+            verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+        )
     });
     assert!(
         outcome.is_none(),
@@ -4097,7 +4138,10 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
 
     let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
-        ComputedEntry::Rooted(None, empty_fact_signature())
+        ComputedEntry::Rooted(
+            None,
+            verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+        )
     });
     assert!(
         outcome.is_none(),
@@ -4149,7 +4193,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
                 ),
                 false,
             ),
-            empty_fact_signature(),
+            verter_session_query::facts::policy::FactPolicy::production().empty_set(),
         ))
     });
     assert!(
@@ -4217,7 +4261,10 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             ),
             || {
                 bump();
-                ComputedEntry::Rooted(decl("stale", "/lc_total/decl.ts"), empty_fact_signature())
+                ComputedEntry::Rooted(
+                    decl("stale", "/lc_total/decl.ts"),
+                    verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+                )
             },
         );
     let _ = store
@@ -4231,7 +4278,10 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             ),
             || {
                 bump();
-                ComputedEntry::Rooted(true, empty_fact_signature())
+                ComputedEntry::Rooted(
+                    true,
+                    verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+                )
             },
         );
     let _ = store
@@ -4245,7 +4295,10 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             ),
             || {
                 bump();
-                ComputedEntry::Rooted(None, empty_fact_signature())
+                ComputedEntry::Rooted(
+                    None,
+                    verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+                )
             },
         );
     let _ = store
@@ -4268,7 +4321,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
                     ),
                     false,
                 ),
-                empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ))
         },
     );
@@ -4384,7 +4437,9 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     };
     let entry = ComponentMetaResultEntry {
         payload: Arc::new(cached),
-        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         validated_at_generation: gen0,
     };
     store
@@ -4491,9 +4546,10 @@ fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation()
     let gen0 = host.project_type_store().current_project_generation();
     store.insert_relation_payload_for_tests(
         key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
-            FactVersionRef::ProjectGeneration { generation: gen0 },
-        ])),
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of([FactVersionRef::ProjectGeneration { generation: gen0 }]),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(RelationOutcome::NotAssignable),
         gen0,
@@ -4554,6 +4610,7 @@ fn owner_import_surface_get_with_view_rejects_surface_from_superseded_generation
     let surfaces = host.project_type_store().owner_import_surfaces();
     let gen0 = host.project_type_store().current_project_generation();
     let surface = build_owner_import_surface(
+        verter_session_query::facts::policy::FactPolicy::production(),
         Arc::from(owner),
         owner_whole_hash,
         Vec::<(
@@ -4660,10 +4717,12 @@ fn shape_member(
 /// The strict warm-read validator checks this against the live view's
 /// authoritative self-root hash for the keyed canonical.
 fn self_root_at(canonical: &str, hash: [u8; 16]) -> verter_session_query::facts::fact_set::FactSet {
-    verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash,
-    }])
+    verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: canonical.into(),
+            hash,
+        },
+    ])
 }
 
 /// (8a) Equivalence preservation. Two DISTINCT `SurfaceMember`s (different
@@ -5869,6 +5928,7 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
         &view,
         || {
             ComputeAdmission::Cacheable(build_owner_import_surface(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 Arc::from(owner),
                 owner_whole_hash,
                 Vec::<(

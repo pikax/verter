@@ -151,7 +151,9 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
         lane: verter_session_query::facts::FactLane::Semantic,
         expected_hash: [0x22u8; 16],
     })]);
-    let carrier = ReadSetSignature::new(facts);
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of_shared(facts),
+    );
 
     // Direct publish via the test-only helper.
     let populated = store.publish_with_carrier_for_tests(
@@ -325,7 +327,9 @@ fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
             expected_hash: [2u8; 16],
         }),
     ]);
-    let sig = ReadSetSignature::new(facts);
+    let sig = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of_shared(facts),
+    );
     let canons: Vec<String> = sig
         .canonical_ids()
         .iter()

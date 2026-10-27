@@ -136,11 +136,12 @@ fn admit_decision_inner(taint: ResultTaint, sig: &ReadSetSignature) -> Admission
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use verter_session_query::facts::fact_cache::FactVersionRef;
 
     fn sig_from(facts: Vec<FactVersionRef>) -> ReadSetSignature {
-        ReadSetSignature::new(Arc::from(facts.into_boxed_slice()))
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(facts),
+        )
     }
 
     #[test]

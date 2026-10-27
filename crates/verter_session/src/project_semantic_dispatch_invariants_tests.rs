@@ -1602,7 +1602,9 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     // project generation so the warm read's generation gate passes.
     graph.insert_relation_payload_for_tests(
         seed_key.clone(),
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         Arc::from(Vec::<Arc<str>>::new()),
         graph.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::Assignable,
@@ -2970,7 +2972,9 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     // self-version-rooted; a synthetic publish with no self-roots uses
     // an empty carrier + empty self-root set so the warm read validates
     // vacuously.
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::empty();
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     let generation = host.project_type_store().current_project_generation();
     graph.insert_relation_payload_for_tests(
         key.clone(),

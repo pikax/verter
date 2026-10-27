@@ -4991,9 +4991,9 @@ fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
                     replay: super::dispatch_txn::FlowMemberReuse {
                         reads:
                             verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
-                                facts: verter_session_query::facts::fact_set::FactSet::from(
-                                    Vec::new(),
-                                ),
+                                facts: verter_session_query::facts::policy::FactPolicy::production(
+                                )
+                                .set_of(Vec::new()),
                                 non_cacheable: false,
                             },
                         observed_self_roots: Vec::new(),
@@ -5030,9 +5030,8 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
                 reuse,
                 replay: super::dispatch_txn::FlowMemberReuse {
                     reads: verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
-                        facts: verter_session_query::facts::fact_set::FactSet::from(vec![
-                            fact.clone()
-                        ]),
+                        facts: verter_session_query::facts::policy::FactPolicy::production()
+                            .set_of(vec![fact.clone()]),
                         non_cacheable: false,
                     },
                     observed_self_roots: vec![root.clone()],
