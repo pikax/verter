@@ -2215,19 +2215,18 @@ where
         F: FnOnce() -> Result<V, E>,
         R: FnOnce(&V) -> bool,
     {
-        let scope = self
+        let ambient = verter_execution::tasks::ExecutionScope::current_task();
+        let registry = self
             .registry
             .get()
-            .map(verter_execution::tasks::ExecutionScope::enter);
-        let waiter = scope
-            .as_ref()
-            .map(|scope| scope.task().clone())
-            .or_else(verter_execution::tasks::ExecutionScope::current_task);
+            .or_else(|| ambient.as_ref().map(|task| task.registry()))
+            .unwrap_or_else(|| self.task_registry());
+        let scope = verter_execution::tasks::ExecutionScope::enter(registry);
         let mut core = owned_singleflight::FlightCore::new(
             self.shared(),
             key,
             token,
-            waiter,
+            Some(scope.task().clone()),
             verter_execution::cancellation::CancellationToken::new(),
             compute,
             retain,
