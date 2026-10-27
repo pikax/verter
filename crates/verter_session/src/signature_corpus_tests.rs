@@ -2,7 +2,7 @@
 //! evidence lock (`docs/arch/signature-kernel.md` §14).
 //!
 //! Every row in [`signature_corpus_rows_tests::CORPUS`] is a recorded
-//! 7.0.2 observation. This driver:
+//! 7.1.0-beta observation. This driver:
 //!
 //! 1. **parses** every recorded observation — the `checker` text through
 //!    the shared typed checker-syntax parser (extending it deliberately,
@@ -43,7 +43,7 @@
 //!    observation without a re-locked manifest fails.
 //!
 //! The suite never invokes the checker: the observations are RECORDED
-//! measurements against the pinned 7.0.2 toolchain whose digests the
+//! measurements against the pinned 7.1.0-beta toolchain whose digests the
 //! `oracle_core` identity tests re-verify.
 
 use sha2::{Digest, Sha256};
@@ -53,7 +53,7 @@ use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, re
 
 /// The corpus identity this driver locks. Mirrored verbatim in
 /// `docs/evidence/signature-kernel/manifest.json` (`corpus.identity`).
-pub(crate) const CORPUS_IDENTITY: &str = "verter-signature-corpus-v0@typescript-7.0.2";
+pub(crate) const CORPUS_IDENTITY: &str = "verter-signature-corpus-v0@typescript-7.1.0-beta";
 
 /// The evidence manifest, relative to the crate manifest dir.
 const EVIDENCE_MANIFEST_REL: &str = "../../docs/evidence/signature-kernel/manifest.json";
@@ -467,7 +467,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // Publication KEEPS an alias/builtin instantiation carrier: the
     // checker keeps the alias label too, and the carrier is resolved when
     // a consumer DEMANDS the structural fact behind it. The recorded
-    // `checker` column, by contrast, is what 7.0.2 prints through the
+    // `checker` column, by contrast, is what 7.1.0-beta prints through the
     // corpus's two-step wrapper — a REDUCED form. Comparing the published
     // carrier against a reduced print measures publication laziness, not
     // a semantic difference, and no row could ever match.
@@ -1054,7 +1054,7 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
 /// substrate answers without a diagnostic never matches.
 ///
 /// The probe is the corpus's recursive thenable (`Awaited<Rec>`), measured on
-/// tsc 7.0.2: TS2589 at the `Awaited` reference, `[any]` through the tuple
+/// tsc 7.1.0-beta: TS2589 at the `Awaited` reference, `[any]` through the tuple
 /// wrapper. `Awaited<NumberThen>` is `number` with no diagnostic.
 #[test]
 fn diagnostic_rows_flip_on_the_checker_recovery_in_both_directions() {
@@ -1161,7 +1161,7 @@ fn signature_corpus_identity_is_locked_in_the_evidence_manifest() {
     );
 }
 
-/// The GROUPING WITNESS, recorded executable: on the pinned 7.0.2
+/// The GROUPING WITNESS, recorded executable: on the pinned 7.1.0-beta
 /// oracle BOTH preserved groupings reduce to `never` (`L<"a">` and
 /// `R<"a">`), unlike the historical 5.8.3 probe in the contract where
 /// `L` was `never` while `R` stayed an unreduced intersection
@@ -1170,7 +1170,7 @@ fn signature_corpus_identity_is_locked_in_the_evidence_manifest() {
 /// recording `never`), so the ledger's recheck clause cannot silently
 /// lose one side.
 #[test]
-fn signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair() {
+fn signature_corpus_records_the_grouping_witness_as_a_pair() {
     let l = CORPUS
         .iter()
         .find(|r| r.id == "SV12_grouping_witness_L")
@@ -1181,7 +1181,7 @@ fn signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair() {
         .expect("the R grouping witness row");
     assert!(
         l.checker_is_never && r.checker_is_never,
-        "on 7.0.2 both L<\"a\"> and R<\"a\"> reduce to never — the shape legs are silent and \
+        "on 7.1.0-beta both L<\"a\"> and R<\"a\"> reduce to never — the shape legs are silent and \
          the IsNever legs fire; a change here is an oracle-level semantic difference that \
          must land in the semantic-difference ledger"
     );
@@ -1251,7 +1251,7 @@ fn union_order_is_the_only_difference_from_the_checker() {
 /// `PP<{ a: 1 }>` print `Partial<{ a: 1; }>`, `MpA<{ a: 1 }>` prints
 /// `Mp<{ a: 1; }>`, `PU` prints `PU`), and an alias of a keyed one keeps
 /// its own (`PickA<…>`, `Rec<"x">`). Every checker print is TypeScript
-/// 7.0.2's, measured on this exact module through the corpus's two-step
+/// 7.1.0-beta's, measured on this exact module through the corpus's two-step
 /// wrapper.
 #[test]
 fn the_print_altitude_names_declaration_applications_as_the_checker_does() {
