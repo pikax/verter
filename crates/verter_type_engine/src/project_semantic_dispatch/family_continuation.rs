@@ -168,6 +168,17 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         self.dispatch.pin_signature_list(kind, value, resolution)
     }
 
+    /// Whether a signature list read earlier may still be read: it names no
+    /// retired kernel epoch, the gate every warm read of it applies.
+    pub(super) fn serves_signature_list(
+        &self,
+        value: &crate::signature_kernel::SignatureSetValue,
+    ) -> bool {
+        self.graph_store().serves_stored_value(&QueryResult::Value(
+            SemanticQueryValue::SignatureSet(value.clone()),
+        ))
+    }
+
     /// The result read the node form of `list`'s next composite candidate
     /// waits on, or `None` once every candidate is a node.
     pub(super) fn prepare_next_composite(
@@ -225,6 +236,36 @@ impl FamilyBuild {
     fn counts_need_intent(&self) -> bool {
         matches!(self, Self::ApparentType(_))
     }
+
+    /// Whether the read this build waits on was named from kernel handles a
+    /// replacement retired while it waited — a composite candidate's result,
+    /// prepared from a signature list the replacement retired. No read of it
+    /// answers the build, whichever driver makes it: the build is resumed
+    /// with [`retired_read`] instead, never with the read, whose rails the
+    /// staleness alone would taint, and it reads its list again.
+    pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        stage: &ContinuationStage<'_, '_, C>,
+    ) -> bool {
+        match self {
+            Self::OverloadSet(build) => build.awaits_retired_read(stage),
+            Self::ApparentType(build) => build.awaits_retired_read(stage),
+            Self::MacroPayload(_)
+            | Self::ReduceIntersection(_)
+            | Self::ClassInstanceSurface(_)
+            | Self::ClassStaticSurface(_) => false,
+        }
+    }
+}
+
+/// The answer a build waiting on a read named from retired kernel handles
+/// resumes with ([`FamilyBuild::awaits_retired_read`]): a miss with no rails
+/// and no receipt, which its stage takes for the retirement it is.
+pub(super) fn retired_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
+    CacheRead::from_value_and_signature(
+        QueryResult::Error(crate::semantic_query::QueryError::Miss),
+        super::empty_signature(),
+    )
 }
 
 /// A global declaration lookup a stage names: the first declaration of the
@@ -254,6 +295,16 @@ pub(super) enum FamilyStep {
     /// computed. Both drivers make the read in place.
     Declarations(Box<FamilyBuild>),
 }
+
+// A suspended family build is owned state its frame carries to whichever
+// thread resumes it: the build and the step naming its next dependency own
+// what they retained, borrowing nothing of the dispatcher that stepped them.
+// Each is advanced by value, one stage at a time, so no two drivers can step
+// the same build.
+static_assertions::assert_impl_all!(FamilyBuild: Send);
+static_assertions::assert_impl_all!(FamilyStep: Send);
+static_assertions::assert_not_impl_any!(FamilyBuild: Clone, Copy);
+static_assertions::assert_not_impl_any!(FamilyStep: Clone, Copy);
 
 /// Whether `key`'s family builds as a continuation
 /// ([`ProjectSemanticDispatch::begin_family_build`]).
@@ -449,6 +500,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: SemanticQueryKey,
         build: &FamilyBuild,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        if build.awaits_retired_read(&self.continuation_stage()) {
+            return retired_read();
+        }
         if build.counts_need_intent() && !self.drives_on_the_runtime(&key) {
             self.record_dispatch_intent_counters(&key);
         }
@@ -466,6 +520,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let _ = self.drive_family_in_place(step);
         true
+    }
+
+    /// The result read an overload set over `callee`'s signatures of `kind`
+    /// makes for its first composite candidate, its signature list read in
+    /// place first: `None` when the list settles without one.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_composite_result_read_for_tests(
+        &self,
+        callee: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+    ) -> Option<SemanticQueryKey> {
+        use super::continuation_stages::{ListProgress, SignatureListRead};
+        let (mut list, read) = SignatureListRead::begin(callee, kind, true);
+        let read = self.execute_via_cold_build_helper(read);
+        match self
+            .continuation_stage()
+            .advance_signature_list(&mut list, read)
+        {
+            ListProgress::Read(key) => Some(key),
+            ListProgress::Nodes(_) | ListProgress::Unsettled => None,
+        }
+    }
+
+    /// The instantiation an apparent type widening to the global interface
+    /// `name` reads in `demand`'s project: `None` when the project declares
+    /// no such interface.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apparent_interface_read_for_tests(
+        &self,
+        demand: &str,
+        name: &'static str,
+    ) -> Option<SemanticQueryKey> {
+        self.first_global_declaration(demand, name)
+            .map(|declaration| {
+                self.continuation_stage()
+                    .apparent_surface_key(&declaration, name)
+            })
     }
 
     /// Drive a family build to its output, reading each query it names in

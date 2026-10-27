@@ -123,6 +123,46 @@ impl SignatureListRead {
             context: crate::semantic_query::SemanticContextId::production(),
         }
     }
+
+    /// Whether the composite result read this list waits on names handles
+    /// of the list a kernel-epoch replacement has retired since it was
+    /// pinned: no read of it answers the list, which is read again instead.
+    /// A list not yet read waits on its own read, which never goes stale.
+    fn awaits_retired_result<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        stage: &ContinuationStage<'_, '_, C>,
+    ) -> bool {
+        self.list
+            .as_ref()
+            .is_some_and(|(value, _)| !stage.serves_signature_list(value))
+    }
+}
+
+impl OverloadSetBuild {
+    /// Whether the read this set waits on was named from handles a
+    /// kernel-epoch replacement retired while it waited.
+    pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        stage: &ContinuationStage<'_, '_, C>,
+    ) -> bool {
+        self.list.awaits_retired_result(stage)
+    }
+}
+
+impl ApparentTypeBuild {
+    /// Whether the read this widening waits on was named from handles a
+    /// kernel-epoch replacement retired while it waited.
+    pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        stage: &ContinuationStage<'_, '_, C>,
+    ) -> bool {
+        match &self.stage {
+            ApparentStage::Anchor { list, .. } | ApparentStage::Buckets { list, .. } => {
+                list.awaits_retired_result(stage)
+            }
+            ApparentStage::Global { .. } | ApparentStage::Surface { .. } => false,
+        }
+    }
 }
 
 /// A callable's apparent type between its stages: the base, the fence its
@@ -831,10 +871,11 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
     /// `SignaturesOfType` read, or the result its prepared composite
     /// candidate applies. The next composite's result is read next, and once
     /// every candidate is a node the list is done. A list whose handles a
-    /// kernel-epoch replacement retired is read once more, in the current
-    /// epoch; any other failure, or a second retirement, leaves the list
-    /// unsettled.
-    fn advance_signature_list(
+    /// kernel-epoch replacement retired — met as it is pinned, as a
+    /// composite settles, or as a composite's result read for the retired
+    /// descriptors fails — is read once more, in the current epoch; any
+    /// other failure, or a second retirement, leaves the list unsettled.
+    pub(super) fn advance_signature_list(
         &self,
         list: &mut SignatureListRead,
         read: crate::semantic_query::CacheRead<
@@ -852,9 +893,14 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                 }
                 _ => return ListProgress::Unsettled,
             },
-            Some((_, pinned)) => match read.value {
+            Some((value, pinned)) => match read.value {
                 QueryResult::Value(SemanticQueryValue::SignatureResult(result)) => {
                     self.settle_composite_signature(pinned, result.result)
+                }
+                // A replacement since the composite was prepared retired the
+                // descriptors its result is read for: the list is retired.
+                _ if !self.serves_signature_list(value) => {
+                    Err(super::signature_discovery::SignatureSetReadFailure::Retired)
                 }
                 _ => return ListProgress::Unsettled,
             },

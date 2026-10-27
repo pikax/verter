@@ -2579,10 +2579,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(FrameBuild::Family(family)) = build.take() else {
             unreachable!("a family frame resumes its own build")
         };
-        let read = self.read_frame_delivery(FrameDelivery {
-            delivery,
-            depth: depth + 1,
-        });
+        // A read named from kernel handles retired while the frame waited
+        // answers nothing: it is dropped unread, its rails and receipt never
+        // the build's, and the build reads its source again.
+        let read = if family.awaits_retired_read(&self.continuation_stage()) {
+            drop(delivery);
+            super::family_continuation::retired_read()
+        } else {
+            self.read_frame_delivery(FrameDelivery {
+                delivery,
+                depth: depth + 1,
+            })
+        };
         let step = self.resume_family_build(*family, read);
         self.advance_family_frame(key, build, step, suspends_loads)
     }
