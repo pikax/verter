@@ -123,7 +123,9 @@ for errors, cancellation, lifetime and the higher-caller conversion inventory.
 Base capture similarly exposes `VerterHost::begin_store_view`; its owned
 producer transfers snapshot or pending root-release reclamation work outside
 poll. Reset stops old subscribers while retaining any physically running claim
-until release. See [base capture](../../../docs/arch/root-continuations.md#base-store-view-capture).
+until release. A final subscriber host pin protects the lowering service through
+host teardown, then uses the lowering handoff's nonjoining queue closure; held
+shard work cannot block cancellation. See [base capture](../../../docs/arch/root-continuations.md#base-store-view-capture).
 Owned declaration-lowering demands defensively refuse their waiter's already
 owned shard before admission, including all-or-none batch preflight; pure
 callbacks still must not reenter the service or host.
@@ -147,7 +149,9 @@ Neither poll performs backend work or enters a blocking driver. The synchronous
 The initiating context's cancellation belongs only to its subscriber. Producer
 P/S task and stop scopes are independent and restore before wakes. Strong
 publication delivery lasts until attached consumers drain, after which the
-existing weak terminal remains. A stable parsed value carries its retirement
+existing weak terminal remains. A new attachment pins a completed live envelope
+under the subscription lock, or restarts production if that envelope expired.
+A stable parsed value carries its retirement
 interest into external Finish Work, so dropping the P continuation cannot
 unlist a parse before that work finishes. Retirement checks the exact current
 lane and live interests; all typed terminal/drop paths withdraw their own

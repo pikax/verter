@@ -814,12 +814,10 @@ impl<T> Drop for ShardHandoff<T> {
         // Release any unsubmitted closure and its captured service references
         // while this handoff still holds its own service pin.
         drop(self.job.take());
-        // Atomic extraction avoids a last-owner race with another Arc drop.
-        // A subscriber must never invoke the service's joining destructor:
-        // closing queues lets admitted jobs drain before their workers exit.
-        if let Some(mut service) = Arc::into_inner(self.service.take().expect("handoff service")) {
-            drop(service.workers.take());
-        }
+        self.service
+            .take()
+            .expect("handoff service")
+            .release_without_join();
     }
 }
 
@@ -1100,6 +1098,17 @@ pub const DECL_LOWERING_DEFAULT_POOL_SIZE: verter_execution::pool_size::PoolSize
     };
 
 impl DeclLoweringService {
+    /// Release a dependency's service pin without joining worker threads.
+    /// If this is the final owner, close the queues and let admitted jobs drain
+    /// on their existing workers. Ordinary external owners retain joining drop.
+    pub fn release_without_join(self: Arc<Self>) {
+        // Atomic extraction avoids a last-owner race with another Arc drop.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut service) = Arc::into_inner(self) {
+            drop(service.workers.take());
+        }
+    }
+
     /// Eager service at the default decl-lowering pool size — workers
     /// spawn at construction. Keyed off the same
     /// [`DECL_LOWERING_DEFAULT_POOL_SIZE`] the default

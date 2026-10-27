@@ -48,13 +48,25 @@ impl StoreViewProducer {
 }
 impl StoreViewHandoff {
     pub fn poll(&mut self, waker: &Waker) -> Poll<Result<StoreViewStep, StoreViewError>> {
-        self.core.poll(waker).map(|answer| {
+        // Core and its transient cached views can release the final service
+        // owner during a terminal poll. Retire it only after all poll locals
+        // and mapped payloads have gone, using the lowering handoff's release.
+        let service = self
+            .core
+            .host
+            .as_ref()
+            .expect("live host")
+            .decl_lowering
+            .clone();
+        let result = self.core.poll(waker).map(|answer| {
             answer.and_then(|step| match step {
                 Step::Produce(core) => Ok(StoreViewStep::Produce(StoreViewProducer { core })),
                 Step::Value(value) => Ok(StoreViewStep::Value(value)),
                 Step::Reentrant(_) => Err(StoreViewError::Cycle),
             })
-        })
+        });
+        service.release_without_join();
+        result
     }
 }
 impl VerterHost {
@@ -73,10 +85,23 @@ impl VerterHost {
 
 trait HostRef: Clone {
     fn host(&self) -> &VerterHost;
+    fn release(self) {
+        drop(self);
+    }
 }
 impl HostRef for Arc<VerterHost> {
     fn host(&self) -> &VerterHost {
         self
+    }
+    fn release(self) {
+        if let Some(host) = Arc::into_inner(self) {
+            // Host teardown can release other service pins (artifacts and the
+            // scheduler executor). Keep one until all those owners have gone,
+            // then use the same nonjoining release as a lowering handoff.
+            let service = host.decl_lowering.clone();
+            drop(host);
+            service.release_without_join();
+        }
     }
 }
 impl HostRef for &VerterHost {
@@ -329,8 +354,10 @@ impl<H: HostRef> Core<H> {
             reply.lock().wakers.withdraw(&mut self.registration);
         }
         self.fallback = None;
-        self.host = None;
         self.manager = None;
+        if let Some(host) = self.host.take() {
+            host.release();
+        }
     }
     fn finish(
         &mut self,

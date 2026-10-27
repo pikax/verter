@@ -452,3 +452,90 @@ fn completed_store_view_handoff_and_value_retain_no_host() {
     assert!(value.is_current());
     assert_eq!(registry.active_task_count_for_tests(), 0);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn cancelled_store_view_releases_last_host_without_joining_held_lowering_workers() {
+    last_host_with_held_lowering_workers(true);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn warm_store_view_releases_last_host_without_joining_held_lowering_workers() {
+    last_host_with_held_lowering_workers(false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn last_host_with_held_lowering_workers(cancel: bool) {
+    let (host, registry) = fixture();
+    host.close();
+    if !cancel {
+        drop(host.resolver_store_view_read());
+    }
+    let mut held = host.decl_lowering.hold_workers_for_tests();
+    let weak = Arc::downgrade(&host);
+    let stop = CancellationToken::new();
+    let mut demand = host.begin_store_view(registry.register_task(), stop.clone());
+    drop(host);
+    if cancel {
+        stop.cancel();
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let poller = std::thread::spawn(move || {
+        let terminal = match demand.poll(Waker::noop()) {
+            Poll::Ready(Err(StoreViewError::Cancelled)) => cancel,
+            Poll::Ready(Ok(StoreViewStep::Value(value))) => !cancel && value.is_current(),
+            _ => false,
+        };
+        drop(demand);
+        let _ = tx.send(terminal);
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+    let host_released = weak.strong_count() == 0;
+    // Release and join even when cancellation or handoff drop tried to join.
+    held.release();
+    poller.join().unwrap();
+    assert_eq!(
+        result.ok(),
+        Some(true),
+        "terminal poll must return before worker release"
+    );
+    assert!(host_released, "a terminal handoff must release its host");
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    assert_eq!(registry.active_task_count_for_tests(), 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn failed_store_view_releases_cached_artifacts_without_joining_held_lowering_workers() {
+    let (host, registry) = pending_maintenance();
+    let mut demand = begin(&host, &registry);
+    let producer = take_producer(&mut demand);
+    let mut held = host.decl_lowering.hold_workers_for_tests();
+    drop(producer);
+    let weak = Arc::downgrade(&host);
+    drop(host);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let poller = std::thread::spawn(move || {
+        let failed = matches!(
+            demand.poll(Waker::noop()),
+            Poll::Ready(Err(StoreViewError::ProducerDropped))
+        );
+        drop(demand);
+        let _ = tx.send(failed);
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+    let host_released = weak.strong_count() == 0;
+    held.release();
+    poller.join().unwrap();
+    assert_eq!(
+        result.ok(),
+        Some(true),
+        "failed poll must return before worker release"
+    );
+    assert!(host_released);
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    assert_eq!(registry.active_task_count_for_tests(), 0);
+}
