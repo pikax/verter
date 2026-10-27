@@ -18,7 +18,7 @@ Filter globs are plain positive globs (`**` spans path segments, `*` stays in on
 
 **A merge is not tested twice.** On a push to `main`, `detect-changes` first runs `scripts/release-proof.mjs --landed`: when the pushed commit is the squash of a pull request, and a successful CI run of THAT pull request recorded testing exactly the squash's tree, every lane is off and `CI Required` passes on that proof, so the commit on `main` keeps its green tick without re-running the pull request's lanes. The record is a `ci-tested` notice (`pull=<number> tree=<sha>`) that `detect-changes` leaves on every pull request run: a `pull_request` run tests `refs/pull/N/merge`, not the head, and GitHub forgets which pull request a run belonged to once it merges. Another pull request sharing the head tested another base, so its run never counts. A force-push, a direct push, a run that tested another tree, or any commit the proof cannot vouch for runs CI as usual.
 
-- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the `rust-observe` instrumentation lane (`node scripts/observe-lane.mjs run`: every workspace member declaring `semantic-observe`, tested with it on under the same core filter, so the audit/footprint/timing suites the default build compiles away still run); the closure-gated `rust-providers-live` job (the serial tsgo libtest lane; the tsserver lane runs in `tsserver-nightly.yml`), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
+- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the required `rust-observe` smoke (`node scripts/observe-lane.mjs smoke`) builds a small host-backed example with `semantic-observe`, verifies generated output and a stored compile audit record, and checks that disabling audit preserves the output and stores no record. It builds no test harnesses or full-suite fixture metadata. The full instrumented Rust suite runs nightly. The closure-gated `rust-providers-live` job (the serial tsgo libtest lane; the tsserver lane runs in `tsserver-nightly.yml`), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`, plus the native binding's workspace suites; its script self-tests run `test:scripts:ci`, which omits the tests another required lane already owns (the ARH dirty twins in `architecture-health`, the lane self-tests in their lanes, the sfc-projection verifiers in `sfc-projection`, the aggregate test in its own step)
 - **Native binding changes** (verter_napi's crate closure plus any JS change) -- `native-test` runs the native-backed package suites against the default release binding, which reports unavailable audit capture, so its capture-aware specs assert the unavailable outcome; `native-observe-test` builds the binding with `semantic-observe` (`pnpm --filter @verter/native build:observe:debug`), fails unless `captureAvailability()` is `"Available"`, and runs `@verter/native` and `@verter/typeinfo` so the record-reading cases still run
@@ -26,12 +26,12 @@ Filter globs are plain positive globs (`**` spans path segments, `*` stays in on
 - **SFC projection changes** (`tests/sfc-projection/**`, `scripts/sfc-projection/**`, the lockfile, and the verter_compiler / verter_language / verter_session / verter_validation_probe crate closure) -- `sfc-projection` runs `pnpm run test:sfc-projection` on two shards: each node's protocol runs `cargo test` and typechecks its probes on both TypeScript engines. Shard 1 runs the node verifiers its `SFC_SHARD_1` title pattern names; shard 2 runs the whole chain with that pattern skipped, so a new or renamed verifier runs in shard 2
 - **Docs and other CI-inert paths only** -- no lane; `CI Required` passes
 - **WASM changes** (verter_wasm's crate closure plus `packages/wasm/**`, `packages/browser-host/**`) -- `wasm-build`; on a pull request it skips `wasm-opt` (the optimised module is built and checked on pushes to `main`, by the daily `Nightly` playground build and by `release.yml`)
-- **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build`: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
+- **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build` in the official Playwright container, pinned to the version resolved in `pnpm-lock.yaml` with its browsers and system libraries preinstalled: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
 - **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.
 Caches are restored on every ref and saved only from `main` (`save-if` on
-rust-cache, a restore/save split for Playwright and Gradle): the repository's
+rust-cache, a restore/save split for Gradle): the repository's
 cache is capped at 10 GB, and a pull request's saves, readable by that pull
 request alone, used to evict the `main` entries every other pull request
 restores. The VS Code host and sccache's per-compile entries are the exceptions.
@@ -345,7 +345,7 @@ See [Publishing a Release](#publishing-a-release) for the full flow.
 
 ### Nightly (`nightly.yml`)
 
-Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/playground/**` change.
+Triggered daily at 06:00 UTC and manually through `workflow_dispatch`.
 
 1. Builds WASM via `cargo build --target wasm32-unknown-unknown`, `wasm-bindgen`, and a `wasm-opt` size pass
 2. Smoke tests the WASM binary
@@ -354,9 +354,20 @@ Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/p
 5. Cleans up old assets beyond the 50-commit window
 6. Builds and deploys the playground to production (via Netlify)
 
+An independent, read-only `rust-observe` job runs the complete instrumented
+Rust suite with `node scripts/observe-lane.mjs run`. The runner derives every
+workspace member declaring `semantic-observe` from Cargo metadata, enables
+the feature for all of them, prepares their foreign-crate fixture metadata,
+and uses the same provider-free core filter as before. Test failures fail
+the nightly job; its JUnit report and schema-checked metadata are retained,
+including after test failures; the separate JUnit artifact is kept for seven
+days. This suite does not gate pull requests. Normal correctness tests,
+including concurrent-session isolation, remain in ordinary PR CI;
+the separate native and WASM instrumentation package jobs are unchanged.
+
 ## Nextest JUnit evidence
 
-Every job that runs nextest with the `ci` profile (the `Rust Test (Core n/4)` shards, the instrumentation lane, BF2 Authoritative, and the nightly core coverage lane) uploads its `junit.xml` with a `junit-metadata.json` beside it, through `.github/actions/nextest-evidence`, under a stable artifact name (`nextest-evidence-<job>[-<partition>]`), also when tests fail. The document (schema v1, `scripts/ci-junit-metadata.mjs`) carries the tested tree and its parents read from the checked-out commit object, tool versions, the environment fingerprint, the run configuration and each test's hermetic flag. A test is hermetic only when `scripts/manifests/ci-hermetic-tests.json` names it. The environment fingerprint is the allow-listed snapshot the nextest step itself writes (`ci-junit-metadata.mjs snapshot-env`, run inside that step's shell after any `cargo llvm-cov show-env`), and command, cargo features, filter and partition are read from the cargo argument vector the run used. The same script's `check` mode fails the job when a required field is missing or the test list differs from the junit.xml. No required check reads these files; the workflow keeps its own JUnit locate and `Test report` steps independent of the evidence step, so deleting the evidence step restores the previous CI.
+Every job that runs nextest with the `ci` profile (the `Rust Test (Core n/4)` shards, the nightly instrumentation lane, BF2 Authoritative, and the nightly core coverage lane) uploads its `junit.xml` with a `junit-metadata.json` beside it, through `.github/actions/nextest-evidence`, under a stable artifact name (`nextest-evidence-<job>[-<partition>]`), also when tests fail. The document (schema v1, `scripts/ci-junit-metadata.mjs`) carries the tested tree and its parents read from the checked-out commit object, tool versions, the environment fingerprint, the run configuration and each test's hermetic flag. A test is hermetic only when `scripts/manifests/ci-hermetic-tests.json` names it. The environment fingerprint is the allow-listed snapshot the nextest step itself writes (`ci-junit-metadata.mjs snapshot-env`, run inside that step's shell after any `cargo llvm-cov show-env`), and command, cargo features, filter and partition are read from the cargo argument vector the run used. The same script's `check` mode fails the job when a required field is missing or the test list differs from the junit.xml. No required check reads these files; existing JUnit locate and `Test report` steps remain independent of the evidence step, so deleting the evidence step restores the previous CI.
 
 ## Versioning
 

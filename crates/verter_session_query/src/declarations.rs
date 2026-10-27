@@ -58,7 +58,7 @@ pub type FunctionSignature = FunctionSignatureFact;
 ///
 /// Carries the declaration HEADER facts plus the content-free locator of its
 /// authored body — never the body itself.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct TypeDeclInfo {
     pub name: String,
     pub owner: TopLevelOwnerId,
@@ -102,7 +102,7 @@ pub struct TypeDeclInfo {
 /// [`primary`](Self::primary) returns the LAST contributor — the
 /// last-wins representative used where a single declaration is required (alias
 /// groups, single-contributor groups).
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct TypeDeclGroup {
     /// Contributors in source/binder order. Always non-empty once created.
     pub contributors: Vec<TypeDeclInfo>,
@@ -232,7 +232,7 @@ impl TypeDeclGroup {
 /// groups). A merged declaration MUST reach the reducer as this distinct
 /// carrier; collapsing it to a bare intersection would route it through
 /// heritage-shadow member semantics — the wrong rule.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum TypeDeclBody {
     /// A single declaration's whole-body slot.
     Single(TypeBodySlot),
@@ -241,7 +241,7 @@ pub enum TypeDeclBody {
 }
 
 /// The ordered contributor body slots + kinds of a merged declaration.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct MergedTypeBody {
     /// Contributor body slots in source/binder order (each addresses one
     /// ordered merged contributor of the declaration).
@@ -379,7 +379,7 @@ impl EnumMemberValue {
 /// peel target + source), signature facts, object-shape facts, and the enum
 /// member inventory. Authored positions are content-free locators; bodies
 /// lower on demand through the shared resolver.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct ValueDeclInfo {
     pub name: String,
     pub owner: TopLevelOwnerId,
@@ -452,7 +452,7 @@ pub struct ValueDeclInfo {
 /// contributor's signature facts in source order (the function-overload group);
 /// [`primary`](Self::primary) returns the LAST contributor, the last-wins
 /// representative used where a single declaration is required.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct ValueDeclGroup {
     /// Contributors in source/binder order. Always non-empty once created.
     pub contributors: Vec<ValueDeclInfo>,
@@ -664,7 +664,15 @@ pub enum ValueDeclKind {
 /// They are retained in a SEPARATE scoped inventory so cross-file augmentation
 /// can stitch them onto the augmented declaration on demand, without polluting
 /// file-scope `type_symbols`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum AugmentationScopeKind {
     /// `declare global { ... }` — augments the global scope.
     Global,
@@ -678,8 +686,10 @@ pub enum AugmentationScopeKind {
 
 /// The per-file shallow symbol-table inventory: content-free facts + locators
 /// per declared symbol, grouped by name in source/binder order.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct EvalEnv {
+    storage: verter_retention::pinned_heap::FactStoragePin,
     /// Type declarations: interfaces, type aliases. Each name maps to an
     /// ordered group of contributors (append-only, source/binder order).
     pub type_symbols: DeclMap<TypeDeclGroup>,
@@ -716,13 +726,23 @@ pub struct EvalEnv {
     pub preserve_canonical_vue_vnode_slot_returns: bool,
 }
 
+impl verter_retention::pinned_heap::EmbeddedStorage for EvalEnv {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
+}
+
 /// Traversal budgets for inventory consumers.
 ///
 /// The inventory itself performs no evaluation; these budgets bound the
 /// traversal work of consumers that walk it (the shared resolver's
 /// demand-driven lowering and expansion paths), and the step counter
 /// ([`EvalEnv::steps`]) is the shared accounting they charge against.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct EvalLimits {
     /// Maximum structural traversal depth. Default: 32.
     pub max_depth: usize,
@@ -784,6 +804,7 @@ impl EvalEnv {
     /// Create a new inventory environment with default limits.
     pub fn new() -> Self {
         Self {
+            storage: Default::default(),
             type_symbols: DeclMap::default(),
             value_symbols: DeclMap::default(),
             augmentation_scopes: FxHashMap::default(),

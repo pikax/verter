@@ -1441,17 +1441,20 @@ fn synth_augmenter_artifacts_declared_in(
     use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     Arc::new(FileArtifacts {
+        storage: Default::default(),
         indexed: synth_indexed(0xA9),
         facts: Arc::new(FileFacts::empty()),
         parse_stable_hash,
-        augmentations: Arc::new(vec![ModuleAugmentationFact {
-            specifier: InternedSpecifier::from(specifier),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            augmented_name: InternedName::from("Augmented"),
-            space: SymbolSpace::Type,
-            augmented_member_shape_fingerprint: [0u8; 16],
-            declaring_file,
-        }]),
+        augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(vec![
+            ModuleAugmentationFact {
+                specifier: InternedSpecifier::from(specifier),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                augmented_name: InternedName::from("Augmented"),
+                space: SymbolSpace::Type,
+                augmented_member_shape_fingerprint: [0u8; 16],
+                declaring_file,
+            },
+        ])),
     })
 }
 
@@ -1966,18 +1969,22 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
             parse_stable_hash: [0x11u8; 16],
-            augmentations: Arc::new(vec![ModuleAugmentationFact {
-                specifier: InternedSpecifier::from("./dep"),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                augmented_name: InternedName::from("Augmented"),
-                space: SymbolSpace::Type,
-                // CHANGED member-shape fingerprint → genuine contribution change.
-                augmented_member_shape_fingerprint: [0x77u8; 16],
-                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
-            }]),
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(vec![
+                ModuleAugmentationFact {
+                    specifier: InternedSpecifier::from("./dep"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    augmented_name: InternedName::from("Augmented"),
+                    space: SymbolSpace::Type,
+                    // CHANGED member-shape fingerprint → genuine contribution change.
+                    augmented_member_shape_fingerprint: [0x77u8; 16],
+                    declaring_file:
+                        verter_session_query::inputs::contributors::FileModuleKind::Module,
+                },
+            ])),
         })
     };
     store.insert_artifacts(aug_key, changed);
@@ -2122,17 +2129,21 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
             parse_stable_hash: [0x11u8; 16],
-            augmentations: Arc::new(vec![ModuleAugmentationFact {
-                specifier: InternedSpecifier::from("./dep"),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                augmented_name: InternedName::from("Augmented"),
-                space: SymbolSpace::Type,
-                augmented_member_shape_fingerprint: [0x77u8; 16],
-                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
-            }]),
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(vec![
+                ModuleAugmentationFact {
+                    specifier: InternedSpecifier::from("./dep"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    augmented_name: InternedName::from("Augmented"),
+                    space: SymbolSpace::Type,
+                    augmented_member_shape_fingerprint: [0x77u8; 16],
+                    declaring_file:
+                        verter_session_query::inputs::contributors::FileModuleKind::Module,
+                },
+            ])),
         })
     };
     assert!(
@@ -2146,17 +2157,21 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
             parse_stable_hash: [0x11u8; 16],
-            augmentations: Arc::new(vec![ModuleAugmentationFact {
-                specifier: InternedSpecifier::from("./dep"),
-                owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                augmented_name: InternedName::from("Augmented"),
-                space: SymbolSpace::Type,
-                augmented_member_shape_fingerprint: [0u8; 16],
-                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
-            }]),
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(vec![
+                ModuleAugmentationFact {
+                    specifier: InternedSpecifier::from("./dep"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                    augmented_name: InternedName::from("Augmented"),
+                    space: SymbolSpace::Type,
+                    augmented_member_shape_fingerprint: [0u8; 16],
+                    declaring_file:
+                        verter_session_query::inputs::contributors::FileModuleKind::Module,
+                },
+            ])),
         })
     };
     assert!(
@@ -2884,6 +2899,37 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
     assert!(
         store.reclaim_retired_versions() >= 1,
         "the retired augmenter version is freed once no root sees it"
+    );
+}
+
+/// Draining one canonical retires only the augmentation rows its own
+/// artifacts contributed: another target's published augmenter set stays
+/// served.
+#[test]
+fn removing_one_canonical_keeps_unrelated_augmenter_sets() {
+    use smallvec::{smallvec, SmallVec};
+    use verter_session_query::resolution::{AugmenterEntry, AugmenterSet};
+
+    let store = FileArtifactStore::new();
+    let target = relative_dep_target_key();
+    store.populate_augmenter_set(
+        target.clone(),
+        Arc::new(AugmenterSet {
+            entries: smallvec![AugmenterEntry {
+                artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
+                parse_stable_hash: [3u8; 16],
+            }] as SmallVec<[AugmenterEntry; 2]>,
+            fingerprint: [0xaa; 16],
+        }),
+    );
+    store.insert(Arc::from("/unrelated.ts"), synth_indexed(0x55));
+    assert_eq!(store.remove_canonical("/unrelated.ts"), 1);
+    assert_eq!(
+        store
+            .get_augmenter_set(&target)
+            .expect("an unrelated removal keeps the published set")
+            .fingerprint,
+        [0xaa; 16]
     );
 }
 

@@ -1339,13 +1339,15 @@ defineProps<ButtonHTMLAttributes>()
 <template><button /></template>"#,
     );
 
-    for _ in 0..100 {
-        if ws.read_count("/workspace/src/runtime/types/html.ts") >= 1 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-
+    // The scheduler ingests the blocker on its own thread; wait for its read of the
+    // normalized companion before checking what else it read.
+    assert!(
+        ws.wait_for_read(
+            "/workspace/src/runtime/types/html.ts",
+            std::time::Duration::from_secs(20)
+        ),
+        "scheduler blocker ingestion should read the normalized typed companion at least once",
+    );
     assert_eq!(
         ws.read_count("/workspace/src/runtime/types/html"),
         0,

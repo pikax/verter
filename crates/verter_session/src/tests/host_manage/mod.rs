@@ -118,6 +118,8 @@ fn template_class_facts_for(
 struct CountingWorkspace {
     inner: Arc<verter_workspace::MemoryWorkspace>,
     read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+    /// Notified, under `read_counts`, after every counted read.
+    read_counted: parking_lot::Condvar,
     exists_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
     manifest_read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
     resolve_counts: parking_lot::Mutex<rustc_hash::FxHashMap<(String, String), u64>>,
@@ -130,6 +132,7 @@ impl CountingWorkspace {
                 verter_workspace::MemoryOptions::default(),
             )),
             read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            read_counted: parking_lot::Condvar::new(),
             exists_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             manifest_read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolve_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
@@ -151,6 +154,23 @@ impl CountingWorkspace {
 
     fn read_count(&self, path: &str) -> u64 {
         self.read_counts.lock().get(path).copied().unwrap_or(0)
+    }
+
+    /// Wait until `path` has been read at least once. Reads are counted and notified under
+    /// one lock, so none is missed; the budget is a hang guard only.
+    fn wait_for_read(&self, path: &str, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut counts = self.read_counts.lock();
+        while counts.get(path).copied().unwrap_or(0) == 0 {
+            if self
+                .read_counted
+                .wait_until(&mut counts, deadline)
+                .timed_out()
+            {
+                return counts.get(path).copied().unwrap_or(0) > 0;
+            }
+        }
+        true
     }
 
     fn reset_exists(&self) {
@@ -180,11 +200,11 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
     }
 
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
-        *self
-            .read_counts
-            .lock()
-            .entry(canonical_id.to_string())
-            .or_default() += 1;
+        {
+            let mut counts = self.read_counts.lock();
+            *counts.entry(canonical_id.to_string()).or_default() += 1;
+            self.read_counted.notify_all();
+        }
         self.inner.read_file(canonical_id)
     }
 

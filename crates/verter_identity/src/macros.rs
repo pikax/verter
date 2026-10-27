@@ -8,7 +8,7 @@
 macro_rules! digest_identity {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(verter_retention::heap_size::HeapSize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name($crate::canonical::Canonical);
 
         impl $name {

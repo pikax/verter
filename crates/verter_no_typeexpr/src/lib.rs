@@ -28,8 +28,8 @@
 //!
 //! Because `NoTypeExpr` is blanket-impl'd for everything that is the witness, no
 //! crate — first-party or downstream — can hand-write `impl NoTypeExpr for X`:
-//! it would overlap the blanket (`E0119`). For a first-party carrier the only
-//! sanctioned route to the witness is [`#[derive(NoTypeExpr)]`](NoTypeExpr),
+//! it would overlap the blanket (`E0119`). For a first-party carrier the
+//! ordinary route to the witness is [`#[derive(NoTypeExpr)]`](NoTypeExpr),
 //! which emits the witness field-recursively, so a derived carrier with a
 //! `TypeExpr`-owning field (by alias or nesting) fails to compile.
 //!
@@ -59,8 +59,11 @@ extern crate self as verter_no_typeexpr;
 
 /// Hidden witness machinery. By CONVENTION, do not name, import, or
 /// hand-implement [`__private::NoTypeExprWitness`] outside the sanctioned
-/// `#[derive(NoTypeExpr)]` route (and the single audited carrier exception in
-/// `verter_session`). It is `pub` only so the derive's generated absolute paths
+/// `#[derive(NoTypeExpr)]` route, except for the audited carrier in
+/// `verter_session` and `verter_retention::pinned_heap::FactStoragePin`.
+/// The latter wraps erased accounting holds, with a private inner pin and an
+/// initializer requiring `T: NoTypeExpr`; it cannot retain a type-expression
+/// payload through that initializer. It is `pub` only so generated absolute paths
 /// resolve downstream — it is NOT a sealed boundary, so a downstream crate CAN
 /// deliberately forge this witness; the marker is a first-party structural
 /// witness, not a security boundary. The blanket bridge still makes the PUBLIC

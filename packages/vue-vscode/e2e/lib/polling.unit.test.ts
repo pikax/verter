@@ -9,6 +9,7 @@ describe("pollUntilWithin", () => {
     const result = pollUntilWithin(
       "slow ready provider",
       async () => {
+        // Fake time models a provider completing after the poll deadline.
         await new Promise((resolve) => setTimeout(resolve, 20));
         return "ready";
       },
@@ -26,6 +27,7 @@ describe("pollUntilWithin", () => {
     const result = pollUntilWithin(
       "slow empty provider",
       async () => {
+        // Fake time models a provider completing after the poll deadline.
         await new Promise((resolve) => setTimeout(resolve, 20));
         return "empty";
       },

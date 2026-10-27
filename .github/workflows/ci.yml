@@ -473,71 +473,32 @@ jobs:
           reporter: java-junit
           fail-on-error: false
 
-  # The instrumentation lane. Audit capture, footprints and timing compile only
-  # under the default-off `semantic-observe` feature, so the core shards above
-  # build them away and the suites that read a captured record run here, with
-  # the feature on for every workspace member that declares it
-  # (`scripts/observe-lane.mjs` derives that set from `cargo metadata`). The
-  # test selection is the same provider-free core filter.
+  # Verify real host capture without rebuilding/running every Rust test.
+  # The full semantic-observe suite runs in nightly.yml.
   rust-observe:
-    name: Rust Test (instrumentation)
+    name: Rust Test (instrumentation smoke)
     needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 95
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: rust-observe
-      - uses: pnpm/action-setup@v6
+          key: rust-observe-smoke
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Fetch locked Cargo dependencies
-        run: cargo fetch --locked
-      - name: Run the instrumentation lane
-        timeout-minutes: 80
-        id: nextest
-        env:
-          NEXTEST_PROFILE: ci
-        run: |
-          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
-          argv="$(node scripts/observe-lane.mjs args)"
-          echo "argv=$argv" >> "$GITHUB_OUTPUT"
-          node scripts/observe-lane.mjs run
-      - name: Locate nextest JUnit report
-        if: always()
-        id: junit
-        run: |
-          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
-            exit 1
-          fi
-          echo "path=$found" >> "$GITHUB_OUTPUT"
-      - name: Nextest JUnit evidence
-        if: always()
-        uses: ./.github/actions/nextest-evidence
-        with:
-          junit-path: ${{ steps.junit.outputs.path }}
-          name: nextest-evidence-rust-observe
-          env-snapshot: ${{ runner.temp }}/nextest-env.json
-          argv-json: ${{ steps.nextest.outputs.argv }}
-      - name: Test report
-        if: always() && steps.junit.outputs.path != ''
-        uses: dorny/test-reporter@v3
-        with:
-          name: Rust Instrumentation Test Results
-          path: ${{ steps.junit.outputs.path }}
-          reporter: java-junit
-          fail-on-error: false
+          package-manager-cache: false
+      - name: Check the instrumentation runner
+        run: node --test scripts/observe-lane.test.mjs
+      - name: Verify host output and audit capture
+        timeout-minutes: 30
+        run: node scripts/observe-lane.mjs smoke
 
   # The real-provider lane: tsgo, the main platform. Its tests run exactly as
   # before — serial libtest, explicitly initialized, one test at a time.
@@ -1321,7 +1282,9 @@ jobs:
       - uses: actions/checkout@v5
       # The native probe links with `cc`; the image is not guaranteed to ship it.
       - name: Ensure a C linker
-        run: command -v cc >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: command -v cc >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev)
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-unknown-unknown

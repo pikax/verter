@@ -119,16 +119,22 @@ describe("MetaRuntime", () => {
   it("parallel opens for the same key dedup to one engine", async () => {
     const input = baseInput();
     let bootstrapCalls = 0;
+    let releaseBootstrap!: () => void;
+    const bootstrapping = new Promise<void>((resolve) => {
+      releaseBootstrap = resolve;
+    });
     const bootstrap = async () => {
       bootstrapCalls++;
-      await new Promise((r) => setTimeout(r, 10));
+      await bootstrapping;
       return { nativeProject: mockNativeProject(), baseFileIds: [] };
     };
 
-    const [e1, e2] = await Promise.all([
+    const pending = [
       runtime.getOrCreateEngine(input, bootstrap),
       runtime.getOrCreateEngine(input, bootstrap),
-    ]);
+    ];
+    releaseBootstrap();
+    const [e1, e2] = await Promise.all(pending);
     expect(e1).toBe(e2);
     expect(bootstrapCalls).toBe(1);
   });

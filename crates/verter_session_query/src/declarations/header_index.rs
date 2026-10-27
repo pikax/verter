@@ -13,7 +13,7 @@ use verter_type_expr::{
 };
 
 /// Exact authored contributor record retained by the shallow header index.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct DeclHeaderContributor {
     pub anchor: DeclContributorAnchor,
     pub declaration_span: Span,
@@ -26,7 +26,7 @@ pub struct DeclHeaderContributor {
 /// block with zero members is still a named lexical scope, and the
 /// family-A binder-identity projection needs the complete scope
 /// inventory (it must not derive scopes only from registered members).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct NamespaceBlockRecord {
     pub owner: TopLevelOwnerId,
     pub qualified_name: String,
@@ -43,7 +43,7 @@ pub struct NamespaceBlockRecord {
 /// block recorded by the shallow walk, in source order. EMPTY blocks
 /// are recorded too (an empty augmentation block still introduces the
 /// augmentation scope + target).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AugmentationBlockRecord {
     pub scope: AugmentationScopeKind,
     pub owner: TopLevelOwnerId,
@@ -56,7 +56,7 @@ pub struct AugmentationBlockRecord {
 }
 
 /// Exact parser-authored locator for a JSDoc typedef declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct JsdocTypedefHeader {
     pub owner: TopLevelOwnerId,
     pub attached_to: u32,
@@ -69,7 +69,7 @@ pub struct JsdocTypedefHeader {
 /// One direct syntactic member header: the member's name plus the
 /// header-level flags the declaration states syntactically. No member
 /// VALUE type is recorded — that is body data, lowered on demand.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct MemberHeader {
     pub key: TypeAuthoredPropertyKey,
     pub method_kind: Option<ObjectMethodKind>,
@@ -93,7 +93,7 @@ impl MemberHeader {
 /// distinct computed keys. Every insertion is one index probe, so a wide
 /// interface, type literal or object literal costs linear key work instead
 /// of a scan of the members already recorded.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct MemberHeaderList {
     members: Vec<MemberHeader>,
     positions: FxHashMap<TypeAuthoredPropertyKey, u32>,
@@ -259,7 +259,7 @@ impl FromIterator<MemberHeader> for MemberHeaderList {
 /// One type-parameter header: the parameter name plus the source locators
 /// of its constraint / default clauses (the clauses themselves lower with
 /// the body, on demand).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TypeParamHeader {
     pub name: String,
     pub constraint_span: Option<Span>,
@@ -269,7 +269,7 @@ pub struct TypeParamHeader {
 /// Header record for one declared TYPE symbol (file scope or augmentation
 /// scope): everything later stages need to ADDRESS the declaration without
 /// lowering its body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct TypeDeclHeader {
     pub kind: TypeDeclKind,
     /// Full declaration span of the LAST contributor (the last-wins
@@ -304,7 +304,7 @@ pub struct TypeDeclHeader {
 }
 
 /// Header record for one declared VALUE symbol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ValueDeclHeader {
     pub kind: ValueDeclKind,
     /// Full declaration span of the last contributor.
@@ -328,7 +328,7 @@ pub struct ValueDeclHeader {
 /// as a dual-space type + value header (see [`index_enum`]) so it resolves
 /// through the shared demand path; this table is the member-name authority,
 /// not a sign that enums are absent from the value/type inventory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct EnumDeclHeader {
     pub span: Span,
     pub name_span: Span,
@@ -344,7 +344,7 @@ pub struct EnumDeclHeader {
 ///
 /// Augmentation tables are NESTED maps (`scope → name → header`) so a
 /// scoped lookup needs no allocated tuple key.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct DeclHeaderIndex {
     pub type_headers: DeclMap<TypeDeclHeader>,
     pub value_headers: DeclMap<ValueDeclHeader>,

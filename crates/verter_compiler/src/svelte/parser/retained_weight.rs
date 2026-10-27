@@ -53,6 +53,15 @@ impl ParsedSvelte {
     }
 }
 
+impl verter_retention::heap_size::HeapSize for ParsedSvelte {
+    fn heap_size<'t>(
+        &'t self,
+        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.retained_bytes() - std::mem::size_of::<Self>()
+    }
+}
+
 fn descriptor_bytes(descriptor: &CustomElementDescriptor) -> usize {
     let mut n = string_bytes(descriptor.tag.as_ref());
     n = n.saturating_add(string_bytes(descriptor.extend.as_ref()));

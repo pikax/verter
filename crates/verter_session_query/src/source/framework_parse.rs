@@ -12,7 +12,7 @@ use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ParseKey};
 /// carrier language that produced it, the parse identity it recorded, and the
 /// byte region of its module script (`<script module>` / legacy
 /// `context="module"`), when it has one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct FrameworkParseFacts {
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,

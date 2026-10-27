@@ -405,7 +405,7 @@ pub(crate) fn emit_parse_facts_counting_inventory(
 /// first observation, through the artifact's declaration-body memo —
 /// the lazy body fact path. Memoized per key in a shared side-store
 /// (`Arc`-shared with every clone of the owning [`FileFacts`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct LazyBodyFactSource {
     memo: Arc<DeclBodyMemo>,
     lens: Arc<ShallowLens>,

@@ -316,8 +316,12 @@ and every other optional observation compile only under `semantic-observe`
 it. A Rust test that reads a captured record carries
 `#[cfg(feature = "semantic-observe")]` with the one-line comment
 `// Reads optional audit capture: runs in the instrumentation lane.` and is
-bound to `node scripts/observe-lane.mjs run` (CI `rust-observe`), which tests
+bound to `node scripts/observe-lane.mjs run` (nightly `rust-observe`), which tests
 every workspace member declaring the feature with it on under the core filter.
+Pull-request `rust-observe` runs `node scripts/observe-lane.mjs smoke`: one
+host-backed compile example checks real output, a stored audit record, and
+the audit-disabled control without building the full test harnesses or fixture
+metadata. Ordinary correctness tests remain in the default PR suite.
 Keep a default-build test for each public audit surface asserting
 `AuditCaptureState::Unavailable` or the unavailable-capture error, so the
 default build still discriminates. TypeScript specs that read records branch on

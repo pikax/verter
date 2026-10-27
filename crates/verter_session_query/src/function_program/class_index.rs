@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// declaring class is the class whose body declares it directly, so a
 /// class records the span of each member it declares: each class element,
 /// and each constructor parameter that declares a property.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ClassSyntaxRecord {
     /// The class node's span.
     pub span: verter_span::Span,
@@ -33,7 +33,7 @@ pub struct ClassSyntaxRecord {
 
 /// What a class's `extends` clause names, as the discovery walk resolved
 /// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum ClassBase {
     /// The class has no `extends` clause.
     None,
@@ -58,7 +58,7 @@ pub struct ClassSyntaxDiscovery {
 
 /// The sealed class index of one file. Built once by
 /// [`ClassIndex::from_discovery`]; every lookup is a keyed read.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ClassIndex {
     /// Every class, in source order.
     records: Arc<[ClassSyntaxRecord]>,

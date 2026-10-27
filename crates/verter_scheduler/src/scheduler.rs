@@ -393,6 +393,10 @@ pub struct Scheduler {
     /// parse/analyze work. Workers tag `CallerKind::IoWorker`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+    /// Stage tasks this scheduler submitted to either pool that have not
+    /// finished dropping their captures ([`Self::wait_stage_tasks_before`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) stage_tasks: Arc<crate::execution::pool::StageTasksInFlight>,
     /// Deferred blocker IDs for files whose node was at generation 0 when
     /// `register_resolved_deps` was called. Replayed when the node advances
     /// past generation 0 during Source stage completion.
@@ -646,6 +650,7 @@ impl Scheduler {
             config,
             cpu_pool,
             io_pool,
+            stage_tasks: Arc::default(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
             #[cfg(any(test, feature = "semantic-observe"))]
@@ -765,6 +770,8 @@ impl Scheduler {
             cpu_pool,
             #[cfg(not(target_arch = "wasm32"))]
             io_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            stage_tasks: Arc::default(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
             #[cfg(any(test, feature = "semantic-observe"))]
@@ -1514,6 +1521,24 @@ impl Scheduler {
         start
     }
 
+    /// The boundary after every stage task this scheduler has submitted so
+    /// far, for [`Self::wait_stage_tasks_before`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stage_task_boundary(&self) -> crate::execution::pool::StageTaskBoundary {
+        self.stage_tasks.boundary()
+    }
+
+    /// Block until every stage task submitted before `boundary` has
+    /// finished, including dropping the file node and snapshots its closure
+    /// captured: a task wakes its waiters before it returns, so what it
+    /// retained can outlive the answer it delivered. Tasks submitted after
+    /// the boundary are not waited for, so a busy scheduler cannot hold the
+    /// wait open. Never call from scheduler stage work.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn wait_stage_tasks_before(&self, boundary: crate::execution::pool::StageTaskBoundary) {
+        self.stage_tasks.wait_before(boundary);
+    }
+
     /// Drain and discard all pending inbox submissions. Used by `close()`
     /// to quiesce the scheduler before clearing state, preventing
     /// already-queued submissions from recreating removed nodes.
@@ -2217,6 +2242,43 @@ impl Scheduler {
         self.dag.lock().pending_len()
     }
 
+    /// Test-only: wait until the scheduler priority queue holds at least `depth` jobs while the
+    /// driver is parked at the dispatch pause, re-checking after each inbox re-drain the parked
+    /// driver completes. Returns whether the depth was reached before `budget`; the budget is a
+    /// hang guard only.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    #[doc(hidden)]
+    pub fn test_wait_until_job_queue_depth(
+        &self,
+        depth: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            // Note the re-drain count BEFORE reading the depth, so a re-drain landing in between
+            // is waited past rather than missed.
+            let seen = self.dispatch_pause.state.lock().redrains;
+            if self.test_job_queue_depth() >= depth {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            let mut state = self.dispatch_pause.state.lock();
+            while state.redrains == seen {
+                if self
+                    .dispatch_pause
+                    .cv
+                    .wait_until(&mut state, deadline)
+                    .timed_out()
+                {
+                    drop(state);
+                    return self.test_job_queue_depth() >= depth;
+                }
+            }
+        }
+    }
+
     /// Test-only: how many times [`Self::reset`] has posted its inbox
     /// teardown wake. Observing this instead of the inbox itself is what
     /// lets a teardown test release a rendezvous exactly once the wake is
@@ -2235,6 +2297,10 @@ impl Scheduler {
         let mut state = self.dispatch_pause.state.lock();
         state.released = true;
         self.dispatch_pause.cv.notify_all();
+        drop(state);
+        // The parked driver blocks on the inbox; a wake there lets it see the release. A full
+        // inbox already holds a submission that wakes it.
+        let _ = self.inbox.sender.try_send(Submission::Wake);
     }
 
     /// Test-only: install the mid-batch admission seam hook. Fired once

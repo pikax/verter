@@ -772,8 +772,11 @@ impl VerterHost {
     /// decl memos hold parse leases and their prepared declarations pooled
     /// identities. Then the semantic store's destroyed-node sidecars,
     /// drained dependency-rail and dedup tables, and the identity strings
-    /// only the pool still references. Each step frees only storage whose
-    /// last referent is gone, so it is idempotent and safe on a live host.
+    /// only the pool still references. Last, the table capacity those
+    /// releases left behind in the artifact store and in the process's
+    /// shared-allocation registry, down to what live entries need. Each
+    /// step frees only storage whose last referent is gone, so it is
+    /// idempotent and safe on a live host.
     fn reclaim_released_storage(&self) {
         let _ = self.project_type_store.indexed().reclaim_retired_versions();
         let _ = self
@@ -781,6 +784,8 @@ impl VerterHost {
             .semantic_graph()
             .release_drained_storage();
         let _ = self.project_type_store.identity_interner().shed_pool_only();
+        self.project_type_store.indexed().reclaim_table_storage();
+        verter_retention::pinned_heap::PinContext::default().reclaim_shared_storage();
     }
 
     /// Open a completion boundary over the releases this host has issued
@@ -809,6 +814,8 @@ impl VerterHost {
         HostReleaseCompletion {
             host: self,
             parse: self.decl_lowering.release_completion(),
+            #[cfg(not(target_arch = "wasm32"))]
+            stage_tasks: self.scheduler.stage_task_boundary(),
         }
     }
 
@@ -1672,12 +1679,16 @@ impl VerterHost {
 pub struct HostReleaseCompletion<'host> {
     host: &'host VerterHost,
     parse: verter_semantic_source::decl_lowering::ParseReleaseCompletion,
+    #[cfg(not(target_arch = "wasm32"))]
+    stage_tasks: verter_scheduler::StageTaskBoundary,
 }
 
 impl HostReleaseCompletion<'_> {
     /// Block until every decl-lowering worker has applied the parse
-    /// releases recorded before the boundary opened, then give back the
-    /// storage released owners left behind.
+    /// releases recorded before the boundary opened and every scheduler
+    /// stage task submitted before it has dropped the file nodes and
+    /// snapshots it captured, then give back the storage released owners
+    /// left behind.
     ///
     /// # Errors
     ///
@@ -1685,6 +1696,10 @@ impl HostReleaseCompletion<'_> {
     /// before applying its releases; nothing is reclaimed then.
     pub fn wait(self) -> Result<(), crate::ParseReleaseError> {
         self.parse.wait()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.host
+            .scheduler
+            .wait_stage_tasks_before(self.stage_tasks);
         self.host.reclaim_released_storage();
         Ok(())
     }
