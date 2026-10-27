@@ -5639,6 +5639,78 @@ mod receipt_validation_tests {
         );
     }
 
+    /// An admitted signature narrower than the fresh-slice width is stored
+    /// canonically — sorted, deduplicated, and without a receipt another of
+    /// its receipts consumed — where it used to be stored as recorded. The
+    /// stored facts reach exactly the facts admitted, so the answer is the
+    /// same, the candidate is charged exactly what admitting the canonical
+    /// facts directly charges, and an edit to any admitted fact, a consumed
+    /// receipt's leaf included, still misses.
+    #[test]
+    fn a_narrow_admitted_signature_is_stored_canonically_and_misses_every_edit() {
+        use verter_session_query::retention::{
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        // Fresh receipts per admission: a receipt's storage is claimed by the
+        // first admission that retains it.
+        let recorded = || {
+            let inner = receipt(vec![whole_hash("/inner.ts", 1)]);
+            let outer = receipt(vec![inner.clone(), whole_hash("/outer.ts", 2)]);
+            vec![
+                whole_hash("/z.ts", 3),
+                outer,
+                whole_hash("/a.ts", 4),
+                inner,
+                whole_hash("/z.ts", 3),
+            ]
+        };
+        let canonical =
+            || verter_session_query::facts::fact_read_set::canonical_signature_facts(recorded());
+        let expected = canonical();
+        assert_eq!(
+            expected.len(),
+            3,
+            "sorted, deduplicated, the consumed receipt dropped"
+        );
+        assert_eq!(
+            &expected[..2],
+            &[whole_hash("/a.ts", 4), whole_hash("/z.ts", 3)]
+        );
+        assert!(
+            matches!(expected[2], FactVersionRef::Receipt(_)),
+            "the outer receipt stays"
+        );
+        let admit = |facts: Vec<FactVersionRef>| {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, u32> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            assert!(cache.insert("k", 7, facts));
+            let retained = account.snapshot().retained_bytes;
+            (cache, retained)
+        };
+        let (cache, retained) = admit(recorded());
+        let (_, canonical_retained) = admit(canonical());
+        assert_eq!(
+            retained, canonical_retained,
+            "the candidate is charged exactly the canonical slice it stores"
+        );
+        let (value, stored) = cache
+            .get_if_valid_with_facts(&"k", &CountingView::default())
+            .expect("every admitted fact holds");
+        assert_eq!(*value, 7, "the answer is unchanged");
+        assert_eq!(&stored[..], expected.as_slice());
+        for edited in ["/z.ts", "/a.ts", "/inner.ts", "/outer.ts"] {
+            let view = CountingView {
+                rejected: Some(edited),
+                ..CountingView::default()
+            };
+            assert!(
+                cache.get_if_valid(&"k", &view).is_none(),
+                "an edit to {edited} misses the canonical signature"
+            );
+        }
+    }
+
     fn wide_facts() -> Vec<FactVersionRef> {
         (0..2 * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max() + 3)
             .map(|index| whole_hash(&format!("/wide/{index:05}.ts"), 1))
