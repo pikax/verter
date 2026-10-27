@@ -1210,7 +1210,9 @@ running no stage. `a_root_released_or_cancelled_at_any_converted_seam_leaves_not
 drops the waiting root, or cancels its request, at every seam.
 `a_macro_payload_whose_owner_is_loading_yields_and_reads_it_once_loaded`
 and `a_class_instance_surface_whose_declaring_file_is_loading_resumes_elsewhere_once_loaded`
-hold the scheduler source read of the file the family loads.
+hold the scheduler source read of the file the family loads, and
+`a_family_released_or_cancelled_while_its_file_loads_leaves_nothing_open`
+drops or cancels each while it waits there.
 `completed_signature_list_is_revalidated_after_retirement` retires the
 kernel epoch once, as a list's build settles it and, separately, as a
 consumer holds the completed list to pin it, and requires an overload set

@@ -5064,6 +5064,93 @@ mod semantic_poll_contract {
         assert!(graph.resident_flight_keys_for_tests().is_empty());
     }
 
+    /// A family waiting on its file's load — the file's scheduler source
+    /// read held — released by its consumer, or stopped by its request's
+    /// cancellation, which wakes it with the read still held, withdraws only
+    /// its own wait: nothing stays open, the load it began goes on, and the
+    /// dispatcher then reads the family exactly as the synchronous entry does
+    /// on a fresh host.
+    #[test]
+    fn a_family_released_or_cancelled_while_its_file_loads_leaves_nothing_open() {
+        type Key = fn(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey;
+        let cases: [(&str, &str, &str, Key); 2] = [
+            (
+                "a macro payload's owner",
+                UNLOADED_OWNER,
+                "export interface Props { a: string }\n",
+                |_, dispatch| owned_props_payload_keys(dispatch, UNLOADED_OWNER).0,
+            ),
+            (
+                "a class's declaring file",
+                UNLOADED_CLASS,
+                INSTANCE_CLASS,
+                |host, dispatch| class_instance_surface_in(host, dispatch, UNLOADED_CLASS),
+            ),
+        ];
+        for (case, file, source, key) in cases {
+            let synchronous = {
+                let host = unloaded_files_host(&[(file, source)]);
+                let dispatch = ProjectSemanticDispatch::new(&*host);
+                let root = key(&host, &dispatch);
+                read_summary(&dispatch, &dispatch.execute_via_cold_build_helper(root))
+            };
+            for cancelled in [false, true] {
+                let label = format!("{case}, cancelled={cancelled}");
+                let host = unloaded_files_host(&[(file, source)]);
+                let mut dispatch = ProjectSemanticDispatch::new(&*host);
+                let graph = host.project_type_store().semantic_graph();
+                let root = key(&host, &dispatch);
+                let gate = Arc::clone(&host.test_force.source_load_gate);
+                gate.hold(file);
+                let held = HeldSource(&gate);
+                let counter = Arc::new(CountingWaker::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let (pending, stopped) = if cancelled {
+                    let request = budgeted_request(1);
+                    let _request =
+                        verter_type_engine::request_context::RequestContextGuard::install(
+                            Arc::clone(&request),
+                        );
+                    dispatch
+                        .with_semantic_task_for_tests(root.clone(), |slot| {
+                            let task = slot.as_mut().expect("the task is lent");
+                            let pending = task.poll_for_tests(&waker).is_pending();
+                            let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+                            request.cancel();
+                            let woken =
+                                counter.0.load(std::sync::atomic::Ordering::SeqCst) > before;
+                            let stopped = woken
+                                && matches!(
+                                    task.poll_for_tests(&waker),
+                                    Poll::Ready(TaskOutcomeForTests::Stopped)
+                                )
+                                && task.live_frames_for_tests() == 0;
+                            (pending, stopped)
+                        })
+                        .expect("the cold root runs as a task")
+                } else {
+                    let mut entry = dispatch.poll_query(root.clone());
+                    let pending = entry.poll(&waker).is_pending();
+                    drop(entry);
+                    (pending, true)
+                };
+                let open = dispatch.open_request_state_for_tests();
+                let waits = graph.wait_graph_counts_for_tests().1;
+                drop(held);
+                assert!(pending, "{label}: the family yields while its file loads");
+                assert!(
+                    stopped,
+                    "{label}: the cancellation wakes the waiting family, which stops"
+                );
+                assert_eq!(open, NOTHING_OPEN, "{label}");
+                assert_eq!(waits, 0, "{label}: the released family holds no wait");
+                let read = dispatch.execute_via_cold_build_helper(root);
+                assert_eq!(read_summary(&dispatch, &read), synchronous, "{label}");
+                assert!(graph.resident_flight_keys_for_tests().is_empty(), "{label}");
+            }
+        }
+    }
+
     /// A file declaring a value of an interface type, unloaded.
     const UNLOADED_VALUE: &str = "/semantic-task/value.ts";
 
