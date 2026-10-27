@@ -412,6 +412,34 @@ fn flow_return_of(
     .cloned()
 }
 
+/// [`probe_host`] for a project with no tsconfig and no ambient library,
+/// composed with `policy`: the same audit host, its workspace and every set
+/// it builds under that policy.
+pub(super) fn probe_host_under(
+    project: ProbeProject<'_>,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> Arc<crate::VerterHost> {
+    assert!(
+        project.compiler_options.is_none() && project.ambient_lib.is_none(),
+        "a policy-composed probe host is the standalone audit host"
+    );
+    let host = Arc::new(crate::VerterHost::new_with_scheduler_config(
+        crate::HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            audit_enabled: true,
+            footprint_capture: false,
+            ..crate::HostConfig::default()
+        },
+        crate::fact_policy_test_support::workspace_under(policy),
+        verter_scheduler::scheduler::SchedulerConfig {
+            cpu_threads: 1,
+            ..verter_scheduler::scheduler::SchedulerConfig::default()
+        },
+    ));
+    upsert_probe_files(&host, project.files);
+    host
+}
+
 /// A host for `project` with its sibling files and ambient library
 /// registered; the probe module itself is not yet upserted.
 pub(super) fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
