@@ -435,9 +435,19 @@ fn holds_refusal(answer: &TypeExpr) -> bool {
     }
 }
 
-/// The checker's `increment` over a module-scope `ThisType`, and the
-/// marker-typed one it must not answer.
-const NAMESAKE_ROWS: [(&str, &str); 1] = [("ReturnType<St['increment']>", "number")];
+/// The checker's store over a module-scope `ThisType`, and the
+/// marker-typed answers it must not give. The checker (TypeScript 7.0.2,
+/// all four settings) answers `increment`, which reads `this.count`, with
+/// its error recovery — `any` (TS7023 under `noImplicitAny`; TS2339 on
+/// each `this` read) — while `double`, `first` and `add`, which read no
+/// `this`, it answers completely: `number`, `{ id: number; }` and
+/// `{ id: number; }`.
+const NAMESAKE_ROWS: [(&str, &str); 4] = [
+    ("St['double']", "number"),
+    ("St['first']", "{ id: number; }"),
+    ("ReturnType<St['increment']>", "number"),
+    ("ReturnType<St['add']>", "{ id: number; }"),
+];
 
 /// A module-scope `ThisType` is an ordinary interface: the store's actions
 /// read `this` as their own object literal, so `increment`, which returns
@@ -445,7 +455,12 @@ const NAMESAKE_ROWS: [(&str, &str); 1] = [("ReturnType<St['increment']>", "numbe
 /// `any` (TS7023 under `noImplicitAny`; TS2339 on each `this` read).
 /// Measured on TypeScript 7.0.2, all four settings. The checker's recovery
 /// is error-type `any`; the named demand refuses the unmodelled read with a
-/// typed degraded leaf, never the marker's answer.
+/// typed degraded leaf, never the marker's answer. The refusal propagates
+/// to `double`, `first` and `add` too, which the checker answers
+/// independently through the getters' contextual `state` and `add`'s own
+/// parameter: that propagated refusal of independently answerable members
+/// is the recorded recovery divergence the error-recovery successor owns,
+/// upgrading these rows to the checker's answers.
 #[test]
 fn a_module_scope_namesake_is_not_the_marker() {
     let failures = non_refused_answers(
@@ -458,7 +473,9 @@ fn a_module_scope_namesake_is_not_the_marker() {
 /// A module that also contributes the global marker still reads its own
 /// module-scope `ThisType` there: the namesake shadows the global
 /// declaration in its own module, so the store it declares answers as with
-/// a namesake alone. Measured on TypeScript 7.0.2, all four settings.
+/// a namesake alone. Measured on TypeScript 7.0.2, all four settings, with
+/// the same complete `double`, `first` and `add` and error-recovered
+/// `increment` as a namesake alone.
 #[test]
 fn a_namesake_shadows_its_own_modules_global_contribution() {
     let failures = non_refused_answers(

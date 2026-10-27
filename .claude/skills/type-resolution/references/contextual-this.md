@@ -11,7 +11,10 @@ contextual type, then the literal's own type.
 `noImplicitThis: false` retains the checker's `any` receiver. Arrow functions
 keep the receiver of their lexical frame. An authored `this` annotation or a
 contextual signature's `this` parameter takes precedence over the contextual
-marker. The authored annotation is lowered with the demanded body;
+marker. Only those give `this` an explicit type (the checker's
+`getExplicitThisType`); an object literal method's contextual receiver does
+not, so a statement call through it decides no effects signature.
+The authored annotation is lowered with the demanded body;
 lexical contexts carry receiver identity, never annotation contents.
 
 Contextual targets are lowered in carrier mode. Alias applications are
@@ -21,7 +24,9 @@ and receiver dependency ordering share the same carrier-preserving view.
 Recognition checks the resolved declaration against the consuming project's
 global namespace; an ambient library file need not own a project.
 A similarly named local declaration is
-not a marker.
+not a marker, even in the module whose own `declare global` block contributes
+the marker every other module reads; with no declaration of the name the
+receiver recovers without the marker, never through it.
 Structural readers still instantiate the empty interface normally.
 
 Top-level contextual literals and calls containing context-sensitive object
@@ -79,4 +84,8 @@ cold and warm answers, relation growth, nested marker intersections, lexical
 arrows, ordinary receivers, non-strict `this`, getters consumed by earlier or
 later actions, forward siblings, generic aliases, enclosing markers, spreads,
 explicit annotations, top-level contextual literals and receiver isolation
-across array, call and conditional expression boundaries.
+across array, call and conditional expression boundaries. The marker's global
+identity — a library's, an authored `declare global` and a contributed
+declaration read beside a namesake, the shadowing a contributing module's own
+namesake does there, and a missing declaration — is covered in
+`pinia_options_store_tests`.
