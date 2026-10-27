@@ -260,13 +260,28 @@ async fn peer_notification_is_surfaced_to_handler() {
     sw.write_all(&encode_message(&notification)).await.unwrap();
     sw.flush().await.unwrap();
 
-    // The handler reports what it was given; the timeout is a hang guard only.
-    let surfaced = tokio::time::timeout(std::time::Duration::from_secs(5), seen.recv())
+    // A probe answered after the notification: the reader routes frames in order, so once the
+    // answer arrives every callback for the notification has run. The timeout is a hang guard only.
+    let mut probe = Box::pin(conn.request("probe", serde_json::Value::Null));
+    assert!(std::future::Future::poll(
+        probe.as_mut(),
+        &mut std::task::Context::from_waker(std::task::Waker::noop())
+    )
+    .is_pending());
+    let answer = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": null });
+    sw.write_all(&encode_message(&answer)).await.unwrap();
+    sw.flush().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), probe)
         .await
-        .expect("a peer notification must be surfaced to the notification handler, not ignored");
+        .expect("the probe answer must arrive")
+        .expect("the probe is answered");
+    let mut surfaced = Vec::new();
+    while let Ok(method) = seen.try_recv() {
+        surfaced.push(method);
+    }
     assert_eq!(
-        surfaced.as_deref(),
-        Some("verter/fatal"),
+        surfaced,
+        vec!["verter/fatal".to_string()],
         "a peer notification must be surfaced to the notification handler, not ignored"
     );
     conn.close().await.unwrap();

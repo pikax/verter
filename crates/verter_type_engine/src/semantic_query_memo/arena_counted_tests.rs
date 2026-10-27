@@ -13,10 +13,13 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 
     const WAIT: Duration = Duration::from_secs(30);
     const HOLD: Duration = Duration::from_millis(20);
+    let base = std::time::Instant::now();
     for (hit, acquisition) in [(true, 1), (false, 1), (false, 2)] {
         let mut arena = NodeArena::default();
         let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
         arena.provenance = Some(Arc::clone(&provenance));
+        // The wait clock is stepped by the test, not read from the wall.
+        *arena.wait_clock.lock() = Some(base);
         let data = SemanticNodeData::Literal(LiteralValue::String("contended".into()));
         // The hit case's seed stays owned across the worker's intern, so
         // the worker finds it live rather than interning a fresh node.
@@ -50,14 +53,10 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             parked_rx.recv_timeout(WAIT).unwrap();
             let held = arena.inner.write();
             resume.send(()).unwrap();
-            // The worker reports once its wait clock is running, so the lock is held for HOLD
-            // of that clock's time before it is released. The hold itself is the measured
-            // stimulus, spun on the clock rather than slept.
+            // The worker reports once its wait clock is running; the clock then steps HOLD
+            // forward while the lock is still held, so the counted wait is exactly HOLD.
             timing_rx.recv_timeout(WAIT).unwrap();
-            let timing_from = std::time::Instant::now();
-            while timing_from.elapsed() < HOLD {
-                std::hint::spin_loop();
-            }
+            *arena.wait_clock.lock() = Some(base + HOLD);
             drop(held);
             let interned = worker.join().unwrap();
             if let Some(seeded) = &seeded {
@@ -69,7 +68,7 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             .node_arena_inner_write_wait_ns
             .load(Ordering::Relaxed)
             - before;
-        assert!(waited >= HOLD.as_nanos() as u64,
+        assert!(waited == HOLD.as_nanos() as u64,
             "hit={hit}, acquisition={acquisition}: blocked write acquisition was not counted ({waited}ns)");
     }
 }

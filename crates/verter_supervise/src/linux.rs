@@ -220,6 +220,16 @@ fn populated(events: &Path) -> bool {
 /// nothing is signalled once it is empty. Returns whether the cgroup was
 /// populated at the start and whether anything survived `limit`.
 fn empty_cgroup(kill: &File, events: &Path, limit: Duration) -> (bool, bool) {
+    empty_cgroup_observed(kill, events, limit, || {})
+}
+
+/// [`empty_cgroup`], calling `after_kill` right after each kill is written.
+fn empty_cgroup_observed(
+    kill: &File,
+    events: &Path,
+    limit: Duration,
+    mut after_kill: impl FnMut(),
+) -> (bool, bool) {
     let was_populated = populated(events);
     let deadline = Instant::now() + limit;
     let mut last_kill: Option<Instant> = None;
@@ -231,6 +241,7 @@ fn empty_cgroup(kill: &File, events: &Path, limit: Duration) -> (bool, bool) {
             let mut kill = kill;
             kill.write_all(b"1").ok();
             last_kill = Some(Instant::now());
+            after_kill();
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -645,25 +656,17 @@ mod tests {
         );
         assert_eq!(disk::read_to_string(&kill_path).unwrap(), "");
 
-        // Populated until the first kill lands, then empty.
+        // Populated until the first kill lands, then empty: the cgroup empties the moment that
+        // kill is written, before teardown looks at it again.
         disk::write(&events, "populated 1\n").unwrap();
-        let flip = {
-            let events = events.clone();
-            let kill_path = kill_path.clone();
-            std::thread::spawn(move || {
-                while disk::read_to_string(&kill_path).unwrap().is_empty() {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                disk::write(&events, "populated 0\n").unwrap();
-            })
-        };
         assert_eq!(
-            empty_cgroup(&kill, &events, Duration::from_secs(5)),
+            empty_cgroup_observed(&kill, &events, Duration::from_secs(5), || {
+                disk::write(&events, "populated 0\n").unwrap();
+            }),
             (true, false)
         );
-        flip.join().unwrap();
-        // empty_cgroup has returned and the flipper has exited, so nothing can write
-        // the kill file any more: what it holds now is final.
+        // empty_cgroup has returned, so nothing can write the kill file any more: what it holds
+        // now is final.
         assert_eq!(
             disk::read_to_string(&kill_path).unwrap(),
             "1",

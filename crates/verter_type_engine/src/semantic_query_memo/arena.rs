@@ -1660,6 +1660,10 @@ pub(crate) struct NodeArenaCore {
     destroyed_sink: OnceLock<super::release::SidecarSink>,
     #[cfg(test)]
     race_hook: parking_lot::Mutex<Option<ArenaRaceHook>>,
+    /// TEST-ONLY: when set, the instant the write-wait clock reads, so a test steps the measured
+    /// wait instead of waiting it out.
+    #[cfg(all(test, feature = "semantic-observe"))]
+    pub(super) wait_clock: parking_lot::Mutex<Option<Instant>>,
     /// The ONE payload every released slot resolves to through [`Self::get`]
     /// — an `Opaque(Miss)` node ("this value's resolution answered
     /// nothing"), never in the dedup index. Mirrors the
@@ -1766,6 +1770,8 @@ impl Default for NodeArena {
                 destroyed_sink: OnceLock::new(),
                 #[cfg(test)]
                 race_hook: Default::default(),
+                #[cfg(all(test, feature = "semantic-observe"))]
+                wait_clock: Default::default(),
                 released_placeholder: NodeData::new(SemanticNodeData::Opaque(
                     crate::semantic_query::QueryError::Miss,
                 )),
@@ -1830,6 +1836,16 @@ impl NodeArenaCore {
     #[cfg(test)]
     pub(super) fn slot_storage_charge_bytes(&self) -> usize {
         self.inner.read().charges.lock().charged()
+    }
+
+    /// The write-wait clock: the real clock, or a test's stepped instant.
+    #[cfg(feature = "semantic-observe")]
+    fn wait_clock_now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = *self.wait_clock.lock() {
+            return now;
+        }
+        Instant::now()
     }
 
     #[cfg(test)]
@@ -2533,7 +2549,9 @@ impl NodeArena {
         self.race_event(ArenaRaceEvent::BeforeInnerWrite);
         #[cfg(feature = "semantic-observe")]
         let start = if super::records_telemetry::<M>() {
-            self.provenance.as_ref().map(|prov| (prov, Instant::now()))
+            self.provenance
+                .as_ref()
+                .map(|prov| (prov, self.wait_clock_now()))
         } else {
             None
         };
@@ -2545,7 +2563,9 @@ impl NodeArena {
         #[cfg(feature = "semantic-observe")]
         if let Some((prov, start)) = start {
             prov.node_arena_inner_write_wait_ns.fetch_add(
-                start.elapsed().as_nanos() as u64,
+                self.wait_clock_now()
+                    .saturating_duration_since(start)
+                    .as_nanos() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
         }

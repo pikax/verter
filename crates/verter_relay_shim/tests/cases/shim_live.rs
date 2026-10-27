@@ -1294,9 +1294,8 @@ async fn setup_failure_after_spawn_kills_fake_tsgo() {
     std::fs::write(&regular_file, b"x").unwrap();
     let bad_control_dir = regular_file.join("nope");
     let heartbeat = dir.join("heartbeat.log");
-    let pid_file = dir.join("fake.pid");
 
-    let mut shim = Command::new(bin_exe!("verter-relay-shim"))
+    let shim = Command::new(bin_exe!("verter-relay-shim"))
         .arg("--real-tsgo")
         .arg(bin_exe!("fake_tsgo_heartbeat"))
         .arg("--control-dir")
@@ -1307,34 +1306,39 @@ async fn setup_failure_after_spawn_kills_fake_tsgo() {
         .arg("--lsp")
         .arg("--stdio")
         .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
-        .env("FAKE_TSGO_PID_FILE", &pid_file)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .expect("spawn the relay shim binary");
 
     // The shim fails fast on the setup error (after the child spawn) → non-zero exit.
-    let status = tokio::time::timeout(Duration::from_secs(20), shim.wait())
+    let output = tokio::time::timeout(Duration::from_secs(20), shim.wait_with_output())
         .await
         .expect("the shim must exit promptly on a setup failure (bounded)")
         .expect("await the shim exit status");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
-        !status.success(),
-        "a setup failure after spawn must exit the shim NON-ZERO; got {status:?}"
+        !output.status.success(),
+        "a setup failure after spawn must exit the shim NON-ZERO; got {:?}; stderr: {stderr}",
+        output.status
     );
 
-    // After the shim has exited, the fake tsgo must be DEAD (reaped by the guard). A fake that ran
-    // at all published its pid first, so that process must have exited; one the guard killed before
-    // it ran never published one.
-    if let Some(pid) = published_child_pid(&pid_file) {
-        assert!(
-            wait_for_process_exit(pid, Duration::from_secs(10)).await,
-            "the fake tsgo must be reaped on setup failure (no orphan): pid {pid} is still running \
-             AFTER the shim exited"
-        );
-    }
+    // The shim's setup-failure report names the engine it spawned. After the shim has exited,
+    // that process must be DEAD (reaped by the guard); its exit is observed directly, and the
+    // budget is a hang guard only.
+    let engine_pid: u32 = stderr
+        .split("(engine pid ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|pid| pid.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the setup-failure report must name the engine pid: {stderr}"));
+    assert!(
+        wait_for_process_exit(engine_pid, Duration::from_secs(10)).await,
+        "the fake tsgo must be reaped on setup failure (no orphan): pid {engine_pid} is still \
+         running AFTER the shim exited"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1719,13 +1723,22 @@ fn a_non_utf8_heartbeat_path_does_not_kill_the_fixture() {
         .expect("spawn the fake tsgo fixture");
 
     // The fixture prints `ready` once it has decoded its configuration and attempted its first
-    // beat; a fixture that died on the decode reaches EOF instead.
-    let mut ready = String::new();
-    std::io::BufRead::read_line(
-        &mut std::io::BufReader::new(child.stdout.take().expect("fixture stdout")),
-        &mut ready,
-    )
-    .expect("read the fixture's readiness line");
+    // beat; a fixture that died on the decode reaches EOF instead. The read runs on a helper thread
+    // so a fixture that never answers is caught by a bounded wait (then killed) rather than hanging.
+    let stdout = child.stdout.take().expect("fixture stdout");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line);
+        let _ = ready_tx.send(line);
+    });
+    let ready = ready_rx
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap_or_else(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the fixture never reported readiness nor exited")
+        });
     let died = child.try_wait().expect("poll the fixture");
     let _ = child.kill();
     let output = child.wait_with_output().expect("reap the fixture");
