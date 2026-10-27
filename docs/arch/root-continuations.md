@@ -1124,7 +1124,13 @@ apparent types step, in resolution or declaration order.
   waits on that load as an outside input (`EvalStep::Await`, which steps the
   same frame again once the load resolves) with its build retained
   (`FrameBuild::FamilySource`); the synchronous entry's drive loads the file
-  in place as its external driver. An explicit session overlay or a
+  in place as its external driver. The load's end is a typed terminal
+  `IndexedLoadOutcome` the frame consumes once: an integrated file is
+  served as loaded, and a load that ended without integrating it (absent,
+  failed, cancelled, superseded, a cycle, shutdown) resumes the build with no
+  input for the file — what the synchronous serve answers after the same
+  failed load. The frame never begins that load again and never serves the
+  file in place to rediscover the failure. An explicit session overlay or a
   tombstoned file needs no load. A scheduler without a driver thread
   (every wasm32 host) has no executor but the caller, so nothing would
   advance a load begun for a frame to wait on: there the serve loads the
@@ -1143,6 +1149,15 @@ apparent types step, in resolution or declaration order.
 - **No replay.** The per-graph counters `continuation_builds_begun` and
   `continuation_stages_resumed` count stages wherever they run, so a stage
   run again under either driver changes them.
+- **Kept results stay valid where they are consumed.** The execution keeps
+  a completed demand's value for later needs only while
+  `Program::reusable` holds, and asks it again each time a need would take
+  the kept value. The query program answers it with the memo's own warm
+  gates: complete, cacheable, and naming no retired signature-kernel epoch
+  (`SemanticGraphStore::serves_stored_value`). A list retired after it
+  completed is therefore forgotten and that one demand started again; the
+  family that needed it keeps its stage, and a list retired before it
+  completed is never kept.
 
 Behaviour, in the session's `semantic_poll_contract` group: a macro payload
 whose payload operation another task produces, an intersection reduction
@@ -1151,7 +1166,15 @@ scheduler source read is held each return `Pending` at the polled entry,
 stay pending when their `Send` task is polled on another thread, and then
 deliver exactly the synchronous entry's answer, fact status, diagnostics and
 receipt with each stage run once; a released waiting payload leaves nothing
-open.
+open. `completed_signature_list_is_revalidated_after_retirement` retires the
+kernel epoch once, as a list's build settles it and, separately, as a
+consumer holds the completed list to pin it, and requires an overload set
+over authored leaves, one over a composite and an apparent type to read
+what the synchronous entry reads with no replacement.
+`family_load_failure_is_terminal` polls a macro payload and a class instance
+surface whose file the workspace does not hold and requires a bounded
+answer equal to the synchronous entry's, with the owner's failed load
+submitted once by either entry.
 
 ### Frame entry loads
 
@@ -1374,8 +1397,11 @@ inside the step. Frame entry loads (above) cover only the loads an
 instantiation or `typeof` build performs before anything else: a file a
 build reaches later — a re-export chain's hop resolved at demand time, a
 heritage or member declaration of another file, a declaration body lowered
-on its owner shard — still loads or is lowered in place. A flow frame still
-drops and re-runs its evaluation when its body meets an unanswered read.
+on its owner shard — still loads or is lowered in place. A frame entry load
+that fails also leaves its build to serve the file in place, as the
+synchronous build does after its own failed load; only a family frame
+consumes its load's terminal outcome. A flow frame still drops and re-runs
+its evaluation when its body meets an unanswered read.
 
 An ignored acceptance test in the session's `semantic_poll_contract` group
 states the polled entry's contract for the flow gap and fails today:
