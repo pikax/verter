@@ -2955,6 +2955,118 @@ mod semantic_poll_contract {
         assert_eq!(read_summary(&dispatch, &read), synchronous);
     }
 
+    /// What a read decides on, receipt aside: its answer, fact status,
+    /// rails and diagnostics.
+    type ReadDecision = (String, String, bool, bool, Vec<String>);
+
+    fn decision(
+        summary: (String, String, bool, bool, Vec<String>, Option<String>),
+    ) -> ReadDecision {
+        (summary.0, summary.1, summary.2, summary.3, summary.4)
+    }
+
+    /// `key` polled at the production entry on a fresh `host` while the
+    /// signature kernel replaces its epoch exactly once — as the first
+    /// signature-list build settles the list it publishes, which is then a
+    /// list of a retired epoch — against what the synchronous entry reads
+    /// on a fresh host with no replacement.
+    fn read_across_one_retirement(
+        host: fn() -> Arc<crate::VerterHost>,
+        key: fn(
+            &crate::VerterHost,
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ) -> SemanticQueryKey,
+    ) -> (ReadDecision, ReadDecision) {
+        let synchronous = {
+            let host = host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let key = key(&host, &dispatch);
+            decision(read_summary(
+                &dispatch,
+                &dispatch.execute_via_cold_build_helper(key),
+            ))
+        };
+        let host = host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let key = key(&host, &dispatch);
+        let graph = Arc::clone(dispatch.graph_arc());
+        let replacements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let read = {
+            let (graph, replacements) = (Arc::clone(&graph), Arc::clone(&replacements));
+            super::super::signature_epoch_tests::with_build_hook(
+                verter_type_engine::project_semantic_dispatch::signature_discovery::SignaturesOfTypeBuildPoint::Settled,
+                move || {
+                    if replacements
+                        .compare_exchange(
+                            0,
+                            1,
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        graph
+                            .signature_store()
+                            .replace_epoch()
+                            .expect("the kernel replaces its epoch");
+                    }
+                },
+                || {
+                    let mut entry = dispatch.poll_query(key);
+                    poll_until_ready(|waker| entry.poll(waker))
+                },
+            )
+        };
+        assert_eq!(
+            replacements.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "premise: the first list the read builds is retired as it settles"
+        );
+        let polled = decision(read_summary(&dispatch, &read));
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        (polled, synchronous)
+    }
+
+    /// A signature list the request completed and the kernel then retired is
+    /// no answer to a later need of it: the consumer that meets the retired
+    /// list reads it once more, and that read recomputes it in the current
+    /// epoch instead of being handed the completed retired list again. An
+    /// overload set over authored leaves, one over a composite candidate and
+    /// an apparent type whose anchor list is retired each read exactly what
+    /// the synchronous entry reads with no replacement.
+    ///
+    /// Served the completed retired list again, the consumer's one re-read
+    /// meets the same retired handles and answers `Error(Miss)`.
+    #[test]
+    fn completed_signature_list_is_revalidated_after_retirement() {
+        let overloads = read_across_one_retirement(contextual_host, |host, dispatch| {
+            overload_set_keys(host, dispatch).0
+        });
+        assert!(
+            overloads.1 .0.contains("OverloadSet"),
+            "premise: {overloads:?}"
+        );
+        assert_eq!(
+            overloads.0, overloads.1,
+            "an overload set over authored leaves"
+        );
+
+        let composite = read_across_one_retirement(union_callee_host, |host, dispatch| {
+            union_overload_set_keys(host, dispatch).0
+        });
+        assert!(
+            composite.1 .0.contains("OverloadSet") && !composite.1 .3,
+            "premise: {composite:?}"
+        );
+        assert_eq!(composite.0, composite.1, "an overload set over a composite");
+
+        let apparent = read_across_one_retirement(apparent_callee_host, |_, dispatch| {
+            apparent_type_keys(dispatch).0
+        });
+        assert!(apparent.1 .0.contains("marker"), "premise: {apparent:?}");
+        assert_eq!(apparent.0, apparent.1, "an apparent type");
+    }
+
     /// A callable object surface and the global `Function` interface its
     /// apparent type widens to.
     const APPARENT_CALLEE: &str =
@@ -4050,6 +4162,98 @@ mod semantic_poll_contract {
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
+    /// A file the workspace does not hold: its load fails.
+    const MISSING_OWNER: &str = "/semantic-task/missing.ts";
+
+    /// `C`'s instance surface in `file`, unscoped by a loaded declaration.
+    fn class_instance_surface_in(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        file: &str,
+    ) -> SemanticQueryKey {
+        let env = host.host_view_env_hashes_for(file);
+        SemanticQueryKey::ResolveClassSurface {
+            decl_slot: dispatch.type_slot_for(
+                file,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "C",
+            ),
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            side: verter_type_engine::semantic_query::ClassSurfaceSide::Instance,
+            context: verter_type_engine::semantic_query::ClassSurfaceContext {
+                parse_env_hash: env.parse_env_hash,
+                resolve_env_hash: env.resolve_env_hash,
+                mode: ProjectionMode::Shallow,
+            },
+        }
+    }
+
+    /// A family whose file's load fails consumes that terminal outcome once:
+    /// the polled entry submits the load once, waits on it, and — the load
+    /// failed — resumes the family from its retained stage without the file,
+    /// answering in bounded polls exactly what the synchronous entry, whose
+    /// in-place load fails the same way, reads. It never submits its load
+    /// again, and leaves nothing open. Holds for a macro payload's owner and
+    /// a class's declaring file alike; the class surface's next stage, its
+    /// instantiation, is a reader of its own that waits once on its own load
+    /// of the file.
+    ///
+    /// Restarted from its load stage after the failure instead, the family
+    /// begins the same load again at every resume and never answers.
+    #[test]
+    fn family_load_failure_is_terminal() {
+        type Key = fn(
+            &crate::VerterHost,
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ) -> SemanticQueryKey;
+        let cases: [(&str, Key, usize); 2] = [
+            (
+                "a macro payload's owner",
+                |_, dispatch| owned_props_payload_keys(dispatch, MISSING_OWNER).0,
+                1,
+            ),
+            (
+                "a class's declaring file",
+                |host, dispatch| class_instance_surface_in(host, dispatch, MISSING_OWNER),
+                2,
+            ),
+        ];
+        for (case, key, readers) in cases {
+            let synchronous = {
+                let host = unloaded_files_host(&[]);
+                let dispatch = ProjectSemanticDispatch::new(&*host);
+                let key = key(&host, &dispatch);
+                read_summary(&dispatch, &dispatch.execute_via_cold_build_helper(key))
+            };
+            let host = unloaded_files_host(&[]);
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let key = key(&host, &dispatch);
+            let submitted = || {
+                host.test_force
+                    .indexed_loads_begun
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            };
+            let before = submitted();
+            let mut entry = dispatch.poll_query(key);
+            let read = poll_until_ready(|waker| entry.poll(waker));
+            drop(entry);
+            assert_eq!(
+                submitted() - before,
+                readers,
+                "{case}: each reader submits the failed load once and never again"
+            );
+            assert!(
+                host.scheduler.try_get_source(MISSING_OWNER).is_none(),
+                "{case}: premise: the load failed"
+            );
+            assert_eq!(read_summary(&dispatch, &read), synchronous, "{case}");
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+        }
     }
 
     /// A macro payload released while its owner loads withdraws only its own

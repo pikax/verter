@@ -37,6 +37,9 @@ struct ChainProgram<E: Fn(u64) -> Vec<u64>> {
     outside: Option<u64>,
     outside_restarts: u32,
     answered: Option<u64>,
+    /// A demand whose kept value stops serving the first time a need would
+    /// take it, as a value whose handles were retired after it completed.
+    retired_once: Option<(u64, std::cell::Cell<u32>)>,
 }
 
 const CYCLE: u64 = 1_000_000_000;
@@ -56,6 +59,7 @@ impl<E: Fn(u64) -> Vec<u64>> ChainProgram<E> {
             outside: None,
             outside_restarts: 0,
             answered: None,
+            retired_once: None,
         }
     }
 }
@@ -114,7 +118,16 @@ impl<E: Fn(u64) -> Vec<u64>> Program for ChainProgram<E> {
         Ok(CYCLE)
     }
 
-    fn reusable(&self, _demand: &u64, _value: &u64) -> bool {
+    fn reusable(&self, demand: &u64, _value: &u64) -> bool {
+        if let Some((retired, asked)) = &self.retired_once {
+            if retired == demand {
+                // Asked when it completes, then when a need would take it.
+                asked.set(asked.get() + 1);
+                if asked.get() == 2 {
+                    return false;
+                }
+            }
+        }
         self.reusable
     }
 
@@ -194,6 +207,42 @@ fn a_completion_that_is_not_reusable_is_started_again() {
     assert_eq!(execution.counters().starts, 15);
     assert_eq!(execution.counters().reuses, 0);
     assert_eq!(execution.demand_state(&0), None);
+}
+
+/// A kept value that stops serving after it completed is not delivered: the
+/// need that finds it starts that demand alone again, its waiter keeping its
+/// place, and the recomputed value serves the needs after it.
+#[test]
+fn a_kept_value_that_stopped_serving_starts_its_demand_again() {
+    let mut program = ChainProgram::new(|n| if n == 0 { vec![1, 1, 1] } else { vec![] });
+    program.retired_once = Some((1, std::cell::Cell::new(0)));
+    let mut execution = SemanticExecution::new();
+    assert_eq!(execution.drive(&mut program, 0), Ok(3));
+    assert_eq!(
+        program.starts,
+        vec![0, 1, 1],
+        "only the retired demand starts again"
+    );
+    assert_eq!(execution.counters().invalidated, 1);
+    assert_eq!(
+        execution.counters().reuses,
+        1,
+        "the recomputed value serves"
+    );
+    assert_eq!(execution.demand_state(&1), Some(DemandState::Complete));
+    // The root's own kept value is checked as a later drive opens it.
+    let mut program = ChainProgram::new(|_| vec![]);
+    program.retired_once = Some((0, std::cell::Cell::new(0)));
+    let mut execution = SemanticExecution::new();
+    assert_eq!(execution.drive(&mut program, 0), Ok(0));
+    assert_eq!(execution.drive(&mut program, 0), Ok(0));
+    assert_eq!(
+        program.starts,
+        vec![0, 0],
+        "the retired root is started again"
+    );
+    assert_eq!(execution.drive(&mut program, 0), Ok(0));
+    assert_eq!(program.starts, vec![0, 0], "the recomputed root serves");
 }
 
 /// A demand the program answers when it starts completes without a frame,

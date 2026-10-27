@@ -66,7 +66,7 @@ use super::cost_receipt::Nesting;
 use super::family_continuation::{FamilyBuild, FamilyStep};
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
-use crate::resolver_core::request_ports::{IndexedLoad, IndexedReadiness};
+use crate::resolver_core::request_ports::{IndexedLoad, IndexedLoadOutcome, IndexedReadiness};
 use crate::semantic_execution::{EvalStep, External, Outcome, Program, SemanticExecution, Start};
 use crate::semantic_query::{
     CacheRead, QueryError, QueryResult, ReadReceipt, SemanticNodeData, SemanticNodeId,
@@ -162,8 +162,27 @@ pub(super) enum FrameBuild {
     Call(Box<CallBuild>),
     Flow(Box<FlowBuild>),
     Family(Box<FamilyBuild>),
-    /// A family build waiting on its file's load, to read that file next.
-    FamilySource(Box<FamilyBuild>, Arc<str>),
+    /// A family build waiting on its file's load, to read that file next
+    /// from the load's terminal outcome.
+    FamilySource(Box<FamilyBuild>, Arc<str>, LoadEnded),
+}
+
+/// Where a load's terminal outcome is kept for the frame that waited on it:
+/// the frame consumes it once, and never begins the same load again.
+pub(super) type LoadEnded = Arc<std::sync::OnceLock<IndexedLoadOutcome>>;
+
+/// The load of a file a frame waits on, and where its outcome goes when the
+/// frame consumes it (`None` for a frame that reads the file whatever the
+/// load's outcome).
+pub(super) struct LoadWait<'p> {
+    load: Box<dyn IndexedLoad + Send + 'p>,
+    ended: Option<LoadEnded>,
+}
+
+impl<'p> LoadWait<'p> {
+    fn unobserved(load: Box<dyn IndexedLoad + Send + 'p>) -> Self {
+        Self { load, ended: None }
+    }
 }
 
 /// A function's flow return between its steps: the answers to the reads
@@ -256,7 +275,7 @@ pub(super) struct CallSeam {
 enum FramePoll<'a> {
     Need(SemanticQueryKey),
     /// The build waits on a file's load before it reads the file.
-    Await(Box<dyn IndexedLoad + Send + 'a>),
+    Await(LoadWait<'a>),
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
 }
 
@@ -508,7 +527,7 @@ impl FrameProducer<'_> {
 pub(super) enum PendingWait<'p> {
     Claim(PendingClaim<'p>),
     /// Resolved, the waiting frame steps again and reads the file.
-    Load(Box<dyn IndexedLoad + Send + 'p>),
+    Load(LoadWait<'p>),
 }
 
 /// A subscription to another task's producer, with the claim it continues.
@@ -1720,9 +1739,16 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             "a demand is answered at its own checking site"
         );
         // Exactly what the memo would serve warm: a complete, cacheable
-        // result. A partial or non-cacheable one is evaluated again, as a
-        // synchronous re-entry would evaluate it.
-        !delivery.read.cache_suppress && !delivery.read.result_is_partial()
+        // result naming no retired kernel epoch. A partial or non-cacheable
+        // one is evaluated again, as a synchronous re-entry would evaluate
+        // it; one whose epoch was retired after it completed is read again,
+        // as the request's kept completions are.
+        !delivery.read.cache_suppress
+            && !delivery.read.result_is_partial()
+            && self
+                .dispatch
+                .graph()
+                .serves_stored_value(&delivery.read.value)
     }
 
     fn poll_subscription(
@@ -1733,7 +1759,15 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         let pending = match pending {
             PendingWait::Claim(pending) => pending,
             // A loaded file is read by the frame that waited on it.
-            PendingWait::Load(load) => return load.poll(waker).map(|()| External::Restart),
+            PendingWait::Load(wait) => {
+                return wait.load.poll(waker).map(|outcome| {
+                    if let Some(ended) = &wait.ended {
+                        let set = ended.set(outcome);
+                        verter_debug_assert!(set.is_ok(), "a load ends once");
+                    }
+                    External::Restart
+                })
+            }
         };
         let dispatch = &self.dispatch;
         verter_debug_assert!(
@@ -2575,8 +2609,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if let IndexedReadiness::Loading(load) =
                             self.ctx.begin_indexed_load(&canonical)
                         {
-                            *build = Some(FrameBuild::FamilySource(family, canonical));
-                            return FramePoll::Await(load);
+                            let ended = LoadEnded::default();
+                            *build = Some(FrameBuild::FamilySource(
+                                family,
+                                canonical,
+                                Arc::clone(&ended),
+                            ));
+                            return FramePoll::Await(LoadWait {
+                                load,
+                                ended: Some(ended),
+                            });
                         }
                     }
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
@@ -2677,7 +2719,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(load) =
                 self.frame_source_load(&frame.key, &mut frame.awaited_loads, suspends_loads)
             {
-                return EvalStep::Await(PendingWait::Load(load));
+                return EvalStep::Await(PendingWait::Load(LoadWait::unobserved(load)));
             }
         }
         if !frame.recording {
@@ -2748,17 +2790,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     suspends_loads,
                 )
             }
-            // A family build whose file loaded reads it now.
+            // A family build whose file's load ended reads the file from
+            // that terminal outcome, once: an integrated file is served as
+            // loaded, and a load that ended without integrating it leaves
+            // the build no input for it — the input a synchronous serve
+            // answers after the same failed load. The load is never begun
+            // again.
             Some(FrameBuild::FamilySource(..)) => {
-                let Some(FrameBuild::FamilySource(family, canonical)) = frame.build.take() else {
+                let Some(FrameBuild::FamilySource(family, canonical, ended)) = frame.build.take()
+                else {
                     unreachable!("the build was just matched")
                 };
-                self.advance_family_frame(
-                    &frame.key,
-                    &mut frame.build,
-                    FamilyStep::Load(canonical, family),
-                    suspends_loads,
-                )
+                let serve = match ended.get() {
+                    Some(IndexedLoadOutcome::Integrated) => {
+                        self.ctx.ensure_indexed_ready_serve(&canonical)
+                    }
+                    Some(IndexedLoadOutcome::NotIntegrated(_)) => None,
+                    None => unreachable!("a frame waiting on a load resumes once it ended"),
+                };
+                let step = self.resume_family_source(*family, serve);
+                self.advance_family_frame(&frame.key, &mut frame.build, step, suspends_loads)
             }
             None => self.begin_frame_build(
                 &frame.key,

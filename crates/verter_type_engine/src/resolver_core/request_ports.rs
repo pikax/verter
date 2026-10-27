@@ -32,10 +32,39 @@ pub enum IndexedReadiness<'p> {
 /// owned, movable between threads, with one poller. Dropping it withdraws
 /// only its own wait; the load goes on for any other demand of it.
 pub trait IndexedLoad {
-    /// `Ready` once the load was integrated, failed or stopped — the serve
-    /// then answers as it answers after a synchronous load — or `Pending`
-    /// with `waker` registered on the load's completion.
-    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<()>;
+    /// `Ready` with how the load ended — integrated, or ended without
+    /// integrating the file — or `Pending` with `waker` registered on the
+    /// load's completion. The outcome is terminal: a reader that waited on
+    /// the load consumes it instead of loading the file again.
+    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<IndexedLoadOutcome>;
+}
+
+/// How an owned load ended ([`IndexedLoad::poll`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedLoadOutcome {
+    /// The file is integrated: its serve answers without loading it.
+    Integrated,
+    /// The load ended without integrating the file: the reader answers as it
+    /// answers after a synchronous load that ended the same way, with no
+    /// indexed input for the file.
+    NotIntegrated(IndexedLoadEnd),
+}
+
+/// Why a load ended without integrating its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedLoadEnd {
+    /// The load completed and supplied no content for the file.
+    Absent,
+    /// The load failed.
+    Failed,
+    /// The load was cancelled.
+    Cancelled,
+    /// A newer version of the file superseded the load.
+    Superseded,
+    /// The load waited on itself.
+    Cycle,
+    /// The loader shut down.
+    Shutdown,
 }
 
 /// The load of a file another read would perform, begun instead

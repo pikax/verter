@@ -202,8 +202,11 @@ pub(crate) trait Program {
     /// keeps evaluating.
     fn close_cycle(&mut self, demand: &Self::Demand, role: Self::Role) -> Outcome<Self>;
 
-    /// Whether a completed value may answer later needs of its demand within
-    /// this execution.
+    /// Whether a completed value may answer a need of its demand within this
+    /// execution. Asked when the value completes, to keep it, and again each
+    /// time a later need would take the kept value: a value kept while it
+    /// served may have stopped serving since (its handles retired), and is
+    /// then forgotten and its demand started again.
     fn reusable(&self, demand: &Self::Demand, value: &Self::Value) -> bool;
 
     /// Poll the outside producer of a subscription: `Ready` once it resolved,
@@ -273,6 +276,9 @@ pub(crate) struct ExecutionCounters {
     pub(crate) starts: u64,
     /// Needs answered from the execution's completed results.
     pub(crate) reuses: u64,
+    /// Completed results a later need found no longer serving, forgotten so
+    /// their demands started again.
+    pub(crate) invalidated: u64,
     /// Needs that closed a cycle.
     pub(crate) cycles: u64,
     /// Outside producers' subscriptions resolved.
@@ -547,16 +553,10 @@ impl<P: Program> SemanticExecution<P> {
             "a drive begins with no open demand"
         );
         if let Some(&id) = self.index.get(&root) {
-            let record = &self.demands[id.0 as usize];
-            verter_debug_assert!(record.state == DemandState::Complete);
-            #[cfg(test)]
-            {
-                self.counters.reuses += 1;
+            verter_debug_assert!(self.demands[id.0 as usize].state == DemandState::Complete);
+            if let Some(value) = self.kept_value(program, id) {
+                return Err(Ok(value));
             }
-            return Err(Ok(record
-                .value
-                .clone()
-                .expect("a complete demand holds its value")));
         }
         self.root_outcome = None;
         let root = self.insert_demand(root);
@@ -683,17 +683,15 @@ impl<P: Program> SemanticExecution<P> {
             return;
         };
         match self.demands[id.0 as usize].state {
-            DemandState::Complete => {
-                #[cfg(test)]
-                {
-                    self.counters.reuses += 1;
+            DemandState::Complete => match self.kept_value(program, id) {
+                Some(value) => self.deliver(waiter, Ok(value)),
+                // Only this demand starts again: its waiter keeps its place.
+                None => {
+                    let id = self.insert_demand(demand);
+                    self.demands[id.0 as usize].waiters.push(waiter);
+                    self.begin(program, id, root);
                 }
-                let value = self.demands[id.0 as usize]
-                    .value
-                    .clone()
-                    .expect("a complete demand holds its value");
-                self.deliver(waiter, Ok(value));
-            }
+            },
             DemandState::Subscribed => self.demands[id.0 as usize].waiters.push(waiter),
             DemandState::Starting
             | DemandState::Runnable(_)
@@ -713,6 +711,38 @@ impl<P: Program> SemanticExecution<P> {
                 self.deliver(waiter, outcome);
             }
         }
+    }
+
+    /// The value the completed demand `id` keeps, when it still answers a
+    /// need ([`Program::reusable`]); otherwise the demand is forgotten, so
+    /// the caller starts it again.
+    fn kept_value(&mut self, program: &P, id: DemandId) -> Option<P::Value> {
+        let record = &self.demands[id.0 as usize];
+        let demand = record
+            .demand
+            .as_ref()
+            .expect("a kept value answers an identified demand");
+        let value = record
+            .value
+            .as_ref()
+            .expect("a complete demand holds its value");
+        if program.reusable(demand, value) {
+            #[cfg(test)]
+            {
+                self.counters.reuses += 1;
+            }
+            return Some(value.clone());
+        }
+        #[cfg(test)]
+        {
+            self.counters.invalidated += 1;
+        }
+        let record = &mut self.demands[id.0 as usize];
+        record.value = None;
+        if let Some(demand) = record.demand.take() {
+            self.index.remove(&demand);
+        }
+        None
     }
 
     /// Complete `id` with `outcome`: keep a reusable value as the execution's

@@ -271,28 +271,58 @@ impl VerterHost {
 
 /// A file's load the semantic runtime waits on instead of driving it: the
 /// owned scheduler handoff, integrated on this host once Analysis is ready,
-/// exactly as [`VerterHost::ensure_loaded`] integrates it.
+/// exactly as [`VerterHost::ensure_loaded`] integrates it. Its terminal
+/// outcome is kept and answered again to a later poll.
 struct HostIndexedLoad<'h> {
     host: &'h VerterHost,
     load: Option<HostLoadHandoff>,
+    outcome: Option<verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome>,
 }
 
 impl verter_type_engine::resolver_core::request_ports::IndexedLoad for HostIndexedLoad<'_> {
-    fn poll(&mut self, waker: &Waker) -> Poll<()> {
+    fn poll(
+        &mut self,
+        waker: &Waker,
+    ) -> Poll<verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome> {
+        use verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome;
+        if let Some(outcome) = self.outcome {
+            return Poll::Ready(outcome);
+        }
         let Some(load) = self.load.as_mut() else {
-            return Poll::Ready(());
+            unreachable!("a load without its handoff has ended with an outcome")
         };
-        let outcome = match load.poll(waker) {
+        let ended = match load.poll(waker) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(outcome) => outcome,
+            Poll::Ready(ended) => ended,
         };
         self.load = None;
-        // A failed, stopped or superseded load integrates nothing; the serve
-        // then answers as it answers after a synchronous load that failed.
-        if let Ok(commit) = outcome {
-            let _ = commit.apply(self.host);
+        // A failed, stopped or superseded load integrates nothing; its
+        // reader then answers as after a synchronous load that failed.
+        let outcome = match ended.and_then(|commit| commit.apply(self.host)) {
+            Ok(true) => IndexedLoadOutcome::Integrated,
+            Ok(false) => IndexedLoadOutcome::NotIntegrated(
+                verter_type_engine::resolver_core::request_ports::IndexedLoadEnd::Absent,
+            ),
+            Err(error) => IndexedLoadOutcome::NotIntegrated(error.load_end()),
+        };
+        self.outcome = Some(outcome);
+        Poll::Ready(outcome)
+    }
+}
+
+impl HostLoadError {
+    /// The typed end of an owned load this error stopped.
+    fn load_end(&self) -> verter_type_engine::resolver_core::request_ports::IndexedLoadEnd {
+        use verter_type_engine::resolver_core::request_ports::IndexedLoadEnd;
+        match self {
+            HostLoadError::Cancelled => IndexedLoadEnd::Cancelled,
+            HostLoadError::Cycle => IndexedLoadEnd::Cycle,
+            HostLoadError::Superseded => IndexedLoadEnd::Superseded,
+            HostLoadError::Shutdown => IndexedLoadEnd::Shutdown,
+            HostLoadError::Failed(_) | HostLoadError::WrongHost | HostLoadError::NoProgress => {
+                IndexedLoadEnd::Failed
+            }
         }
-        Poll::Ready(())
     }
 }
 
@@ -335,6 +365,10 @@ impl VerterHost {
         {
             return IndexedReadiness::Settled;
         }
+        #[cfg(test)]
+        self.test_force
+            .indexed_loads_begun
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let scope = self.scheduler.enter_execution_scope();
         let load = self.begin_load(
             &canonical,
@@ -344,6 +378,7 @@ impl VerterHost {
         IndexedReadiness::Loading(Box::new(HostIndexedLoad {
             host: self,
             load: Some(load),
+            outcome: None,
         }))
     }
 }
