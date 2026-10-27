@@ -741,3 +741,15 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/code_transform/chunk.rs` | Chunk types (Original, Overwritten, Inserted, InsertedMapped) |
 | `crates/verter_compiler/src/code_transform/source_map.rs` | Source map generation from chunk positions |
 | `crates/verter_compiler/src/framework_common/generated_chunk.rs` | Generated-chunk assembly and multi-source map composition |
+
+### Retained parse storage measurement
+
+Framework parse artifacts and prepared style IRs expose exhaustive `HeapSize`
+measurement for their session owners. The erased `CarrierParse` contract requires
+that measurement for every adapter. Parser-owned capacity walkers measure opaque
+SFC/Svelte payloads without counting their inline records twice; CSS counts its
+frozen arena reservation once, including spare capacity, rather than counting
+bump-backed children again. These data-only measurements do not choose admission
+or change the standalone prepared compiler's production boundary. The owning
+accounting conventions are in
+`crates/verter_type_engine/observe-inventory/SKR-OWN-ACCOUNT-ARTIFACTS.md`.

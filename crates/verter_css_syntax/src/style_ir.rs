@@ -397,7 +397,11 @@ impl StaticClassFact {
     }
 }
 
-struct StyleSyntaxIrData {
+/// The one shared allocation holding a parsed stylesheet: every clone of a
+/// [`StyleSyntaxIr`] names it. Opaque; it describes its storage to an
+/// owning accounting layer ([`Self::source_text`],
+/// [`Self::exclusive_allocations`]) without this crate depending on one.
+pub struct StyleSyntaxIrStorage {
     source: CssSource,
     dialect: CssDialect,
     statements: BumpSlice<StyleStatement>,
@@ -428,10 +432,40 @@ struct StyleSyntaxIrData {
 /// Parsed stylesheet. `Clone` is an `Arc` clone and keeps bump-backed nodes valid.
 #[derive(Clone)]
 pub struct StyleSyntaxIr {
-    data: Arc<StyleSyntaxIrData>,
+    data: Arc<StyleSyntaxIrStorage>,
+}
+
+impl StyleSyntaxIrStorage {
+    /// The source text, an allocation other holders may share.
+    pub fn source_text(&self) -> &Arc<str> {
+        self.source.shared_text()
+    }
+
+    /// Payload bytes of each allocation the parse owns exclusively beyond
+    /// its shared block and its source text: the frozen arena (every chunk
+    /// with spare capacity and chunk metadata), then the capacities of the
+    /// diagnostic, dependency and comment lists. An entry of `0` is no
+    /// allocation. The listed records hold only inline fields.
+    pub fn exclusive_allocations(&self) -> [usize; 4] {
+        fn list<T: Copy>(values: &Vec<T>) -> usize {
+            values.capacity() * std::mem::size_of::<T>()
+        }
+        [
+            self._bump.reserved_bytes(),
+            list(&self.diagnostics),
+            list(&self.dependencies),
+            list(&self.comment_spans),
+        ]
+    }
 }
 
 impl StyleSyntaxIr {
+    /// The shared allocation holding this parse, for an owning layer that
+    /// accounts retained storage.
+    pub fn storage(&self) -> &Arc<StyleSyntaxIrStorage> {
+        &self.data
+    }
+
     pub fn source(&self) -> &CssSource {
         &self.data.source
     }
@@ -564,7 +598,7 @@ impl StyleSyntaxIr {
     /// order — a binary-search slice of the parse-time comment inventory, never a
     /// re-lex of `range`'s bytes.
     /// The span of an unpaired `<!--` CDO token, if the parse saw one.
-    /// See [`StyleSyntaxIrData::unpaired_cdo_span`] field doc.
+    /// See [`StyleSyntaxIrStorage::unpaired_cdo_span`] field doc.
     #[must_use]
     pub fn unpaired_cdo_span(&self) -> Option<Span> {
         self.data.unpaired_cdo_span
@@ -1368,7 +1402,7 @@ pub(crate) fn notify_parse_phase(_phase: &'static str) {}
 
 fn ir_from_frozen(bump: Bump, frozen: FrozenStyleIr) -> StyleSyntaxIr {
     StyleSyntaxIr {
-        data: Arc::new(StyleSyntaxIrData {
+        data: Arc::new(StyleSyntaxIrStorage {
             source: frozen.source,
             dialect: frozen.dialect,
             statements: frozen.statements,

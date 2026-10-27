@@ -11,7 +11,17 @@ use super::carrier_structure_hash::CarrierStructureHash;
 
 macro_rules! local_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            verter_retention::heap_size::HeapSize,
+        )]
         pub struct $name(pub u32);
         impl $name {
             pub const fn get(self) -> u32 {
@@ -27,7 +37,7 @@ local_id!(MarkupNodeId);
 local_id!(AttributeId);
 local_id!(InternedNameId);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SourceSpan {
     pub source_space: SourceSpaceId,
     pub start: u32,
@@ -43,7 +53,7 @@ impl SourceSpan {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SourceSlice {
     pub span: SourceSpan,
 }
@@ -53,7 +63,7 @@ impl SourceSlice {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SourceEncoding {
     Utf8,
 }
@@ -66,7 +76,7 @@ pub enum SourceEncoding {
 /// integer can never masquerade as block identity. Consumers associate data
 /// through full-identity equality (artifact identity + block id) and
 /// re-validate against a live inventory via [`ArtifactBlockRef::validate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct CarrierArtifactIdentity([u8; 32]);
 
 impl CarrierArtifactIdentity {
@@ -75,7 +85,7 @@ impl CarrierArtifactIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ArtifactBlockRef {
     artifact_identity: CarrierArtifactIdentity,
     block: BlockId,
@@ -101,12 +111,12 @@ impl ArtifactBlockRef {
             && self.artifact_identity == *owner.artifact_identity_token()
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct BlockContentOriginFingerprint(pub [u8; 32]);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct TransformChainFingerprint(pub [u8; 32]);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SourceSpaceIdentity {
     RegisteredSnapshot {
         snapshot: RegisteredSourceSnapshotId,
@@ -119,7 +129,7 @@ pub enum SourceSpaceIdentity {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SourceSpaceDescriptor {
     pub id: SourceSpaceId,
     pub identity: SourceSpaceIdentity,
@@ -146,18 +156,18 @@ impl SourceSpaceDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct NormalizedNameTable {
     pub values: Arc<[Arc<str>]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct DecodedValueKey {
     pub raw: SourceSlice,
     pub recipe: EntityDecodeRecipe,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct CarrierBlockInventory {
     source_spaces: Arc<[SourceSpaceDescriptor]>,
     normalized_names: Arc<NormalizedNameTable>,
@@ -731,7 +741,7 @@ pub enum InventoryValidationError {
     BlocksOutOfOrder,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum CarrierBlock {
     Section {
         id: BlockId,
@@ -751,7 +761,7 @@ impl CarrierBlock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SectionRole {
     TemplateHost,
     Script {
@@ -767,13 +777,13 @@ pub enum SectionRole {
         normalized_name: Arc<str>,
     },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ScriptRole {
     Instance,
     Setup,
     Module,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ScriptSourceType {
     JavaScript,
     TypeScript,
@@ -795,7 +805,7 @@ impl From<RegistryScriptSourceType> for ScriptSourceType {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum StyleDialect {
     Css,
     Scss,
@@ -809,14 +819,14 @@ pub enum StyleDialect {
     },
     Missing,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum StyleModule {
     None,
     Default,
     Named { name: SourceSlice },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum MarkupFragmentKind {
     Element,
     Text,
@@ -828,7 +838,7 @@ pub enum MarkupFragmentKind {
     Recovered,
     Unknown,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum RecoveredMarkupKind {
     Element,
     Comment,
@@ -837,7 +847,7 @@ pub enum RecoveredMarkupKind {
     SvelteClause,
     SvelteStandaloneTag,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum UnknownMarkupReason {
     ParserUnknownVariant,
     UnsupportedAuthoredHead,
@@ -845,7 +855,7 @@ pub enum UnknownMarkupReason {
     RecoveryBudgetExceeded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct TaggedSyntax {
     pub authored_name: SourceSlice,
     pub normalized_name: InternedNameId,
@@ -876,7 +886,7 @@ impl TaggedSyntax {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SyntaxTermination {
     Closed,
     SelfClosing,
@@ -887,7 +897,7 @@ pub enum SyntaxTermination {
         recovery_span: Option<SourceSpan>,
     },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum BlockRecoveryReason {
     MissingCloseTag,
     MismatchedCloseTag,
@@ -901,7 +911,7 @@ pub enum BlockRecoveryReason {
     ParserRejectedSyntax,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum CarrierAttribute {
     Named {
         id: AttributeId,
@@ -1022,18 +1032,18 @@ impl CarrierAttribute {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct AttributeName {
     pub authored: SourceSlice,
     pub normalized: InternedNameId,
     pub name_span: SourceSpan,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum NamedAttributeSyntax {
     Explicit,
     SvelteShorthand,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum AttributeValue {
     Missing,
     Static {
@@ -1086,7 +1096,7 @@ impl AttributeValue {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum AttributeValuePart {
     Static {
         raw: SourceSlice,
@@ -1120,7 +1130,7 @@ impl AttributeValuePart {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum AttributeDynamicSyntax {
     VueBracedExpression,
     VueDynamicArgument,
@@ -1129,19 +1139,19 @@ pub enum AttributeDynamicSyntax {
     SvelteShorthand,
     SvelteExpressionTag,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum AttributeQuote {
     Unquoted,
     Single,
     Double,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum DirectiveFamily {
     Vue(VueDirectiveKind),
     Svelte(SvelteDirectiveKind),
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum VueDirectiveKind {
     Bind,
     On,
@@ -1167,7 +1177,7 @@ pub enum VueDirectiveKind {
         normalized: InternedNameId,
     },
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SvelteDirectiveKind {
     Bind,
     On,
@@ -1185,13 +1195,13 @@ pub enum SvelteDirectiveKind {
         reason: UnknownDirectiveReason,
     },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum UnknownDirectiveReason {
     ParserUnknownVariant,
     UnsupportedAuthoredPrefix,
     MalformedAuthoredPrefix,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum DirectiveArgument {
     None,
     Static {
@@ -1224,7 +1234,7 @@ impl DirectiveArgument {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct DirectiveModifier {
     pub authored: SourceSlice,
     pub normalized: InternedNameId,
@@ -1232,12 +1242,12 @@ pub struct DirectiveModifier {
     pub name_span: SourceSpan,
     pub full_span: SourceSpan,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum LazyDecodedText {
     SameAsSource,
     EntityDecode { key: DecodedValueKey },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum EntityDecodeRecipe {
     Html5Text,
     Html5Attribute { quote: AttributeQuote },
@@ -1246,13 +1256,13 @@ pub enum EntityDecodeRecipe {
     SvelteText,
     SvelteAttribute { quote: AttributeQuote },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum QuotedAttributeQuote {
     Single,
     Double,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct MarkupSyntaxArena {
     pub roots: Arc<[MarkupNodeId]>,
     pub nodes: Arc<[MarkupSyntaxNode]>,
@@ -1269,7 +1279,7 @@ impl MarkupSyntaxArena {
         &self.child_ids
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct MarkupSyntaxNode {
     pub id: MarkupNodeId,
     pub root_block: BlockId,
@@ -1283,7 +1293,7 @@ impl MarkupSyntaxNode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum MarkupNodeKind {
     Element(MarkupElementSyntax),
     Text {
@@ -1447,12 +1457,12 @@ impl MarkupNodeKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum MarkupInterpolationFamily {
     VueInterpolation,
     SvelteInterpolation,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct MarkupElementSyntax {
     pub authored_name: SourceSlice,
     pub normalized_name: InternedNameId,
@@ -1496,7 +1506,7 @@ impl MarkupElementSyntax {
         v
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum MarkupNamespace {
     Html,
     Svg,
@@ -1504,7 +1514,7 @@ pub enum MarkupNamespace {
     Foreign,
     Unknown,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum MarkupElementKind {
     Native,
     Component,
@@ -1514,7 +1524,7 @@ pub enum MarkupElementKind {
     SvelteSpecial(SvelteSpecialElementKind),
     Unknown,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SvelteSpecialElementKind {
     Head,
     Window,
@@ -1529,7 +1539,7 @@ pub enum SvelteSpecialElementKind {
     Unknown { authored_local: SourceSlice },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SvelteControlBlockSyntax {
     pub head: SvelteControlBlockHead,
     pub opening_span: SourceSpan,
@@ -1548,7 +1558,7 @@ impl SvelteControlBlockSyntax {
 /// Head expressions are parser-owned facts: an EMPTY authored head (`{#if}`,
 /// `{#each}`, `{#await}`, `{#key}` — ordinary mid-typing states) carries
 /// `None`, the typed recovery. Consumers must not fabricate a span for it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SvelteControlBlockHead {
     If {
         condition: Option<SourceSpan>,
@@ -1613,7 +1623,7 @@ impl SvelteControlBlockHead {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SvelteClauseSyntax {
     pub head: SvelteClauseHead,
     pub marker_span: SourceSpan,
@@ -1629,7 +1639,7 @@ impl SvelteClauseSyntax {
 }
 /// `ElseIf.condition` is `None` for an authored empty condition
 /// (`{:else if}`) — the same typed recovery as the control-block heads.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SvelteClauseHead {
     Else,
     ElseIf { condition: Option<SourceSpan> },
@@ -1645,7 +1655,7 @@ impl SvelteClauseHead {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SvelteAwaitInlineBranch {
     None,
     Then {
@@ -1680,7 +1690,7 @@ impl SvelteAwaitInlineBranch {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SvelteStandaloneTagSyntax {
     pub family: SvelteStandaloneTagFamily,
     pub opening_span: SourceSpan,
@@ -1700,7 +1710,7 @@ impl SvelteStandaloneTagSyntax {
         v
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SvelteStandaloneTagFamily {
     Render,
     Html,

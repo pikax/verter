@@ -85,6 +85,7 @@ mod tests {
 
     /// A fixture carrier type — its `CarrierParse` impl proves a carrier-less
     /// ctx never opens it.
+    #[derive(verter_retention::heap_size::HeapSize)]
     struct FixtureCarrier;
     impl CarrierParse for FixtureCarrier {
         fn __verter_as_any(&self) -> &dyn Any {

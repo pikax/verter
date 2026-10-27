@@ -36,3 +36,27 @@ pub mod references;
 pub mod rename;
 pub mod sentinel_uris;
 pub mod workspace_symbol;
+
+pub mod app_perf;
+pub mod compat;
+pub mod component_workbench;
+pub mod edit_transaction;
+#[cfg(test)]
+mod edit_transaction_tests;
+pub mod migration;
+pub mod on_type_formatting;
+pub mod regex;
+pub mod rename_codec;
+#[cfg(test)]
+mod rename_codec_tests;
+pub mod runtime_inspection;
+pub mod security;
+pub mod semantic_graph;
+pub mod semantic_tokens;
+pub mod signature_help;
+pub mod source_actions;
+pub mod structural;
+pub mod testing;
+pub mod vue_style_projection;
+#[cfg(test)]
+mod vue_style_projection_tests;

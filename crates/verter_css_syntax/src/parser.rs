@@ -88,6 +88,13 @@ impl CssSource {
         &self.text
     }
 
+    /// The source text's allocation, which other holders of the same text
+    /// may share.
+    #[inline]
+    pub fn shared_text(&self) -> &Arc<str> {
+        &self.text
+    }
+
     #[inline]
     pub const fn origin(&self) -> u32 {
         self.size.origin()

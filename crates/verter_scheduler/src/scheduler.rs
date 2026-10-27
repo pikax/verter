@@ -396,6 +396,10 @@ pub struct Scheduler {
     /// parse/analyze work. Workers tag `CallerKind::IoWorker`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+    /// Stage tasks this scheduler submitted to either pool that have not
+    /// finished dropping their captures ([`Self::wait_stage_tasks_before`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) stage_tasks: Arc<crate::execution::pool::StageTasksInFlight>,
     /// Deferred blocker IDs for files whose node was at generation 0 when
     /// `register_resolved_deps` was called. Replayed when the node advances
     /// past generation 0 during Source stage completion.
@@ -652,6 +656,7 @@ impl Scheduler {
             config,
             cpu_pool,
             io_pool,
+            stage_tasks: Arc::default(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
             #[cfg(any(test, feature = "semantic-observe"))]
@@ -774,6 +779,8 @@ impl Scheduler {
             cpu_pool,
             #[cfg(not(target_arch = "wasm32"))]
             io_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            stage_tasks: Arc::default(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
             #[cfg(any(test, feature = "semantic-observe"))]
@@ -1541,6 +1548,24 @@ impl Scheduler {
         *self.driver_thread_id.lock() = Some(handle.thread().id());
         *self.driver_handle.lock() = Some(handle);
         start
+    }
+
+    /// The boundary after every stage task this scheduler has submitted so
+    /// far, for [`Self::wait_stage_tasks_before`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stage_task_boundary(&self) -> crate::execution::pool::StageTaskBoundary {
+        self.stage_tasks.boundary()
+    }
+
+    /// Block until every stage task submitted before `boundary` has
+    /// finished, including dropping the file node and snapshots its closure
+    /// captured: a task wakes its waiters before it returns, so what it
+    /// retained can outlive the answer it delivered. Tasks submitted after
+    /// the boundary are not waited for, so a busy scheduler cannot hold the
+    /// wait open. Never call from scheduler stage work.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn wait_stage_tasks_before(&self, boundary: crate::execution::pool::StageTaskBoundary) {
+        self.stage_tasks.wait_before(boundary);
     }
 
     /// Drain and discard all pending inbox submissions. Used by `close()`

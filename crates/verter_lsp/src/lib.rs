@@ -536,3 +536,14 @@ pub enum ProjectSyncMode {
     #[default]
     FullProject,
 }
+
+// Reserved module homes.
+pub mod coexistence;
+pub mod diagnostic_transport;
+pub mod enhancement;
+pub mod file_operations;
+pub mod progress;
+pub mod project_profile;
+pub mod ts_enhancement;
+pub mod workspace_edit;
+pub mod workspace_protocol;

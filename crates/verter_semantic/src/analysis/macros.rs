@@ -787,7 +787,21 @@ pub struct MacroFieldAddressTable {
     work: verter_audit::observe::ObservedU64,
 }
 
-#[derive(Debug)]
+impl verter_retention::heap_size::HeapSize for MacroFieldAddressTable {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            macros,
+            #[cfg(feature = "semantic-observe")]
+                work: _,
+        } = self;
+        macros.heap_size(meter)
+    }
+}
+
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 struct MacroAddress {
     owner: TopLevelOwnerId,
     kind: AnalyzedMacroKind,
@@ -796,7 +810,7 @@ struct MacroAddress {
 }
 
 /// Where one field's authored payload node sits in the retained program.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, verter_retention::heap_size::HeapSize)]
 enum FieldAddress {
     /// The analyzer recorded no authored payload for the field.
     Unauthored,
