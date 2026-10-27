@@ -240,15 +240,14 @@ async fn closed_connection_fails_request() {
 #[tokio::test]
 async fn peer_notification_is_surfaced_to_handler() {
     let (cr, cw, _sr, mut sw) = duplex_pair();
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen_handler = Arc::clone(&seen);
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     let conn = JsonRpcConnection::connect_with_handlers(
         cr,
         cw,
         Arc::new(|_method, _params| serde_json::Value::Null),
         Arc::new(move |method, _params| {
-            seen_handler.lock().unwrap().push(method.to_string());
+            let _ = seen_tx.send(method.to_string());
         }),
     );
 
@@ -261,11 +260,13 @@ async fn peer_notification_is_surfaced_to_handler() {
     sw.write_all(&encode_message(&notification)).await.unwrap();
     sw.flush().await.unwrap();
 
-    // Give the reader task a moment to route it.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The handler reports what it was given; the timeout is a hang guard only.
+    let surfaced = tokio::time::timeout(std::time::Duration::from_secs(5), seen.recv())
+        .await
+        .expect("a peer notification must be surfaced to the notification handler, not ignored");
     assert_eq!(
-        *seen.lock().unwrap(),
-        vec!["verter/fatal".to_string()],
+        surfaced.as_deref(),
+        Some("verter/fatal"),
         "a peer notification must be surfaced to the notification handler, not ignored"
     );
     conn.close().await.unwrap();
@@ -280,11 +281,24 @@ async fn is_closed_reflects_connection_death() {
     let conn = JsonRpcConnection::connect(cr, cw);
     assert!(!conn.is_closed(), "a fresh live connection is not closed");
 
+    // An in-flight probe: its first poll registers it as a waiter.
+    let mut probe = Box::pin(conn.request("probe", serde_json::Value::Null));
+    assert!(std::future::Future::poll(
+        probe.as_mut(),
+        &mut std::task::Context::from_waker(std::task::Waker::noop())
+    )
+    .is_pending());
+
     // The peer drops both ends → EOF on the client read → the reader task ends.
     drop(sr);
     drop(sw);
-    // Give the reader task a moment to observe EOF.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // On EOF the reader marks the connection closed and only then fails every
+    // waiter, so the probe failing means the flag is already set. The timeout
+    // is a hang guard only.
+    let probed = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+        .await
+        .expect("the reader task must observe EOF");
+    assert!(probed.is_err(), "the peer never answered the probe");
     assert!(
         conn.is_closed(),
         "a connection whose peer EOFed must report is_closed() == true"

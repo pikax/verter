@@ -662,7 +662,8 @@ mod tests {
             (true, false)
         );
         flip.join().unwrap();
-        std::thread::sleep(Duration::from_millis(250));
+        // empty_cgroup has returned and the flipper has exited, so nothing can write
+        // the kill file any more: what it holds now is final.
         assert_eq!(
             disk::read_to_string(&kill_path).unwrap(),
             "1",

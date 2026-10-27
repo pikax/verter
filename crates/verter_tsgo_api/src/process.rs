@@ -825,12 +825,13 @@ mod tests {
     async fn tree_kill_reaches_a_pipe_holding_descendant() {
         use tokio::io::AsyncReadExt;
 
-        // sh -c 'echo ready; (exec sleep 600) & wait' — the grandchild sleep
-        // inherits stdout/stderr; the direct child waits on it forever.
+        // The grandchild sleep inherits stdout/stderr; the direct child waits
+        // on it forever. `ready` is printed only after the grandchild was
+        // forked, so reading it proves the tree is established.
         let mut command = tokio::process::Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("echo ready; sleep 600 & wait")
+            .arg("sleep 600 & echo ready; wait")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -839,8 +840,18 @@ mod tests {
         let mut child = command.spawn().expect("spawn sh");
         let pid = child.id().expect("child pid");
 
-        // Let the tree establish, then kill it.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the tree to establish, then kill it.
+        let mut out = child.stdout.take().expect("stdout");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 64];
+        while !buf.ends_with(b"ready\n") {
+            let read = tokio::time::timeout(REAP_BOUND, out.read(&mut chunk))
+                .await
+                .expect("the shell must report the tree established")
+                .expect("read the shell's stdout");
+            assert!(read > 0, "the shell exited before reporting the tree");
+            buf.extend_from_slice(&chunk[..read]);
+        }
         TreeKill::arm(pid).kill_tree();
         assert!(
             reap_child_bounded(&mut child, REAP_BOUND).await,
@@ -848,8 +859,6 @@ mod tests {
         );
         // The pipes must hit EOF once every writer is dead (the grandchild
         // held them): a read that returns 0 bytes proves the tree died.
-        let mut out = child.stdout.take().expect("stdout");
-        let mut buf = Vec::new();
         let read = tokio::time::timeout(REAP_BOUND, out.read_to_end(&mut buf)).await;
         assert!(
             read.is_ok(),

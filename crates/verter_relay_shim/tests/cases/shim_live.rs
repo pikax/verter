@@ -184,6 +184,8 @@ fn carrier_fixture(dir: &Path) -> (String, String, String) {
 struct FakeEditor {
     out_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     frames: Arc<StdMutex<Vec<serde_json::Value>>>,
+    /// Fired after every recorded frame.
+    recorded: Arc<tokio::sync::Notify>,
 }
 
 impl FakeEditor {
@@ -205,6 +207,8 @@ impl FakeEditor {
 
         let frames = Arc::new(StdMutex::new(Vec::new()));
         let sink = Arc::clone(&frames);
+        let recorded = Arc::new(tokio::sync::Notify::new());
+        let announce = Arc::clone(&recorded);
         let answer_tx = out_tx.clone();
         tokio::spawn(async move {
             let mut out = stdout;
@@ -228,10 +232,15 @@ impl FakeEditor {
                         let _ = answer_tx.send(encode_message(&reply));
                     }
                     sink.lock().unwrap().push(msg);
+                    announce.notify_waiters();
                 }
             }
         });
-        Self { out_tx, frames }
+        Self {
+            out_tx,
+            frames,
+            recorded,
+        }
     }
 
     async fn send(&self, msg: &serde_json::Value) {
@@ -247,23 +256,28 @@ impl FakeEditor {
         pred: impl Fn(&serde_json::Value) -> bool,
         timeout: Duration,
     ) -> Option<serde_json::Value> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            if let Some(found) = self
-                .frames
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|m| pred(m))
-                .cloned()
-            {
-                return Some(found);
+        // Re-check after every recorded frame; interest is enabled before each re-check, so a frame
+        // landing in between is not missed. The timeout is a hang guard only.
+        tokio::time::timeout(timeout, async {
+            loop {
+                let recorded = self.recorded.notified();
+                tokio::pin!(recorded);
+                recorded.as_mut().enable();
+                if let Some(found) = self
+                    .frames
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|m| pred(m))
+                    .cloned()
+                {
+                    return found;
+                }
+                recorded.await;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        })
+        .await
+        .ok()
     }
 }
 
@@ -1280,6 +1294,7 @@ async fn setup_failure_after_spawn_kills_fake_tsgo() {
     std::fs::write(&regular_file, b"x").unwrap();
     let bad_control_dir = regular_file.join("nope");
     let heartbeat = dir.join("heartbeat.log");
+    let pid_file = dir.join("fake.pid");
 
     let mut shim = Command::new(bin_exe!("verter-relay-shim"))
         .arg("--real-tsgo")
@@ -1292,6 +1307,7 @@ async fn setup_failure_after_spawn_kills_fake_tsgo() {
         .arg("--lsp")
         .arg("--stdio")
         .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        .env("FAKE_TSGO_PID_FILE", &pid_file)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1309,18 +1325,16 @@ async fn setup_failure_after_spawn_kills_fake_tsgo() {
         "a setup failure after spawn must exit the shim NON-ZERO; got {status:?}"
     );
 
-    // After the shim has exited, the fake tsgo must be DEAD (reaped by the guard), so the
-    // heartbeat file stops growing. Sample across the fake's ~30ms beat interval: a
-    // still-alive orphan would append several more bytes.
-    let sample = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    let before = sample(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let after = sample(&heartbeat);
-    assert_eq!(
-        before, after,
-        "the fake tsgo must be reaped on setup failure (no orphan): the heartbeat grew \
-         {before}->{after} bytes AFTER the shim exited, so the child was left running"
-    );
+    // After the shim has exited, the fake tsgo must be DEAD (reaped by the guard). A fake that ran
+    // at all published its pid first, so that process must have exited; one the guard killed before
+    // it ran never published one.
+    if let Some(pid) = published_child_pid(&pid_file) {
+        assert!(
+            wait_for_process_exit(pid, Duration::from_secs(10)).await,
+            "the fake tsgo must be reaped on setup failure (no orphan): pid {pid} is still running \
+             AFTER the shim exited"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1332,6 +1346,30 @@ async fn setup_failure_after_spawn_kills_fake_tsgo() {
 /// duplicated per gate.
 fn heartbeat_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// The pid the fake tsgo published at `pid_file` as its first act, if it has published one. The
+/// fixture writes the file whole and renames it into place, so a present file is complete.
+fn published_child_pid(pid_file: &Path) -> Option<u32> {
+    std::fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+}
+
+/// Wait until the process `pid` has exited. It is a separate process with no channel back to the
+/// test, so its liveness is observed by polling the OS under a watchdog; the result is a positive
+/// observation of the exit rather than an absence of heartbeats over a time window.
+async fn wait_for_process_exit(pid: u32, budget: Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if !verter_tsgo_api::process::process_alive(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// HARD-kill the shim so NEITHER its RAII `Drop` NOR its Unix signal handlers can run — only the
@@ -1371,6 +1409,7 @@ async fn hard_killed_shim_does_not_orphan_real_tsgo() {
     let dir = tempdir("hardkill");
     let control_dir = dir.join("ctl");
     let heartbeat = dir.join("heartbeat.log");
+    let pid_file = dir.join("fake.pid");
 
     let mut shim = Command::new(bin_exe!("verter-relay-shim"))
         .arg("--real-tsgo")
@@ -1383,6 +1422,7 @@ async fn hard_killed_shim_does_not_orphan_real_tsgo() {
         .arg("--lsp")
         .arg("--stdio")
         .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        .env("FAKE_TSGO_PID_FILE", &pid_file)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1397,12 +1437,13 @@ async fn hard_killed_shim_does_not_orphan_real_tsgo() {
     // missing fake bin could never advertise and this gate would time out rather than pass hollow).
     let (_adv_path, _adv) = wait_for_advertisement(&control_dir, "hardkill").await;
 
-    // Non-vacuity gate: the fake tsgo must be genuinely alive + beating before the hard kill.
-    let warm = heartbeat_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Non-vacuity gate: the fake tsgo must be genuinely alive before the hard kill. It publishes its
+    // pid before its first beat, so once it beats its pid is known.
+    wait_for_child_alive(&heartbeat).await;
+    let child_pid = published_child_pid(&pid_file).expect("the fake tsgo publishes its pid first");
     assert!(
-        heartbeat_len(&heartbeat) > warm,
-        "the fake tsgo must be beating before the hard kill (else the reap assertion is vacuous)"
+        verter_tsgo_api::process::process_alive(child_pid),
+        "the fake tsgo must be running before the hard kill (else the reap assertion is vacuous)"
     );
 
     // HARD-kill the shim: no Drop, no signal handler — only the OS primitive can reap the child.
@@ -1410,18 +1451,13 @@ async fn hard_killed_shim_does_not_orphan_real_tsgo() {
     // Reap the shim so the OS releases its handles (Windows closes the last job handle → the job's
     // KILL_ON_JOB_CLOSE reaps the child; Linux delivers the child's PDEATHSIG on the shim's death).
     let _ = tokio::time::timeout(Duration::from_secs(10), shim.wait()).await;
-    // Let the OS finish reaping the contained child before sampling.
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // THE guarantee: the OS reaped the OWNED child, so the heartbeat stops growing once the shim is
-    // gone. Sample across several ~30ms beat intervals.
-    let before = heartbeat_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    let after = heartbeat_len(&heartbeat);
-    assert_eq!(
-        before, after,
-        "a HARD-killed shim must not orphan the real tsgo: the heartbeat grew {before}->{after} \
-         bytes after the shim was hard-killed, so the OS did not reap the OWNED child"
+    // THE guarantee: the OS reaps the OWNED child once the shim is gone. Its exit is observed
+    // directly; the budget is a hang guard only.
+    assert!(
+        wait_for_process_exit(child_pid, Duration::from_secs(10)).await,
+        "a HARD-killed shim must not orphan the real tsgo: pid {child_pid} is still running after \
+         the shim was hard-killed, so the OS did not reap the OWNED child"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1451,6 +1487,7 @@ async fn shim_sigterm_reaps_owned_child_and_reraises_the_signal() {
     let dir = tempdir("sigterm");
     let control_dir = dir.join("ctl");
     let heartbeat = dir.join("heartbeat.log");
+    let pid_file = dir.join("fake.pid");
 
     let mut shim = Command::new(bin_exe!("verter-relay-shim"))
         .arg("--real-tsgo")
@@ -1463,6 +1500,7 @@ async fn shim_sigterm_reaps_owned_child_and_reraises_the_signal() {
         .arg("--lsp")
         .arg("--stdio")
         .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        .env("FAKE_TSGO_PID_FILE", &pid_file)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1477,6 +1515,9 @@ async fn shim_sigterm_reaps_owned_child_and_reraises_the_signal() {
     // installed (F1), so observing it proves the handlers are live — SIGTERM from here is
     // caught + reaped, never dropped through an unhandled setup-signal gap.
     let (_adv_path, _adv) = wait_for_advertisement(&control_dir, "sigterm").await;
+    // The fake tsgo publishes its pid before its first beat.
+    wait_for_child_alive(&heartbeat).await;
+    let child_pid = published_child_pid(&pid_file).expect("the fake tsgo publishes its pid first");
     let pid = shim.id().expect("the shim has a pid") as libc::pid_t;
 
     // Deliver SIGTERM to the shim.
@@ -1499,16 +1540,13 @@ async fn shim_sigterm_reaps_owned_child_and_reraises_the_signal() {
         "a signal-terminated shim is never a success exit; got {status:?}"
     );
 
-    // THE fix: the OWNED child was reaped, not orphaned — the heartbeat stops growing once
-    // the shim has exited. Pre-fix the shim was killed by SIGTERM's default action without
-    // cleanup, orphaning the child (heartbeat keeps growing).
-    let before = heartbeat_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let after = heartbeat_len(&heartbeat);
-    assert_eq!(
-        before, after,
-        "SIGTERM must reap the OWNED child (no orphan): the heartbeat grew {before}->{after} \
-         bytes after the shim exited, so the child was left running"
+    // THE fix: the OWNED child was reaped, not orphaned. Pre-fix the shim was killed by
+    // SIGTERM's default action without cleanup, orphaning the child. Its exit is observed
+    // directly; the budget is a hang guard only.
+    assert!(
+        wait_for_process_exit(child_pid, Duration::from_secs(10)).await,
+        "SIGTERM must reap the OWNED child (no orphan): pid {child_pid} is still running after \
+         the shim exited"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1674,21 +1712,29 @@ fn a_non_utf8_heartbeat_path_does_not_kill_the_fixture() {
 
     let mut child = std::process::Command::new(bin_exe!("fake_tsgo_heartbeat"))
         .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
-        .stdout(Stdio::null())
+        .env("FAKE_TSGO_ANNOUNCE_READY", "1")
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the fake tsgo fixture");
 
-    std::thread::sleep(Duration::from_millis(500));
+    // The fixture prints `ready` once it has decoded its configuration and attempted its first
+    // beat; a fixture that died on the decode reaches EOF instead.
+    let mut ready = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().expect("fixture stdout")),
+        &mut ready,
+    )
+    .expect("read the fixture's readiness line");
     let died = child.try_wait().expect("poll the fixture");
     let _ = child.kill();
     let output = child.wait_with_output().expect("reap the fixture");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     assert!(
-        died.is_none(),
-        "the fixture exited ({died:?}) instead of running with a non-UTF-8 heartbeat path: it \
-         forced an OS path through a Unicode string. --- fixture stderr ---\n{stderr}"
+        ready.trim() == "ready" && died.is_none(),
+        "the fixture exited ({died:?}, readiness {ready:?}) instead of running with a non-UTF-8 \
+         heartbeat path: it forced an OS path through a Unicode string. --- fixture stderr ---\n{stderr}"
     );
 }
 
