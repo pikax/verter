@@ -11088,25 +11088,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(ClassMemberStep::Inherited { heritage, base })
     }
 
-    /// The member-precise answer of a read of `name` that the class's own
-    /// elements declare, when every element declaring it is a property
-    /// whose type names nothing: no reference, type parameter, `this`,
-    /// `typeof` or operator — only keywords, literals and unions, arrays
-    /// and tuples of them (the independent-member type predicate). Such a type
-    /// is fixed by the elements' own text, so the read roots on the class's
-    /// `Member` fact for the name (the declaring elements and the `extends`
-    /// reference, observed at `observed_hash`) instead of the file's whole
-    /// hash, and lowers to scope-free nodes through no locator query, so
-    /// neither its nodes nor a locator memo entry root the read on the
-    /// class's file: an edit to another member of the class, or anywhere
-    /// else in its file, leaves the read's evidence in place, while an edit
-    /// to an element declaring the name, to how many elements do, or to the
-    /// `extends` clause moves it.
-    ///
-    /// Unsupported signatures and binding-sensitive types keep the general
-    /// content path. Imported heads are accepted only from the source port's
-    /// exact resolved map; no file-scope fallback runs under Global.
-    #[allow(clippy::too_many_arguments)]
     /// Observe the content version of every imported head the precise
     /// member path embeds by reference.
     ///
@@ -11161,6 +11142,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The member-precise answer of a read of `name` that the class's own
+    /// elements declare, when every element declaring it is a property
+    /// whose type names nothing: no reference, type parameter, `this`,
+    /// `typeof` or operator — only keywords, literals and unions, arrays
+    /// and tuples of them (the independent-member type predicate). Such a type
+    /// is fixed by the elements' own text, so the read roots on the class's
+    /// `Member` fact for the name (the declaring elements and the `extends`
+    /// reference, observed at `observed_hash`) instead of the file's whole
+    /// hash, and lowers to scope-free nodes through no locator query, so
+    /// neither its nodes nor a locator memo entry root the read on the
+    /// class's file: an edit to another member of the class, or anywhere
+    /// else in its file, leaves the read's evidence in place, while an edit
+    /// to an element declaring the name, to how many elements do, or to the
+    /// `extends` clause moves it.
+    ///
+    /// Unsupported signatures and binding-sensitive types keep the general
+    /// content path. Imported heads are accepted only from the source port's
+    /// exact resolved map; no file-scope fallback runs under Global.
+    #[allow(clippy::too_many_arguments)]
     fn precise_class_member_read(
         &self,
         canonical: &str,

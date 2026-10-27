@@ -998,6 +998,7 @@ fn standalone_augmentation_content_port_observes_the_served_snapshot() {
         let (answer, reads) =
             verter_type_engine::resolver_core::resolver_context::with_fact_tracer_cell(
                 Default::default(),
+                verter_session_query::facts::policy::FactPolicy::production(),
                 |_| OwnedLowering::augmenter_artifact_answer(ctx, &identity, identity.content_hash),
             );
         assert!(!answer.unwrap().augmentations.is_empty());
@@ -1188,7 +1189,9 @@ fn standalone_analysis_and_structure_ports_observe_their_snapshot() {
     let _ = host.get_raw_analysis_snapshot(canonical);
     for analysis in [true, false] {
         host.with_base_resolver_context::<_, verter_audit::observe::Uncaptured>(|ctx| {
-            let (present, reads) = verter_type_engine::resolver_core::resolver_context::with_fact_tracer_cell(Default::default(), |_| {
+            let (present, reads) = verter_type_engine::resolver_core::resolver_context::with_fact_tracer_cell(
+                Default::default(),
+                verter_session_query::facts::policy::FactPolicy::production(), |_| {
                 if analysis { IndexedInputs::get_raw_analysis_snapshot(ctx, canonical).is_some() }
                 else { OwnedLowering::ordered_sfc_structure(ctx, canonical).is_some() }
             });

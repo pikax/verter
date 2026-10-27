@@ -3966,7 +3966,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut pending: Vec<SemanticNodeId> = Vec::new();
         value.for_each_retained_node(|node| pending.push(node));
         let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = Default::default();
-        let mut observed: Vec<Arc<str>> = Vec::new();
+        let mut observed: Vec<(Arc<str>, _)> = Vec::new();
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
                 continue;
@@ -3981,16 +3981,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             if let Some(identity) = identity {
                 let canonical: &str = identity.canonical_id.as_ref();
-                if !observed.iter().any(|seen| seen.as_ref() == canonical) {
-                    observed.push(Arc::from(canonical));
-                    if let Some(hash) = self.ctx.authoritative_current_content_hash(canonical) {
-                        crate::resolver_core::resolver_context::observe_fan_out(
-                            FactVersionRef::FileWholeHash {
-                                canonical_id: Arc::from(canonical),
-                                hash,
-                            },
-                        );
-                    }
+                let embedded = identity.whole_hash;
+                if !observed
+                    .iter()
+                    .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
+                {
+                    observed.push((Arc::from(canonical), embedded));
+                    // The version the retained payload actually embeds, not the
+                    // live one: a stale embedded version must make this entry
+                    // miss on the next validation, never certify the live hash
+                    // next to an old payload.
+                    crate::resolver_core::resolver_context::observe_fan_out(
+                        FactVersionRef::FileWholeHash {
+                            canonical_id: Arc::from(canonical),
+                            hash: embedded,
+                        },
+                    );
                 }
             }
             data.for_each_retained_child(|child| pending.push(child));
