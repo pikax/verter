@@ -1964,6 +1964,13 @@ pub enum FlowReturnDegradation {
     /// refusal from a callee that is not callable, accepts no overload, or
     /// whose applicability went undecided.
     ContextSensitiveInference,
+    /// A member read off a receiver that declares no such member — an object
+    /// literal's own `this` when no marker types it — evaluated to the typed
+    /// miss: the checker reports TS2339 there and continues with its error
+    /// type, a recovery this rail does not model. The first observed cause
+    /// wins, so a call refused because a context-sensitive argument's return
+    /// holds that miss reports this read, never only the refusal.
+    AbsentReceiverMember,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,

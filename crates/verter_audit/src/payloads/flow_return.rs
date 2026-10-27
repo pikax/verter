@@ -79,6 +79,9 @@ pub enum FlowDegradationTag {
     /// context-sensitive argument's return the call resolver could not
     /// continue.
     ContextSensitiveInference,
+    /// A member read off a receiver that declares no such member evaluated
+    /// to the typed miss (the checker's TS2339 recovery).
+    AbsentReceiverMember,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,

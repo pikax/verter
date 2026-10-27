@@ -9281,8 +9281,8 @@ impl<'a> Lowerer<'a> {
     /// annotated parameter or local reads its declared member type, and one
     /// rooted at a module binding, a global or a nested function
     /// declaration its value — both settled by the evaluator. A `this`
-    /// root without an explicit type is inert; one with an explicit type, a
-    /// `super` root, a free closed declaration (already decided) and an
+    /// root the text gives no explicit type is settled by the evaluator's
+    /// receiver; one with an explicit type, a `super` root, a free closed declaration (already decided) and an
     /// unmodelled binding stay unprovable.
     fn effect_callee(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> EffectCallee {
         let mut path: Vec<Arc<str>> = Vec::new();
@@ -9294,11 +9294,12 @@ impl<'a> Lowerer<'a> {
                     cursor = unwrap_parenthesized(&member.object);
                 }
                 Expression::Identifier(root) => break root,
-                // A `this` without an explicit type (an object literal's method,
-                // a function with no `this` parameter) has no effects
-                // signature: the call neither asserts nor ends the path.
+                // A `this` the text gives no explicit type (an object
+                // literal's method, a function with no `this` parameter) has
+                // no effects signature unless a contextual signature's `this`
+                // parameter types it, which only the evaluator knows.
                 Expression::ThisExpression(_) if !self.explicit_this => {
-                    return EffectCallee::Inert;
+                    return EffectCallee::Settle(SliceEffectCallee::ContextualThis);
                 }
                 Expression::ThisExpression(_) | Expression::Super(_) => {
                     return EffectCallee::Unprovable;

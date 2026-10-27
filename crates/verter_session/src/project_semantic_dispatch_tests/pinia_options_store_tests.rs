@@ -22,18 +22,20 @@
 //! other module still reads as the marker; and with no declaration at all
 //! the checker reports the name and recovers without the marker. Where no
 //! marker types the actions, the named demand refuses the store with a
-//! typed cause — its `defineStore` call's context-sensitive-inference
-//! refusal, read off the shared flow result of the store's initializer —
-//! that every member then propagates; an unrelated refusal of the same
-//! call, though its members print the same unknown leaf, is told apart.
+//! typed cause — the absent member an action reads off its own object
+//! literal's `this`, read off the shared flow result of the store's
+//! initializer — that every member then propagates; an unrelated refusal of
+//! the same call, though its members print the same unknown leaf, is told
+//! apart, a marked store's missing dependency included.
 //!
 //! The rules the store reaches are pinned on their smallest shapes too:
 //! an object relating to a `Record` over index keys, inference through
 //! `Pick` / `Omit` of an object or an interface, the keys of an interface
 //! applied to an open type parameter, a callback typed by the one arm of a
 //! union of signatures its arity admits, a statement call through an
-//! object literal's contextual `this`, and a member read keeping an
-//! intersection's generic-interface contributor.
+//! object literal's contextual `this` beside one through a contextual
+//! signature's explicit `this`, and a member read keeping an intersection's
+//! generic-interface contributor.
 
 use std::sync::Arc;
 
@@ -271,14 +273,28 @@ fn refusal(
 /// `defineStore("counter", { … })` — the shared result every member of
 /// the store reads — or why it has no value.
 fn store_degradation(host: &crate::VerterHost) -> Result<Option<FlowReturnDegradation>, String> {
+    flow_degradation(
+        host,
+        "useCounterStore",
+        verter_type_expr::facts::FunctionPartIdentity::Initializer,
+    )
+}
+
+/// The typed degradation of the shared flow result of the scenario's
+/// function `symbol` at `part`, or why it has no value.
+fn flow_degradation(
+    host: &crate::VerterHost,
+    symbol: &str,
+    part: verter_type_expr::facts::FunctionPartIdentity,
+) -> Result<Option<FlowReturnDegradation>, String> {
     let initializer = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: verter_type_expr::OwnedStr::from(SCENARIO),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: verter_type_expr::OwnedStr::from("useCounterStore"),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
-        function_part: verter_type_expr::facts::FunctionPartIdentity::Initializer,
+        function_part: part,
         overload_ordinal: 0,
     };
     let (result, _) = host
@@ -503,18 +519,19 @@ fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store() {
 }
 
 /// Every failure of a store no marker types to show the named demand's
-/// permitted recovery refusal, under each of `settings`: the store's
-/// `defineStore` call is refused for inferring its actions from methods
-/// whose `this` no marker types — the typed
-/// [`FlowReturnDegradation::ContextSensitiveInference`] of the store
-/// initializer's shared flow result, the checker's TS2339 / TS7023
-/// recovery — and every member of the whole store, each element of
-/// `WHOLE_STORE` beside the checker's print of it in `checker`, is the
-/// typed semantic miss that refusal propagates: the miss itself, or the
-/// member's access deferred on `St`, whose own answer is that miss. Never
-/// a value. With the marker the same call completes, so this refusal is
-/// also the proof the marker typed nothing. Any other cause — an
-/// inapplicable or undecided call, a budget, a missing dependency, an
+/// permitted recovery refusal, under each of `settings`: an action reads
+/// `this.count` off its own object literal, which declares no `count` —
+/// the checker's TS2339 recovery, the typed
+/// [`FlowReturnDegradation::AbsentReceiverMember`] the store initializer's
+/// shared flow result names as its first cause — so the store's
+/// `defineStore` call cannot infer its actions, and every member of the
+/// whole store, each element of `WHOLE_STORE` beside the checker's print
+/// of it in `checker`, is the typed semantic miss that refusal propagates:
+/// the miss itself, or the member's access deferred on `St`, whose own
+/// answer is that miss. Never a value. With the marker `this` declares
+/// `count` and the same call completes, so this cause is also the proof
+/// the marker typed nothing. Any other cause — the call's refusal alone,
+/// an inapplicable or undecided call, a budget, a missing dependency, an
 /// unmodelled position, a checker recovery — fails, whatever wire leaf
 /// its members print.
 ///
@@ -540,10 +557,10 @@ fn recovery_mismatches(
         };
         let host = project.host(setting.options, probes);
         let store = store_degradation(&host);
-        if store != Ok(Some(FlowReturnDegradation::ContextSensitiveInference)) {
+        if store != Ok(Some(FlowReturnDegradation::AbsentReceiverMember)) {
             failures.push(format!(
-                "{}: the store's `defineStore` call is {store:?}, not the \
-                 context-sensitive-inference refusal",
+                "{}: the store's initializer is {store:?}, not refused for an \
+                 action's absent receiver member",
                 setting.label
             ));
         }
@@ -671,7 +688,7 @@ fn a_namesake_shadows_its_own_modules_global_contribution() {
 /// action is absent from the store (TS2339 at each probe reading one), the
 /// error type `any`, never the marker-typed member. Measured on
 /// TypeScript 7.0.2, all four settings. The named demand refuses the
-/// store's call at its context-sensitive inference, as with a namesake.
+/// store's call, as with a namesake, for the same absent receiver member.
 #[test]
 fn an_undeclared_marker_recovers_without_inferring_through_it() {
     let failures = recovery_mismatches(
@@ -706,8 +723,33 @@ fn an_unrelated_store_refusal_is_not_the_recovery_refusal() {
     };
     let failures = recovery_mismatches(&project, &ALL[..1], &NAMESAKE_STORE);
     assert!(
-        matches!(&failures[..], [store] if store.contains("not the context-sensitive-inference refusal")),
+        matches!(&failures[..], [store] if store.contains("not refused for an action's absent receiver member")),
         "the unrelated refusal's members hold the propagated miss and only the store's \
+         typed cause tells it apart: {failures:?}"
+    );
+}
+
+/// A marked store whose `first` getter reads a name nothing declares,
+/// `(state) => missingDependency` — TS2304 alone in TypeScript 7.0.2, every
+/// other member answering as the marker-typed store's — refuses its
+/// `defineStore` call too, every member propagating the same miss. Its cause
+/// is that context-sensitive call's own refusal, never an absent receiver
+/// member, so the recovery evidence rejects it on the typed cause alone.
+#[test]
+fn a_marked_stores_missing_dependency_is_not_the_recovery_refusal() {
+    let project = Project {
+        declarations: MARKED,
+        scenario: STORE.replacen(
+            "first: (state) => state.items[0]",
+            "first: (state) => missingDependency",
+            1,
+        ),
+    };
+    assert_ne!(project.scenario, STORE, "the getter is replaced");
+    let failures = recovery_mismatches(&project, &ALL[..1], &NAMESAKE_STORE);
+    assert!(
+        matches!(&failures[..], [store] if store.contains("Some(ContextSensitiveInference)")),
+        "the missing dependency's members hold the propagated miss and only the store's \
          typed cause tells it apart: {failures:?}"
     );
 }
@@ -836,6 +878,49 @@ fn a_call_through_a_contextual_this_has_no_effects() {
     )
     .mismatches(&[("ReturnType<MO['add']>", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A contextual signature's `this` parameter gives an object literal
+/// method's `this` an explicit type, so a statement call through it reads
+/// that type's effects signature: `this.check(x)` against `check(x:
+/// unknown): asserts x is string` narrows `x`, and TypeScript 7.0.2
+/// answers `string` for the method's return, free of diagnostics, all four
+/// settings. The named demand does not read that assertion: it keeps the
+/// typed guard-narrowing gap on the function's shared flow result, never
+/// publishing the un-narrowed `unknown` as complete.
+#[test]
+fn a_call_through_a_contextual_signatures_explicit_this_keeps_its_effects() {
+    let project = Project::module(
+        "function f() {\n\
+           return { m(x: unknown) { this.check(x); return x; } } satisfies \
+             { m(this: { check(x: unknown): asserts x is string }, x: unknown): unknown };\n\
+         }\n",
+    );
+    let probe = "ReturnType<ReturnType<typeof f>['m']>";
+    for setting in ALL {
+        let host = project.host(setting.options, &[probe]);
+        let answer = wire_answer(&host, &named_answer(&host, 0));
+        let degradation = flow_degradation(
+            &host,
+            "f",
+            verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        );
+        assert_eq!(
+            degradation,
+            Ok(Some(FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            ))),
+            "{}: `f` keeps the asserting call's typed gap; `{probe}` is `{}`",
+            setting.label,
+            display(&answer)
+        );
+        assert_ne!(
+            answer,
+            TypeExpr::Primitive(PrimitiveName::Unknown),
+            "{}: `{probe}` is not the complete un-narrowed `unknown`",
+            setting.label
+        );
+    }
 }
 
 /// A closed access nested in an answer reads what the member resolves to

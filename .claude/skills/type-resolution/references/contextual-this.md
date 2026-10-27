@@ -13,7 +13,12 @@ keep the receiver of their lexical frame. An authored `this` annotation or a
 contextual signature's `this` parameter takes precedence over the contextual
 marker. Only those give `this` an explicit type (the checker's
 `getExplicitThisType`); an object literal method's contextual receiver does
-not, so a statement call through it decides no effects signature.
+not, so a statement call through it decides no effects signature. The slice
+leaves a call through a `this` its text does not type to the evaluator's
+receiver (`SliceEffectCallee::ContextualThis`): an explicitly typed receiver —
+an authored or contextual-signature `this`, or a literal whose contextual
+methods may declare one (`contextual_methods_may_declare_this`) — keeps the
+typed guard-narrowing gap; any other receiver is inert.
 The authored annotation is lowered with the demanded body;
 lexical contexts carry receiver identity, never annotation contents.
 
@@ -27,11 +32,14 @@ A similarly named local declaration is
 not a marker, even in the module whose own `declare global` block contributes
 the marker every other module reads; with no declaration of the name the
 receiver recovers without the marker, never through it.
-Without the marker, a generic call inferring from a method whose return reads
-that receiver (the checker's TS2339 / TS7023 recovery, which the flow rail does
-not model) is refused with its own typed cause,
-`FlowReturnDegradation::ContextSensitiveInference`, never collapsed into
-`UnrepresentableCallee` and never answered through the marker.
+Without the marker, a method reading a member its object literal's own
+receiver does not declare (the checker's TS2339 recovery, which the flow rail
+does not model) records `FlowReturnDegradation::AbsentReceiverMember` as the
+first cause; a generic call inferring from that method's return is then
+refused with `FlowReturnDegradation::ContextSensitiveInference` beneath it,
+never collapsed into `UnrepresentableCallee` and never answered through the
+marker. A refusal for any other reason (a missing dependency) keeps the call's
+own cause, so the two stay distinguishable on the shared flow result.
 Structural readers still instantiate the empty interface normally.
 
 Top-level contextual literals and calls containing context-sensitive object

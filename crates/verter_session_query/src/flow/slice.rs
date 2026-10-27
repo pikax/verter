@@ -2198,6 +2198,11 @@ pub enum SliceEffectCallee {
     /// Any other dotted name (a module or global binding, a nested
     /// function declaration): its value.
     Value(Box<SliceExpr>),
+    /// A dotted name rooted at a `this` the function's text gives no
+    /// explicit type (an object literal's method, a function with no `this`
+    /// parameter): inert unless the evaluator's receiver is explicitly typed
+    /// after all, by a contextual signature's `this` parameter.
+    ContextualThis,
 }
 
 /// One class expression's body, lowered for the evaluator's class

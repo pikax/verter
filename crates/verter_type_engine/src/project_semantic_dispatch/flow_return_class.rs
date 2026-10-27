@@ -36,6 +36,12 @@ pub(super) struct ClassReceiver {
     /// The member reads made while a nested function's evaluation records
     /// what it read off this receiver.
     pub(super) reads: ReceiverReadLog,
+    /// Whether `this` may have an explicit type here (the checker's
+    /// `getExplicitThisType`): a class's instance, an authored `this`
+    /// parameter, a contextual signature's `this` parameter, or an object
+    /// literal whose contextual methods may declare one. An object literal's
+    /// contextual receiver alone does not.
+    pub(super) explicit_this: bool,
 }
 
 /// What a read of member `name` off a receiver's evaluated members found
@@ -133,7 +139,15 @@ impl ClassReceiver {
             infer_literal_members,
             forward_read: std::cell::Cell::new(false),
             reads: ReceiverReadLog::default(),
+            explicit_this: false,
         }
+    }
+
+    /// This receiver, giving `this` an explicit type.
+    #[must_use]
+    pub(super) fn explicit(mut self) -> Self {
+        self.explicit_this = true;
+        self
     }
 
     /// A receiver whose members are those of `binder` alone.
@@ -481,21 +495,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Open the class's receiver and order its members.
     fn class_begin_members(&mut self, frame: &mut ClassEvalFrame<'_>) {
         let class = frame.class;
-        let receiver = std::rc::Rc::new(ClassReceiver::new(
-            self.dispatch
-                .this_binder(self.canonical, self.owner, &class.name, None),
-            frame.base.as_ref().and_then(|base| base.instance),
-            class
-                .members
-                .iter()
-                .filter(|member| !member.is_static)
-                .filter_map(|member| match &member.key {
-                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
-                    SliceObjectKey::Computed { .. } => None,
-                })
-                .collect(),
-            true,
-        ));
+        let receiver = std::rc::Rc::new(
+            ClassReceiver::new(
+                self.dispatch
+                    .this_binder(self.canonical, self.owner, &class.name, None),
+                frame.base.as_ref().and_then(|base| base.instance),
+                class
+                    .members
+                    .iter()
+                    .filter(|member| !member.is_static)
+                    .filter_map(|member| match &member.key {
+                        SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                        SliceObjectKey::Computed { .. } => None,
+                    })
+                    .collect(),
+                true,
+            )
+            .explicit(),
+        );
         frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
         frame.receiver = Some(receiver);
         frame.order = (0..class.members.len())
@@ -1048,6 +1065,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return ReceiverMemberRead::Forward;
         }
         ReceiverMemberRead::Base(bound.base)
+    }
+
+    /// Whether `receiver` is this frame's bound receiver and neither holds
+    /// nor declares member `name`: a read of it is the checker's TS2339.
+    pub(super) fn receiver_lacks_member(&self, receiver: SemanticNodeId, name: &str) -> bool {
+        self.receiver
+            .as_ref()
+            .filter(|bound| bound.binder == receiver)
+            .is_some_and(|bound| {
+                matches!(
+                    self.receiver_member_read(bound, name),
+                    ReceiverMemberRead::Base(_)
+                )
+            })
     }
 
     /// Where member `name` of `receiver` reads from when `receiver` is a
