@@ -39,10 +39,9 @@
 //! strictly-positive.
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use verter_execution::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_language::FileLanguage as SchedFileKind;
@@ -76,7 +75,8 @@ const POOL_THREADS: usize = 2;
 /// is released together with the dispatch pause once that observation is
 /// made.
 struct SourceGate {
-    entered: AtomicUsize,
+    entered: Mutex<usize>,
+    entered_cv: Condvar,
     released: Mutex<bool>,
     release_cv: Condvar,
 }
@@ -84,7 +84,8 @@ struct SourceGate {
 impl SourceGate {
     fn new() -> Self {
         Self {
-            entered: AtomicUsize::new(0),
+            entered: Mutex::new(0),
+            entered_cv: Condvar::new(),
             released: Mutex::new(false),
             release_cv: Condvar::new(),
         }
@@ -93,7 +94,8 @@ impl SourceGate {
     /// Worker side: record arrival, then block until the driver
     /// releases the gate.
     fn enter_and_wait(&self) {
-        self.entered.fetch_add(1, Ordering::SeqCst);
+        *self.entered.lock().expect("source gate mutex") += 1;
+        self.entered_cv.notify_all();
         let mut released = self.released.lock().expect("source gate mutex");
         while !*released {
             released = self
@@ -107,16 +109,20 @@ impl SourceGate {
     /// entered the gated source stage. Panics on timeout so a genuine
     /// stall fails loudly instead of hanging the suite.
     fn wait_until_entered(&self, n: usize) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while self.entered.load(Ordering::SeqCst) < n {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {n} source-stage workers to enter the \
-                 gate (only {} entered); the surplus requests cannot queue",
-                self.entered.load(Ordering::SeqCst),
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        let (entered, timeout) = self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().expect("source gate mutex"),
+                Duration::from_secs(10),
+                |entered| *entered < n,
+            )
+            .expect("source gate condvar wait");
+        assert!(
+            !timeout.timed_out(),
+            "timed out waiting for {n} source-stage workers to enter the \
+             gate (only {} entered); the surplus requests cannot queue",
+            *entered,
+        );
     }
 
     /// Driver side: release every parked (and future) source execution.
@@ -322,20 +328,13 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     // entries demonstrably accrued scheduler-queue dwell during the
     // pause window.
     let want_surplus = REQUESTS - POOL_THREADS;
-    let depth_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let depth = sched.test_job_queue_depth();
-        if depth >= want_surplus {
-            break;
-        }
-        assert!(
-            Instant::now() < depth_deadline,
-            "surplus never reached the scheduler priority queue: observed \
-             depth {depth}, want >= {want_surplus} (REQUESTS {REQUESTS} - \
-             POOL_THREADS {POOL_THREADS})",
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    assert!(
+        sched.test_wait_until_job_queue_depth(want_surplus, Duration::from_secs(10)),
+        "surplus never reached the scheduler priority queue: observed \
+         depth {}, want >= {want_surplus} (REQUESTS {REQUESTS} - \
+         POOL_THREADS {POOL_THREADS})",
+        sched.test_job_queue_depth(),
+    );
 
     // Step 5: release the gate FIRST (so the dispatched + surplus source
     // workers can run freely), then release the dispatch pause so the

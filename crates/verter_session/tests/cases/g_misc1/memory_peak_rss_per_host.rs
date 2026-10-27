@@ -1,20 +1,18 @@
-//! Per-host peak-RSS sampler isolation test.
+//! Per-host peak-RSS slot test.
 //!
 //! Spin up two `VerterHost` instances with `audit_timing_capture =
-//! true`. Run a slow component-meta request on each so the host-owned
-//! sampler thread ticks at least twice (50 ms tick × ≥ 2 = 100 ms
-//! minimum window). After both finish, assert each host's audit
-//! record carries a non-zero `process_rss_peak_bytes` AND each peak
-//! reflects only that host's sampler — peak values must be tied to
-//! the per-request slot the host's sampler updated, not a
-//! process-global accumulator.
+//! true` and run a component-meta request on each, concurrently. Each
+//! request's per-request peak slot is seeded with the current RSS when
+//! the request registers with its host, and that host's sampler thread
+//! only raises it. After both finish, assert each host's audit record
+//! carries a realistic, non-zero `process_rss_peak_bytes` read from its
+//! own per-request slot, not a process-global accumulator.
 //!
 //! Discrimination contract:
-//! - Pre-change tree (no sampler thread, peak field is missing or
-//!   forced to zero): both peaks come back as 0 → test FAILS.
-//! - Post-change tree (host-owned sampler ticks every 50 ms while
-//!   the request is active): both peaks come back as `> 0` and each
-//!   host's record stays decoupled from the sibling host's runtime.
+//! - A tree whose records never read the per-request slot (peak field
+//!   missing or forced to zero): both peaks come back as 0 → test FAILS.
+//! - Whether the sampler ticks during a request is not synchronised
+//!   here; the seeded value alone satisfies the assertions.
 //!
 //! Skipped on WASM via `#[cfg(not(target_arch = "wasm32"))]`; the
 //! sibling test `memory_peak_rss_zero_on_wasm.rs` covers the WASM
@@ -24,7 +22,6 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
@@ -45,19 +42,6 @@ defineProps<Props>()
   </div>
 </template>
 "#;
-
-/// Wait until the sampler has had at least `min_ticks` opportunities to
-/// fire (~50 ms each on the host-owned sampler thread). The wait is
-/// busy-loopless: `thread::sleep` honours the OS scheduler, so the
-/// sampler thread runs at least `min_ticks` times before this returns
-/// (modulo scheduler jitter).
-fn wait_for_sampler_ticks(min_ticks: u32) {
-    let dwell = Duration::from_millis(50 * u64::from(min_ticks) + 25);
-    let start = Instant::now();
-    while start.elapsed() < dwell {
-        thread::sleep(Duration::from_millis(20));
-    }
-}
 
 #[test]
 fn each_host_sampler_attributes_peak_only_to_its_own_request() {
@@ -96,31 +80,18 @@ fn each_host_sampler_attributes_peak_only_to_its_own_request() {
         aliases: Vec::new(),
     });
 
-    // Force a quiet baseline before either request runs so the
-    // sampler can't latch onto cached state from a sibling test.
-    wait_for_sampler_ticks(1);
-
-    // Run host_a's request on a worker thread that lingers in the
-    // request scope long enough for the sampler to tick at least
-    // twice.
+    // Run host_a's request on a worker thread.
     let host_a_for_thread = Arc::clone(&host_a);
     let handle_a = thread::spawn(move || {
         let (_analysis, resolution) = host_a_for_thread
             .get_component_meta_with_resolution(canon_a)
             .expect("host_a request must succeed");
-        // After the request finalises, the registration removed the
-        // active-request entry, but the sampler had >= 2 ticks while
-        // the request was in flight (the upsert above warmed enough
-        // I/O that the resolver itself takes a few ms; a deliberate
-        // post-resolve wait here is unnecessary because the
-        // sampler's per-request slot is captured at finalize and
-        // must already reflect the in-flight peak).
+        // The per-request slot is read when the request finalises.
         resolution.request_id
     });
 
-    // While host_a's request is in flight, run host_b's. The
-    // overlap proves the two samplers do not share state — host_b's
-    // peak slot is updated only by host_b's sampler.
+    // host_b's request runs alongside; its peak slot belongs to host_b
+    // alone.
     let host_b_for_thread = Arc::clone(&host_b);
     let handle_b = thread::spawn(move || {
         let (_analysis, resolution) = host_b_for_thread
@@ -144,27 +115,18 @@ fn each_host_sampler_attributes_peak_only_to_its_own_request() {
 
     assert!(
         record_a.memory.process_rss_peak_bytes > 0,
-        "host_a's sampler must have updated its per-request peak slot \
-         while the request was in flight; got {}",
+        "host_a's record must carry its per-request peak slot; got {}",
         record_a.memory.process_rss_peak_bytes,
     );
     assert!(
         record_b.memory.process_rss_peak_bytes > 0,
-        "host_b's sampler must have updated its per-request peak slot \
-         while the request was in flight; got {}",
+        "host_b's record must carry its per-request peak slot; got {}",
         record_b.memory.process_rss_peak_bytes,
     );
 
-    // Discriminating contract: the per-request peak slot was
-    // populated by the host-owned sampler thread. The exact
-    // ordering between `AuditBuilder::new`'s before-snapshot, the
-    // sampler's first tick, and the resolver finishing is
-    // OS-dependent — what we MUST observe is that the slot moved
-    // off zero (sampler ran AND fetch_max wrote a real RSS value).
-    // Pre-change tree (no sampler thread) leaves the slot at 0 and
-    // fails the assertions above; this clause adds a sanity floor
-    // that the value falls in the realistic RSS range for a debug
-    // test process (>1 MB; <16 GB).
+    // The slot holds a real RSS value: a sanity floor that the value
+    // falls in the realistic range for a debug test process
+    // (>1 MB; <16 GB).
     const ONE_MB: u64 = 1024 * 1024;
     const SIXTEEN_GB: u64 = 16u64 * 1024 * 1024 * 1024;
     assert!(

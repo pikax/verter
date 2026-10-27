@@ -2242,6 +2242,43 @@ impl Scheduler {
         self.dag.lock().pending_len()
     }
 
+    /// Test-only: wait until the scheduler priority queue holds at least `depth` jobs while the
+    /// driver is parked at the dispatch pause, re-checking after each inbox re-drain the parked
+    /// driver completes. Returns whether the depth was reached before `budget`; the budget is a
+    /// hang guard only.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    #[doc(hidden)]
+    pub fn test_wait_until_job_queue_depth(
+        &self,
+        depth: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            // Note the re-drain count BEFORE reading the depth, so a re-drain landing in between
+            // is waited past rather than missed.
+            let seen = self.dispatch_pause.state.lock().redrains;
+            if self.test_job_queue_depth() >= depth {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            let mut state = self.dispatch_pause.state.lock();
+            while state.redrains == seen {
+                if self
+                    .dispatch_pause
+                    .cv
+                    .wait_until(&mut state, deadline)
+                    .timed_out()
+                {
+                    drop(state);
+                    return self.test_job_queue_depth() >= depth;
+                }
+            }
+        }
+    }
+
     /// Test-only: how many times [`Self::reset`] has posted its inbox
     /// teardown wake. Observing this instead of the inbox itself is what
     /// lets a teardown test release a rendezvous exactly once the wake is
@@ -2260,6 +2297,10 @@ impl Scheduler {
         let mut state = self.dispatch_pause.state.lock();
         state.released = true;
         self.dispatch_pause.cv.notify_all();
+        drop(state);
+        // The parked driver blocks on the inbox; a wake there lets it see the release. A full
+        // inbox already holds a submission that wakes it.
+        let _ = self.inbox.sender.try_send(Submission::Wake);
     }
 
     /// Test-only: install the mid-batch admission seam hook. Fired once

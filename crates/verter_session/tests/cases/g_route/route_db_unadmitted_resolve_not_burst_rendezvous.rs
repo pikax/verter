@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::VerterHost;
@@ -79,18 +79,17 @@ fn wait_for_route_follower_admitted<V>(db: &RouteDb, provider: &str, name: &str,
 where
     V: verter_session_query::facts::store_view::StoreView + ?Sized,
 {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while db.test_route_inflight_strong_count(&rk(provider, name), view)
-        <= LEADER_AND_SIBLING_PIN_INFLIGHT_REFS
-    {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for the follower to be admitted onto the \
+    assert!(
+        db.test_wait_for_route_inflight_strong_count(
+            &rk(provider, name),
+            view,
+            LEADER_AND_SIBLING_PIN_INFLIGHT_REFS,
+            Duration::from_secs(10),
+        ),
+        "timed out waiting for the follower to be admitted onto the \
              route singleflight in-flight entry (strong count never \
              exceeded {LEADER_AND_SIBLING_PIN_INFLIGHT_REFS})",
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    );
 }
 
 /// Join `handle` and return its value, panicking if it does not
