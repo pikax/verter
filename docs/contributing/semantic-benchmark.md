@@ -1,7 +1,8 @@
-# Semantic Benchmark: Verter vs tsc 7.0.2
+# Semantic Benchmark: Verter vs tsc
 
-`scripts/benchmark/semantic-perf.mjs` compares Verter's type engine with
-TypeScript 7.0.2 on **identical demands**: the same module, the same library,
+`scripts/benchmark/semantic-perf.mjs` compares Verter's type engine with the
+pinned TypeScript (the root `package.json` `typescript` devDependency) on
+**identical demands**: the same module, the same library,
 the same compiler options, the same requested answer. It is built to be fair
 to both tools. Future performance work is baselined on it, so every run is
 validated before any number in it is read.
@@ -44,7 +45,7 @@ match, or splits more than once, keep the checker's names.
 | Arm | What runs | Enters the head-to-head |
 |---|---|---|
 | `verter` | `semantic_perf_probe`: a release executable linking the production `verter_session` library, host built with the shipped `HostConfig::default()` (no audit, trace, footprint or metrics capture) | yes |
-| `tsc-api` | TypeScript 7.0.2's native API (`typescript/unstable/sync`, driving the native `tsc --api` server; the verified executable is passed to it explicitly) | yes |
+| `tsc-api` | the pinned TypeScript's native API (`typescript/sync`, driving the native `tsc --api` server; the verified executable is passed to it explicitly) | yes |
 | `verter-obs` | the same probe with the host's observability bookkeeping on (audit records with timing and footprint capture, metrics) | no: shows what the bookkeeping costs |
 | `verter-observe` | the same probe built with `--features semantic-observe` (optional semantic capture compiled in; production configuration), in its own target directory. The `verter` probe has that capture physically compiled out, and the validator requires each binary's `identity` to say so | no: shows what compiled-in capture costs, and checks both builds retain the same REQUIRED state |
 | `verter-counted` | the probe's twin with a counting global allocator | no: allocation counts only |
@@ -209,7 +210,7 @@ Why each probe demands the same work of both tools:
    roots. Verter opens the supporting modules during setup, before either
    alias demand. The validator checks every root and input digest, including
    the copies used by whole-program CLI arms and measured references.
-2. **Same library.** Both read `lib.bench.d.ts`, a copy of TypeScript 7.0.2's
+2. **Same library.** Both read `lib.bench.d.ts`, a copy of TypeScript's
    own declarations for the members the scenarios read. tsc reads it as a
    root file under `noLib`, so no other library is loaded; Verter upserts it
    as an ordinary `.d.ts` file of the project (`--lib-mode root-file`, the
@@ -296,7 +297,7 @@ the reported ambient namespace export assignment: a named `Opt` import whose
 `Opt["k"]` probe answers `99`. Its four-setting references are measured from
 this in-tree source and companion declaration file.
 
-Expected answers are **measured** on tsc 7.0.2, independently of the
+Expected answers are **measured** on the pinned tsc, independently of the
 benchmark's tsc arm, by `scripts/benchmark/semantic-perf/measure-expected.mjs`
 in all four `strictNullChecks` × `noImplicitAny` settings. The default reference is
 `scripts/benchmark/semantic-perf/expected.json`, which holds the catalog's golden
@@ -393,7 +394,7 @@ answer is never a win.
 
 `validate.mjs` fails a run when:
 
-- a binary is not the one named: TypeScript is not 7.0.2 (package, platform
+- a binary is not the one named: TypeScript is not the pin (package, platform
   package and `tsc -v`), a Verter probe was not built at `opt-level 3` without
   debug assertions, or with a non-production feature (`test-support`,
   `attribution`, …), a pinned binary or the tsc API client changed during
@@ -423,7 +424,7 @@ answer is never a win.
 - repetitions of one arm disagree on the answer or its class;
 - the tsc arm's answer or error-type flag differs from the measured
   reference, or a reference cell was measured on another source, tsconfig,
-  library or method, or not by a verified tsc 7.0.2;
+  library or method, or not by a verified pinned tsc;
 - the stored summary differs from the summary recomputed from the raw
   records (a claimed match or verdict the raw answers do not support), or a
   raw record on disk differs from its copy in `results.json`.
@@ -726,11 +727,11 @@ labels every record `containment: sampled`.
 2. Node.js 20 or newer and pnpm 9 or newer, native to the machine (on an
    Apple-silicon Mac, an arm64 node, not one running under Rosetta).
 3. From the repository root: `pnpm install`. This installs the root
-   devDependency `typescript@7.0.2` and, through its optional dependencies,
+   `typescript` devDependency (the pin) and, through its optional dependencies,
    the native tsc for the platform (`@typescript/typescript-darwin-arm64` on
    an Apple-silicon Mac, `@typescript/typescript-win32-x64` on Windows). The
    harness resolves both through ordinary dependency resolution and refuses
-   any version other than 7.0.2.
+   any version other than the pin.
 4. The supervisor: the harness builds `crates/verter_supervise` itself; on a
    checkout without it, pass `--supervisor <path-to-verter-supervise>`.
 5. No tuning variables in the environment and no Cargo configuration outside

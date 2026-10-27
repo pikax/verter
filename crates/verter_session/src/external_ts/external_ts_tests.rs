@@ -130,7 +130,7 @@ fn bare_star_include_resolves_carrier_source_to_project_binding() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -172,7 +172,7 @@ fn jsconfig_owned_lax_tree_resolves_vue_and_svelte_carriers_to_project_binding()
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -206,7 +206,7 @@ fn extension_specific_include_does_not_own_carrier_source() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -243,7 +243,7 @@ fn binding_carries_reference_graph_data() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -298,7 +298,7 @@ fn dual_vue_claimant_solution_binds_to_first_reference_order_leaf() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -350,7 +350,7 @@ fn dual_vue_claimant_binding_follows_reference_declared_order() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -400,7 +400,7 @@ fn bound_env_dims_sourced_from_resolved_project_member_not_tsconfig_path() {
             project_identity: crate::file_artifact_store::ProjectIdentity([fill; 16]),
         }
     };
-    let resolver = WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &env_source, true);
+    let resolver = WorkspaceProjectResolver::new(&snap, &ws, "7.1.1", &env_source, true);
 
     match resolver.resolve("d:/ws/src/Foo.vue", None) {
         CarrierOwnershipResolution::Bound(binding) => {
@@ -443,7 +443,7 @@ fn real_file_at_carrier_path_downgrades_to_ambiguous() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -481,7 +481,7 @@ fn same_stem_svelte_rune_downgrades_to_ambiguous() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -511,7 +511,7 @@ fn carrier_with_no_conflict_resolves_cleanly() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -548,7 +548,7 @@ fn real_file_at_jsx_carrier_path_downgrades_to_ambiguous() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -581,7 +581,7 @@ fn tsx_carrier_path_still_detected_after_descriptor_derivation() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -620,7 +620,7 @@ fn non_canonical_source_uri_still_detects_carrier_conflict() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -664,7 +664,7 @@ fn real_file_at_carrier_path_downgrades_unowned_source_to_ambiguous() {
             let resolver = WorkspaceProjectResolver::new(
                 &snap,
                 &ws,
-                "7.0.1",
+                "7.1.1",
                 &(test_env_dims as fn(&str) -> EnvDims),
                 true,
             );
@@ -690,7 +690,7 @@ fn real_file_at_carrier_path_downgrades_unowned_source_to_ambiguous() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -739,7 +739,7 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
             let resolver = WorkspaceProjectResolver::new(
                 &snap,
                 &ws,
-                "7.0.1",
+                "7.1.1",
                 &(test_env_dims as fn(&str) -> EnvDims),
                 true,
             );
@@ -771,7 +771,7 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
         let resolver = WorkspaceProjectResolver::new(
             &snap,
             &ws,
-            "7.0.1",
+            "7.1.1",
             &(test_env_dims as fn(&str) -> EnvDims),
             true,
         );
@@ -812,7 +812,7 @@ fn multiply_owned_carrier_resolves_to_single_tsgo_default_owner() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -860,7 +860,7 @@ fn bootstrap_ownership_view_resolves_not_ready() {
     let bootstrap = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         false, // ownership_ready = false ⇒ bootstrap
     );
@@ -873,7 +873,7 @@ fn bootstrap_ownership_view_resolves_not_ready() {
     let authoritative = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -900,7 +900,7 @@ fn project_binding_mints_ensure_project_request() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );
@@ -913,7 +913,7 @@ fn project_binding_mints_ensure_project_request() {
     let request = binding.ensure_project_request();
     assert_eq!(request.tsconfig_uri(), "d:/ws/tsconfig.json");
     assert_eq!(request.workspace_root(), "d:/ws");
-    assert_eq!(request.ts_version(), "7.0.1");
+    assert_eq!(request.ts_version(), "7.1.1");
     // The request carries the orthogonal env dims, not a bundled hash.
     let dims = request.env_dims();
     assert_eq!(dims.project_identity, request.project_identity());
@@ -976,7 +976,7 @@ fn bound_project_mints_from_ensure_project_request() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );

@@ -67,7 +67,9 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
 /// the default profile, or an empty signature if no slot was admitted.
 fn read_signature(host: &VerterHost, canonical: &str) -> ReadSetSignature {
     host.compile_slot_fact_dep_signature(canonical, &CompileProfile::default())
-        .unwrap_or_else(ReadSetSignature::empty)
+        .unwrap_or_else(|| {
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production())
+        })
 }
 
 /// R3/R26/R28 producer-timing discriminator.

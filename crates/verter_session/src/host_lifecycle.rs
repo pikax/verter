@@ -64,6 +64,11 @@ impl VerterHost {
     /// resolution state keeps charging the one retention adapter across
     /// LSP/test workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
+        // The host's fact policy is fixed at composition: a workspace sealing
+        // its witnesses under another one cannot be bound.
+        self.project_type_store
+            .fact_policy()
+            .assert_compatible(workspace.fact_policy());
         self.workspace_services.attach(workspace.as_ref());
         let freshness_readers = workspace.freshness_readers();
         {

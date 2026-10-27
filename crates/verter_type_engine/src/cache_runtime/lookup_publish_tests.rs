@@ -304,10 +304,12 @@ fn lookup_publish_threads_deferred_victims_to_evict() {
 
 fn sig_for(canonical: &str, hash_byte: u8) -> ReadSetSignature {
     let facts: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: [hash_byte; 16],
-        }]);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [hash_byte; 16],
+            },
+        ]);
     ReadSetSignature::new(facts)
 }
 

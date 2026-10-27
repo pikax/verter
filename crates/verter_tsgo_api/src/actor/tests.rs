@@ -198,7 +198,7 @@ async fn callback_is_serviced_inline_without_deadlock() {
         let call = encode_frame(MessageType::Call, b"readFile", br#""/repo/src/a.ts""#);
         from_engine.send(call).await.unwrap();
 
-        // 3. the actor must reply with CALL_RESPONSE carrying {content:"…"}
+        // 3. the actor must reply with CALL_RESPONSE carrying the tagged value
         let cb_raw = to_engine.recv().await.unwrap();
         let (cb, _) = decode_frame(&cb_raw, 0).unwrap();
         assert_eq!(cb.msg_type, MessageType::CallResponse);
@@ -250,7 +250,7 @@ async fn multiple_callbacks_before_response() {
             .unwrap();
         let exists = to_engine.recv().await.unwrap();
         let (e, _) = decode_frame(&exists, 0).unwrap();
-        assert_eq!(e.payload, b"true");
+        assert_eq!(e.payload, br#"{"kind":"value","value":true}"#);
 
         from_engine
             .send(encode_frame(MessageType::Call, b"readFile", br#""/a.ts""#))
@@ -805,23 +805,23 @@ async fn backpressure_bounds_the_queue() {
 }
 
 // ── PURE callback servicing (also covered via the actor, but unit-tested for
-//    the exact wire JSON the host must emit) ──────────────────────────────────
+//    the exact tagged result JSON the host must emit, fsCallbacks.js:47-98) ──
 #[test]
-fn service_fs_callback_readfile_wraps_three_states() {
+fn service_fs_callback_readfile_tags_three_states() {
     let snap = OverlaySnapshot::builder()
         .file("/a.ts", "X")
         .absent_file("/gone.ts")
         .build();
 
-    // Found -> {content:"X"}
+    // Found -> the overlay's value
     let found = service_fs_callback(&snap, "readFile", br#""/a.ts""#).unwrap();
-    assert_eq!(found, r#"{"content":"X"}"#);
-    // NotFound -> {content:null}
+    assert_eq!(found, r#"{"kind":"value","value":"X"}"#);
+    // NotFound -> missing (never a fall-through to a stale on-disk copy)
     let nf = service_fs_callback(&snap, "readFile", br#""/gone.ts""#).unwrap();
-    assert_eq!(nf, r#"{"content":null}"#);
-    // FallThrough -> "" (empty)
+    assert_eq!(nf, r#"{"kind":"missing"}"#);
+    // FallThrough -> the engine reads the host filesystem
     let ft = service_fs_callback(&snap, "readFile", br#""/unknown.ts""#).unwrap();
-    assert_eq!(ft, "");
+    assert_eq!(ft, r#"{"kind":"useOS"}"#);
 }
 
 #[test]
@@ -848,22 +848,33 @@ fn service_fs_callback_file_exists_and_realpath_and_entries() {
 
     assert_eq!(
         service_fs_callback(&snap, "fileExists", br#""/repo/overlay.ts""#).unwrap(),
-        "true"
+        r#"{"kind":"value","value":true}"#
     );
     assert_eq!(
         service_fs_callback(&snap, "fileExists", br#""/repo/missing.ts""#).unwrap(),
-        "",
-        "unknown file falls through (empty result)"
+        r#"{"kind":"useOS"}"#,
+        "an unknown file is served from the host filesystem"
     );
     assert_eq!(
         service_fs_callback(&snap, "realpath", br#""/repo/overlay.ts""#).unwrap(),
-        r#""/repo/overlay.ts""#
+        r#"{"kind":"value","value":"/repo/overlay.ts"}"#
     );
 
-    // getAccessibleEntries merges real + overlay.
+    // getAccessibleEntries merges real + overlay into one tagged value.
     let entries = service_fs_callback(&snap, "getAccessibleEntries", br#""/repo""#).unwrap();
-    assert!(entries.contains("real.ts"), "{entries}");
-    assert!(entries.contains("overlay.ts"), "{entries}");
+    let parsed: serde_json::Value = serde_json::from_str(&entries).unwrap();
+    assert_eq!(parsed["kind"], "value", "{entries}");
+    assert_eq!(
+        parsed["value"]["files"],
+        serde_json::json!(["real.ts", "overlay.ts"]),
+        "{entries}"
+    );
+    assert_eq!(parsed["value"]["directories"], serde_json::json!([]));
+    // A directory nothing knows is served from the host filesystem.
+    assert_eq!(
+        service_fs_callback(&snap, "getAccessibleEntries", br#""/elsewhere""#).unwrap(),
+        r#"{"kind":"useOS"}"#
+    );
 
     // NEGATIVE: an unknown callback name is a typed error string.
     assert!(service_fs_callback(&snap, "totallyUnknown", br#""/x""#).is_err());

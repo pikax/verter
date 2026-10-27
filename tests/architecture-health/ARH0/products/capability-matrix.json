@@ -51,8 +51,8 @@
     {
       "capability": "typescript-tsgo-plane",
       "status": "implemented",
-      "engine": "typescript (native preview toolchain at repo root)",
-      "version": "7.0.2",
+      "engine": "typescript (TypeScript 7 native toolchain at repo root)",
+      "version": "7.1.0-beta",
       "versionSource": "package.json",
       "consumers": [
         "crates/verter_tsgo_api",

@@ -155,6 +155,30 @@ pub(crate) struct CoordinatorReceipts {
     /// the tick that decided the hold, so a dispatch tick that ends after it
     /// has provably taken that decision.
     pub(crate) dependency_holds: Arc<std::sync::atomic::AtomicUsize>,
+    /// Whether the coordinator holds no work: as of its last loop tick no
+    /// document was pending and no diagnostics pull was in flight. Cleared
+    /// before the loop drains the inbox, so a signal leaving the inbox never
+    /// leaves both the inbox and this flag reading idle.
+    pub(crate) idle: Arc<std::sync::atomic::AtomicBool>,
+    /// Notified (with a stored permit) when the restart-pulse listener task
+    /// is dropped, so a test can tell the listener is gone instead of waiting
+    /// to see whether it reacts.
+    pub(crate) pulse_listener_stopped: Arc<tokio::sync::Notify>,
+    /// A quiet window that replaces [`crate::edit_quiet_window::EDIT_QUIET_WINDOW`]
+    /// for this coordinator, so a test that needs every receipt's window
+    /// elapsed sets it to zero instead of waiting the window out.
+    pub(crate) quiet_window_override: Arc<parking_lot::Mutex<Option<std::time::Duration>>>,
+}
+
+/// TEST-ONLY: notifies its `Notify` when dropped.
+#[cfg(test)]
+struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+
+#[cfg(test)]
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -413,6 +437,25 @@ impl SyncCoordinatorHandle {
     #[cfg(test)]
     pub(crate) fn inbox_contains(&self, canonical_id: &str) -> bool {
         self.pending.lock().contains_key(canonical_id)
+    }
+
+    /// TEST-ONLY: replace this coordinator's quiet window, from its next loop
+    /// tick on.
+    #[cfg(test)]
+    pub(crate) fn set_quiet_window_for_test(&self, window: std::time::Duration) {
+        *self.receipts.quiet_window_override.lock() = Some(window);
+        let _ = self.wake_tx.try_send(());
+    }
+
+    /// TEST-ONLY: whether the coordinator holds no work at all — nothing in
+    /// the handle-side inbox, nothing pending in the loop, no diagnostics pull
+    /// in flight. Read it inside [`Self::await_until`]: the loop re-evaluates
+    /// it on every tick, so once it holds every compile the queued work owed
+    /// has run.
+    #[cfg(all(test, feature = "semantic-observe"))]
+    pub(crate) fn idle_for_test(&self) -> bool {
+        self.pending.lock().is_empty()
+            && self.receipts.idle.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -879,7 +922,6 @@ async fn coordinator_loop(
         touches,
         scanning,
     } = shared;
-    let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
     // Map from canonical_id → (last_change_time, uri_str)
     let mut pending_files: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
     // Provider-state commits are serialized and allowed to finish. Diagnostics
@@ -958,7 +1000,11 @@ async fn coordinator_loop(
         .and_then(|provider| provider.provider_restart_pulse())
     {
         let drain = Arc::clone(&pending_redrive);
+        #[cfg(test)]
+        let stopped = NotifyOnDrop(Arc::clone(&receipts.pulse_listener_stopped));
         _pulse_listener.0 = Some(tokio::spawn(async move {
+            #[cfg(test)]
+            let _stopped = stopped;
             loop {
                 restart_pulse.notified().await;
                 crate::server::signal_pending_sync_redrive(
@@ -970,6 +1016,9 @@ async fn coordinator_loop(
     }
 
     loop {
+        let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
+        #[cfg(test)]
+        let debounce = receipts.quiet_window_override.lock().unwrap_or(debounce);
         release_held_publications(
             scanning.load(std::sync::atomic::Ordering::Acquire),
             &deps,
@@ -1025,7 +1074,13 @@ async fn coordinator_loop(
         tokio::select! {
             wake = wake_rx.recv() => {
                 match wake {
-                    Some(()) => absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks),
+                    Some(()) => {
+                        #[cfg(test)]
+                        receipts
+                            .idle
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                        absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks)
+                    }
                     None => {
                         // All handles dropped — coordinator shutting down.
                         for (_, task) in diagnostic_tasks.drain() {
@@ -1206,6 +1261,10 @@ async fn coordinator_loop(
                 // served are absorbed FIRST: which select arm runs is not
                 // ordered, and the newest receipt can only win a choice it is
                 // part of.
+                #[cfg(test)]
+                receipts
+                    .idle
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks);
                 let touch_tracker = &touches;
                 let touches = touch_tracker.lock().clone();
@@ -1468,6 +1527,11 @@ async fn coordinator_loop(
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
+        #[cfg(test)]
+        receipts.idle.store(
+            pending_files.is_empty() && diagnostic_tasks.is_empty(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         #[cfg(test)]
         receipts.loop_tick.notify_waiters();
     }

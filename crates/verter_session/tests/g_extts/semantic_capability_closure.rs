@@ -191,8 +191,8 @@ fn certification_records_observed_profile_project_and_live_basis() {
     // The witness is provenance-readable: which project was resolved, which
     // capability interpretation was observed, and which basis answers will be
     // attributed to.
-    let serving = owned_serving("7.0.2");
-    let binding = certified_binding(observed_capabilities("7.0.2"), &serving, b"basis-1")
+    let serving = owned_serving("7.1.2");
+    let binding = certified_binding(observed_capabilities("7.1.2"), &serving, b"basis-1")
         .expect("certification over negotiated capabilities must succeed");
     assert_eq!(binding.project(), "d:/ws/tsconfig.json");
     assert_eq!(
@@ -201,7 +201,7 @@ fn certification_records_observed_profile_project_and_live_basis() {
     );
     // The same observation composes the same profile; the profile is carried
     // by value, so re-certification over identical facts agrees.
-    let again = certified_binding(observed_capabilities("7.0.2"), &serving, b"basis-1")
+    let again = certified_binding(observed_capabilities("7.1.2"), &serving, b"basis-1")
         .expect("certification over negotiated capabilities must succeed");
     assert_eq!(
         binding.observed_profile(),
@@ -215,7 +215,7 @@ fn certification_refuses_unobserved_engine_capabilities() {
     // Fail-closed: default-constructed capabilities carry no recorded
     // handshake, so certifying them would record an ASSUMED interpretation —
     // the self-certified status this closure exists to refuse.
-    let serving = owned_serving("7.0.2");
+    let serving = owned_serving("7.1.2");
     let refused = certified_binding(EngineCapabilities::default(), &serving, b"basis-1");
     assert!(
         matches!(
@@ -233,18 +233,18 @@ fn capability_interpretation_changes_the_question_not_just_the_answer() {
     // engine version) changes the observed profile and therefore the composed
     // query identity for otherwise-identical arguments.
     let args = CanonicalDigest::of_bytes(b"hover-args");
-    let serving = owned_serving("7.0.2");
+    let serving = owned_serving("7.1.2");
 
-    let base = certified_binding(observed_capabilities("7.0.2"), &serving, b"basis-1")
+    let base = certified_binding(observed_capabilities("7.1.2"), &serving, b"basis-1")
         .expect("certification over negotiated capabilities must succeed");
     let flipped = {
-        let mut caps = observed_capabilities("7.0.2");
+        let mut caps = observed_capabilities("7.1.2");
         caps.async_cancellable_queries = true;
         certified_binding(caps, &serving, b"basis-1").expect("certification must succeed")
     };
     let versioned = certified_binding(
-        observed_capabilities("7.0.3"),
-        &owned_serving("7.0.3"),
+        observed_capabilities("7.1.3"),
+        &owned_serving("7.1.3"),
         b"basis-1",
     )
     .expect("certification over negotiated capabilities must succeed");
@@ -275,11 +275,11 @@ fn query_identity_is_snapshot_independent_and_flight_key_is_basis_bound() {
     // coerces back. The capability is part of the question: another row composes
     // another identity even for identical arguments.
     let args = CanonicalDigest::of_bytes(b"same-args");
-    let serving = owned_serving("7.0.2");
+    let serving = owned_serving("7.1.2");
 
-    let first = certified_binding(observed_capabilities("7.0.2"), &serving, b"basis-1")
+    let first = certified_binding(observed_capabilities("7.1.2"), &serving, b"basis-1")
         .expect("certification over negotiated capabilities must succeed");
-    let second = certified_binding(observed_capabilities("7.0.2"), &serving, b"basis-2")
+    let second = certified_binding(observed_capabilities("7.1.2"), &serving, b"basis-2")
         .expect("certification over negotiated capabilities must succeed");
 
     let qid_first = first.query_identity::<()>(QueryFeature::Hover, args);
@@ -319,25 +319,25 @@ fn serving_session_separates_question_identities() {
     // cannot launder into the other's. Same for distinct wire pins and
     // generations under one mode.
     let args = CanonicalDigest::of_bytes(b"same-args");
-    let caps = observed_capabilities("7.0.2");
+    let caps = observed_capabilities("7.1.2");
 
-    let owned = certified_binding(caps.clone(), &owned_serving("7.0.2"), b"basis-1")
+    let owned = certified_binding(caps.clone(), &owned_serving("7.1.2"), b"basis-1")
         .expect("certification over negotiated capabilities must succeed");
     let shared = certified_binding(
         caps.clone(),
-        &serving_identity(ServeMode::Shared, "7.0.2", 7, 3),
+        &serving_identity(ServeMode::Shared, "7.1.2", 7, 3),
         b"basis-1",
     )
     .expect("certification over negotiated capabilities must succeed");
     let repinned = certified_binding(
         caps.clone(),
-        &serving_identity(ServeMode::Owned, "7.0.2", 9, 3),
+        &serving_identity(ServeMode::Owned, "7.1.2", 9, 3),
         b"basis-1",
     )
     .expect("certification over negotiated capabilities must succeed");
     let reconnected = certified_binding(
         caps,
-        &serving_identity(ServeMode::Owned, "7.0.2", 7, 4),
+        &serving_identity(ServeMode::Owned, "7.1.2", 7, 4),
         b"basis-1",
     )
     .expect("certification over negotiated capabilities must succeed");
@@ -388,8 +388,8 @@ fn alias_and_direct_references_share_one_composed_identity() {
     // same References identity for the same arguments. A carrier in a second
     // project composes a different one.
     let files = alias_workspace();
-    let caps = observed_capabilities("7.0.2");
-    let serving = owned_serving("7.0.2");
+    let caps = observed_capabilities("7.1.2");
+    let serving = owned_serving("7.1.2");
 
     let direct = certified_binding_for(
         &files,
@@ -448,8 +448,8 @@ fn auto_import_completion_identity_is_stable_over_reexport_aliases() {
     // the direct path or the re-export alias, because both certify over the
     // same project, serving session, and capability interpretation.
     let files = alias_workspace();
-    let caps = observed_capabilities("7.0.2");
-    let serving = owned_serving("7.0.2");
+    let caps = observed_capabilities("7.1.2");
+    let serving = owned_serving("7.1.2");
 
     let direct = certified_binding_for(
         &files,

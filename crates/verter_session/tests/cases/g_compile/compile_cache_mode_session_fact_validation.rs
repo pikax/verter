@@ -71,7 +71,9 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
 
 fn read_signature(host: &VerterHost, canonical: &str) -> ReadSetSignature {
     host.compile_slot_fact_dep_signature(canonical, &session_profile())
-        .unwrap_or_else(ReadSetSignature::empty)
+        .unwrap_or_else(|| {
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production())
+        })
 }
 
 #[test]

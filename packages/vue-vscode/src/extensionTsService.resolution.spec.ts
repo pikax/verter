@@ -329,7 +329,7 @@ describe("ExtensionTsService — workspace TypeScript resolution", () => {
     expect(unavailable).toEqual([message]);
   });
 
-  // The native-preview (7.x / tsgo) layout is a COMPLETE install whose entry is
+  // The native TypeScript 7 (tsgo) layout is a COMPLETE install whose entry is
   // a launcher with no in-process language service and whose libraries live in a
   // separate platform package. It must be refused — this service cannot drive it
   // — but refused for the RIGHT reason: telling the user to reinstall TypeScript

@@ -22,11 +22,10 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use verter_scheduler::execution::cpu_concurrency::{CpuConcurrencyPermit, CpuConcurrencySemaphore};
 
@@ -128,22 +127,16 @@ fn raii_drop_releases_permit() {
     } // permit drops here, releasing the slot
 
     // If release did NOT happen on drop, this acquire would block forever.
-    let got = Arc::new(AtomicUsize::new(0));
+    let (acquired_tx, acquired) = std::sync::mpsc::channel();
     let sem2 = Arc::clone(&sem);
-    let flag = Arc::clone(&got);
     let h = thread::spawn(move || {
         let _p = sem2.acquire();
-        flag.store(1, Ordering::SeqCst);
+        let _ = acquired_tx.send(());
     });
 
-    let start = Instant::now();
-    while got.load(Ordering::SeqCst) == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "acquire after scope-drop blocked — RAII release on normal drop is broken",
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    acquired
+        .recv_timeout(Duration::from_secs(2))
+        .expect("acquire after scope-drop blocked — RAII release on normal drop is broken");
     h.join().expect("acquire thread joined");
 }
 
@@ -169,23 +162,17 @@ fn permit_released_on_panic_unwind() {
     );
 
     // Capacity must have recovered: this acquire must succeed promptly.
-    let recovered = Arc::new(AtomicUsize::new(0));
+    let (acquired_tx, acquired) = std::sync::mpsc::channel();
     let sem2 = Arc::clone(&sem);
-    let flag = Arc::clone(&recovered);
     let h = thread::spawn(move || {
         let _p = sem2.acquire();
-        flag.store(1, Ordering::SeqCst);
+        let _ = acquired_tx.send(());
     });
 
-    let start = Instant::now();
-    while recovered.load(Ordering::SeqCst) == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "capacity did not recover after a permit-holder panicked — \
-             release is NOT RAII (it leaked the slot on unwind)",
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    acquired.recv_timeout(Duration::from_secs(2)).expect(
+        "capacity did not recover after a permit-holder panicked — \
+         release is NOT RAII (it leaked the slot on unwind)",
+    );
     h.join().expect("recovery acquire thread joined");
 }
 

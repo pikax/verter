@@ -42,9 +42,9 @@ fn session(version: &str, pin: u64, generation: u64) -> EngineSessionFacts {
 /// generation, so a reconnect is modeled by bumping it.
 fn candidates(shared_gen: u64) -> EngineSessionCandidates {
     EngineSessionCandidates {
-        owned: OwnedSessionFacts::new(session("7.0.1", 1, 0)),
+        owned: OwnedSessionFacts::new(session("7.1.1", 1, 0)),
         shared: Some(SharedSessionFacts::new(session(
-            "7.0.1",
+            "7.1.1",
             100 + shared_gen,
             shared_gen,
         ))),
@@ -55,9 +55,9 @@ fn candidates(shared_gen: u64) -> EngineSessionCandidates {
 fn positive_facts(bound: ProjectIdentity) -> EligibilityFacts {
     EligibilityFacts {
         version_gate: VersionGateFact::Cleared {
-            observed_version: Arc::<str>::from("7.0.1"),
+            observed_version: Arc::<str>::from("7.1.1"),
         },
-        attach: AttachFact::Live(SharedSessionFacts::new(session("7.0.1", 7, 3))),
+        attach: AttachFact::Live(SharedSessionFacts::new(session("7.1.1", 7, 3))),
         binding: BindingFact::Bound(bound),
         generated_units: GeneratedUnitAdmissionFact::Admitted(admission(1)),
         proxy: ProxyFact::Available,
@@ -319,7 +319,7 @@ fn failover_live_moves_whole_component_and_discards_warm() {
     assert_eq!(shared.mode(), ServeMode::Shared);
     assert_eq!(cache.len(), 1);
 
-    let owned_session = OwnedSessionFacts::new(session("7.0.1", 1, 0));
+    let owned_session = OwnedSessionFacts::new(session("7.1.1", 1, 0));
     let failed = failover_live(
         shared.decision(),
         FailoverCause::RedirectClosed,

@@ -180,14 +180,16 @@ fn resolved_fact_warm_read_requires_same_generation_and_fact_rail() {
         canonical_id: "/node_modules/fixture-fw/index.d.ts".into(),
         hash: [9u8; 16],
     };
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
-        vec![cross_file].into_boxed_slice(),
-    )));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![cross_file].into_boxed_slice()),
+    ));
     store.publish_if_cacheable(
         key.clone(),
         ExactScriptFacts::new(fixture_payload()),
         &admission,
         5,
+        verter_session_query::facts::policy::FactPolicy::production(),
     );
 
     // Same gen + permissive view ⇒ warm hit.
@@ -212,6 +214,7 @@ fn refused_admission_never_warms_the_store_return_only() {
         ExactScriptFacts::new(fixture_payload()),
         &admission,
         5,
+        verter_session_query::facts::policy::FactPolicy::production(),
     );
     // The computed value is handed back...
     assert!(stored
@@ -229,8 +232,16 @@ fn refused_admission_never_warms_the_store_return_only() {
 fn cacheable_admission_warms_exactly_one_entry() {
     let store = FrameworkScriptFactStore::new();
     let key = resolved_fact_key("/a.ts");
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::empty());
-    store.publish_if_cacheable(key, ExactScriptFacts::new(fixture_payload()), &admission, 5);
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::empty(
+        verter_session_query::facts::policy::FactPolicy::production(),
+    ));
+    store.publish_if_cacheable(
+        key,
+        ExactScriptFacts::new(fixture_payload()),
+        &admission,
+        5,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     assert_eq!(store.len(), 1, "a Cacheable admission warms one entry");
 }
 
@@ -238,16 +249,20 @@ fn cacheable_admission_warms_exactly_one_entry() {
 /// extending another set, so it is held in shared tree storage no cache
 /// admission has claimed yet.
 fn wide_cacheable_admission() -> SignatureAdmission {
-    let facts: Vec<FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
-            .map(|index| FactVersionRef::FileWholeHash {
-                canonical_id: format!("/wide/{index:05}.ts").into(),
-                hash: [1u8; 16],
-            })
-            .collect();
+    let facts: Vec<FactVersionRef> = (0..2
+        * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+        + 3)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/wide/{index:05}.ts").into(),
+            hash: [1u8; 16],
+        })
+        .collect();
     SignatureAdmission::Cacheable(ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts[..1].to_vec())
-            .union_with_facts(&facts[1..]),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            facts[..1].to_vec(),
+        )
+        .union_with_facts(&facts[1..]),
     ))
 }
 
@@ -268,6 +283,7 @@ fn a_wide_cacheable_admission_claims_its_shared_storage_and_is_refused_for_it() 
         ExactScriptFacts::new(fixture_payload()),
         &wide_cacheable_admission(),
         5,
+        verter_session_query::facts::policy::FactPolicy::production(),
     );
     assert_eq!(store.len(), 1);
     let storage = stored.read_set_signature.facts.tree_footprint();
@@ -295,6 +311,7 @@ fn a_wide_cacheable_admission_claims_its_shared_storage_and_is_refused_for_it() 
         ExactScriptFacts::new(fixture_payload()),
         &wide_cacheable_admission(),
         5,
+        verter_session_query::facts::policy::FactPolicy::production(),
     );
     assert!(store.is_empty(), "a refused claim admits nothing");
     assert!(stored
@@ -305,7 +322,7 @@ fn a_wide_cacheable_admission_claims_its_shared_storage_and_is_refused_for_it() 
         .is_some());
     assert_eq!(
         stored.read_set_signature.facts.len(),
-        2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3,
+        2 * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max() + 3,
         "the delivered signature stays complete"
     );
     let storage = stored.read_set_signature.facts.tree_footprint();

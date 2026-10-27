@@ -1037,7 +1037,10 @@ fn assert_compile_retention_refusal_suppresses_companions(files: usize) {
                 }
             })
             .collect();
-        let facts = seal_canonical_signature(facts);
+        let facts = seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            facts,
+        );
         // The wide consumed result's evidence carries its own charge, which
         // the compile's admission must claim whole.
         let consumed = ResultReceipt::new(facts.iter().cloned().collect());
@@ -1052,9 +1055,10 @@ fn assert_compile_retention_refusal_suppresses_companions(files: usize) {
             ..RetentionLimits::defaults()
         });
         host.project_type_store = Arc::new(
-            crate::project_type_store::ProjectTypeStore::with_retention_account(Arc::clone(
-                &account,
-            )),
+            crate::project_type_store::ProjectTypeStore::with_retention_account(
+                Arc::clone(&account),
+                host.project_type_store().fact_policy(),
+            ),
         );
         let canonical = "/wide/Owner.vue";
         upsert_vue(

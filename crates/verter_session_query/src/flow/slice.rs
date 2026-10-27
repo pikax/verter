@@ -2995,8 +2995,9 @@ pub enum SliceEvolvingOperationKind {
         freshness: SliceFreshness,
     },
     /// `a = []`: the binding holds a new evolving array with no elements
-    /// (not through parentheses — `a = ([])` assigns `never[]` on 7.0.2,
-    /// an ordinary [`SliceStatement::Assignment`]). The expression's value
+    /// (not through parentheses — `a = ([])` assigns `never[]`, re-measured
+    /// on 7.1.0-beta, an ordinary [`SliceStatement::Assignment`]). The
+    /// expression's value
     /// is the empty literal's.
     Reset {
         /// The written value's site (the reaching definition).

@@ -97,7 +97,7 @@ fn test_binding(identity: ProjectIdentity) -> CarrierOwnershipResolution {
     CarrierOwnershipResolution::Bound(ProjectBinding::new_for_test(
         "/ws",
         "/ws/tsconfig.json",
-        "7.0.1-rc",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         env_dims(identity),
         Vec::new(),
         verter_session_query::resolution::ProjectId(0),
@@ -107,7 +107,7 @@ fn test_binding(identity: ProjectIdentity) -> CarrierOwnershipResolution {
 
 fn shared_session(generation: u64) -> SharedSessionFacts {
     SharedSessionFacts::new(EngineSessionFacts {
-        observed_version: Arc::<str>::from("7.0.1-rc"),
+        observed_version: Arc::<str>::from(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         wire_pin: 42,
         editor_session_generation: generation,
     })
@@ -115,7 +115,7 @@ fn shared_session(generation: u64) -> SharedSessionFacts {
 
 fn owned_session(generation: u64) -> OwnedSessionFacts {
     OwnedSessionFacts::new(EngineSessionFacts {
-        observed_version: Arc::<str>::from("7.0.1-rc"),
+        observed_version: Arc::<str>::from(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         wire_pin: 42,
         editor_session_generation: generation,
     })
@@ -136,7 +136,7 @@ struct Positive {
 fn positive(identity: ProjectIdentity, generation: u64) -> Positive {
     Positive {
         version_gate: VersionGateFact::Cleared {
-            observed_version: Arc::<str>::from("7.0.1-rc"),
+            observed_version: Arc::<str>::from(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         },
         attach: AttachFact::Live(shared_session(generation)),
         binding: BindingFact::from_resolution(&test_binding(identity)),
@@ -374,7 +374,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
     let project_b = pid(2);
 
     let version_gate = VersionGateFact::Cleared {
-        observed_version: Arc::<str>::from("7.0.1-rc"),
+        observed_version: Arc::<str>::from(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
     };
 
     // A shared warm cache primed with project B's CORRECT SHARED serving entry — the
@@ -442,7 +442,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
         workspace_root: Arc::from(workspace),
         witness_root_uri: Some(Arc::from(witness)),
         owned_session: owned_session(gen),
-        observed_version: Arc::<str>::from("7.0.1-rc"),
+        observed_version: Arc::<str>::from(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         warm_cache: Arc::clone(&warm),
         establishment,
     };
@@ -545,7 +545,9 @@ fn reconnect_mints_fresh_identity_and_prior_warm_entry_is_unreachable() {
     let decide_at = |attach_gen: u64, cfg_gen: u64, warm: &mut EngineWarmCache| {
         decide_shared_serve(
             VersionGateFact::Cleared {
-                observed_version: Arc::<str>::from("7.0.1-rc"),
+                observed_version: Arc::<str>::from(
+                    verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+                ),
             },
             AttachFact::Live(shared_session(attach_gen)),
             BindingFact::from_resolution(&test_binding(id)),

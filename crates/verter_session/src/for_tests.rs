@@ -1421,7 +1421,7 @@ pub(crate) fn resolution_witness_fact_for_tests(
 /// `verter_lsp` real-provider diagnostics lane, so both lanes always prove
 /// the same program instead of divergent copies.
 ///
-/// tsc 7.0.2 reports exactly one TS2432 on `Two`'s second initializer-less
+/// tsc 7.1.0-beta reports exactly one TS2432 on `Two`'s second initializer-less
 /// block and one TS1061 on `Bad`'s bare member after `Math.random()` — both
 /// in `MERGED_B` — and nothing else in any of the three files.
 pub const MERGED_A: &str = "\

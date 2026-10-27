@@ -1,7 +1,7 @@
 //! Hand-written tsgo `--api` wire codec.
 //!
 //! The codec is hand-written (not generated). Each module mirrors a specific
-//! shipped reference file from the rc `typescript` package and cites the
+//! shipped reference file from the pinned `typescript` package and cites the
 //! mirrored lines so a maintainer's version-update agent can re-verify against
 //! the same source on a TypeScript bump:
 //!

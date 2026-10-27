@@ -3,7 +3,7 @@
 Candidate source: branch `tama_dag/0.1.0-tama/STP13` worktree (repair turn
 over the captured candidate; baseline is the captured STP12 head).
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` (ts-js 6.0.3, ts-native 7.0.2).
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` (ts-js 6.0.3, ts-native 7.1.0-beta).
 
 Selected case IDs: `STP13-options-this`, `STP13-mixins`, `STP13-combined`, `STP13-shadowed-macro`, `STP13-options-instance`.
 

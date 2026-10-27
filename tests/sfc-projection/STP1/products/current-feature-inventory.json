@@ -6,7 +6,7 @@
   "rule": "all-RequiredCurrent-rows-and-charter-families-are-selected",
   "inputSnapshot": {
     "typescriptJs": { "package": "typescript", "version": "6.0.3", "source": "packages/playground/package.json" },
-    "typescriptNative": { "package": "typescript", "version": "7.0.2", "source": "package.json" },
+    "typescriptNative": { "package": "typescript", "version": "7.1.0-beta", "source": "package.json" },
     "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
     "compilerSfc": { "package": "@vue/compiler-sfc", "version": "3.6.0-rc.5", "source": "package.json" },
     "tsconfigs": [

@@ -2,7 +2,8 @@
 //!
 //! Spawns the actual tsgo process through the production stdio-pipe transport
 //! and drives the single-writer actor through the real wire: `initialize`,
-//! `updateSnapshot(openProjects)`, and `getSemanticDiagnostics` on both a clean
+//! `createSnapshot(openProjects)`, `updateSnapshot` from that base, and
+//! `getSemanticDiagnostics` on both a clean
 //! and a deliberately-broken OVERLAY file (served only through the snapshot's
 //! FS callbacks, never written to disk).
 //!
@@ -18,7 +19,8 @@ use std::time::Duration;
 
 use verter_tsgo_api::actor::spawn_actor;
 use verter_tsgo_api::proto::types::{
-    method, Diagnostic, InitializeResponse, UpdateSnapshotParams, UpdateSnapshotResponse,
+    method, Diagnostic, DocumentIdentifier, EnsurePrograms, FileNotifications, InitializeResponse,
+    SnapshotChanges, SnapshotResponse, UpdateSnapshotParams,
 };
 use verter_tsgo_api::snapshot::{AccessibleEntries, OverlaySnapshot, RealDirSource};
 use verter_tsgo_api::transport::pipe::StdioPipeTransport;
@@ -101,37 +103,39 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
         "engine reported a current directory"
     );
 
-    // 2. updateSnapshot(openProjects) — opens the configured project; the carrier
+    // 2. createSnapshot(openProjects) — opens the configured project; the carrier
     //    must appear in the project's root files (discovered via the merged
     //    getAccessibleEntries).
-    let snap: UpdateSnapshotResponse = req_json(
+    let snap: SnapshotResponse = req_json(
         &handle,
-        method::UPDATE_SNAPSHOT,
+        method::CREATE_SNAPSHOT,
         serde_json::json!({ "openProjects": [common::norm(&tsconfig)] }),
     )
     .await;
-    // Got a snapshot handle faithful to the rc engine's wire shape — a bare
+    // Got a snapshot handle faithful to the engine's wire shape — a bare
     // integer (NOT a string).
     let snap_wire = serde_json::to_value(snap.snapshot).expect("snapshot handle serializes");
     assert!(
         snap_wire.is_number() && !snap_wire.is_string(),
-        "the rc snapshot handle is a JSON integer, not a string: {snap_wire}"
+        "the snapshot handle is a JSON integer, not a string: {snap_wire}"
     );
     let project = snap
         .projects
         .iter()
         .find(|p| {
-            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+            common::norm(std::path::Path::new(
+                p.config_file_name.as_deref().unwrap_or_default(),
+            )) == common::norm(&tsconfig)
         })
         .expect("the opened project is in the snapshot");
     let carrier_norm = common::norm(&carrier_path);
     assert!(
         project
-            .root_files
+            .root_files()
             .iter()
             .any(|f| common::norm(std::path::Path::new(f)) == carrier_norm),
         "the off-disk carrier is a project root file: {:?}",
-        project.root_files
+        project.root_files()
     );
 
     // 3. getSemanticDiagnostics on the CLEAN carrier → no TS2307 (module not
@@ -142,7 +146,7 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
         serde_json::json!({
             "snapshot": snap.snapshot,
             "project": project.id,
-            "file": carrier_norm,
+            "files": [carrier_norm],
         }),
     )
     .await;
@@ -155,8 +159,9 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
         "clean carrier type-checks with zero diagnostics: {clean_diags:?}"
     );
 
-    // 4. Flip the carrier to the error variant via a fresh snapshot + a
-    //    fileChanges delta, then re-check: TS2345 must fire on the off-disk file.
+    // 4. Flip the carrier to the error variant via a fresh overlay + an
+    //    updateSnapshot from the ACTIVE base notifying the change, then
+    //    re-check: TS2345 must fire on the off-disk file.
     let err_snapshot = OverlaySnapshot::builder()
         .file(&carrier_norm, carrier_err)
         .directory(common::norm(&src_dir))
@@ -165,34 +170,42 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
     handle.publish_snapshot(err_snapshot);
 
     let params = UpdateSnapshotParams {
-        open_projects: Some(vec![
-            verter_tsgo_api::proto::types::DocumentIdentifier::file_name(common::norm(&tsconfig)),
-        ]),
-        file_changes: Some(verter_tsgo_api::proto::types::FileChanges::Summary(
-            verter_tsgo_api::proto::types::FileChangeSummary {
-                changed: Some(vec![
-                    verter_tsgo_api::proto::types::DocumentIdentifier::file_name(
-                        carrier_norm.clone(),
-                    ),
-                ]),
+        snapshot: snap.snapshot,
+        changes: Some(SnapshotChanges {
+            file_notifications: Some(FileNotifications {
+                changed: Some(vec![DocumentIdentifier::file_name(carrier_norm.clone())]),
                 ..Default::default()
-            },
-        )),
-        ..Default::default()
+            }),
+            // Without it the derived snapshot keeps the project dirty and the
+            // checker answers from the stale program.
+            ensure_programs: Some(EnsurePrograms::All),
+            ..Default::default()
+        }),
     };
-    let snap2: UpdateSnapshotResponse = req_json(
+    let snap2: SnapshotResponse = req_json(
         &handle,
         method::UPDATE_SNAPSHOT,
         serde_json::to_value(&params).unwrap(),
     )
     .await;
+    assert_ne!(
+        snap2.snapshot, snap.snapshot,
+        "a notified change derives a NEW snapshot from the base"
+    );
+    // The update lists only projects added or replaced relative to the base;
+    // an unchanged project carries over from it.
     let project2 = snap2
         .projects
         .iter()
-        .find(|p| {
-            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
-        })
-        .expect("project present after delta");
+        .find(|p| p.id == project.id)
+        .unwrap_or(project);
+    // The superseded base is released; it is never sent again.
+    let _: serde_json::Value = req_json(
+        &handle,
+        method::RELEASE,
+        serde_json::json!({ "snapshot": snap.snapshot }),
+    )
+    .await;
 
     let err_diags: Vec<Diagnostic> = req_json(
         &handle,
@@ -200,7 +213,7 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
         serde_json::json!({
             "snapshot": snap2.snapshot,
             "project": project2.id,
-            "file": carrier_norm,
+            "files": [carrier_norm],
         }),
     )
     .await;
@@ -251,16 +264,18 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
     let init = client.initialize().await.expect("initialize");
     assert!(!init.current_directory.is_empty());
 
-    let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
+    let params = SnapshotChanges::single_project(common::norm(&tsconfig));
     let snap = client
-        .update_snapshot(&params)
+        .create_snapshot(&params)
         .await
-        .expect("updateSnapshot");
+        .expect("createSnapshot");
     let project = snap
         .projects
         .iter()
         .find(|p| {
-            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+            common::norm(std::path::Path::new(
+                p.config_file_name.as_deref().unwrap_or_default(),
+            )) == common::norm(&tsconfig)
         })
         .expect("project opened");
 
@@ -283,6 +298,30 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
         .await
         .expect("typeToString");
     assert_eq!(s, "number");
+
+    // A no-op update from the active base: a new snapshot (or the base itself,
+    // with its extra reference already released by the client); either way
+    // the base and the update are released exactly once each.
+    let next = client
+        .update_snapshot(&snap.snapshot, &SnapshotChanges::default())
+        .await
+        .expect("updateSnapshot from the active base");
+    if next.snapshot != snap.snapshot {
+        client
+            .release(&next.snapshot)
+            .await
+            .expect("release update");
+    }
+    client.release(&snap.snapshot).await.expect("release base");
+    // A released base is gone: the engine refuses to derive from it.
+    let refused = client
+        .update_snapshot(&snap.snapshot, &SnapshotChanges::default())
+        .await;
+    assert!(
+        refused.is_err(),
+        "a released snapshot cannot be updated: {:?}",
+        refused.map(|r| r.snapshot)
+    );
 
     client.close().await.expect("close");
 }
@@ -357,16 +396,18 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
         .await
         .expect("connect");
     client.initialize().await.expect("initialize");
-    let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
+    let params = SnapshotChanges::single_project(common::norm(&tsconfig));
     let snap = client
-        .update_snapshot(&params)
+        .create_snapshot(&params)
         .await
-        .expect("updateSnapshot");
+        .expect("createSnapshot");
     let project = snap
         .projects
         .iter()
         .find(|p| {
-            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+            common::norm(std::path::Path::new(
+                p.config_file_name.as_deref().unwrap_or_default(),
+            )) == common::norm(&tsconfig)
         })
         .expect("project opened");
 
@@ -381,7 +422,7 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
          (that is exactly the rootscope gap): {per_file:?}"
     );
 
-    // (b) Whole-program getter (file omitted): the non-root imported error IS here.
+    // (b) Whole-program getter (files omitted): the non-root imported error IS here.
     let program = client
         .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)
         .await
@@ -423,14 +464,16 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
     .expect("connect clean");
     clean_client.initialize().await.expect("initialize clean");
     let snap_clean = clean_client
-        .update_snapshot(&params)
+        .create_snapshot(&params)
         .await
-        .expect("updateSnapshot clean");
+        .expect("createSnapshot clean");
     let project_clean = snap_clean
         .projects
         .iter()
         .find(|p| {
-            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+            common::norm(std::path::Path::new(
+                p.config_file_name.as_deref().unwrap_or_default(),
+            )) == common::norm(&tsconfig)
         })
         .expect("clean project opened");
     let clean_program = clean_client
@@ -508,16 +551,16 @@ export function handlePointer(event) {\n\
         .expect("connect");
     client.initialize().await.expect("initialize");
     let snap = client
-        .update_snapshot(&UpdateSnapshotParams::single_project(common::norm(
-            &tsconfig,
-        )))
+        .create_snapshot(&SnapshotChanges::single_project(common::norm(&tsconfig)))
         .await
-        .expect("updateSnapshot");
+        .expect("createSnapshot");
     let project = snap
         .projects
         .iter()
         .find(|project| {
-            common::norm(std::path::Path::new(&project.config_file_name)) == common::norm(&tsconfig)
+            common::norm(std::path::Path::new(
+                project.config_file_name.as_deref().unwrap_or_default(),
+            )) == common::norm(&tsconfig)
         })
         .expect("nested project opened");
     let per_file = client
@@ -594,16 +637,18 @@ async fn config_file_parsing_getter_surfaces_bad_target_and_none_on_clean() {
             .await
             .expect("connect");
         client.initialize().await.expect("initialize");
-        let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
+        let params = SnapshotChanges::single_project(common::norm(&tsconfig));
         let snap = client
-            .update_snapshot(&params)
+            .create_snapshot(&params)
             .await
-            .expect("updateSnapshot");
+            .expect("createSnapshot");
         let project = snap
             .projects
             .iter()
             .find(|p| {
-                common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+                common::norm(std::path::Path::new(
+                    p.config_file_name.as_deref().unwrap_or_default(),
+                )) == common::norm(&tsconfig)
             })
             .expect("project opened");
         let diags = client

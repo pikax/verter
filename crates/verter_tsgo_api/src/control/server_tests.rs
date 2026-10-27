@@ -111,7 +111,10 @@ fn spawn_fake_tsgo_cfg(
                             &mut write,
                             &id,
                             serde_json::json!({
-                                "serverInfo": { "name": "faketsgo", "version": "7.0.1-rc" },
+                                "serverInfo": {
+                                    "name": "faketsgo",
+                                    "version": crate::toolchain::policy::TYPESCRIPT_PIN
+                                },
                                 "capabilities": {},
                             }),
                         )
@@ -330,7 +333,10 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
         .await
         .expect("waitInitialized timed out")
         .expect("waitInitialized");
-    assert_eq!(witness.server_info_version.as_deref(), Some("7.0.1-rc"));
+    assert_eq!(
+        witness.server_info_version.as_deref(),
+        Some(crate::toolchain::policy::TYPESCRIPT_PIN)
+    );
     assert_eq!(witness.observed_initialize_id, serde_json::json!(1));
     assert_eq!(witness.root_uri.as_deref(), Some("file:///w"));
 
@@ -1132,15 +1138,24 @@ async fn raw_bring_up_open_carrier(
     );
 }
 
-/// Poll the fake tsgo up to ~2s for a `didClose` retraction of `carrier_uri`.
+/// Wait for the fake tsgo to observe a `didClose` retraction of `carrier_uri`.
+/// The fake fires `observed` after every recorded overlay event, and interest
+/// is enabled before each re-check. The timeout is a hang guard only.
 async fn poll_carrier_retracted(fake: &Arc<StdMutex<FakeServerState>>, carrier_uri: &str) -> bool {
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if fake.lock().unwrap().closed.iter().any(|u| u == carrier_uri) {
-            return true;
+    let observed = fake.lock().unwrap().observed.clone();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let notified = observed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if fake.lock().unwrap().closed.iter().any(|u| u == carrier_uri) {
+                return;
+            }
+            notified.await;
         }
-    }
-    false
+    })
+    .await
+    .is_ok()
 }
 
 /// An explicit `verter/detach` with an OMITTED params body (`{}`) FAILS CLOSED — it
@@ -1396,19 +1411,12 @@ async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carri
     // which a per-carrier close does not confirm and leaves a shim-side residual (a live wire
     // always acks and removes).
     relay.shutdown().await;
-    let mut wire_down = false;
-    for _ in 0..200 {
-        if relay
-            .injection_channel()
-            .did_change("file:///__probe__", 2, "")
-            .await
-            .is_err()
-        {
-            wire_down = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    relay.join_tasks_for_test().await;
+    let wire_down = relay
+        .injection_channel()
+        .did_change("file:///__probe__", 2, "")
+        .await
+        .is_err();
     assert!(
         wire_down,
         "the server-side wire must be down so `relay.did_close` fails — the residual precondition"

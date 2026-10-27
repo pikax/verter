@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The tsc arm of the semantic benchmark's session workloads: runs one
-// session script through TypeScript 7.0.2's native API in ONE live server
-// and writes one JSON record.
+// session script through the pinned TypeScript's native API in ONE live
+// server and writes one JSON record.
 //
 //   node tsc-session-probe.mjs --job <session.json> --out <result.json>
 //
@@ -9,20 +9,22 @@
 // tsconfig, script) plus the verified TypeScript package directory and
 // native tsc executable, and the Verter probe executable that reads the
 // server's OS statistics. It uses the asynchronous API client
-// (`typescript/unstable/async`, the server's `--async` mode), so a
-// concurrent demand step issues every request before awaiting any.
+// (`typescript/async`, the server's `--async` mode), so a concurrent demand
+// step issues every request before awaiting any.
 //
 // tsc's own incremental facility serves the edits: an edit writes the file
-// in the invocation's project copy and calls `updateSnapshot` with
-// `fileChanges.changed` naming it, so the server derives the next snapshot
-// from the previous one (program reuse) instead of opening the project
-// again. The record keeps the change notification and the snapshot ids as
-// the evidence.
+// in the invocation's project copy and updates the CURRENT snapshot with a
+// `fileNotifications.changed` naming it (`snapshot.update`, programs
+// re-ensured), so the server derives the next snapshot from the previous one
+// (program reuse) instead of opening the project again. The superseded
+// snapshot is disposed at once and never touched again; the last one is
+// disposed before the API closes. The record keeps the change notification
+// (under its `fileChanges` evidence key) and the snapshot ids.
 //
 // Times: a sequential request's time is the server's own processing time
 // (`collectTiming`); a concurrent step's is the client's round trip for the
 // whole step (requests in flight together have no separable server time).
-// An edit's time is the server's `updateSnapshot` time. Each step's answers
+// An edit's time is the server's snapshot-update (`updateSnapshot`) time. Each step's answers
 // are printed right after it, outside every timer (as the Verter probe
 // observes them). A `meta` step (Vue component metadata) has no tsc
 // counterpart and is recorded as not applicable.
@@ -74,9 +76,13 @@ async function main() {
   if (!job.steps?.length) throw new Error("a session runs at least one step");
   for (const path of [outPath, `${outPath}.steps.jsonl`, `${outPath}.phase`])
     rmSync(path, { force: true });
-  const { API } = await import(
-    pathToFileURL(join(job.tsPackageDir, "dist", "api", "async", "api.js")).href
-  );
+  // The verified package's public `./async` export (its `exports` map entry).
+  const tsPackage = JSON.parse(readFileSync(join(job.tsPackageDir, "package.json"), "utf8"));
+  const asyncEntry = tsPackage.exports?.["./async"];
+  if (typeof asyncEntry !== "string") {
+    throw new Error(`${job.tsPackageDir} exports no ./async entry (TypeScript 7.1 or later)`);
+  }
+  const { API } = await import(pathToFileURL(join(job.tsPackageDir, asyncEntry)).href);
   const dir = job.dir.replace(/\\/g, "/");
   const path = (file) => `${dir}/${file}`;
   const configPath = path(job.tsconfig);
@@ -97,15 +103,15 @@ async function main() {
 
   phase("setup");
   t = performance.now();
-  let snapshot = await api.updateSnapshot({ openProjects: [configPath] });
+  let snapshot = await api.createSnapshot({ openProjects: [configPath] });
   const setupRoundTripMs = performance.now() - t;
-  const setupMs = await serverTime("updateSnapshot");
+  const setupMs = await serverTime("createSnapshot");
   const serverPid = api.client?.process?.pid;
   if (typeof serverPid !== "number") throw new Error("the tsc API server pid is not reachable");
-  let project = snapshot.getProject(configPath) ?? snapshot.getProjects()[0];
+  let project = snapshot.getConfiguredProject(configPath) ?? snapshot.getProjects()[0];
   if (snapshot.getProjects().length !== 1)
     throw new Error(`expected one project, got ${snapshot.getProjects().length}`);
-  const rootFiles = project.rootFiles.map((f) => f.replace(/\\/g, "/"));
+  const rootFiles = project.parsedCommandLine.fileNames.map((f) => f.replace(/\\/g, "/"));
 
   const typeAt = async (file, alias) => {
     const position = aliasNamePosition(textOf(file), alias);
@@ -179,15 +185,16 @@ async function main() {
     } else if (step.kind === "edit") {
       writeFileSync(path(step.file), step.text);
       texts.set(step.file, step.text);
-      const fileChanges = { changed: [path(step.file)] };
+      const fileNotifications = { changed: [path(step.file)] };
       const superseded = snapshot;
       const start = performance.now();
-      snapshot = await api.updateSnapshot({ fileChanges });
+      snapshot = await superseded.update({ fileNotifications, ensurePrograms: true });
       const roundTripMs = performance.now() - start;
       // An undisposed snapshot stays active in the server and would inflate the
-      // memory reading taken after the steps.
-      await superseded.dispose();
-      project = snapshot.getProject(configPath) ?? snapshot.getProjects()[0];
+      // memory reading taken after the steps. An update that changed nothing
+      // hands back the same snapshot, which stays the active one.
+      if (snapshot !== superseded) await superseded.dispose();
+      project = snapshot.getConfiguredProject(configPath) ?? snapshot.getProjects()[0];
       steps.push({
         kind: "edit",
         file: step.file,
@@ -195,7 +202,7 @@ async function main() {
         serverMs: await serverTime("updateSnapshot"),
         roundTripMs,
         snapshot: snapshot.id,
-        fileChanges,
+        fileChanges: fileNotifications,
       });
     } else if (step.kind === "demand") {
       const records = [];
@@ -276,6 +283,7 @@ async function main() {
   };
 
   phase("teardown");
+  await snapshot.dispose();
   await api.close();
   replace(outPath, JSON.stringify(result, null, 2));
   phase("done");

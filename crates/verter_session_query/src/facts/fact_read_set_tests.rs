@@ -28,10 +28,14 @@ use crate::facts::fact_set::FactSet;
 
 use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ScriptSourceType};
 
-use super::{
-    compare_fact_refs, FactReadSet, FactReadSetFinalise, FACT_DOMAIN_PRECISE_MAX,
-    WIDE_SIGNATURE_WIDTH,
-};
+use super::{compare_fact_refs, FactReadSet, FactReadSetFinalise};
+
+/// The production fresh-slice width these fixtures straddle.
+const WIDE_SIGNATURE_WIDTH: usize =
+    crate::facts::policy::FactPolicy::production().fresh_slice_max();
+/// The production precise-bucket bound these fixtures straddle.
+const FACT_DOMAIN_PRECISE_MAX: usize =
+    crate::facts::policy::FactPolicy::production().precise_domain_max();
 use crate::facts::fact_cache::{
     AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain, DerivedFactKind,
     DomainGenerationFact, FactVersionRef, ParseEnvHash, ParseFactRef, ResolveImportsFactRef,
@@ -327,7 +331,7 @@ fn permute(facts: &[FactVersionRef], seed: u64) -> Vec<FactVersionRef> {
 }
 
 fn finalise_all(facts: &[FactVersionRef]) -> FactSet {
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     for fact in facts {
         read_set.observe(fact.clone());
     }
@@ -558,7 +562,7 @@ fn canonical_ordering_is_free_of_transient_allocation() {
             large.push(fact);
         }
     }
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     for fact in &large {
         read_set.observe(fact.clone());
     }
@@ -606,8 +610,8 @@ fn absorbing_a_canonical_witness_yields_the_exact_union() {
         "the witness must contain facts the attempt-local set does not"
     );
 
-    let run: FactSet = FactSet::from(canonical.clone());
-    let mut merged = FactReadSet::new();
+    let run: FactSet = crate::facts::policy::FactPolicy::production().set_of(canonical.clone());
+    let mut merged = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     for fact in &local {
         merged.observe(fact.clone());
     }
@@ -646,12 +650,12 @@ fn absorbing_a_canonical_witness_yields_the_exact_union() {
 #[test]
 fn absorbed_witness_merge_is_order_independent_and_dedups_across_the_seam() {
     let (canonical, local) = split_corpus();
-    let run: FactSet = FactSet::from(canonical.clone());
+    let run: FactSet = crate::facts::policy::FactPolicy::production().set_of(canonical.clone());
 
     let mut baseline: Option<FactSet> = None;
     for seed in 1u64..=64 {
         let permuted = permute(&local, seed.wrapping_mul(0x2545_F491_4F6C_DD1D));
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         // Absorb before, between, and after the local observations across
         // the seeds, so absorption order is exercised too.
         if seed % 2 == 0 {
@@ -691,9 +695,9 @@ fn absorbing_a_non_canonical_arc_still_produces_the_canonical_union() {
     let (canonical, local) = split_corpus();
     let mut scrambled = permute(&canonical, 0x1234_5678);
     scrambled.push(canonical[0].clone());
-    let scrambled: FactSet = FactSet::from(scrambled);
+    let scrambled: FactSet = crate::facts::policy::FactPolicy::production().set_of(scrambled);
 
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     for fact in &local {
         read_set.observe(fact.clone());
     }
@@ -719,9 +723,9 @@ fn absorbed_runs_count_towards_the_signature_width() {
             hash: hash16(0),
         })
         .collect();
-    let run: FactSet = FactSet::from(wide.clone());
+    let run: FactSet = crate::facts::policy::FactPolicy::production().set_of(wide.clone());
 
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     read_set.absorb_canonical_signature(&run);
     assert_eq!(read_set.len(), WIDE_SIGNATURE_WIDTH + 1);
     assert!(!read_set.is_empty());
@@ -738,8 +742,8 @@ fn absorbed_runs_count_towards_the_signature_width() {
 
 #[test]
 fn absorbing_an_empty_signature_is_a_no_op() {
-    let empty: FactSet = FactSet::from(Vec::new());
-    let mut read_set = FactReadSet::new();
+    let empty: FactSet = crate::facts::policy::FactPolicy::production().set_of(Vec::new());
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     read_set.absorb_canonical_signature(&empty);
     assert!(read_set.is_empty());
     assert_eq!(read_set.len(), 0);
@@ -821,7 +825,7 @@ fn finalise_with_basis(
     facts: &[FactVersionRef],
     basis: AggregateGenerations,
 ) -> FactReadSetFinalise {
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     read_set.set_aggregate_basis(basis);
     for fact in facts {
         read_set.observe(fact.clone());
@@ -856,7 +860,11 @@ fn compact_canonical(
     let mut canonical = facts.to_vec();
     canonical.sort_unstable_by(compare_fact_refs);
     canonical.dedup();
-    let lifted = super::compact_domains(&mut canonical, &basis);
+    let lifted = super::compact_domains(
+        &mut canonical,
+        &basis,
+        crate::facts::policy::FactPolicy::production(),
+    );
     (canonical, lifted)
 }
 
@@ -1342,7 +1350,7 @@ fn live_table(facts: &[FactVersionRef]) -> LiveWholeHashes {
 }
 
 fn seal(facts: &[FactVersionRef]) -> crate::facts::fact_cache::ReadSetSignature {
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     for fact in facts.iter().rev() {
         read_set.observe(fact.clone());
     }
@@ -1437,7 +1445,7 @@ fn a_tree_signature_built_by_edits_detects_an_edit_to_any_fact_including_the_las
     let facts = wide_whole_hashes(width);
     let (inner, outer) = facts.split_at(width - 40);
     let witness = seal(inner).facts;
-    let mut read_set = FactReadSet::new();
+    let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     read_set.absorb_canonical_signature(&witness);
     for fact in outer.iter().rev() {
         read_set.observe(fact.clone());
@@ -1482,7 +1490,7 @@ fn a_tree_signature_built_by_edits_detects_an_edit_to_any_fact_including_the_las
 fn sealing_is_deterministic_and_absorbed_sets_are_shared() {
     let facts = wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3);
     let forward = {
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         for fact in &facts {
             read_set.observe(fact.clone());
         }
@@ -1498,7 +1506,7 @@ fn sealing_is_deterministic_and_absorbed_sets_are_shared() {
     );
     assert_eq!(forward.digest(), reverse.digest());
 
-    let mut outer = FactReadSet::new();
+    let mut outer = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     outer.absorb_canonical_signature(&forward);
     outer.observe(FactVersionRef::ProjectGeneration { generation: 7 });
     let FactReadSetFinalise::Ok(enclosing) = outer.finalise() else {
@@ -1521,7 +1529,7 @@ fn sealing_is_deterministic_and_absorbed_sets_are_shared() {
         shared > own * 4,
         "the enclosing set shares the absorbed seal's nodes: {own} own, {shared} shared"
     );
-    let mut next = FactReadSet::new();
+    let mut next = FactReadSet::new(crate::facts::policy::FactPolicy::production());
     next.absorb_canonical_signature(&enclosing);
     next.observe(FactVersionRef::ProjectGeneration { generation: 8 });
     let FactReadSetFinalise::Ok(enclosing_twice) = next.finalise() else {
@@ -1741,9 +1749,10 @@ fn a_retained_candidate_claims_its_receipts_once_into_its_refusable_reservation(
 #[test]
 fn a_store_charging_no_own_bytes_is_refused_for_a_fresh_wide_signature() {
     use crate::retention::RetentionLimits;
-    let signature = crate::facts::fact_read_set::seal_canonical_signature(wide_whole_hashes(
-        2 * WIDE_SIGNATURE_WIDTH + 3,
-    ));
+    let signature = crate::facts::fact_read_set::seal_canonical_signature(
+        crate::facts::policy::FactPolicy::production(),
+        wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3),
+    );
     assert!(crate::facts::receipt::has_unclaimed_retained_storage(
         &signature
     ));
@@ -1765,7 +1774,10 @@ fn a_store_charging_no_own_bytes_is_refused_for_a_fresh_wide_signature() {
         signature.tree_footprint().charged_bytes,
         "the admitted store is charged for the signature's storage"
     );
-    let narrow = crate::facts::fact_read_set::seal_canonical_signature(wide_whole_hashes(64));
+    let narrow = crate::facts::fact_read_set::seal_canonical_signature(
+        crate::facts::policy::FactPolicy::production(),
+        wide_whole_hashes(64),
+    );
     assert!(
         crate::facts::receipt::claim_retained_storage(&none, &narrow).is_ok(),
         "a narrow signature is charged by its holder, never claimed"
@@ -1784,7 +1796,9 @@ fn a_refused_own_hold_commits_no_claim() {
     let receipt_bytes = account.snapshot().pinned_bytes;
     assert!(receipt_bytes > 0);
     // Tree storage built by edits that reaches the receipts.
-    let signature = FactSet::from_facts(wide_whole_hashes(64)).union_with_facts(receipts.iter());
+    let signature = crate::facts::policy::FactPolicy::production()
+        .set_of(wide_whole_hashes(64))
+        .union_with_facts(receipts.iter());
     let nodes = signature.tree_footprint();
     assert!(nodes.nodes > 0 && nodes.pinned_bytes > 0);
     assert_eq!(nodes.retained_bytes, 0);
@@ -1927,4 +1941,109 @@ fn receipts_behind_a_result_receipt_join_the_retaining_reservation() {
     drop(receipts);
     let drained = account.snapshot();
     assert_eq!((drained.retained_bytes, drained.pinned_bytes), (0, 0));
+}
+
+fn narrow_policy() -> crate::facts::policy::FactPolicy {
+    crate::facts::policy::FactPolicy::with_widths(crate::facts::policy::FactWidths {
+        fresh_slice_max: 40,
+        strict_root_threshold: 40,
+        precise_domain_max: 40,
+        extension_slice_max: 4,
+    })
+    .expect("valid widths")
+}
+
+/// A tracer under a narrow policy seals exactly what a production tracer
+/// seals, in the storage its own widths select, and compacts a domain one
+/// distinct fact past its own precise bound, never at it.
+#[test]
+fn a_narrow_tracer_seals_the_same_facts_and_compacts_at_its_own_bound() {
+    let policy = narrow_policy();
+    let basis = AggregateGenerations {
+        content: Some(AggregateStamp::Generation(9)),
+        view_population: Some(ViewPopulation::Base),
+        ..Default::default()
+    };
+    let seal = |policy: crate::facts::policy::FactPolicy, count: usize| {
+        let mut read_set = FactReadSet::new(policy);
+        read_set.set_aggregate_basis(basis);
+        for fact in distinct_content_facts(count) {
+            read_set.observe(fact);
+        }
+        let FactReadSetFinalise::Ok(set) = read_set.finalise() else {
+            panic!("a stable tracer seals");
+        };
+        set
+    };
+    let at_bound = seal(policy, 40);
+    assert_eq!(at_bound.len(), 40, "at its bound the bucket stays precise");
+    assert!(at_bound.as_flat().is_some());
+    assert_eq!(at_bound.policy(), policy);
+    assert_eq!(
+        at_bound,
+        seal(crate::facts::policy::FactPolicy::production(), 40),
+        "the same observations seal to the same set under either policy"
+    );
+    let past_bound = seal(policy, 41);
+    assert_eq!(
+        aggregates_of(&past_bound.to_vec()),
+        vec![DomainGenerationFact {
+            domain: CompactionDomain::Content,
+            population: AggregatePopulation::View(ViewPopulation::Base),
+            stamp: AggregateStamp::Generation(9),
+        }],
+        "one distinct fact past its bound, the bucket lifts to its aggregate"
+    );
+    let production_past = seal(crate::facts::policy::FactPolicy::production(), 41);
+    assert_eq!(
+        production_past.len(),
+        41,
+        "production keeps 41 facts precise"
+    );
+}
+
+/// A tracer refuses a run sealed under another policy before its replay
+/// shortcut could keep the run's storage.
+#[test]
+#[should_panic(expected = "different fact policies")]
+fn a_tracer_refuses_a_run_of_another_policy() {
+    let run = crate::facts::policy::FactPolicy::production().set_of(distinct_content_facts(3));
+    let mut read_set = FactReadSet::new(narrow_policy());
+    read_set.absorb_canonical_signature(&run);
+}
+
+/// Placing a few appended facts into a canonical prefix in place gives the
+/// same set, in the same order, as sorting and deduplicating the whole
+/// collection — whether an appended fact is new, repeats a prefix fact or
+/// repeats another appended fact, and wherever it falls.
+#[test]
+fn appended_facts_are_placed_into_the_canonical_prefix_exactly() {
+    let fact = |index: usize| FactVersionRef::FileWholeHash {
+        canonical_id: format!("/sorted/{index:03}.ts").into(),
+        hash: hash16(0),
+    };
+    let mut seed = 0x9E37_79B9_u64;
+    let mut next = |bound: usize| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((seed >> 33) as usize) % bound
+    };
+    for _ in 0..500 {
+        let prefix_len = next(12);
+        let mut prefix: Vec<usize> = (0..prefix_len).map(|_| next(40)).collect();
+        prefix.sort_unstable();
+        prefix.dedup();
+        let tail: Vec<usize> = (0..=next(8)).map(|_| next(40)).collect();
+        let mut facts: Vec<FactVersionRef> = prefix
+            .iter()
+            .chain(tail.iter())
+            .map(|&index| fact(index))
+            .collect();
+        let mut expected = facts.clone();
+        expected.sort();
+        expected.dedup();
+        super::sort_dedup_facts(&mut facts);
+        assert_eq!(facts, expected, "prefix {prefix:?} tail {tail:?}");
+    }
 }

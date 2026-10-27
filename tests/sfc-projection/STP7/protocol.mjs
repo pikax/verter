@@ -9,6 +9,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  describeEnginePins,
+  textRecordsEnginePins,
+} from "../../../scripts/sfc-projection/engine-pins.mjs";
 
 const STP7_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(STP7_DIR, "../../..");
@@ -576,12 +580,12 @@ export function validateStp7Products({
       ),
     );
   }
-  if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {
+  if (!textRecordsEnginePins(evidenceText)) {
     errors.push(
       err(
         "STP7-svelte-shape",
         "missing-engine-pins",
-        "STP7 evidence must record ts-js 6.0.3 and ts-native 7.0.2 engine pins",
+        `STP7 evidence must record ${describeEnginePins()} engine pins`,
       ),
     );
   }

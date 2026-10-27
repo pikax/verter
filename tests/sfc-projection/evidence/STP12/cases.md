@@ -1,7 +1,7 @@
 # JavaScript projection evidence index
 
 Candidate source: current STP12 worktree. Engine pins: `typescript@6.0.3`
-(`ts-js`) and `typescript@7.0.2` (`ts-native`); Vue pin:
+(`ts-js`) and `typescript@7.1.0-beta` (`ts-native`); Vue pin:
 `vue@3.6.0-rc.5`.
 
 Selected case IDs: `STP12-checkjs-off`, `STP12-checkjs-on`,

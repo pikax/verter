@@ -14,11 +14,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::gate::{self, EngineVersionWitness, GateClearance, ObservedEngine};
 use crate::jsonrpc::framing::{encode_message, MessageFramer};
+use crate::toolchain::policy::pinned_version;
+
+/// A stable version on the TypeScript pin's release line, `offset` patches past
+/// the pin's — accepted by the gate however the pin itself is spelled.
+fn line_version(offset: u64) -> String {
+    let pin = pinned_version();
+    format!("{}.{}.{}", pin.major, pin.minor, pin.patch + offset)
+}
+
+/// The engine version the fake servers report and the gate accepts.
+fn accepted() -> String {
+    line_version(3)
+}
 
 #[test]
 fn initialize_api_session_method_string_is_exact() {
-    // The method string is server-side (Go binary), verified against the shipped
-    // native-preview binary. Pin it so a typo cannot silently break the attach.
+    // The method string is server-side (Go binary), verified against the pinned
+    // engine. Pin it so a typo cannot silently break the attach.
     assert_eq!(INITIALIZE_API_SESSION_METHOD, "custom/initializeAPISession");
 }
 
@@ -225,7 +238,7 @@ fn spawn_fake_lsp_server(
 /// A clearance minted through the REAL gate over a supported stable version
 /// with the in-band witness — the clearance `from_parts` stores.
 fn test_clearance() -> GateClearance {
-    gate::validate(&ObservedEngine::from_in_band_server_info("7.0.3"))
+    gate::validate(&ObservedEngine::from_in_band_server_info(accepted()))
         .expect("a supported stable version clears the gate")
 }
 
@@ -243,12 +256,12 @@ fn fake_session_handle() -> ApiSessionHandle {
 
 #[tokio::test]
 async fn lsp_handshake_reads_in_band_serverinfo_and_gates_accepted() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version(&accepted()));
 
     let clearance = TsgoAttach::lsp_handshake(&conn, "file:///ws")
         .await
         .expect("a supported serverInfo.version must clear the gate");
-    assert_eq!(clearance.observed_version, "7.0.3");
+    assert_eq!(clearance.observed_version, accepted());
     assert_eq!(
         clearance.witness,
         EngineVersionWitness::InBandServerInfo,
@@ -327,7 +340,7 @@ async fn lsp_handshake_fails_closed_on_missing_serverinfo() {
 
 #[tokio::test]
 async fn attach_over_refuses_a_non_owning_connection() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let lsp = TsgoLspConnection::new_attached(conn.clone());
     assert_eq!(lsp.ownership(), ConnectionOwnership::AttachedNonOwning);
 
@@ -352,7 +365,7 @@ async fn attach_over_refuses_a_non_owning_connection() {
     // being generally broken): the same composer over an OWNED connection DOES
     // originate `initialize` (the flow proceeds past the ownership check and
     // only fails later at the fake nonexistent pipe, which is irrelevant here).
-    let (conn2, trace2, join2) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (conn2, trace2, join2) = spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let owned = TsgoLspConnection::new_owned(conn2.clone(), None);
     assert_eq!(owned.ownership(), ConnectionOwnership::Owned);
     let _ = TsgoAttach::attach_over(owned, "file:///ws").await;
@@ -366,7 +379,7 @@ async fn attach_over_refuses_a_non_owning_connection() {
 
 #[tokio::test]
 async fn attach_to_initialized_gates_supplied_version_fail_closed() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let lsp = TsgoLspConnection::new_attached(conn.clone());
 
     let err = TsgoAttach::attach_to_initialized(lsp, "garbage")
@@ -398,11 +411,11 @@ async fn attach_to_initialized_gates_supplied_version_fail_closed() {
 /// never through the non-owning composer.
 #[tokio::test]
 async fn attach_to_initialized_refuses_owned_connection() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let owned = TsgoLspConnection::new_owned(conn.clone(), None);
     assert_eq!(owned.ownership(), ConnectionOwnership::Owned);
 
-    let err = TsgoAttach::attach_to_initialized(owned, "7.0.3")
+    let err = TsgoAttach::attach_to_initialized(owned, &accepted())
         .await
         .expect_err("attach_to_initialized must refuse an OWNED connection");
     assert!(
@@ -448,7 +461,8 @@ async fn open_invariant_pair<O: AttachOwnership>(attach: &TsgoAttach<O>) {
 /// ABSENT on non-owning), while the non-owning arm instead retracts its
 /// overlays via `didClose`. Returns the completed `--lsp` and `--api` traces.
 async fn teardown_flow_traces(ownership: ConnectionOwnership) -> (WireTrace, WireTrace) {
-    let (lsp_conn, lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (lsp_conn, lsp_trace, lsp_join) =
+        spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let (api_conn, api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     match ownership {
@@ -548,7 +562,8 @@ async fn owned_teardown_sends_exit() {
 /// `teardown()` entry point.
 #[tokio::test]
 async fn teardown_dispatches_on_ownership() {
-    let (lsp_conn, lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (lsp_conn, lsp_trace, lsp_join) =
+        spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
@@ -587,7 +602,8 @@ async fn teardown_dispatches_on_ownership() {
 /// duplicate.
 #[tokio::test]
 async fn did_open_tracks_overlay_uris_for_retraction() {
-    let (lsp_conn, lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (lsp_conn, lsp_trace, lsp_join) =
+        spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
@@ -641,7 +657,8 @@ async fn did_open_tracks_overlay_uris_for_retraction() {
 /// would `didClose` a document the server never opened.
 #[tokio::test]
 async fn did_open_failure_tracks_no_phantom_overlay() {
-    let (lsp_conn, _lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (lsp_conn, _lsp_trace, lsp_join) =
+        spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
     let api_conn_keep = api_conn.clone();
 
@@ -691,7 +708,7 @@ async fn did_open_failure_tracks_no_phantom_overlay() {
 
 // ────────────────────────────────────────────────────────────────────────────
 // Witness FLOW: the version the gate accepted is STORED on the attach and is
-// what the `--api` `updateSnapshot` rail is driven with — never a version the
+// what the `--api` first-snapshot rail is driven with — never a version the
 // call site re-supplies or hardcodes. Plus the ACCEPTED-witness leg of the
 // non-owning composer (the refused leg lives above), where it proceeds to the
 // `--api` session open while still never originating an LSP `initialize`.
@@ -702,7 +719,7 @@ async fn did_open_failure_tracks_no_phantom_overlay() {
 /// URI — the `--api` rail's assertion is on the full params payload.
 type ApiCallTrace = Arc<StdMutex<Vec<(String, serde_json::Value)>>>;
 
-/// A fake `--api` peer that answers `updateSnapshot` with a STRING snapshot
+/// A fake `--api` peer that answers `getCurrentLanguageServerSnapshot` with a STRING snapshot
 /// handle — the pre-integer-handle wire the codec refuses. That refusal is
 /// raised by `gate::require_integer_snapshot_handle`, whose message embeds the
 /// `observed_version` its CALLER supplied, which is what makes the version that
@@ -753,22 +770,23 @@ fn spawn_fake_api_server_with_string_snapshot_handle(
 }
 
 /// A clearance minted through the REAL gate over `version` with the in-band
-/// witness — the clearance `from_parts` stores and `update_snapshot` drives the
+/// witness — the clearance `from_parts` stores and `current_snapshot` drives the
 /// rail with.
 fn clearance_for(version: &str) -> GateClearance {
     gate::validate(&ObservedEngine::from_in_band_server_info(version))
         .unwrap_or_else(|e| panic!("`{version}` must clear the gate: {e:?}"))
 }
 
-/// Drive `TsgoAttach::update_snapshot` on an attach whose gate clearance
+/// Drive `TsgoAttach::current_snapshot` on an attach whose gate clearance
 /// accepted `observed_version`, against an `--api` peer that answers the first
-/// `updateSnapshot` with a string handle. Returns the typed refusal message
+/// snapshot request with a string handle. Returns the typed refusal message
 /// (which quotes the version the rail was driven with) and the recorded `--api`
 /// calls.
-async fn update_snapshot_refusal_for(
+async fn current_snapshot_refusal_for(
     observed_version: &str,
 ) -> (String, Vec<(String, serde_json::Value)>) {
-    let (lsp_conn, _lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (lsp_conn, _lsp_trace, lsp_join) =
+        spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let (api_conn, api_calls, api_join) = spawn_fake_api_server_with_string_snapshot_handle();
     let api_conn_keep = api_conn.clone();
 
@@ -790,7 +808,7 @@ async fn update_snapshot_refusal_for(
     );
 
     let err = attach
-        .update_snapshot("/ws/tsconfig.json")
+        .current_snapshot("/ws/tsconfig.json")
         .await
         .expect_err("a string first-snapshot handle must be refused");
     let TsgoApiError::UnsupportedTsgoWire(message) = err else {
@@ -809,24 +827,25 @@ async fn update_snapshot_refusal_for(
 }
 
 /// The STORED in-band witness — not a literal baked into the convenience — is
-/// what `update_snapshot` hands the `--api` rail. Discriminating A/B pair: two
+/// what `current_snapshot` hands the `--api` rail. Discriminating A/B pair: two
 /// attaches that differ ONLY in the gate-accepted version produce refusals
 /// naming their OWN version and not the other's. A hardcoded version literal in
-/// `update_snapshot` would make both legs name the same string and fail here.
+/// `current_snapshot` would make both legs name the same string and fail here.
 /// The first call for a project also leases it (`openProjects`), pinned on the
 /// same entry so the witness flow and the rail's wire shape are proven together.
 #[tokio::test]
-async fn update_snapshot_drives_the_api_rail_with_the_stored_in_band_witness() {
-    let (first, first_calls) = update_snapshot_refusal_for("7.0.3").await;
-    let (second, _) = update_snapshot_refusal_for("7.0.2").await;
+async fn current_snapshot_drives_the_api_rail_with_the_stored_in_band_witness() {
+    let (a, b) = (line_version(3), line_version(4));
+    let (first, first_calls) = current_snapshot_refusal_for(&a).await;
+    let (second, _) = current_snapshot_refusal_for(&b).await;
 
     assert!(
-        first.contains("7.0.3") && !first.contains("7.0.2"),
-        "the rail was driven with the attach's OWN stored witness `7.0.3`: {first}"
+        first.contains(&a) && !first.contains(&b),
+        "the rail was driven with the attach's OWN stored witness `{a}`: {first}"
     );
     assert!(
-        second.contains("7.0.2") && !second.contains("7.0.3"),
-        "the rail was driven with the attach's OWN stored witness `7.0.2`: {second}"
+        second.contains(&b) && !second.contains(&a),
+        "the rail was driven with the attach's OWN stored witness `{b}`: {second}"
     );
 
     assert_eq!(
@@ -836,10 +855,10 @@ async fn update_snapshot_drives_the_api_rail_with_the_stored_in_band_witness() {
     );
     assert_eq!(
         first_calls[0].0,
-        crate::proto::types::method::UPDATE_SNAPSHOT
+        crate::proto::types::method::GET_CURRENT_LANGUAGE_SERVER_SNAPSHOT
     );
     assert_eq!(
-        first_calls[0].1["openProjects"],
+        first_calls[0].1["changes"]["openProjects"],
         serde_json::json!(["/ws/tsconfig.json"]),
         "the FIRST snapshot for a project leases it via `openProjects`: {:?}",
         first_calls[0].1
@@ -854,13 +873,13 @@ async fn update_snapshot_drives_the_api_rail_with_the_stored_in_band_witness() {
 /// accepted-witness leg, where the composer actually proceeds.
 #[tokio::test]
 async fn attach_to_initialized_opens_the_api_session_without_originating_initialize() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version(&accepted()));
     let lsp = TsgoLspConnection::new_attached(conn.clone());
 
     // The session handle names a pipe that exists on no platform, so the attach
     // fails at the pipe CONNECT — after the composer has already done every
     // wire step it is allowed to do.
-    let _ = TsgoAttach::attach_to_initialized(lsp, "7.0.3").await;
+    let _ = TsgoAttach::attach_to_initialized(lsp, &accepted()).await;
 
     conn.close().await.unwrap();
     join.await.unwrap();

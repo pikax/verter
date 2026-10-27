@@ -63,6 +63,14 @@ const RAISE_WHEN_FILE_ENV: &str = "FAKE_TSGO_RAISE_WHEN_FILE";
 
 /// The heartbeat file this fixture appends to — the liveness witness every lifecycle test reads.
 const HEARTBEAT_FILE_ENV: &str = "FAKE_TSGO_HEARTBEAT_FILE";
+/// Where the fixture publishes its own pid (written whole, then renamed into place) as its first
+/// act, so a test watches THIS process's liveness directly instead of sampling heartbeat growth
+/// over a wall-clock window.
+const PID_FILE_ENV: &str = "FAKE_TSGO_PID_FILE";
+/// When set, the fixture prints `ready` on stdout once it has decoded its configuration and made
+/// its first heartbeat attempt — a readiness line a test can block on. Only for a fixture a test
+/// runs directly: under the shim, stdout is the LSP wire.
+const ANNOUNCE_READY_ENV: &str = "FAKE_TSGO_ANNOUNCE_READY";
 
 /// The exit CODE the fixture returns when [`EXIT_WHEN_FILE_ENV`] appears. Requires that variable —
 /// see [`resolve_exit_trigger`].
@@ -170,8 +178,16 @@ fn main() {
         return;
     }
 
+    if let Some(pid_file) = path_var(PID_FILE_ENV) {
+        let staged = pid_file.with_extension("staged");
+        if std::fs::write(&staged, std::process::id().to_string()).is_ok() {
+            let _ = std::fs::rename(&staged, &pid_file);
+        }
+    }
+
     let path = path_var(HEARTBEAT_FILE_ENV)
         .unwrap_or_else(|| panic!("fake_tsgo_heartbeat requires the {HEARTBEAT_FILE_ENV} env var"));
+    let mut announce_ready = std::env::var_os(ANNOUNCE_READY_ENV).is_some();
 
     // Unix only: raise this signal on SELF the moment the trigger file appears, standing in for a
     // real tsgo that dies from a signal (an engine crash). The trigger is an event the TEST
@@ -196,6 +212,11 @@ fn main() {
         {
             let _ = file.write_all(b".");
             let _ = file.flush();
+        }
+        if std::mem::take(&mut announce_ready) {
+            let mut stdout = std::io::stdout();
+            let _ = writeln!(stdout, "ready");
+            let _ = stdout.flush();
         }
         #[cfg(unix)]
         if let Some((signum, when_file)) = raise_trigger.as_ref() {

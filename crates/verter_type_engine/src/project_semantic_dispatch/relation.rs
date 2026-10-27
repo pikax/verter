@@ -513,15 +513,16 @@ type MixedDischargeResult = Result<
     crate::semantic_query::ResolveCallFailure,
 >;
 
-/// The checker's relation recursion limit: `recursiveTypeRelatedTo` sets
-/// `overflow` and answers false when `sourceDepth === 100 || targetDepth
-/// === 100` — the 101st nested structured relation of one
-/// `checkTypeRelatedTo` call — and `checkTypeRelatedTo` then reports
-/// TS2321 ("Excessive stack depth comparing types"). Measured on
-/// TypeScript 7.0.2: `[D] extends [Box<…<number>>]` answers `1` over 99
-/// nested `Box` applications or `{ v: … }` literals and `2` with TS2321
-/// over 100 (the tuple wrapper is one more level). It also bounds this
-/// engine's native recursion: a chain never opens more relation frames.
+/// The checker's relation recursion limit: the 101st nested structured
+/// relation of one `checkTypeRelatedTo` call (the tuple wrapper of a
+/// `[S] extends [T]` probe is one level). It also bounds this engine's
+/// native recursion: a chain never opens more relation frames.
+///
+/// Past it the checker answers the pair `Maybe`, which holds, reports
+/// nothing, and relates the rest of the relation as usual (TypeScript
+/// 7.1.0-beta: `[{ v: … 1 … }] extends [{ v: … number … }] ? 1 : 2` is `1`
+/// over 100 nested literals); see [`Self::relation_depth_maybe`]. The
+/// answer depends on where the chain began, so it is never admitted.
 pub(super) const CHECKER_RELATION_DEPTH_LIMIT: u16 = 100;
 
 /// The checker's `isDeeplyNestedType` depth: a type is deeply nested once
@@ -1335,8 +1336,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let chain = (!measurement)
             .then(|| self.current_relation_chain())
             .flatten();
-        if let Some(chain) = chain.filter(|chain| structured && chain.overflowed) {
-            return Some(self.overflow_relation_chain(&chain));
+        if let Some(chain) = chain
+            .as_ref()
+            .filter(|chain| structured && chain.overflowed)
+        {
+            return Some(self.overflow_relation_chain(chain));
+        }
+        // (0b) A pair this check already related on a `Maybe` answers
+        // `Maybe` again, as the checker's `maybeKeys` serve it.
+        if let Some(chain) = chain.as_ref().filter(|_| structured) {
+            let known = self
+                .dispatch_txn
+                .borrow()
+                .relation
+                .chain_maybe_keys
+                .iter()
+                .rev()
+                .find(|(base, _)| *base == chain.base)
+                .is_some_and(|(_, keys)| keys.contains(key));
+            if known {
+                self.note_relation_context_dependent();
+                self.fold_into_top_build_local_taint_with(
+                    false,
+                    true,
+                    crate::semantic_query::PartialReasonSet::empty(),
+                );
+                return Some(RelationStep::Assignable {
+                    bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                });
+            }
         }
         // (1) Reentry intercept.
         {
@@ -1534,9 +1562,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// A structured relation of an overflowed chain, or one that would
-    /// open past [`CHECKER_RELATION_DEPTH_LIMIT`]: the checker answers
-    /// false and flags the whole relation. The flag is set on the chain's
+    /// A structured relation of a chain a refused comparison check
+    /// overflowed: the checker answers false and flags the whole relation. The flag is set on the chain's
     /// first frame, and the answer is never admitted — it depends on where
     /// the chain began — so the enclosing build is marked non-cacheable.
     fn overflow_relation_chain(
@@ -1559,6 +1586,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::PartialReasonSet::empty(),
         );
         RelationStep::NotAssignable
+    }
+
+    /// A structured pair that would open past [`CHECKER_RELATION_DEPTH_LIMIT`]:
+    /// the checker answers `Maybe`, which holds and reports nothing, and the
+    /// rest of the relation goes on as usual — nothing is flagged on the
+    /// chain. The answer depends on where the chain began, so, as with a
+    /// deeply nested pair's `Maybe`, the enclosing build is non-cacheable.
+    fn relation_depth_maybe(&self) -> RelationResult {
+        self.note_relation_context_dependent();
+        self.fold_into_top_build_local_taint_with(
+            false,
+            true,
+            crate::semantic_query::PartialReasonSet::empty(),
+        );
+        assignable(&[])
     }
 
     /// Refuse a comparison check, retaining its root subjects and resource
@@ -1584,7 +1626,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the stack, once its operands are unwrapped to `concrete`: a pair of
     /// simple types is not an entry. A structured pair counts toward the
     /// chain's depth: with [`CHECKER_RELATION_DEPTH_LIMIT`] entries already
-    /// open (or the chain already overflowed) it overflows, false. It is
+    /// open it answers `Maybe` ([`Self::relation_depth_maybe`]), and in a
+    /// chain a refused comparison check overflowed it is false. It is
     /// then pushed on the recursion stacks under the recursion identities of
     /// its `carriers`; once both sides are deeply nested (the checker's
     /// `isDeeplyNestedType`, sticky down the chain as `expandingFlags`
@@ -1627,10 +1670,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .frame(chain.base)
                 .and_then(|frame| frame.relation())
                 .is_some_and(|state| state.chain.overflowed);
-            if overflowed || chain.depth >= CHECKER_RELATION_DEPTH_LIMIT {
+            if overflowed {
                 drop(txn);
                 self.overflow_relation_chain(&chain);
                 return Some(RelationResult::NotAssignable);
+            }
+            if chain.depth >= CHECKER_RELATION_DEPTH_LIMIT {
+                drop(txn);
+                return Some(self.relation_depth_maybe());
             }
             (top, chain)
         };
@@ -1743,7 +1790,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `any` source), and the pair is not a small union the checker relates
     /// without caching it — a union source of fewer than four members
     /// against a target that is no union, or a union target of fewer than
-    /// four against a simple source (`skipCaching`).
+    /// four against a simple source (`skipCaching`) — nor an object type
+    /// against a primitive, which `isRelatedTo` decides first.
     fn checker_recursion_entry(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
         if source == target || !self.relation_pair_is_structured(source, target) {
             return false;
@@ -1787,6 +1835,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match (&*source_data, &*target_data) {
             (_, SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
             | (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => false,
+            // An object type against a primitive is decided by `isRelatedTo`
+            // itself, before `recursiveTypeRelatedTo`.
+            (source_data, target_data)
+                if super::call_resolve::is_object_type(source_data)
+                    && (simple(target_data)
+                        || matches!(target_data, SemanticNodeData::TemplateLiteral { .. }))
+                    && !matches!(
+                        target_data,
+                        SemanticNodeData::Primitive(PrimitiveKind::Never)
+                    ) =>
+            {
+                false
+            }
             (SemanticNodeData::Primitive(PrimitiveKind::Any), target)
                 if !matches!(target, SemanticNodeData::Primitive(PrimitiveKind::Never)) =>
             {
@@ -2088,8 +2149,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return;
         }
         if self.checker_recursion_entry(source, target) {
-            if !self.enter_inline_recursion() {
-                results.push(RelationResult::NotAssignable);
+            if let Some(answer) = self.enter_inline_recursion() {
+                results.push(answer);
                 return;
             }
             work.push(RelateWork::Ascend);
@@ -2105,23 +2166,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Open one inline entry of the checker's recursion depth on the frame
-    /// on top of the stack: `false` (and the chain overflowed) when the
-    /// chain already overflowed or holds [`CHECKER_RELATION_DEPTH_LIMIT`]
-    /// entries, as a frame of its own would.
-    fn enter_inline_recursion(&self) -> bool {
+    /// on top of the stack: `None` once entered, else the pair's answer, as
+    /// a frame of its own would get it — `Maybe` past
+    /// [`CHECKER_RELATION_DEPTH_LIMIT`] entries, false in a chain a refused
+    /// comparison check overflowed.
+    fn enter_inline_recursion(&self) -> Option<RelationResult> {
         let chain = {
             let txn = self.dispatch_txn.borrow();
             let reentry = txn.reentry();
-            let Some(top) = reentry.depth().checked_sub(1) else {
-                return true;
-            };
-            let Some(chain) = reentry
+            let top = reentry.depth().checked_sub(1)?;
+            let chain = reentry
                 .frame(top)
                 .and_then(|frame| frame.relation())
-                .map(|state| state.chain.clone())
-            else {
-                return true;
-            };
+                .map(|state| state.chain.clone())?;
             let overflowed = reentry
                 .frame(chain.base)
                 .and_then(|frame| frame.relation())
@@ -2129,12 +2186,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if !overflowed && chain.depth < CHECKER_RELATION_DEPTH_LIMIT {
                 drop(txn);
                 self.adjust_inline_recursion(true);
-                return true;
+                return None;
+            }
+            if !overflowed {
+                drop(txn);
+                return Some(self.relation_depth_maybe());
             }
             chain
         };
         self.overflow_relation_chain(&chain);
-        false
+        Some(RelationResult::NotAssignable)
     }
 
     /// Leave the inline recursion entry [`Self::enter_inline_recursion`]
@@ -3057,6 +3118,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let counts = &mut txn.relation.chain_comparisons;
             counts.retain(|(base, _)| *base < idx);
             counts.push((idx, Default::default()));
+            let maybe_keys = &mut txn.relation.chain_maybe_keys;
+            maybe_keys.retain(|(base, _)| *base < idx);
+            maybe_keys.push((idx, Default::default()));
         }
         if let Some(state) = txn
             .reentry_mut()
@@ -3196,6 +3260,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let recursion = self.close_relation_recursion(idx, &chain);
         self.close_relation_unreliable(idx, &frame_key, recursion.footprint.unreliable);
+        // A pair inside the check that held on a `Maybe`, with no inference
+        // session of its own, joins the check's `maybeKeys`.
+        if recursion.context_dependent
+            && chain.base < idx
+            && opened_session.is_none()
+            && !session_delta
+            && bindings.is_empty()
+            && matches!(verdict, RelationResult::Assignable { .. })
+        {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            if let Some((_, keys)) = txn
+                .relation
+                .chain_maybe_keys
+                .iter_mut()
+                .rev()
+                .find(|(base, _)| *base == chain.base)
+            {
+                keys.insert(frame_key.clone());
+            }
+        }
         let mut session_bindings: Option<Arc<[InferBinding]>> = None;
         let mut session_abandoned = false;
         if let Some(sid) = opened_session {
@@ -10639,9 +10723,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let chain = self
             .current_relation_chain()
             .expect("a union comparison belongs to an open relation chain");
-        if chain.overflowed || chain.depth >= CHECKER_RELATION_DEPTH_LIMIT {
+        if chain.overflowed {
             self.overflow_relation_chain(&chain);
             return Some(RelationResult::NotAssignable);
+        }
+        // Each pair would open past the depth, where the checker answers
+        // `Maybe` before looking for the missing property.
+        if chain.depth >= CHECKER_RELATION_DEPTH_LIMIT {
+            return Some(self.relation_depth_maybe());
         }
         let comparison_room = self
             .dispatch_txn

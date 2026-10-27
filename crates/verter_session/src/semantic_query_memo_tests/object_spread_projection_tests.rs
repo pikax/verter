@@ -524,7 +524,10 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                     .send(())
                     .expect("winner: signal in-build");
                 rx_release_winner.recv().expect("winner: released");
-                let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact.clone()]));
+                let carrier = ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![winner_fact.clone()]),
+                );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(SemanticQueryValue::ObjectProjection(
                         formula_with_key(base_value),

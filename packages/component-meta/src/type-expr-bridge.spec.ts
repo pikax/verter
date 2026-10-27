@@ -1981,7 +1981,7 @@ describe("operator-shaped graph nodes render structurally in display text", () =
 });
 
 describe("escapeTemplateQuasi", () => {
-  // A quasi is cooked text; tsc 7.0.2 prints `x${string}\\`, `a\t${string}`
+  // A quasi is cooked text; tsc 7.1.0-beta prints `x${string}\\`, `a\t${string}`
   // and a line feed as it is.
   it("escapes cooked template text as the checker prints it", () => {
     expect(escapeTemplateQuasi("a`b${c\\d\te\nf\r\ng\b\u0001")).toBe(
