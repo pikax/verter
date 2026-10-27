@@ -18,8 +18,10 @@ use verter_session_query::facts::{CrossDeclLens, CrossDeclRef, SymbolSpace};
 /// Resolve `name` against the shallow state's local-symbol +
 /// import-binding tables (header data). Falls back to `Unresolved` for
 /// free references.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct ShallowLens {
+    storage: verter_retention::pinned_heap::StoragePin,
     locals: FxHashSet<verter_type_expr::DeclBindingKey>,
     value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
     exported: FxHashSet<verter_type_expr::DeclBindingKey>,
@@ -33,6 +35,16 @@ pub struct ShallowLens {
         FxHashMap<verter_type_expr::DeclBindingKey, verter_type_expr::DeclBindingKey>,
     /// Maps `local_binding_name → source_specifier`.
     import_targets: FxHashMap<verter_type_expr::DeclBindingKey, Arc<str>>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for ShallowLens {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 impl ShallowLens {
@@ -50,6 +62,7 @@ impl ShallowLens {
         import_targets: FxHashMap<verter_type_expr::DeclBindingKey, Arc<str>>,
     ) -> Self {
         Self {
+            storage: Default::default(),
             locals,
             value_locals,
             exported,
@@ -135,12 +148,24 @@ impl CrossDeclLens for OwnedShallowLens<'_> {
 /// NOT a fingerprint-lens widening: this lens never feeds a hash. Both views
 /// are pure parse domain; no resolved canonical is retained anywhere on the
 /// artifact.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct RouteLens {
+    storage: verter_retention::pinned_heap::StoragePin,
     canonical_id: Arc<str>,
     type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
     import_targets:
         FxHashMap<verter_type_expr::DeclBindingKey, verter_session_query::facts::ImportRouteTarget>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for RouteLens {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 impl RouteLens {
@@ -156,6 +181,7 @@ impl RouteLens {
         >,
     ) -> Self {
         Self {
+            storage: Default::default(),
             canonical_id,
             type_symbols,
             import_targets,

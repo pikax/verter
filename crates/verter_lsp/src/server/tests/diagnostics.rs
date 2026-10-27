@@ -1611,6 +1611,8 @@ async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
     std::fs::create_dir_all(&store_dir).unwrap();
     drain_release.notify_one();
 
+    // The store's first head is an empty generation: wait for the retried
+    // publication itself.
     await_after_drain_passes(
         server,
         || carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig),

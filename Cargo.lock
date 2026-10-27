@@ -3593,6 +3593,7 @@ dependencies = [
  "verter_language",
  "verter_macro_dto",
  "verter_parser",
+ "verter_retention",
  "verter_semantic",
  "verter_session_query",
  "verter_span",
@@ -3698,6 +3699,7 @@ version = "0.0.1-beta.7"
 dependencies = [
  "blake3",
  "serde_json",
+ "verter_retention",
 ]
 
 [[package]]
@@ -3707,6 +3709,7 @@ dependencies = [
  "getrandom 0.2.17",
  "serde",
  "verter_identity",
+ "verter_retention",
  "verter_span",
 ]
 
@@ -3928,6 +3931,7 @@ dependencies = [
  "stacker",
  "verter_debug_assert",
  "verter_language",
+ "verter_retention",
  "verter_session_query",
  "verter_span",
  "verter_type_expr",
@@ -4068,6 +4072,7 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_parser",
  "verter_resolution",
+ "verter_retention",
  "verter_session_query",
  "verter_span",
  "verter_test_support",
@@ -4099,6 +4104,7 @@ dependencies = [
  "verter_execution",
  "verter_language",
  "verter_parser",
+ "verter_retention",
  "verter_semantic",
  "verter_session_query",
  "verter_span",

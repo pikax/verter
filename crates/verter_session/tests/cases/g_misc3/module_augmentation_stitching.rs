@@ -79,10 +79,13 @@ fn insert_artifact_from_fixture(
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
+        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
-        augmentations: Arc::new(emission.augmentations),
+        augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+            emission.augmentations,
+        )),
     });
     let key = FileArtifactKey::base_for_test(Arc::from(canonical), content_hash);
     store.insert_artifacts(key.clone(), artifacts);
@@ -101,10 +104,13 @@ fn insert_artifact_with_raw_source(
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
+        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
-        augmentations: Arc::new(emission.augmentations),
+        augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+            emission.augmentations,
+        )),
     });
     let key = FileArtifactKey::base_for_test(Arc::from(canonical), content_hash);
     store.insert_artifacts(key.clone(), artifacts);
@@ -119,10 +125,13 @@ fn build_filler_artifacts(raw: &str, content_hash: [u8; 16]) -> Arc<FileArtifact
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     Arc::new(FileArtifacts {
+        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
-        augmentations: Arc::new(emission.augmentations),
+        augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+            emission.augmentations,
+        )),
     })
 }
 
@@ -244,10 +253,13 @@ pub(crate) fn session_overlay_augmenter_isolated_from_base_index() {
     store.insert_artifacts(
         overlay_key,
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed,
             facts: Arc::new(emission.facts),
             parse_stable_hash,
-            augmentations: Arc::new(emission.augmentations),
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+                emission.augmentations,
+            )),
         }),
     );
 
@@ -336,10 +348,13 @@ fn seed_base_and_overlay_augmenters(
     store.insert_artifacts(
         overlay_key,
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed,
             facts: Arc::new(emission.facts),
             parse_stable_hash,
-            augmentations: Arc::new(emission.augmentations),
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+                emission.augmentations,
+            )),
         }),
     );
     overlay_discriminator
@@ -1004,10 +1019,13 @@ fn insert_artifact_at_build_fingerprint(
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
+        storage: Default::default(),
         indexed,
         facts: Arc::new(emission.facts),
         parse_stable_hash,
-        augmentations: Arc::new(emission.augmentations),
+        augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+            emission.augmentations,
+        )),
     });
     let key = FileArtifactKey {
         build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(

@@ -555,6 +555,19 @@ impl RegistryTable {
             }
         }
     }
+
+    /// Shrink the table to the capacity its live registrations need and
+    /// charge exactly that: the capacity the same registrations had before
+    /// a burst of others grew the table. Per-release reclamation keeps its
+    /// hysteresis so a table hovering at a size class is not rehashed on
+    /// every release; this runs only at an owner's release boundary.
+    fn reclaim_exact(&mut self) {
+        self.entries.shrink_to(self.entries.len());
+        self.reclaim();
+        if let Some(backing) = self.backing.as_mut() {
+            backing.release_slack();
+        }
+    }
 }
 
 /// Bytes one registered shared charge adds beside the allocation it keys:
@@ -830,6 +843,13 @@ impl AliasCharges {
         table.entries.insert(key, Arc::clone(&shared));
         table.settle(account);
         shared
+    }
+
+    /// Give back the table capacity released registrations left behind,
+    /// down to what the live registrations need. For release boundaries
+    /// (a host's close); a live registry regrows on its next registration.
+    pub fn reclaim_table(&self) {
+        self.0.table.lock().reclaim_exact();
     }
 
     /// Bytes the registry's table backing is charged.

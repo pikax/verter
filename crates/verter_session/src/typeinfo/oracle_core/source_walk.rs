@@ -239,7 +239,7 @@ fn walk<C: crate::resolver_core::HostRequestContext>(
                     .and_then(|root_shallow| {
                         ctx.raw_source_surfaces(&root_shallow, owner, &root_name, space)
                     })
-                    .map(|surfaces| surfaces.as_ref().clone())
+                    .map(|surfaces| Vec::clone(&surfaces))
                     .unwrap_or_default();
                 if space == SymbolSpace::Value
                     && !root_surfaces.is_empty()

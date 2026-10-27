@@ -109,6 +109,14 @@ impl GranularPin {
         }
     }
 
+    /// Release every granule of slack [`Self::sub`] kept to spare the
+    /// account's lock, leaving the charge at the granule-rounded live
+    /// total — for an owner's release boundary, where equal live storage
+    /// must read equally charged however it shrank to it.
+    pub fn release_slack(&mut self) {
+        self.trim_to_live();
+    }
+
     /// The live total.
     #[must_use]
     pub fn used(&self) -> usize {

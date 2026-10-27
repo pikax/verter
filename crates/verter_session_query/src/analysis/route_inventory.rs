@@ -3,14 +3,34 @@
 
 use verter_type_expr::TopLevelOwnerId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum RouteCapability {
     TypeOnly,
     ValueOnly,
     TypeAndValue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum RouteImportForm {
     Named,
     Default,
@@ -20,13 +40,31 @@ pub enum RouteImportForm {
     ImportEquals,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum RouteImportedName {
     Namespace,
     Name(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptImportRoute {
     pub owner: TopLevelOwnerId,
     pub local: String,
@@ -36,13 +74,31 @@ pub struct ScriptImportRoute {
     pub imported: RouteImportedName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptSideEffectImport {
     pub owner: TopLevelOwnerId,
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptReexportRoute {
     pub owner: TopLevelOwnerId,
     pub exported: String,
@@ -51,7 +107,16 @@ pub struct ScriptReexportRoute {
     pub capability: RouteCapability,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptWildcardRoute {
     pub owner: TopLevelOwnerId,
     pub source: String,
@@ -59,7 +124,16 @@ pub struct ScriptWildcardRoute {
     pub exported_namespace: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptLocalExportRoute {
     pub owner: TopLevelOwnerId,
     pub exported: String,
@@ -67,14 +141,32 @@ pub struct ScriptLocalExportRoute {
     pub capability: RouteCapability,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptExportAssignmentRoute {
     pub owner: TopLevelOwnerId,
     pub local: String,
 }
 
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ScriptRouteCounts {
     pub top_level_statement_count: usize,
@@ -96,7 +188,17 @@ pub struct ScriptRouteCounts {
 /// resolved to the module it merges into, never added to the program.
 /// Authored text only: resolving a name is the program-order authority's
 /// job.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ProgramReferences {
     /// `/// <reference path="…" />`, as written.
     pub paths: Vec<String>,
@@ -108,7 +210,17 @@ pub struct ProgramReferences {
     pub module_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ScriptRouteInventory {
     /// Top-level module syntax, including empty exports with no route rows.
     /// Computed from the retained AST, never from raw-source token guesses.
