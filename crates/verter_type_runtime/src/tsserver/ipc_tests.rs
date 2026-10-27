@@ -681,9 +681,9 @@ async fn tsserver_writer_loop_exits_on_shutdown() {
     tx.send(TsserverStdinMessage::Frame(b"test\n".to_vec()))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Send Shutdown
+    // Send Shutdown. The channel is FIFO, so the writer handles the frame
+    // before it sees this.
     tx.send(TsserverStdinMessage::Shutdown).await.unwrap();
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
@@ -1186,7 +1186,7 @@ async fn send_success_response(pending: &Arc<TsserverPendingRequests>, seq: i64,
 async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
-    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let writer = tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
 
     let pending = Arc::new(TsserverPendingRequests::default());
     let transport = Arc::new(TsserverTransport {
@@ -1203,7 +1203,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
     let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
     let seen_commands_task = Arc::clone(&seen_commands);
     let pending_task = Arc::clone(&pending);
-    tokio::spawn(async move {
+    let mock_reader = tokio::spawn(async move {
         let mut reader = BufReader::new(client_reader);
         loop {
             let mut line = String::new();
@@ -1233,8 +1233,20 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
     // Canonical form lowercases the Windows drive letter (keeps the colon).
     assert_eq!(ws_root, "c:/project");
 
-    // Let any (erroneously-spawned) background request reach the mock reader.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // A background request spawned by the configuration would already be
+    // runnable: one yield of this single-threaded runtime runs it up to its
+    // enqueue, ahead of the Shutdown below. The mock reader then sees every
+    // queued frame and stops at EOF once the writer exits.
+    tokio::task::yield_now().await;
+    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+        .await
+        .expect("the writer must exit on Shutdown")
+        .expect("the writer task must not panic");
+    tokio::time::timeout(std::time::Duration::from_secs(10), mock_reader)
+        .await
+        .expect("the mock reader must reach EOF")
+        .expect("the mock reader must not panic");
     let commands = seen_commands.lock().await.clone();
     assert_eq!(
         commands.first().map(String::as_str),
@@ -1249,8 +1261,6 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
          configured-project member, so there is no inferred carrier to configure. \
          Seen: {commands:?}"
     );
-
-    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
 }
 
 // ── update_file end-line tests ──────────────────────────────────
@@ -1265,7 +1275,7 @@ async fn run_update_file_capture(
 ) -> Vec<serde_json::Value> {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
-    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let writer = tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
 
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
@@ -1370,8 +1380,13 @@ async fn run_update_file_capture(
     }
 
     // Shutdown writer + read all frames
+    // The writer handles every frame queued ahead of Shutdown, then exits and
+    // drops its end of the pipe, so the reads below end at EOF.
     let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+        .await
+        .expect("the writer must exit on Shutdown")
+        .expect("the writer task must not panic");
 
     let mut reader = BufReader::new(client_reader);
     let mut frames = Vec::new();
@@ -1441,7 +1456,7 @@ async fn test_update_file_trailing_newline_ends_at_next_line_start() {
 async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_json::Value> {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
-    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let writer = tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
@@ -1483,8 +1498,13 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
         .expect("carrier refresh task must not panic")
         .expect("carrier refresh fence must complete");
 
+    // The writer handles every frame queued ahead of Shutdown, then exits and
+    // drops its end of the pipe, so the reads below end at EOF.
     let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+        .await
+        .expect("the writer must exit on Shutdown")
+        .expect("the writer task must not panic");
     let mut reader = BufReader::new(client_reader);
     let mut frames = Vec::new();
     loop {
@@ -2200,7 +2220,7 @@ async fn run_resync_capture(
 ) -> Vec<serde_json::Value> {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
-    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let writer = tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
@@ -2257,8 +2277,13 @@ async fn run_resync_capture(
     .await
     .expect("resync should succeed");
 
+    // The writer handles every frame queued ahead of Shutdown, then exits and
+    // drops its end of the pipe, so the reads below end at EOF.
     let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+        .await
+        .expect("the writer must exit on Shutdown")
+        .expect("the writer task must not panic");
     let mut reader = BufReader::new(client_reader);
     let mut frames = Vec::new();
     loop {
@@ -4062,26 +4087,25 @@ async fn successful_response_resets_hang_counter() {
     }
     assert_eq!(harness.transport.liveness.strikes(), HANG_THRESHOLD - 1,);
 
-    // Issue a real request and resolve its pending entry from the "tsserver" side.
-    let request_transport = Arc::clone(&harness.transport);
-    let request_task = tokio::spawn(async move {
-        request_transport
-            .request_with_timeout(
-                "quickinfo",
-                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
-                std::time::Duration::from_millis(500),
-            )
-            .await
-    });
-    // Let the request register its pending entry, then answer it.
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    {
-        let seq = harness.transport.next_seq.load(Ordering::Relaxed) - 1;
-        if let Some(tx) = harness.transport.pending.table.take(seq) {
-            let _ = tx.send(serde_json::json!({"success": true, "body": null}));
-        }
-    }
-    let ok = request_task.await.expect("request task must not panic");
+    // Issue a real request and resolve its pending entry from the "tsserver"
+    // side. Its first poll registers the entry before the request's first
+    // await.
+    let mut request = Box::pin(harness.transport.request_with_timeout(
+        "quickinfo",
+        serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+        std::time::Duration::from_millis(500),
+    ));
+    assert!(futures_util::poll!(request.as_mut()).is_pending());
+    let seq = harness.transport.next_seq.load(Ordering::Relaxed) - 1;
+    harness
+        .transport
+        .pending
+        .table
+        .take(seq)
+        .expect("the request registered its pending entry")
+        .send(serde_json::json!({"success": true, "body": null}))
+        .expect("the request still awaits its response");
+    let ok = request.await;
     assert!(ok.is_ok(), "an answered request resolves Ok");
     assert_eq!(
         harness.transport.liveness.strikes(),
@@ -4120,7 +4144,7 @@ async fn reload_projects_recovery_coalesces_under_concurrency() {
 
 /// After the cooldown window a fresh recovery IS sent (the gate rate-limits, it
 /// does not permanently latch shut).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reload_projects_recovery_fires_again_after_cooldown() {
     let harness = storm_harness();
 
@@ -4128,7 +4152,7 @@ async fn reload_projects_recovery_fires_again_after_cooldown() {
     // Within the cooldown: a second recovery is suppressed.
     recover_companion_membership(&harness.transport).await;
     // Past the cooldown: a third recovery fires a second reload.
-    tokio::time::sleep(MEMBERSHIP_RECOVERY_COOLDOWN + std::time::Duration::from_millis(80)).await;
+    tokio::time::advance(MEMBERSHIP_RECOVERY_COOLDOWN + std::time::Duration::from_millis(80)).await;
     recover_companion_membership(&harness.transport).await;
 
     let frames = drain_frames(&harness.stdin_tx, harness.client_reader).await;
@@ -4471,7 +4495,7 @@ async fn silence_watchdog_restarts_without_timing_out_the_request() {
     let (tx, _rx) = oneshot::channel();
     assert!(pending.table.insert(1, tx));
     let liveness = Arc::new(EngineLiveness::since(
-        std::time::Instant::now() - std::time::Duration::from_millis(50),
+        tokio::time::Instant::now() - std::time::Duration::from_millis(50),
     ));
     let notify = Arc::new(Notify::new());
     let waiter = notify.notified();
@@ -4501,7 +4525,7 @@ async fn silence_watchdog_restarts_without_timing_out_the_request() {
 async fn silence_watchdog_starts_at_the_new_pending_interval_after_long_idle() {
     let pending = Arc::new(TsserverPendingRequests::default());
     let liveness = Arc::new(EngineLiveness::since(
-        std::time::Instant::now() - std::time::Duration::from_secs(3600),
+        tokio::time::Instant::now() - std::time::Duration::from_secs(3600),
     ));
     let notify = Arc::new(Notify::new());
     tokio::spawn(watch_engine_silence(
@@ -4532,22 +4556,20 @@ async fn silence_watchdog_starts_at_the_new_pending_interval_after_long_idle() {
 /// outer deadline always fires first and the transport's failure branch — the
 /// only place the pending entry is released and the failure counted — never
 /// runs at all.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn production_tsserver_request_outlives_the_ambient_deadline() {
     let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
-    let transport = Arc::new(test_transport(stdin_tx));
-    let request = {
-        let transport = Arc::clone(&transport);
-        tokio::spawn(async move {
-            crate::deadline::with_deadline(std::time::Duration::from_millis(20), async {
-                transport.request("quickinfo", serde_json::json!({})).await
-            })
-            .await
-        })
-    };
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let transport = test_transport(stdin_tx);
+    let mut request = Box::pin(crate::deadline::with_deadline(
+        std::time::Duration::from_millis(20),
+        transport.request("quickinfo", serde_json::json!({})),
+    ));
+    // The request registers and parks; the clock then moves well past the
+    // 20 ms ambient budget, and the request is polled again after it.
+    assert!(futures_util::poll!(request.as_mut()).is_pending());
+    tokio::time::advance(std::time::Duration::from_millis(60)).await;
     assert!(
-        !request.is_finished(),
+        futures_util::poll!(request.as_mut()).is_pending(),
         "the ambient latency budget must not cancel a production provider request"
     );
     transport
@@ -4558,7 +4580,7 @@ async fn production_tsserver_request_outlives_the_ambient_deadline() {
         .send(serde_json::json!({ "success": true, "body": { "displayString": "ok" } }))
         .expect("request still awaits its response");
     assert_eq!(
-        request.await.unwrap().unwrap(),
+        request.await.unwrap(),
         serde_json::json!({ "displayString": "ok" })
     );
 }
@@ -4574,10 +4596,10 @@ async fn dropping_production_tsserver_requests_releases_every_slot() {
     for _ in 0..HANG_THRESHOLD {
         {
             let mut request = Box::pin(transport.request("quickinfo", serde_json::json!({})));
-            tokio::select! {
-                _ = &mut request => panic!("no response was sent"),
-                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-            }
+            assert!(
+                futures_util::poll!(request.as_mut()).is_pending(),
+                "no response was sent"
+            );
         }
     }
     assert_eq!(
@@ -4727,28 +4749,25 @@ async fn concurrent_full_bound_timeouts_are_one_strike_not_three() {
 /// caller does not even use — `notify_carrier_changed` awaits `projectInfo`
 /// purely as an ordering fence and DISCARDS the body — is charged as proof the
 /// engine is hung, and three carrier changes against a cold project destroy it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_hop_is_not_charged_while_the_child_is_still_emitting() {
     let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
     let notify = Arc::new(Notify::new());
     let transport = Arc::new(test_transport_with_notify(stdin_tx, Arc::clone(&notify)));
 
     for _ in 0..(HANG_THRESHOLD + 2) {
-        // The read loop stamps this on every line the child produces; simulate
-        // an event arriving DURING the hop.
-        let transport_for_traffic = Arc::clone(&transport);
-        let traffic = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            transport_for_traffic.liveness.note_output();
-        });
-        let _ = transport
-            .request_with_timeout(
-                "projectInfo",
-                serde_json::json!({}),
-                std::time::Duration::from_millis(120),
-            )
-            .await;
-        traffic.await.expect("traffic task must not panic");
+        let mut hop = Box::pin(transport.request_with_timeout(
+            "projectInfo",
+            serde_json::json!({}),
+            std::time::Duration::from_millis(120),
+        ));
+        assert!(futures_util::poll!(hop.as_mut()).is_pending());
+        // The read loop stamps this on every line the child produces; an event
+        // arrives 60 ms into the 120 ms hop.
+        tokio::time::advance(std::time::Duration::from_millis(60)).await;
+        transport.liveness.note_output();
+        // The paused clock runs on to the hop's own bound.
+        let _ = hop.await;
     }
 
     assert_eq!(
@@ -4888,12 +4907,13 @@ async fn dropping_an_in_flight_tsserver_request_releases_its_pending_slot() {
 
     {
         let mut fut = Box::pin(transport.request("quickinfo", serde_json::json!({})));
-        // Poll once so the seq is registered and the future is parked on the
-        // response that never comes.
-        tokio::select! {
-            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
+        // Poll once: the first poll registers the seq and enqueues the frame
+        // before its first await, leaving the future parked on the response
+        // that never comes.
+        assert!(
+            futures_util::poll!(fut.as_mut()).is_pending(),
+            "no response was ever written; the request cannot complete"
+        );
         assert_eq!(
             pending_len(&transport),
             1,
@@ -4961,10 +4981,10 @@ async fn dropping_an_in_flight_tsserver_request_cancels_it_at_the_engine() {
 
     {
         let mut fut = Box::pin(transport.request("references", serde_json::json!({})));
-        tokio::select! {
-            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
+        assert!(
+            futures_util::poll!(fut.as_mut()).is_pending(),
+            "no response was ever written; the request cannot complete"
+        );
     }
 
     let sent = stdin_rx.try_recv().expect("the request frame was enqueued");
@@ -4994,10 +5014,10 @@ async fn tsserver_cancellation_does_not_queue_behind_the_lane_it_cancels() {
 
     {
         let mut fut = Box::pin(transport.request("completions", serde_json::json!({})));
-        tokio::select! {
-            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-        }
+        assert!(
+            futures_util::poll!(fut.as_mut()).is_pending(),
+            "no response was ever written; the request cannot complete"
+        );
         // Do not drain the lane — it stays full across the drop.
     }
 
@@ -5020,30 +5040,22 @@ async fn an_answered_tsserver_request_returns_its_result_and_emits_no_cancellati
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
     let transport = test_transport(stdin_tx);
 
-    let answerer = {
-        let pending = Arc::clone(&transport.pending);
-        tokio::spawn(async move {
-            for _ in 0..100 {
-                if let Some(tx) = pending.table.take(1) {
-                    let _ = tx.send(serde_json::json!({
-                        "type": "response",
-                        "request_seq": 1,
-                        "success": true,
-                        "body": { "displayString": "const x: number" }
-                    }));
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            panic!("the request never registered its pending slot");
-        })
-    };
-
-    let result = transport
-        .request("quickinfo", serde_json::json!({}))
-        .await
-        .expect("the answered request succeeds");
-    answerer.await.unwrap();
+    // The first poll registers the request's slot; it is answered from there.
+    let mut request = Box::pin(transport.request("quickinfo", serde_json::json!({})));
+    assert!(futures_util::poll!(request.as_mut()).is_pending());
+    transport
+        .pending
+        .table
+        .take(1)
+        .expect("the request registered its pending slot")
+        .send(serde_json::json!({
+            "type": "response",
+            "request_seq": 1,
+            "success": true,
+            "body": { "displayString": "const x: number" }
+        }))
+        .expect("the request still awaits its response");
+    let result = request.await.expect("the answered request succeeds");
 
     assert_eq!(
         result.get("displayString").and_then(|v| v.as_str()),
@@ -5106,27 +5118,22 @@ async fn a_tsserver_cancellation_envelope_is_an_error_not_an_empty_result() {
     let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
     let transport = test_transport(stdin_tx);
 
-    let answerer = {
-        let pending = Arc::clone(&transport.pending);
-        tokio::spawn(async move {
-            for _ in 0..100 {
-                if let Some(tx) = pending.table.take(1) {
-                    let _ = tx.send(serde_json::json!({
-                        "type": "response",
-                        "request_seq": 1,
-                        "success": true,
-                        "body": { "canceled": true }
-                    }));
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            panic!("the request never registered its pending slot");
-        })
-    };
-
-    let result = transport.request("definition", serde_json::json!({})).await;
-    answerer.await.unwrap();
+    // The first poll registers the request's slot; it is answered from there.
+    let mut request = Box::pin(transport.request("definition", serde_json::json!({})));
+    assert!(futures_util::poll!(request.as_mut()).is_pending());
+    transport
+        .pending
+        .table
+        .take(1)
+        .expect("the request registered its pending slot")
+        .send(serde_json::json!({
+            "type": "response",
+            "request_seq": 1,
+            "success": true,
+            "body": { "canceled": true }
+        }))
+        .expect("the request still awaits its response");
+    let result = request.await;
 
     let err = result.expect_err(
         "a cancellation envelope must not be handed to a feature parser, which \
@@ -5213,7 +5220,7 @@ async fn hang_strikes_are_suspended_during_a_healthy_project_load() {
         .store(1, Ordering::Relaxed);
 
     for _ in 0..(HANG_THRESHOLD + 2) {
-        transport.note_hang_failure("quickinfo", std::time::Instant::now());
+        transport.note_hang_failure("quickinfo", tokio::time::Instant::now());
     }
     assert_eq!(
         transport.liveness.strikes(),
@@ -5226,7 +5233,7 @@ async fn hang_strikes_are_suspended_during_a_healthy_project_load() {
         .project_loads_in_flight
         .store(0, Ordering::Relaxed);
     for _ in 0..HANG_THRESHOLD {
-        transport.note_hang_failure("quickinfo", std::time::Instant::now());
+        transport.note_hang_failure("quickinfo", tokio::time::Instant::now());
     }
     assert_eq!(
         transport.liveness.strikes(),
@@ -5245,11 +5252,11 @@ async fn project_load_suspension_has_an_absolute_silence_backstop() {
         .project_loads_in_flight
         .store(1, Ordering::Relaxed);
     transport.liveness.set_last_output_at(
-        std::time::Instant::now() - LOADING_WEDGE_SILENCE_CAP - std::time::Duration::from_secs(1),
+        tokio::time::Instant::now() - LOADING_WEDGE_SILENCE_CAP - std::time::Duration::from_secs(1),
     );
 
     for _ in 0..HANG_THRESHOLD {
-        transport.note_hang_failure("quickinfo", std::time::Instant::now());
+        transport.note_hang_failure("quickinfo", tokio::time::Instant::now());
     }
     assert_eq!(
         transport.liveness.strikes(),

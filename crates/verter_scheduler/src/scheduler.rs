@@ -507,6 +507,9 @@ pub struct Scheduler {
     /// Test-only observation of a contested lifecycle acquisition or driver join.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     lifecycle_boundary: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
+    /// Test-only receipt of each completed native driver pass.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) driver_passes: DriverPasses,
     /// Test-only monotonic counter bumped once per admission-lock
     /// acquisition inside [`Self::handle_new_request_batch`] (co-located
     /// with the `dag.lock()` call via [`Self::acquire_dag_for_admission`]
@@ -663,6 +666,8 @@ impl Scheduler {
             reset_wake_posts: AtomicU64::new(0),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             lifecycle_boundary: Mutex::new(None),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            driver_passes: DriverPasses::default(),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -782,6 +787,8 @@ impl Scheduler {
             reset_wake_posts: AtomicU64::new(0),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             lifecycle_boundary: Mutex::new(None),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            driver_passes: DriverPasses::default(),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -2109,6 +2116,15 @@ impl Scheduler {
                 }
             }
 
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            let idle_repump_interval = scheduler
+                .driver_passes
+                .idle_repump_override
+                .lock()
+                .unwrap_or(idle_repump_interval);
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            scheduler.driver_passes.record();
+
             // Drop the strong ref before blocking so the caller's Drop can run.
             drop(scheduler);
 
@@ -2461,6 +2477,16 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
+    /// Sends its name when dropped, so a joiner waits on a thread's exit —
+    /// a panicking exit included — instead of polling `is_finished`.
+    struct ExitSignal(crossbeam_channel::Sender<&'static str>, &'static str);
+
+    impl Drop for ExitSignal {
+        fn drop(&mut self) {
+            let _ = self.0.send(self.1);
+        }
+    }
+
     fn fixture_incarnation(scheduler: &Scheduler, id: &str) -> u64 {
         scheduler
             .nodes
@@ -4532,16 +4558,7 @@ mod tests {
             request_context: None,
         });
         // Wait for the panic-catch arm to surface the failure.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let state = loop {
-            if let Some(s) = h_panic.try_get() {
-                break Some(s);
-            }
-            if std::time::Instant::now() >= deadline {
-                break None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        };
+        let state = h_panic.wait_timeout(std::time::Duration::from_secs(5));
         assert!(state.is_some(), "panicked source request must resolve");
         match state.unwrap() {
             CompletionState::Failed(_) => {}
@@ -5744,15 +5761,28 @@ mod tests {
         // submission carries the /dep.ts Analysis `DepKey` and waits.
         drop(a_release_tx);
 
-        // Give the driver time to process Analysis completion and
-        // attempt Artifact admission. The handle MUST remain
-        // unresolved because /dep.ts Analysis is still gated.
-        for _ in 0..20 {
-            if handle.try_get().map(|s| s.is_ready()).unwrap_or(false) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        // Wait until the driver has processed the Analysis completion
+        // and admitted the Artifact. The handle MUST remain unresolved
+        // because /dep.ts Analysis is still gated.
+        let a_gen = sched.try_get_source("/a.vue").unwrap().generation;
+        let artifact_identity = WorkNodeIdentity::Artifact {
+            canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
+            generation: a_gen,
+            profile_hash: profile_hash_to_bytes(11),
+            content_hash: [0u8; 16],
+        };
+        assert!(
+            sched.driver_passes.wait_until(
+                || sched.dag.lock().token_for(&artifact_identity).is_some(),
+                Duration::from_secs(5),
+            ),
+            "the released Analysis must lead the driver to admit the Artifact"
+        );
+        assert!(
+            sched.dag.lock().has_pending_deps(&artifact_identity),
+            "the admitted Artifact must wait on the late blocker's Analysis"
+        );
         assert!(
             !handle.try_get().map(|s| s.is_ready()).unwrap_or(false),
             "Artifact must NOT complete while the late blocker's Analysis is still in flight: \
@@ -5778,19 +5808,10 @@ mod tests {
         // Artifact dispatches.
         drop(dep_release_tx);
 
-        // Poll for Artifact completion with a generous timeout. The
-        // driver must run Source(/dep.ts) → Analysis(/dep.ts) →
-        // re-dispatch Artifact(/a.vue) → execute_artifact → publish.
-        let mut state: Option<CompletionState<RequestResult>> = None;
-        for _ in 0..200 {
-            if let Some(s) = handle.try_get() {
-                if s.is_ready() {
-                    state = Some(s);
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        // Wait for Artifact completion. The driver must run
+        // Source(/dep.ts) → Analysis(/dep.ts) → re-dispatch
+        // Artifact(/a.vue) → execute_artifact → publish.
+        let state = handle.wait_timeout(Duration::from_secs(5));
         assert!(
             state.as_ref().map(|s| s.is_ready()).unwrap_or(false),
             "Artifact must complete after the late blocker's Analysis resolves: \
@@ -5867,7 +5888,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn terminalize_failure_with_dag_waiters_wakes_driver_for_prompt_redispatch() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("owner content"));
@@ -5879,6 +5900,9 @@ mod tests {
         });
 
         let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
+        // Take the idle re-pump out of play: without the wake-on-stranded
+        // path nothing else would ever dispatch the stranded gate.
+        *sched.driver_passes.idle_repump_override.lock() = Some(Duration::from_secs(3600));
 
         let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -5889,29 +5913,15 @@ mod tests {
             request_context: None,
         });
 
-        // The owner's Artifact must resolve in well under the
-        // driver's idle re-pump interval (5s). Without the
-        // wake-on-stranded path the dep's Analysis failure strands the
-        // owner's Analysis gate and the driver sleeps in `recv_timeout`
-        // until the next idle re-pump tick; with the wake the path
-        // triggers a prompt dispatch and the owner's Analysis +
-        // Artifact run in sub-second time.
-        let start = Instant::now();
-        let deadline = start + Duration::from_millis(1500);
-        let mut state: Option<CompletionState<RequestResult>> = None;
-        while Instant::now() < deadline {
-            if let Some(s) = handle.try_get() {
-                state = Some(s);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let elapsed = start.elapsed();
+        // Without the wake-on-stranded path the dep's Analysis failure
+        // strands the owner's Analysis gate and the driver parks with no
+        // idle re-pump to rescue it; with the wake the owner's Analysis +
+        // Artifact dispatch at once. The timeout is a hang guard only.
+        let state = handle.wait_timeout(Duration::from_secs(30));
         assert!(
             state.is_some(),
-            "owner Artifact must resolve within 1500ms (without the \
-             wake-on-stranded path, the stranded Analysis gate would \
-             wait for the 5s idle re-pump tick); got None after {elapsed:?}"
+            "owner Artifact must resolve without the idle re-pump (the \
+             wake-on-stranded path must dispatch the stranded Analysis gate)"
         );
         // Don't assert ready vs failed — the owner's Artifact may
         // succeed (the dep was only a blocker gate) or fail
@@ -6163,26 +6173,28 @@ mod tests {
         drop(release_tx);
 
         // Wait for the request handle to resolve (it was already
-        // signalled by the external commit, but a poll loop tolerates
-        // any scheduler-driven re-signal that might happen).
-        let mut state: Option<CompletionState<RequestResult>> = None;
-        for _ in 0..200 {
-            if let Some(s) = handle.try_get() {
-                if s.is_ready() {
-                    state = Some(s);
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        // signalled by the external commit).
+        let state = handle.wait_timeout(Duration::from_secs(5));
         assert!(
             state.as_ref().map(|s| s.is_ready()).unwrap_or(false),
             "Artifact handle must resolve: got {state:?}"
         );
 
-        // Give the worker thread time to finish its post-executor
-        // path so any overwriting insert would have already landed.
-        std::thread::sleep(Duration::from_millis(200));
+        // Wait until the worker has finished its post-executor path,
+        // so any overwriting insert would have already landed.
+        let artifact_identity = WorkNodeIdentity::Artifact {
+            canonical: Arc::from("/a.vue"),
+            incarnation: witness.incarnation(),
+            generation: witness.generation(),
+            profile_hash: profile_hash_to_bytes(17),
+            content_hash: [0u8; 16],
+        };
+        assert!(
+            sched
+                .dag
+                .wait_artifact_settled(&artifact_identity, Duration::from_secs(5)),
+            "the Artifact worker must finish its post-executor path"
+        );
 
         // Inspect the stored artifact: its `data` payload must be
         // the EXTERNAL sentinel. Without the insert-if-absent guard
@@ -8596,7 +8608,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn source_failure_terminalizes_analysis_keyed_waiters() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
@@ -8628,14 +8640,7 @@ mod tests {
             handle: &CompletionHandle<T>,
             budget: Duration,
         ) -> Option<CompletionState<T>> {
-            let deadline = Instant::now() + budget;
-            while Instant::now() < deadline {
-                if let Some(s) = handle.try_get() {
-                    return Some(s);
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            handle.try_get()
+            handle.wait_timeout(budget)
         }
 
         // Step 1: drive /a.vue Source + Analysis to committed.
@@ -8720,24 +8725,16 @@ mod tests {
             profile_hash: profile_hash_to_bytes(77),
             content_hash: [0u8; 16],
         };
-        let admit_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let admitted = {
-                let dag = sched.dag.lock();
-                dag.token_for(&artifact_identity).is_some()
-            };
-            if admitted {
-                break;
-            }
-            if Instant::now() >= admit_deadline {
-                panic!(
-                    "Artifact admission must complete within 5s of submit_request; \
+        // Admission runs on the driver; re-check after each driver pass.
+        assert!(
+            sched.driver_passes.wait_until(
+                || sched.dag.lock().token_for(&artifact_identity).is_some(),
+                Duration::from_secs(5),
+            ),
+            "Artifact admission must complete within 5s of submit_request; \
                      the driver should have admitted the Artifact identity in admit_artifact_with_blockers. \
-                     a_gen={a_gen}",
-                );
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+                     a_gen={a_gen}"
+        );
 
         // Diagnostic snapshot of /dep.ts state at the moment
         // the Artifact has been admitted. Confirms the matrix
@@ -8939,7 +8936,10 @@ mod tests {
         // `dag.lock()` → `node.artifacts.insert(...)`. dag-lock →
         // shard-write ordering.
         let witness = source_witness(&sched_a, "/race.vue");
+        let (exited_tx, exited) = crossbeam_channel::unbounded();
+        let commit_exit = ExitSignal(exited_tx.clone(), "commit");
         let t_commit = thread::spawn(move || {
+            let _exit = commit_exit;
             while !stop_a.load(Ordering::Acquire) {
                 sched_a.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData));
             }
@@ -8955,7 +8955,9 @@ mod tests {
         let inbox = sched_b.inbox.sender.clone();
         let executor = Arc::clone(&sched_b.executor);
         let dag_b = Arc::clone(&sched_b.dag);
+        let skip_exit = ExitSignal(exited_tx, "skip");
         let t_skip = thread::spawn(move || {
+            let _exit = skip_exit;
             while !stop_b.load(Ordering::Acquire) {
                 let _ = Scheduler::execute_artifact_stage(
                     &node_b,
@@ -8976,18 +8978,15 @@ mod tests {
         // 5-second join budget. Without the drop-Ref-before-lock
         // helper the join hangs (one or both threads stuck in AB-BA).
         // With the helper, both return immediately.
-        let start_join = Instant::now();
-        let join_budget = Duration::from_secs(5);
+        let join_deadline = Instant::now() + Duration::from_secs(5);
         let mut commit_joined = false;
         let mut skip_joined = false;
-        while start_join.elapsed() < join_budget && !(commit_joined && skip_joined) {
-            if !commit_joined && t_commit.is_finished() {
-                commit_joined = true;
+        while !(commit_joined && skip_joined) {
+            match exited.recv_deadline(join_deadline) {
+                Ok("commit") => commit_joined = true,
+                Ok(_) => skip_joined = true,
+                Err(_) => break,
             }
-            if !skip_joined && t_skip.is_finished() {
-                skip_joined = true;
-            }
-            thread::sleep(Duration::from_millis(10));
         }
         assert!(
             commit_joined && skip_joined,
@@ -10563,7 +10562,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn lifecycle_sweeps_drop_nodes_ref_before_dag_lock() {
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         use std::thread;
         use std::time::{Duration, Instant};
@@ -10592,16 +10591,21 @@ mod tests {
         let stop_lock = Arc::clone(&stop);
         let sched_lifecycle = Arc::clone(&sched);
         let sched_lock = Arc::clone(&sched);
-        let lifecycle_ticks = Arc::new(AtomicU64::new(0));
-        let lifecycle_ticks_w = Arc::clone(&lifecycle_ticks);
-        let lock_ticks = Arc::new(AtomicU64::new(0));
-        let lock_ticks_w = Arc::clone(&lock_ticks);
+        // Each thread reports progress every PROGRESS_EVERY iterations, and
+        // its exit when it stops.
+        const PROGRESS_EVERY: u64 = 64;
+        let (lifecycle_progress_tx, lifecycle_progress) = crossbeam_channel::unbounded::<()>();
+        let (lock_progress_tx, lock_progress) = crossbeam_channel::unbounded::<()>();
+        let (exited_tx, exited) = crossbeam_channel::unbounded();
+        let lifecycle_exit = ExitSignal(exited_tx.clone(), "lifecycle");
+        let lock_exit = ExitSignal(exited_tx, "lock");
 
         // Thread A: lifecycle sweeps that historically held a
         // nodes-shard `Ref` across `dag.lock()`. With the snapshot+drop
         // hygiene they snapshot the `Arc<FileNode>` and drop the `Ref`
         // first.
         let lifecycle = thread::spawn(move || {
+            let _exit = lifecycle_exit;
             let mut tick = 0u64;
             while !stop_lifecycle.load(Ordering::Acquire) {
                 let id = format!("/race-{}.vue", tick % 8);
@@ -10619,7 +10623,9 @@ mod tests {
                     }
                 }
                 tick = tick.wrapping_add(1);
-                lifecycle_ticks_w.store(tick, Ordering::Release);
+                if tick.is_multiple_of(PROGRESS_EVERY) {
+                    let _ = lifecycle_progress_tx.send(());
+                }
             }
         });
 
@@ -10632,6 +10638,7 @@ mod tests {
         // across `dag.lock` from thread A, so thread B's writes
         // proceed without waiting on a `Ref`-blocked shard.
         let lock_traffic = thread::spawn(move || {
+            let _exit = lock_exit;
             let mut tick = 0u64;
             while !stop_lock.load(Ordering::Acquire) {
                 let _guard = sched_lock.dag.lock();
@@ -10649,53 +10656,55 @@ mod tests {
                 let _ = sched_lock.nodes.get(&id);
                 drop(_guard);
                 tick = tick.wrapping_add(1);
-                lock_ticks_w.store(tick, Ordering::Release);
+                if tick.is_multiple_of(PROGRESS_EVERY) {
+                    let _ = lock_progress_tx.send(());
+                }
             }
         });
 
-        // Watchdog: poll progress markers from both threads. If
-        // either is parked on a deadlock, its tick counter stops
-        // advancing while the other side continues (or both stop
-        // if the deadlock is mutual). Stamp the last-observed tick
-        // pair at deadline-2s and again at deadline; both pairs
-        // must show strict progress.
-        let start = Instant::now();
-        let mid_deadline = start + Duration::from_secs(1);
-        while Instant::now() < mid_deadline {
-            thread::sleep(Duration::from_millis(25));
+        // Discriminating check: both threads must keep making forward
+        // progress while they contend. An AB-BA inversion without the
+        // snapshot+drop hygiene would park one (or both) threads on a lock
+        // acquisition, and its progress reports would stop. Each round
+        // discards the reports already queued and waits for a fresh one
+        // from each thread in turn, so both are seen progressing throughout
+        // the window; the per-report timeout is a hang guard only.
+        const PROGRESS_ROUNDS: usize = 16;
+        for round in 0..PROGRESS_ROUNDS {
+            for (name, progress) in [
+                ("lifecycle", &lifecycle_progress),
+                ("dag.lock → nodes-shard-write", &lock_progress),
+            ] {
+                while progress.try_recv().is_ok() {}
+                progress
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "{name} thread must continue making progress (no AB-BA stall): \
+                             it stopped in round {round} of {PROGRESS_ROUNDS}"
+                        )
+                    });
+            }
         }
-        let lifecycle_at_mid = lifecycle_ticks.load(Ordering::Acquire);
-        let lock_at_mid = lock_ticks.load(Ordering::Acquire);
-
-        let deadline = start + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(25));
-        }
-        let lifecycle_at_end = lifecycle_ticks.load(Ordering::Acquire);
-        let lock_at_end = lock_ticks.load(Ordering::Acquire);
 
         stop.store(true, Ordering::Release);
 
-        // Bounded join: poll `is_finished` with a watchdog deadline
-        // rather than calling `join()` directly. An unbounded
-        // `.join()` would stall `cargo test` indefinitely if a
-        // regression reintroduces the AB-BA deadlock — the
-        // forward-progress assertions below already characterise
-        // the stall, but the join itself would never return. The
-        // 5-second budget matches the sibling race-stress test's
-        // join budget and is comfortably above the 1-second sleep
-        // already used during the workload window.
+        // Bounded join: wait for each thread's exit receipt with a
+        // watchdog deadline rather than calling `join()` directly. An
+        // unbounded `.join()` would stall `cargo test` indefinitely if a
+        // regression reintroduces the AB-BA deadlock — the progress
+        // rounds above already characterise the stall, but the join
+        // itself would never return. The 5-second budget matches the
+        // sibling race-stress test's join budget.
         let join_deadline = Instant::now() + Duration::from_secs(5);
         let mut lifecycle_finished = false;
         let mut lock_finished = false;
-        while Instant::now() < join_deadline && !(lifecycle_finished && lock_finished) {
-            if !lifecycle_finished && lifecycle.is_finished() {
-                lifecycle_finished = true;
+        while !(lifecycle_finished && lock_finished) {
+            match exited.recv_deadline(join_deadline) {
+                Ok("lifecycle") => lifecycle_finished = true,
+                Ok(_) => lock_finished = true,
+                Err(_) => break,
             }
-            if !lock_finished && lock_traffic.is_finished() {
-                lock_finished = true;
-            }
-            thread::sleep(Duration::from_millis(25));
         }
         assert!(
             lifecycle_finished && lock_finished,
@@ -10709,22 +10718,6 @@ mod tests {
         // below return immediately.
         lifecycle.join().expect("lifecycle thread");
         lock_traffic.join().expect("lock-traffic thread");
-
-        // Discriminating assertion: both threads must have made
-        // forward progress between the mid-point and the deadline.
-        // An AB-BA inversion without the snapshot+drop hygiene
-        // would park one (or both) threads on a lock acquisition
-        // and the corresponding tick counter would stop advancing.
-        assert!(
-            lifecycle_at_end > lifecycle_at_mid,
-            "lifecycle thread must continue making progress (no AB-BA stall): \
-             observed mid={lifecycle_at_mid}, end={lifecycle_at_end}",
-        );
-        assert!(
-            lock_at_end > lock_at_mid,
-            "dag.lock → nodes-shard-write thread must continue making progress \
-             (no AB-BA stall): observed mid={lock_at_mid}, end={lock_at_end}",
-        );
     }
 
     // ─── Failed-blocker propagation discriminators ───
@@ -10803,39 +10796,41 @@ mod tests {
         // Wait for /dep.ts to terminalize. The terminal record's
         // presence in terminal_dep_failures is the gate.
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut dep_gen_observed = 0u64;
-        let observed_record = loop {
-            // Inspect under the DAG lock to avoid racing with the
-            // worker's terminalize_failure write.
-            let dag = sched.dag.lock();
-            let dep_gen = sched
-                .nodes
-                .get("/dep.ts")
-                .map(|n| n.generation())
-                .unwrap_or(0);
-            if dep_gen > 0 {
-                dep_gen_observed = dep_gen;
-                let key = DepKey::FileStage {
-                    canonical: Arc::clone(&dep_arc),
-                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
-                    generation: dep_gen,
-                    stage: FileStageKey::Analysis,
-                };
-                if let Some(rec) = dag.lookup_terminal_dep_failure(&key) {
-                    break rec;
+        let mut observed_record = None;
+        // The terminal record is written before the failed stage reports back to
+        // the driver, so it is re-checked after each driver pass.
+        sched.driver_passes.wait_until(
+            || {
+                // Inspect under the DAG lock to avoid racing with the
+                // worker's terminalize_failure write.
+                let dag = sched.dag.lock();
+                let dep_gen = sched
+                    .nodes
+                    .get("/dep.ts")
+                    .map(|n| n.generation())
+                    .unwrap_or(0);
+                if dep_gen > 0 {
+                    dep_gen_observed = dep_gen;
+                    let key = DepKey::FileStage {
+                        canonical: Arc::clone(&dep_arc),
+                        incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
+                        generation: dep_gen,
+                        stage: FileStageKey::Analysis,
+                    };
+                    observed_record = dag.lookup_terminal_dep_failure(&key);
                 }
-            }
-            drop(dag);
-            if std::time::Instant::now() >= deadline {
-                panic!(
-                    "/dep.ts Source must terminalize within 5s — \
-                     terminal_dep_failures entry never landed for \
-                     the auto-ingested dep. dep_gen={dep_gen_observed}",
-                );
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        };
+                observed_record.is_some()
+            },
+            Duration::from_secs(5),
+        );
+        let observed_record = observed_record.unwrap_or_else(|| {
+            panic!(
+                "/dep.ts Source must terminalize within 5s — \
+                 terminal_dep_failures entry never landed for \
+                 the auto-ingested dep. dep_gen={dep_gen_observed}",
+            )
+        });
         assert!(
             matches!(
                 observed_record.cause,
@@ -11315,9 +11310,11 @@ mod tests {
         );
         // Wait for the terminal record to land in the store.
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
-        let dep_gen_observed = {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
+        // The terminal record is written before the failed stage reports back to
+        // the driver, so it is re-checked after each driver pass.
+        let mut dep_gen_observed = None;
+        sched.driver_passes.wait_until(
+            || {
                 let dep_gen = sched
                     .nodes
                     .get("/dep.ts")
@@ -11332,15 +11329,16 @@ mod tests {
                     };
                     let dag = sched.dag.lock();
                     if dag.lookup_terminal_dep_failure(&key).is_some() {
-                        break dep_gen;
+                        dep_gen_observed = Some(dep_gen);
                     }
                 }
-                if std::time::Instant::now() >= deadline {
-                    panic!("/dep.ts must terminalize and populate terminal_dep_failures within 5s",);
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        };
+                dep_gen_observed.is_some()
+            },
+            Duration::from_secs(5),
+        );
+        let dep_gen_observed = dep_gen_observed.unwrap_or_else(|| {
+            panic!("/dep.ts must terminalize and populate terminal_dep_failures within 5s")
+        });
 
         // Step 2: submit /a.vue Analysis. The Source completes via
         // the custom executor's default execute_source path; the
@@ -11362,18 +11360,7 @@ mod tests {
 
         // Analysis must resolve `Ready` — the missing dep is recorded
         // on the Artifact registry, not gating Analysis.
-        let analysis_state = {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(s) = owner_handle.try_get() {
-                    break Some(s);
-                }
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        };
+        let analysis_state = { owner_handle.wait_timeout(Duration::from_secs(5)) };
         let analysis_state = analysis_state.unwrap_or_else(|| {
             panic!(
                 "owner Analysis must resolve within 5s — analysis is ungated by macro_type_dep \
@@ -11403,18 +11390,7 @@ mod tests {
             file_language: None,
             request_context: None,
         });
-        let artifact_state = {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(s) = artifact_handle.try_get() {
-                    break Some(s);
-                }
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        };
+        let artifact_state = { artifact_handle.wait_timeout(Duration::from_secs(5)) };
         let artifact_state = artifact_state.unwrap_or_else(|| {
             panic!(
                 "owner Artifact must resolve within 5s — the Source-completion path persisted \
@@ -11534,9 +11510,11 @@ mod tests {
             "precondition: /dep.ts must fail (no content). got: {dep_state:?}",
         );
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
-        let dep_gen_observed = {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
+        // The terminal record is written before the failed stage reports back to
+        // the driver, so it is re-checked after each driver pass.
+        let mut dep_gen_observed = None;
+        sched.driver_passes.wait_until(
+            || {
                 let dep_gen = sched
                     .nodes
                     .get("/dep.ts")
@@ -11551,18 +11529,19 @@ mod tests {
                     };
                     let dag = sched.dag.lock();
                     if dag.lookup_terminal_dep_failure(&key).is_some() {
-                        break dep_gen;
+                        dep_gen_observed = Some(dep_gen);
                     }
                 }
-                if std::time::Instant::now() >= deadline {
-                    panic!(
-                        "precondition: /dep.ts must terminalize and populate \
-                         terminal_dep_failures within 5s",
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        };
+                dep_gen_observed.is_some()
+            },
+            Duration::from_secs(5),
+        );
+        let dep_gen_observed = dep_gen_observed.unwrap_or_else(|| {
+            panic!(
+                "precondition: /dep.ts must terminalize and populate \
+                 terminal_dep_failures within 5s",
+            )
+        });
 
         // Step 2: drive /a.vue Source+Analysis to complete. The
         // default DefaultExecutor's extract_deps returns no deps, so
@@ -11644,18 +11623,7 @@ mod tests {
             file_language: None,
             request_context: None,
         });
-        let state = {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(s) = artifact_handle.try_get() {
-                    break Some(s);
-                }
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        };
+        let state = { artifact_handle.wait_timeout(Duration::from_secs(5)) };
         let state = state.expect(
             "Artifact handle must resolve within 5s after \
              register_resolved_deps persisted the failed record on a \
@@ -11741,7 +11709,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn analysis_failure_fanout_to_admitted_waiters_symmetric_to_source() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         /// Gate for the Analysis stage: signal entry then block on
         /// release, then return Err so Analysis fails terminally.
@@ -11801,14 +11769,7 @@ mod tests {
             handle: &CompletionHandle<T>,
             budget: Duration,
         ) -> Option<CompletionState<T>> {
-            let deadline = Instant::now() + budget;
-            while Instant::now() < deadline {
-                if let Some(s) = handle.try_get() {
-                    return Some(s);
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            handle.try_get()
+            handle.wait_timeout(budget)
         }
 
         // Step 1: drive /a.vue Source + Analysis to committed.
@@ -11865,23 +11826,15 @@ mod tests {
             profile_hash: profile_hash_to_bytes(99),
             content_hash: [0u8; 16],
         };
-        let admit_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let admitted = {
-                let dag = sched.dag.lock();
-                dag.token_for(&artifact_identity).is_some()
-            };
-            if admitted {
-                break;
-            }
-            if Instant::now() >= admit_deadline {
-                panic!(
-                    "Artifact admission must complete within 5s of submit_request. \
-                     a_gen={a_gen}",
-                );
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        // Admission runs on the driver; re-check after each driver pass.
+        assert!(
+            sched.driver_passes.wait_until(
+                || sched.dag.lock().token_for(&artifact_identity).is_some(),
+                Duration::from_secs(5),
+            ),
+            "Artifact admission must complete within 5s of submit_request. \
+                     a_gen={a_gen}"
+        );
 
         // Step 5: release the gate — /dep.ts Analysis returns Err →
         // terminalize_failure(Analysis) → fan-out into the Artifact's
@@ -12292,31 +12245,31 @@ mod tests {
 
         // Wait for /dep.ts terminalization.
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let dag = sched.dag.lock();
-            let dep_gen = sched
-                .nodes
-                .get("/dep.ts")
-                .map(|n| n.generation())
-                .unwrap_or(0);
-            if dep_gen > 0 {
-                let key = DepKey::FileStage {
-                    canonical: Arc::clone(&dep_arc),
-                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
-                    generation: dep_gen,
-                    stage: FileStageKey::Analysis,
-                };
-                if dag.lookup_terminal_dep_failure(&key).is_some() {
-                    break;
-                }
-            }
-            drop(dag);
-            if std::time::Instant::now() >= deadline {
-                panic!("/dep.ts must terminalize within 5s");
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        // The terminal record is written before the failed stage reports back
+        // to the driver, so it is re-checked after each driver pass.
+        assert!(
+            sched.driver_passes.wait_until(
+                || {
+                    let dag = sched.dag.lock();
+                    let dep_gen = sched
+                        .nodes
+                        .get("/dep.ts")
+                        .map(|n| n.generation())
+                        .unwrap_or(0);
+                    dep_gen > 0 && {
+                        let key = DepKey::FileStage {
+                            canonical: Arc::clone(&dep_arc),
+                            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
+                            generation: dep_gen,
+                            stage: FileStageKey::Analysis,
+                        };
+                        dag.lookup_terminal_dep_failure(&key).is_some()
+                    }
+                },
+                Duration::from_secs(5),
+            ),
+            "/dep.ts must terminalize within 5s"
+        );
 
         // Submit Artifact; pre-dispatch chokepoint must surface
         // DependencyFailed with cause: FileNotFound.
@@ -12401,7 +12354,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn dependency_failed_carries_source_stage_failed_cause() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
@@ -12437,16 +12390,9 @@ mod tests {
             request_context: None,
         });
         let analysis_state = {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(s) = analysis_handle.try_get() {
-                    break s;
-                }
-                if Instant::now() >= deadline {
-                    panic!("/a.vue Analysis must complete within 5s");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            analysis_handle
+                .wait_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|| panic!("/a.vue Analysis must complete within 5s"))
         };
         assert!(
             analysis_state.is_ready(),
@@ -12487,36 +12433,25 @@ mod tests {
             profile_hash: profile_hash_to_bytes(77),
             content_hash: [0u8; 16],
         };
-        let admit_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let admitted = {
-                let dag = sched.dag.lock();
-                dag.token_for(&artifact_identity).is_some()
-            };
-            if admitted {
-                break;
-            }
-            if Instant::now() >= admit_deadline {
-                panic!("Artifact admission must complete within 5s");
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        // Admission runs on the driver; re-check after each driver pass.
+        assert!(
+            sched.driver_passes.wait_until(
+                || sched.dag.lock().token_for(&artifact_identity).is_some(),
+                Duration::from_secs(5),
+            ),
+            "Artifact admission must complete within 5s"
+        );
 
         // Release the gate — /dep.ts Source returns Err → fan-out
         // attaches FailedDepRecord { cause: StageFailed { .. } }.
         drop(dep_release_tx);
 
         let resolved_state = {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(s) = artifact_handle.try_get() {
-                    break s;
-                }
-                if Instant::now() >= deadline {
-                    panic!("Artifact handle must resolve within 5s after /dep.ts release");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            artifact_handle
+                .wait_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|| {
+                    panic!("Artifact handle must resolve within 5s after /dep.ts release")
+                })
         };
 
         match &resolved_state {
@@ -13324,6 +13259,7 @@ mod tests {
             crate::job::completion_pair::<crate::job::RequestResult>();
         let gated_handle_for_thread = gated_handle.clone();
         let sched_weak = Arc::downgrade(&sched);
+        let parks_before = sched.driver_passes.cooperative_parks();
         let cooperative_thread = std::thread::spawn(move || {
             // Upgrade the weak ref only for the duration of the
             // wait_or_drive call so dropping the test-owned
@@ -13339,7 +13275,12 @@ mod tests {
         // cooperative-pump thread has parked. They must all
         // complete promptly — proof that the DAG lock is released
         // between pump iterations.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            sched
+                .driver_passes
+                .wait_for_cooperative_park(parks_before, std::time::Duration::from_secs(10)),
+            "the cooperative pump must park on its gated handle"
+        );
         let sibling_handles: Vec<_> = (0..5)
             .map(|i| {
                 sched.submit_request(Request {
@@ -14222,24 +14163,20 @@ mod tests {
             request_context: None,
         });
 
-        // Poll for the stamp landing — the driver thread runs
-        // handle_new_request asynchronously, so the test must wait
-        // until the admission has had a chance to fire. A 1s budget
-        // is generous; in practice the stamp lands within
-        // microseconds.
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        // The driver thread runs handle_new_request asynchronously;
+        // the stamp is re-checked after each driver pass.
         let mut observed: Option<CompletionTarget> = None;
-        while std::time::Instant::now() < deadline {
-            if let Some(target) = handle.target() {
-                if matches!(target, CompletionTarget::Work(_)) {
-                    observed = Some(target);
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        sched.driver_passes.wait_until(
+            || {
+                observed = handle
+                    .target()
+                    .filter(|target| matches!(target, CompletionTarget::Work(_)));
+                observed.is_some()
+            },
+            Duration::from_secs(5),
+        );
 
-        let target = observed.expect("handle_new_request must stamp Work target within 1s");
+        let target = observed.expect("handle_new_request must stamp a Work target");
         match target {
             CompletionTarget::Work(WorkNodeIdentity::FileStage {
                 canonical, stage, ..
@@ -15289,8 +15226,17 @@ mod tests {
         // wait_or_drive enters the cooperative loop. The mutation
         // is the synthetic "admission stamped Work mid-flight".
         let sender_for_stamp = sender.clone();
+        let sched_for_stamp = Arc::clone(&sched);
+        let parks_before = sched.driver_passes.cooperative_parks();
         let stamper = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
+            // Stamp only once the cooperative loop has parked, so the stamp
+            // lands mid-flight rather than before the loop's entry check.
+            assert!(
+                sched_for_stamp
+                    .driver_passes
+                    .wait_for_cooperative_park(parks_before, Duration::from_secs(10)),
+                "the cooperative loop must park before the stamp"
+            );
             sender_for_stamp.set_target(CompletionTarget::Work(late_stamped_work));
         });
 

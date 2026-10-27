@@ -248,14 +248,26 @@ fn a_completion_wake_can_reset_its_own_driver_without_leaving_it_running() {
     resetting
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("the wake must return from its own reset");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while !guard.handle.as_ref().unwrap().is_finished() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    let stopped = guard.handle.as_ref().unwrap().is_finished();
+    // A joiner reports the driver's exit; the timeout is a hang guard only.
+    // A driver still running at the deadline is stopped by the guard's drop,
+    // which then lets the joiner finish.
+    let driver = guard.handle.take().unwrap();
+    let (exited_tx, exited) = std::sync::mpsc::channel();
+    let joiner = std::thread::spawn(move || {
+        let joined = driver.join();
+        let _ = exited_tx.send(());
+        joined
+    });
+    let stopped = exited
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok();
     let shutdown = scheduler.shutdown.load(Ordering::Acquire);
     let cleared = scheduler.node_ids().is_empty();
     drop(guard);
+    joiner
+        .join()
+        .expect("the joiner thread must not panic")
+        .expect("the driver thread must not panic");
     assert!(stopped, "a self-reset driver must exit before any restart");
     assert!(shutdown, "a self-reset alone must leave admission stopped");
     assert!(cleared, "self-reset still retires the published file");
