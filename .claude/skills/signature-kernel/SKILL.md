@@ -312,7 +312,7 @@ tables. `semantic_query_memo/intern_table.rs` owns the substrate:
 
 | File | Role |
 |---|---|
-| `manifest.json` | Contract byte-lock, pinned oracle identity (TypeScript 7.0.2 + per-platform toolchain digests), corpus identity and observation digest, generator versions. |
+| `manifest.json` | Contract byte-lock, pinned oracle identity (the TypeScript version the corpus was measured on + per-platform toolchain digests), corpus identity and observation digest, generator versions. |
 | `semantic-difference-ledger.md` | The four-class release authority of §5.8. Every recorded difference is classified: exact agreement, presentation-only, `VerterStableV1` order-induced (causal proof required), or independent semantic difference / incompleteness. A row never silently disappears. |
 | `determinism-matrix.md` | Per-row status of the §5.9 perturbation matrix and what keeps a row undrivable. |
 | `performance-gates.md` | The §12 structural gates, the executable guard for each, and the 5% regression investigation policy. |
@@ -321,7 +321,7 @@ Executable homes:
 
 | Home | Role |
 |---|---|
-| `crates/verter_session/src/signature_corpus_rows_tests.rs` | THE 26-row observation corpus (`verter-signature-corpus-v0@typescript-7.0.2`). Append-only: adding a row is one `Row` literal. Each row records the checker print, the `--declaration --emitDeclarationOnly` bytes, and the implementation's `Verdict`. |
+| `crates/verter_session/src/signature_corpus_rows_tests.rs` | THE 26-row observation corpus (`verter-signature-corpus-v0@typescript-<version>`, named after the TypeScript version it was measured on). Append-only: adding a row is one `Row` literal. Each row records the checker print, the `--declaration --emitDeclarationOnly` bytes, and the implementation's `Verdict`. |
 | `crates/verter_session/src/signature_corpus_tests.rs` | The corpus driver and the **flip law**: a `MatchesChecker` row fails when the live answer stops matching, and an owed/degraded row fails when the live answer STARTS matching. Both directions are proven by `signature_corpus_flip_law_fires_in_both_directions`. A verdict can only move by a deliberate re-pin. |
 | `crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs` | The §5.9 perturbation matrix and the §5.4 stable-key table, each enumerated against its authority and consumed by replay drivers. Every comparison runs on TWO bases: the stable-text completed observation AND the generated-bytes digest. |
 | `crates/verter_session/tests/allocator_canaries.rs` | `signature_kernel_warm_positional::warm_positional_read_does_not_allocate_or_lock` — the §12 Empty/One gate, in a separate test binary because it installs a counting `#[global_allocator]`. |

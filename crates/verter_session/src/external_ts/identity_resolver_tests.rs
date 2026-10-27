@@ -42,8 +42,8 @@ fn candidates() -> EngineSessionCandidates {
         editor_session_generation: generation,
     };
     EngineSessionCandidates {
-        owned: OwnedSessionFacts::new(facts("7.0.1", 1, 0)),
-        shared: Some(SharedSessionFacts::new(facts("7.0.1", 7, 3))),
+        owned: OwnedSessionFacts::new(facts("7.1.1", 1, 0)),
+        shared: Some(SharedSessionFacts::new(facts("7.1.1", 7, 3))),
     }
 }
 

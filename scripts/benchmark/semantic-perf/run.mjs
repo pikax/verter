@@ -135,7 +135,7 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           repository; the report is labelled tuned
   --supervisor <path>     verter-supervise executable (default: build crates/verter_supervise)
   --allow-sampled         consent to a sampled (not kernel-enforced) memory cap; required on macOS
-  --typescript-from <dir> directory whose node_modules resolves typescript@7.0.2 (default: repository root)
+  --typescript-from <dir> directory whose node_modules resolves the pinned typescript (default: repository root)
   --lib-mode <m>          how Verter reads the library: root-file (default, as tsc does) | ambient
   --no-skip-after-kill    re-run every invocation of an arm whose warmup was killed at the memory cap
                           (by default the rest are recorded as skipped: a memory kill is deterministic)

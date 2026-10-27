@@ -14610,12 +14610,13 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
 /// Deeply nested arrays relate on the heap-backed worklist, one element
 /// pair per level, and never answer `Unknown` for their depth: within the
 /// checker's recursion depth the relation reaches the innermost `Number`
-/// vs `String` mismatch, and past it the relation overflows, false, as the
-/// checker's does (every element pair is one `recursiveTypeRelatedTo`
-/// entry; measured on TypeScript 7.0.2, `{ v: … }[]` nested 50 times
-/// overflows with TS2321). Either way a 90-deep and a 500-deep
-/// **readonly** chain `readonly Number[]…[]` against `readonly
-/// String[]…[]` are `NotAssignable`. Readonly Array-Array relation is
+/// vs `String` mismatch, and past it the checker answers `Maybe`, which
+/// holds (every element pair is one `recursiveTypeRelatedTo` entry;
+/// measured on TypeScript 7.1.0-beta, assigning `readonly number[]` nested
+/// 90, 99 and 100 times to its `string` twin fails, and nested 101 and
+/// 500 times holds). So a 90-deep **readonly** chain `readonly
+/// Number[]…[]` against `readonly String[]…[]` is `NotAssignable` and a
+/// 500-deep one is `Assignable`. Readonly Array-Array relation is
 /// covariant (forward only), so descent is linear in depth.
 #[test]
 fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
@@ -14653,12 +14654,19 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
         );
 
         let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
-        assert!(
-            matches!(result, RelationResult::NotAssignable),
-            "relating a {depth}-deep readonly Array chain must answer NotAssignable \
-             (the leaf mismatch, or the checker's depth overflow), never Unknown; \
-             got {result:?}",
-        );
+        if depth < 100 {
+            assert!(
+                matches!(result, RelationResult::NotAssignable),
+                "relating a {depth}-deep readonly Array chain must answer NotAssignable \
+                 (the leaf mismatch), never Unknown; got {result:?}",
+            );
+        } else {
+            assert!(
+                matches!(result, RelationResult::Assignable { .. }),
+                "relating a {depth}-deep readonly Array chain must answer Assignable \
+                 (the checker's Maybe past its depth), never Unknown; got {result:?}",
+            );
+        }
     }
 }
 

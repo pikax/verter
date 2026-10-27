@@ -19,7 +19,7 @@
 // missing / spawn failed) a HARD FAILURE instead of a silent pass — the CI gate
 // uses this so the parity proof can never vacuously skip when the assets are
 // present (review finding T2).
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -67,18 +67,29 @@ function findRepoRoot(start: string): string {
 }
 
 /**
- * Locate the vendored `@typescript/native-preview` `tsgo` binary in the pnpm
- * store, so the tsgo provider runs without depending on a `tsgo` on PATH. Returns
- * the canonical path, or `undefined` when the platform package is not installed.
+ * Locate the pinned TypeScript 7 engine (`lib/tsc[.exe]` of the
+ * `@typescript/typescript-<os>-<arch>` platform package at the workspace
+ * `typescript` devDependency version) in the pnpm store, so the tsgo provider
+ * runs without depending on a `tsc` on PATH. Returns the canonical path, or
+ * `undefined` when the platform package is not installed.
  */
-function findVendoredTsgo(repoRoot: string): string | undefined {
+function findPinnedTsgo(repoRoot: string): string | undefined {
   const pnpmDir = join(repoRoot, "node_modules", ".pnpm");
   if (!existsSync(pnpmDir)) return undefined;
-  const platformDir = readdirSync(pnpmDir).find((d) => d.startsWith("@typescript+native-preview-"));
-  if (!platformDir) return undefined;
-  const scope = platformDir.slice("@typescript+".length).split("@")[0]; // native-preview-win32-x64
-  const exe = process.platform === "win32" ? "tsgo.exe" : "tsgo";
-  const candidate = join(pnpmDir, platformDir, "node_modules", "@typescript", scope, "lib", exe);
+  const pin = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).devDependencies
+    ?.typescript as string | undefined;
+  if (!pin) return undefined;
+  const scope = `typescript-${process.platform}-${process.arch}`;
+  const exe = process.platform === "win32" ? "tsc.exe" : "tsc";
+  const candidate = join(
+    pnpmDir,
+    `@typescript+${scope}@${pin}`,
+    "node_modules",
+    "@typescript",
+    scope,
+    "lib",
+    exe,
+  );
   return existsSync(candidate) ? canonicalizePath(candidate) : undefined;
 }
 
@@ -126,7 +137,7 @@ async function resolveAutoImportFor(
   const entrySource = "myHelper\n";
   writeFileSync(entryPath, entrySource);
 
-  const tools = resolveToolRoots(repoRoot, { tsgoBin: findVendoredTsgo(repoRoot) });
+  const tools = resolveToolRoots(repoRoot, { tsgoBin: findPinnedTsgo(repoRoot) });
   if (process.env.DX_PARITY_DEBUG) {
     console.error(`[${provider}] toolRoot=${JSON.stringify(tools)} repoRoot=${repoRoot}`);
   }

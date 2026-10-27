@@ -1,20 +1,25 @@
 // JS PARITY ORACLE harness.
 //
 // Runs a fixed set of tsgo `--api` operations through the OFFICIAL JS client
-// (`<pkg>/unstable/sync`) against a caller-provided fixture project, and prints
-// the results as JSON on stdout. The Rust parity test runs the SAME ops through
-// the Rust client and asserts the two result sets are IDENTICAL — this is the
+// (`typescript/sync`) against a caller-provided fixture project, and prints the
+// results as JSON on stdout. The Rust parity test runs the SAME ops through the
+// Rust client and asserts the two result sets are IDENTICAL — this is the
 // primary automated check that the hand-written Rust wire matches the official
 // client's behavior.
 //
 // The engine source package is PARAMETERIZED via TS7_SOURCE (and the binary via
-// TSGO_PATH): the rc `typescript` (7.x line) package. Never hardcoded.
+// TSGO_PATH): the pinned `typescript` package. Never hardcoded.
 //
 // Invocation (the Rust test sets these):
 //   TS7_SOURCE=<pkg> TSGO_PATH=<exe> NM_BASE=<repo-root> \
 //     node parity-oracle.mjs <fixtureDir> <tsconfig> <carrierPath> <carrierContent-b64>
 //
-// Output (stdout): a single JSON object — see `buildResult` below.
+// Output (stdout): a single JSON object — see the `result` fields below.
+//
+// Disposal: the API, every Snapshot it hands out (and the Projects a Snapshot
+// owns) are Disposable. They are declared with `using`, so each is disposed
+// exactly once on every exit path, in reverse order (the snapshot before the
+// API that owns its connection), and nothing touches a disposed object.
 
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -35,42 +40,41 @@ const TSCONFIG = norm(tsconfigArg);
 const CARRIER = norm(carrierPathArg);
 const SRC_DIR = norm(path.dirname(carrierPathArg));
 
-// Resolve the OFFICIAL sync API through the PUBLIC `<pkg>/unstable/sync` export,
-// parameterized over the source package (matches tools/tsgo-api-gate/harness.mjs).
+// Resolve the OFFICIAL sync API and the server-FS sentinels through the PUBLIC
+// `<pkg>/sync` and `<pkg>/fs` exports, parameterized over the source package.
 const require = createRequire(import.meta.url);
 const searchPaths = (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean);
 const opts = { paths: searchPaths.length ? searchPaths : undefined };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
+const sourcePkg = process.env.TS7_SOURCE || "typescript";
 let syncApiPath;
-for (const p of sourcePkgs) {
-  try {
-    syncApiPath = require.resolve(`${p}/unstable/sync`, opts);
-    break;
-  } catch {
-    /* try next */
-  }
-}
-if (!syncApiPath) {
-  console.error(`could not resolve a TS>=7 sync API from ${JSON.stringify(sourcePkgs)}`);
+let fsApiPath;
+try {
+  syncApiPath = require.resolve(`${sourcePkg}/sync`, opts);
+  fsApiPath = require.resolve(`${sourcePkg}/fs`, opts);
+} catch (e) {
+  console.error(`could not resolve the TypeScript 7 sync API from ${sourcePkg}: ${e.message}`);
   process.exit(3);
 }
 const { API } = await import(pathToFileURL(syncApiPath).href);
+const { serverFS } = await import(pathToFileURL(fsApiPath).href);
 
 // The off-disk carrier is served purely through the FS overlay (never on disk),
 // merged with the real directory entries — exactly the Rust snapshot's contract.
+// Every other path is answered by the engine from the host filesystem
+// (`serverFS.useOS`), which is what the Rust actor sends for a path the overlay
+// does not know.
 function makeFs() {
   const carrierNorm = CARRIER;
   return {
     readFile(fileName) {
-      if (norm(fileName) === carrierNorm) return carrierContent;
-      return undefined; // fall through to the real FS
+      return norm(fileName) === carrierNorm ? carrierContent : serverFS.useOS;
     },
     fileExists(fileName) {
-      if (norm(fileName) === carrierNorm) return true;
-      return undefined;
+      return norm(fileName) === carrierNorm ? true : serverFS.useOS;
     },
+    directoryExists: serverFS.useOS,
     getAccessibleEntries(dirName) {
-      if (norm(dirName) !== SRC_DIR) return undefined;
+      if (norm(dirName) !== SRC_DIR) return serverFS.useOS;
       let real;
       try {
         const dirents = fs.readdirSync(dirName, { withFileTypes: true });
@@ -85,6 +89,10 @@ function makeFs() {
       if (!real.files.includes(base)) real.files.push(base);
       return real;
     },
+    realpath: serverFS.useOS,
+    stat: serverFS.useOS,
+    writeFile: serverFS.useOS,
+    removeFile: serverFS.useOS,
   };
 }
 
@@ -93,15 +101,15 @@ const diagSummary = (diags) =>
     .map((d) => ({ code: d.code, pos: d.pos, end: d.end }))
     .sort((a, b) => a.code - b.code || a.pos - b.pos);
 
-const api = new API({ tsserverPath: process.env.TSGO_PATH, cwd: fixtureDir, fs: makeFs() });
-
-const result = {};
-try {
-  // updateSnapshot(openProject)
-  const snap = api.updateSnapshot({ openProject: TSCONFIG });
-  const project = snap.getProject(TSCONFIG);
+function run() {
+  const result = {};
+  using api = new API({ tsserverPath: process.env.TSGO_PATH, cwd: fixtureDir, fs: makeFs() });
+  using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+  const project = snap.getConfiguredProject(TSCONFIG);
   result.projectOpened = !!project;
-  result.carrierInRootFiles = project ? project.rootFiles.some((f) => norm(f) === CARRIER) : false;
+  result.carrierInRootFiles = project
+    ? project.parsedCommandLine.fileNames.some((f) => norm(f) === CARRIER)
+    : false;
 
   // getSemanticDiagnostics on the carrier
   const diags = project ? project.program.getSemanticDiagnostics(CARRIER) : [];
@@ -116,16 +124,13 @@ try {
   } else {
     result.typeAtX = null;
   }
-
-  snap.dispose?.();
-} catch (e) {
-  result.__error = String(e && e.stack ? e.stack : e);
-} finally {
-  try {
-    api.close();
-  } catch {
-    /* ignore */
-  }
+  return result;
 }
 
+let result;
+try {
+  result = run();
+} catch (e) {
+  result = { __error: String(e && e.stack ? e.stack : e) };
+}
 process.stdout.write(JSON.stringify(result));

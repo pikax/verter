@@ -55,7 +55,7 @@ pub struct NativeIntrinsicLibrary {
     /// (`@typescript/typescript-<platform>-<arch>`) carrying real declarations
     /// was discoverable in the workspace — i.e. the active engine is TS>=7.
     rc_platform_available: bool,
-    /// Whether the workspace's ACTIVE TypeScript engine uses the tsgo/native-preview
+    /// Whether the workspace's ACTIVE TypeScript engine uses the tsgo
     /// (TypeScript >= 7) toolchain, decided by [`workspace_active_typescript_is_tsgo`]
     /// — a bounded parent walk (mirroring `find_tsserver`) that, nearest-first,
     /// prefers a readable hoisted `node_modules/typescript` major and falls back to
@@ -114,7 +114,7 @@ impl NativeIntrinsicLibrary {
             .is_some_and(lib_dir_is_rc_platform_package)
     }
 
-    /// Does the workspace's ACTIVE TypeScript engine use the tsgo/native-preview
+    /// Does the workspace's ACTIVE TypeScript engine use the tsgo
     /// (TypeScript >= 7) toolchain? Auto-mode provider selection uses this to route a
     /// tsgo workspace to the tsgo external engine instead of a lower bundled/global
     /// tsserver. Resolved by [`workspace_active_typescript_is_tsgo`] — a bounded parent
@@ -214,7 +214,7 @@ struct CandidateLib {
 ///
 /// Sibling of [`detect_ts_major_version`](crate)-style scanning, kept local and
 /// dependency-free: a small string scan for `"version": "X.Y.Z"`. Returns the
-/// full version string (e.g. `"7.0.1-rc"`) or `None` when unreadable.
+/// full version string (e.g. `"7.1.0-rc"`) or `None` when unreadable.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_package_version(pkg_dir: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
@@ -230,7 +230,7 @@ fn read_package_version(pkg_dir: &std::path::Path) -> Option<String> {
 
 /// Does the workspace's ACTIVE TypeScript engine (found by walking `workspace_root`
 /// up to the monorepo root, bounded, mirroring `find_tsserver`'s parent walk) use
-/// the tsgo/native-preview (TypeScript >= 7) toolchain? At each level, nearest-first:
+/// the tsgo (TypeScript >= 7) toolchain? At each level, nearest-first:
 /// a readable hoisted `node_modules/typescript` version is authoritative
 /// (major >= 7 ⇒ tsgo); otherwise, when that version is unreadable but the rc
 /// per-platform package carrying real libs is present at that level (launcher-only
@@ -266,7 +266,7 @@ fn workspace_active_typescript_is_tsgo(workspace_root: &std::path::Path) -> bool
 
 /// Compare two TypeScript version strings (`major.minor.patch[-prerelease]`) by
 /// SEMVER ordering: numeric component compare, then a release (no prerelease)
-/// ranks ABOVE an otherwise-equal prerelease (`7.0.1` > `7.0.1-rc`). Returns
+/// ranks ABOVE an otherwise-equal prerelease (`7.1.0` > `7.1.0-rc`). Returns
 /// `Ordering::Equal` for equal cores + equal prerelease tags. Dependency-free —
 /// the precision needed here (pick the newest installed TS) does not warrant a
 /// full semver crate.
@@ -612,7 +612,7 @@ mod tests {
         // The platform segment is arbitrary here on purpose — discovery must
         // not hardcode `win32-x64`; it enumerates and probes for declarations.
         let plat_lib = root.join(
-            "node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules/@typescript/typescript-some-plat/lib",
+            "node_modules/.pnpm/@typescript+typescript-some-plat@7.1.0-rc/node_modules/@typescript/typescript-some-plat/lib",
         );
         write_lib(&plat_lib, "lib.es5.d.ts", "type Awaited<T> = intrinsic;");
         write_lib(&plat_lib, "lib.dom.d.ts", "// dom");
@@ -689,12 +689,12 @@ mod tests {
     }
 
     // ── DISCRIMINATING (B5): with BOTH the rc per-platform package
-    //    (`@typescript+typescript-*@7.0.1-rc`, the libs that pair with the active
-    //    `typescript@7.0.1-rc` engine) AND a higher-LEXICOGRAPHIC legacy
+    //    (`@typescript+typescript-*@7.1.0-rc`, the libs that pair with the active
+    //    `typescript@7.1.0-rc` engine) AND a higher-LEXICOGRAPHIC legacy
     //    `typescript@6.x` lib dir present, discovery must select the rc libs that
     //    match the ACTIVE engine version — NOT the lexicographically-last path.
     //
-    //    The pnpm store dir names sort `@typescript+typescript-…@7.0.1-rc` <
+    //    The pnpm store dir names sort `@typescript+typescript-…@7.1.0-rc` <
     //    `typescript@6.0.3` (because `@`=0x40 < `t`=0x74), so the old
     //    `candidates.sort(); candidates.pop()` selected the TS6 libs against a
     //    TS7-rc engine. This fixture FAILS on that logic and PASSES on
@@ -707,9 +707,9 @@ mod tests {
         let root = tmp.path();
 
         // Active engine: the hoisted `typescript` is the launcher-only rc package
-        // (its `lib/` carries no declarations) pinned at `7.0.1-rc`.
+        // (its `lib/` carries no declarations) pinned at `7.1.0-rc`.
         let js_pkg = root.join("node_modules/typescript");
-        write_pkg(&js_pkg, "typescript", "7.0.1-rc");
+        write_pkg(&js_pkg, "typescript", "7.1.0-rc");
         let js_lib = js_pkg.join("lib");
         write_lib(&js_lib, "tsc.js", "// launcher");
         write_lib(&js_lib, "getExePath.js", "// launcher");
@@ -717,9 +717,9 @@ mod tests {
         // rc per-platform package (the CORRECT libs): `@`-prefixed pnpm store dir
         // sorts BEFORE `typescript@…`.
         let rc_store =
-            root.join("node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules");
+            root.join("node_modules/.pnpm/@typescript+typescript-some-plat@7.1.0-rc/node_modules");
         let rc_pkg = rc_store.join("@typescript/typescript-some-plat");
-        write_pkg(&rc_pkg, "@typescript/typescript-some-plat", "7.0.1-rc");
+        write_pkg(&rc_pkg, "@typescript/typescript-some-plat", "7.1.0-rc");
         let rc_lib = rc_pkg.join("lib");
         write_lib(&rc_lib, "lib.es5.d.ts", "type Awaited<T> = intrinsic;");
         write_lib(&rc_lib, "lib.dom.d.ts", "// dom");
@@ -738,7 +738,7 @@ mod tests {
             .expect("an rc-matching lib dir must be discovered");
         assert_eq!(
             resolved, rc_lib,
-            "discovery must select the rc libs matching the active `typescript@7.0.1-rc` engine, \
+            "discovery must select the rc libs matching the active `typescript@7.1.0-rc` engine, \
              not the lexicographically-last legacy `typescript@6.0.3` libs"
         );
         // Negative: the legacy TS6 dir must NOT be selected.
@@ -795,12 +795,12 @@ mod tests {
         // Launcher-only hoisted rc package + an rc platform package + a legacy
         // TS6 package (the real-world shape that tripped the lexicographic bug).
         let js_pkg = root.join("node_modules/typescript");
-        write_pkg(&js_pkg, "typescript", "7.0.1-rc");
+        write_pkg(&js_pkg, "typescript", "7.1.0-rc");
         write_lib(&js_pkg.join("lib"), "tsc.js", "// launcher");
 
         let rc_pkg = root
-            .join("node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules/@typescript/typescript-some-plat");
-        write_pkg(&rc_pkg, "@typescript/typescript-some-plat", "7.0.1-rc");
+            .join("node_modules/.pnpm/@typescript+typescript-some-plat@7.1.0-rc/node_modules/@typescript/typescript-some-plat");
+        write_pkg(&rc_pkg, "@typescript/typescript-some-plat", "7.1.0-rc");
         write_lib(&rc_pkg.join("lib"), "lib.es5.d.ts", "// rc");
 
         let legacy_pkg = root.join("node_modules/.pnpm/typescript@6.0.3/node_modules/typescript");
@@ -853,11 +853,11 @@ mod tests {
         write_pkg(
             &root.join("node_modules/typescript"),
             "typescript",
-            "7.0.1-rc",
+            "7.1.0-rc",
         );
         assert!(
             NativeIntrinsicLibrary::discover(root).active_typescript_is_tsgo(),
-            "a hoisted typescript@7.0.1-rc workspace is a tsgo (TS>=7) engine"
+            "a hoisted typescript@7.1.0-rc workspace is a tsgo (TS>=7) engine"
         );
     }
 
@@ -887,7 +887,7 @@ mod tests {
         let js_lib = root.join("node_modules/typescript/lib");
         write_lib(&js_lib, "tsc.js", "// launcher");
         let rc_pkg = root.join(
-            "node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules/@typescript/typescript-some-plat",
+            "node_modules/.pnpm/@typescript+typescript-some-plat@7.1.0-rc/node_modules/@typescript/typescript-some-plat",
         );
         write_lib(&rc_pkg.join("lib"), "lib.es5.d.ts", "// rc");
 
@@ -932,13 +932,13 @@ mod tests {
         write_pkg(
             &root.join("node_modules/typescript"),
             "typescript",
-            "7.0.1-rc",
+            "7.1.0-rc",
         );
         let member = root.join("packages/app");
         std::fs::create_dir_all(&member).unwrap();
         assert!(
             NativeIntrinsicLibrary::discover(&member).active_typescript_is_tsgo(),
-            "a nested member open must walk up to the monorepo-root hoisted typescript@7.0.1-rc \
+            "a nested member open must walk up to the monorepo-root hoisted typescript@7.1.0-rc \
              and classify the workspace as tsgo"
         );
     }
@@ -968,7 +968,7 @@ mod tests {
         write_pkg(
             &member.join("node_modules/typescript"),
             "typescript",
-            "7.0.1-rc",
+            "7.1.0-rc",
         );
         assert!(
             NativeIntrinsicLibrary::discover(&member).active_typescript_is_tsgo(),
@@ -993,7 +993,7 @@ mod tests {
             "// launcher",
         );
         let rc_pkg = root.join(
-            "node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules/@typescript/typescript-some-plat",
+            "node_modules/.pnpm/@typescript+typescript-some-plat@7.1.0-rc/node_modules/@typescript/typescript-some-plat",
         );
         write_lib(&rc_pkg.join("lib"), "lib.es5.d.ts", "// rc");
         // Open a NESTED member with no own typescript.

@@ -255,3 +255,102 @@ fn oracle_toolchain_record_matches_the_installed_engine_bytes() {
         root.display()
     );
 }
+
+/// The rank `library_priority` gives a library its table does not name.
+fn unlisted_library_priority() -> u32 {
+    verter_session_query::inputs::program_order::library_priority("lib.__not_a_library__.d.ts")
+}
+
+/// Whether `file` is one of TypeScript's default libraries, which its
+/// library table does not name: `lib.d.ts`, `lib.es6.d.ts` and the
+/// per-target `lib.*.full.d.ts`.
+fn is_default_library(file: &str) -> bool {
+    file == "lib.d.ts" || file == "lib.es6.d.ts" || file.ends_with(".full.d.ts")
+}
+
+/// Every library the recorded engine ships, but its default libraries, is
+/// named by the library table, so the program order ranks it where
+/// TypeScript does. A table left on an earlier release's shape misses the
+/// new release's files (`lib.es2026.*`, `lib.esnext.modulesource`), and the
+/// order then drops them from every program that loads them.
+#[test]
+fn the_library_table_names_every_library_the_engine_ships() {
+    let record = record();
+    let unlisted = unlisted_library_priority();
+    for (key, platform) in &record.platforms {
+        let missing: Vec<&str> = platform
+            .lib_d_ts
+            .iter()
+            .filter_map(|file| file.path.strip_prefix("lib/"))
+            .filter(|file| !is_default_library(file))
+            .filter(|file| {
+                verter_session_query::inputs::program_order::library_priority(file) >= unlisted
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{key}: the library table names none of {missing:?}"
+        );
+    }
+}
+
+/// The default target's whole library closure, walked through the shipped
+/// files' own `/// <reference lib>` directives from its default library,
+/// resolves every reference to a file the engine ships and ranks every file
+/// it reaches. Skips, with the reason, where the platform package is not
+/// installed.
+#[test]
+fn the_default_target_s_library_closure_is_wholly_ordered() {
+    let record = record();
+    let Some(key) = host_platform_key() else {
+        eprintln!(
+            "SKIP the_default_target_s_library_closure_is_wholly_ordered: no platform package"
+        );
+        return;
+    };
+    let Some(root) = installed_platform_package(key, &record.typescript) else {
+        eprintln!(
+            "SKIP the_default_target_s_library_closure_is_wholly_ordered: the platform package \
+             is not installed (run `pnpm install --frozen-lockfile`)"
+        );
+        return;
+    };
+    let lib = root.join("lib");
+    let unlisted = unlisted_library_priority();
+    let start = verter_session_query::resolution::ScriptTarget::default().default_lib_file_name();
+    let mut pending = vec![start.to_owned()];
+    let mut reached = std::collections::BTreeSet::new();
+    while let Some(file) = pending.pop() {
+        if !reached.insert(file.clone()) {
+            continue;
+        }
+        let text = std::fs::read_to_string(lib.join(&file))
+            .unwrap_or_else(|e| panic!("{file} is reached but not shipped: {e}"));
+        if !is_default_library(&file) {
+            assert!(
+                verter_session_query::inputs::program_order::library_priority(&file) < unlisted,
+                "{file} is reached from {start} but the library table does not rank it"
+            );
+        }
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("/// <reference lib=\"") else {
+                continue;
+            };
+            let name = rest.split('"').next().unwrap_or_default();
+            let referenced = verter_session_query::inputs::program_order::library_file_name(name)
+                .unwrap_or_else(|| panic!("{file} references lib `{name}`, which the table lacks"));
+            pending.push(referenced.to_owned());
+        }
+    }
+    for expected in [
+        "lib.es5.d.ts",
+        "lib.es2026.d.ts",
+        "lib.es2026.array.d.ts",
+        "lib.dom.d.ts",
+    ] {
+        assert!(
+            reached.contains(expected),
+            "{start}'s closure must reach {expected}: {reached:?}"
+        );
+    }
+}

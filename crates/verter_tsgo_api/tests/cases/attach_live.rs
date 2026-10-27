@@ -73,7 +73,7 @@ fn engine_carrier_path<'a>(
     carrier: &str,
 ) -> Option<&'a str> {
     project
-        .root_files
+        .root_files()
         .iter()
         .find(|f| path_eq(f, carrier))
         .map(String::as_str)
@@ -161,7 +161,7 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
 
     // 2. Inject the off-disk carrier as a --lsp didOpen overlay AND synchronize it
     //    (the --api session shares the --lsp server's project.Session; the barrier
-    //    forces the server to register the overlay before --api updateSnapshot
+    //    forces the server to register the overlay before --api getCurrentLanguageServerSnapshot
     //    enumerates roots on the shared session — the two ride different transports).
     attach
         .injection_channel()
@@ -169,18 +169,19 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
         .await
         .expect("didOpen overlay + sync");
 
-    // 3. Open the CONFIGURED project on the --api side (openProjects only — the
-    //    --lsp server owns documents). This is the project-bound membership: the
-    //    carrier rides the configured tsconfig, NOT a config-less inferred project.
-    //    The updateSnapshot rail rides the STORED in-band serverInfo witness the
-    //    handshake gate accepted (attach.update_snapshot), not a hardcoded version.
+    // 3. Read the language server's snapshot with the CONFIGURED project open on
+    //    the --api side (openProjects only — the --lsp server owns documents).
+    //    This is the project-bound membership: the carrier rides the configured
+    //    tsconfig, NOT a config-less inferred project. The first-snapshot rail
+    //    rides the STORED in-band serverInfo witness the handshake gate accepted
+    //    (attach.current_snapshot), not a hardcoded version.
     let snap = tokio::time::timeout(
         Duration::from_secs(30),
-        attach.update_snapshot(&tsconfig_norm),
+        attach.current_snapshot(&tsconfig_norm),
     )
     .await
-    .expect("updateSnapshot timed out")
-    .expect("updateSnapshot failed");
+    .expect("getCurrentLanguageServerSnapshot timed out")
+    .expect("getCurrentLanguageServerSnapshot failed");
 
     let project = snap
         .project_for_config(|c| path_eq(c, &tsconfig_norm))
@@ -193,7 +194,7 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
         panic!(
             "the off-disk carrier must be a Program root of the configured project (overlay \
              membership); roots: {:?}",
-            project.root_files
+            project.root_files()
         )
     });
 
@@ -223,6 +224,13 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
         "the carrier's `./util` import must resolve under the configured project (no \
          false TS2307); got: {diags:?}"
     );
+
+    // The snapshot is released once nothing reads it.
+    attach
+        .api()
+        .release(&snap.snapshot)
+        .await
+        .expect("release the snapshot");
 
     // Ownership-dispatched teardown: this attach rides a SPAWNED (Owned)
     // connection, so teardown() takes the full shutdown arm (exit + kill).
@@ -260,11 +268,11 @@ async fn one_process_serves_both_api_checker_and_lsp_feature() {
         .did_open_synced(&carrier_uri, "typescript", 1, carrier_src)
         .await
         .expect("didOpen + sync");
-    // The stored in-band witness drives the updateSnapshot rail here too.
+    // The stored in-band witness drives the first-snapshot rail here too.
     let snap = attach
-        .update_snapshot(&tsconfig_norm)
+        .current_snapshot(&tsconfig_norm)
         .await
-        .expect("updateSnapshot");
+        .expect("getCurrentLanguageServerSnapshot");
     let project = snap
         .project_for_config(|c| path_eq(c, &tsconfig_norm))
         .expect("configured project present");
@@ -309,6 +317,12 @@ async fn one_process_serves_both_api_checker_and_lsp_feature() {
         "the --lsp feature surface must answer hover on the overlay carrier (same \
          shared Program as --api): got {hover:?}"
     );
+
+    attach
+        .api()
+        .release(&snap.snapshot)
+        .await
+        .expect("release the snapshot");
 
     // Owned connection ⇒ teardown() dispatches to the full shutdown arm.
     attach.teardown().await.expect("teardown");

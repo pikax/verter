@@ -230,7 +230,7 @@ pub(crate) fn body_receipt_line(
 /// whose engine failed discovery returned from its `let Some(session) = … else
 /// { return; }` guard and libtest reported an ORDINARY PASS — indistinguishable
 /// from a run whose assertions executed. A wrong-version tsgo (the support
-/// policy refuses anything outside stable `>=7.0.2, <7.1.0`) is exactly that
+/// policy refuses anything off the pinned release line) is exactly that
 /// case, so a green local run proved nothing while CI — which sets
 /// `VERTER_REQUIRE_TSGO=1` and therefore takes the panic branch — failed.
 ///

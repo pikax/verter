@@ -377,19 +377,33 @@ async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
         .expect("once teardown intent clears, a silent provider must restart");
 }
 
-/// Decode the JSON body of a framed stdin message.
-fn frame_body(msg: &StdinMessage) -> serde_json::Value {
+/// Decode every JSON body a stdin lane message carries, in wire order. A
+/// document's first `didOpen` carries the `custom/projectInfo` lead frame in
+/// front of it; every other message is one frame.
+fn frame_bodies(msg: &StdinMessage) -> Vec<serde_json::Value> {
     let bytes = match msg {
         StdinMessage::Frame(bytes) | StdinMessage::Document(bytes, _) => bytes,
         StdinMessage::Query(_) => panic!("a query frame exists only once the writer places it"),
         StdinMessage::Shutdown => panic!("expected a framed message, got a control signal"),
     };
-    let text = String::from_utf8(bytes.clone()).expect("frame is utf8");
-    let body = text
-        .split_once("\r\n\r\n")
-        .expect("frame has a header/body split")
-        .1;
-    serde_json::from_str(body).expect("frame body is json")
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    framer.push(bytes);
+    let mut bodies = Vec::new();
+    while let Some(body) = framer.next_message().expect("frame body is json") {
+        bodies.push(body);
+    }
+    assert!(
+        !bodies.is_empty(),
+        "a lane message carries at least one frame"
+    );
+    bodies
+}
+
+/// Decode the JSON body of a framed stdin message: for a document delivery,
+/// the document notification itself (its lead frame, if any, is checked by
+/// [`a_first_open_leads_with_its_project_and_nothing_else_does`]).
+fn frame_body(msg: &StdinMessage) -> serde_json::Value {
+    frame_bodies(msg).pop().expect("at least one frame")
 }
 
 // ===========================================================================
@@ -5094,14 +5108,26 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
                 Ok(0) => break,
                 Ok(n) => {
                     seen.extend_from_slice(&chunk[..n]);
-                    if let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let header = std::str::from_utf8(&seen[..end]).unwrap();
+                    // Walk the complete frames: the document's first open
+                    // leads with a small project frame, and the drain ends
+                    // with the frame that carries the payload.
+                    let mut offset = 0;
+                    while let Some(end) = seen[offset..].windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = std::str::from_utf8(&seen[offset..offset + end]).unwrap();
                         let length: usize = header
                             .strip_prefix("Content-Length: ")
                             .unwrap()
                             .parse()
                             .unwrap();
-                        expected_len = Some(end + 4 + length);
+                        let frame_end = offset + end + 4 + length;
+                        if length >= payload_len {
+                            expected_len = Some(frame_end);
+                            break;
+                        }
+                        if seen.len() < frame_end {
+                            break;
+                        }
+                        offset = frame_end;
                     }
                 }
                 Err(_) => break,
@@ -5316,6 +5342,104 @@ async fn the_ledger_opens_once_changes_on_edit_and_reopens_only_after_a_close() 
     assert_eq!(reopened[0].0, "textDocument/didOpen");
     assert_eq!(reopened[0].1["textDocument"]["version"], 1);
     assert_eq!(reopened[0].1["textDocument"]["text"], "const a = 2;\n");
+}
+
+/// Every lane message of one document, as `(method, params, id)` per frame.
+fn drained_frames(
+    stdin_rx: &mut mpsc::Receiver<StdinMessage>,
+) -> Vec<Vec<(String, serde_json::Value, serde_json::Value)>> {
+    let mut messages = Vec::new();
+    while let Ok(message) = stdin_rx.try_recv() {
+        messages.push(
+            frame_bodies(&message)
+                .into_iter()
+                .map(|body| {
+                    (
+                        body["method"].as_str().unwrap_or_default().to_string(),
+                        body["params"].clone(),
+                        body["id"].clone(),
+                    )
+                })
+                .collect(),
+        );
+    }
+    messages
+}
+
+/// A document's first `didOpen` reaches the engine right behind a
+/// `custom/projectInfo` request for the same document, in the SAME lane
+/// message, so the engine has loaded the configured project before the open
+/// could create it, and program order (where TS2432 lands on merged enum
+/// blocks) is the project's, not the editor's open order. The request carries
+/// an id, as a request must, and nothing waits on it: the open returned above
+/// with no peer answering anything.
+///
+/// Discriminance: dropping the lead fails the first and the reopen halves;
+/// sending it on every write fails the change and close halves; sending it
+/// as its own lane message fails the one-message assertions.
+#[tokio::test]
+async fn a_first_open_leads_with_its_project_and_nothing_else_does() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/Widget.vue.tsx";
+    let uri = TsgoTypeProvider::path_to_uri(path);
+
+    provider.open_file(path, "const a = 1;\n").await.unwrap();
+    let opened = drained_frames(&mut stdin_rx);
+    assert_eq!(opened.len(), 1, "the first open is one lane message");
+    let methods: Vec<&str> = opened[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(methods, ["custom/projectInfo", "textDocument/didOpen"]);
+    assert_eq!(opened[0][0].1["textDocument"]["uri"], uri.as_str());
+    assert!(
+        opened[0][0].2.is_i64(),
+        "the project lead is a request: it carries an id"
+    );
+    assert!(opened[0][1].2.is_null(), "the didOpen stays a notification");
+
+    provider.update_file(path, "const a = 2;\n").await.unwrap();
+    let changed = drained_frames(&mut stdin_rx);
+    assert_eq!(changed.len(), 1);
+    let methods: Vec<&str> = changed[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        ["textDocument/didChange"],
+        "an edit owes no project lead"
+    );
+
+    provider.close_file(path).await.unwrap();
+    let closed = drained_frames(&mut stdin_rx);
+    assert_eq!(closed.len(), 1);
+    let methods: Vec<&str> = closed[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        ["textDocument/didClose"],
+        "a close owes no project lead"
+    );
+
+    provider.open_file(path, "const a = 2;\n").await.unwrap();
+    let reopened = drained_frames(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    let methods: Vec<&str> = reopened[0]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        ["custom/projectInfo", "textDocument/didOpen"],
+        "a reopen is a first open again"
+    );
+    assert_ne!(
+        reopened[0][0].2, opened[0][0].2,
+        "each project lead takes its own request id"
+    );
 }
 
 /// `load_file` caches content for local position conversion and deliberately
@@ -5547,8 +5671,8 @@ async fn tsgo_sends_no_workspace_configuration_notification() {
 // readonly=2, static=3, deprecated=4, abstract=5, async=6, modification=7,
 // documentation=8, defaultLibrary=9, local=10.
 //
-// tsgo emits tokens in ITS OWN server-advertised legend (observed live on the
-// pinned 7.0.2: interface=3, variable=8, function=13 — a DIFFERENT order), so
+// tsgo emits tokens in ITS OWN server-advertised legend (observed live on
+// 7.1.0-beta: interface=3, variable=8, function=13 — a DIFFERENT order), so
 // the provider must retain the `initialize`-result legend and remap BOTH the
 // type index and the modifier bitset by NAME before returning. An unmapped
 // token type or modifier bit drops the token (fail closed — absent beats
@@ -5816,7 +5940,7 @@ async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_a
 
 /// The tsgo `initialize` client capabilities must advertise
 /// `textDocument.semanticTokens` — the engine gates the ENTIRE feature on it
-/// (verified live on the pinned 7.0.2: without the capability the initialize
+/// (verified live on 7.1.0-beta: without the capability the initialize
 /// result advertises an EMPTY legend and `semanticTokens/full` returns zero
 /// data for every file). The advertised vocabulary is Verter's PUBLISHED
 /// legend, so the server's negotiated echo can only contain names the shared

@@ -19,7 +19,9 @@ use verter_tsgo_api::client::probe_engine_version_bounded;
 use verter_tsgo_api::error::TsgoApiError;
 use verter_tsgo_api::process::{process_alive, terminate_process};
 use verter_tsgo_api::toolchain::discovery::{enumerate_candidates, resolve, ResolutionRequest};
-use verter_tsgo_api::toolchain::policy::VersionPolicy;
+use verter_tsgo_api::toolchain::policy::{
+    pinned_version, supported_range_ceiling, VersionPolicy, TYPESCRIPT_PIN,
+};
 use verter_tsgo_api::toolchain::validation::{
     CandidateValidator, Capability, ProcessValidator, RejectionReason,
 };
@@ -89,11 +91,8 @@ async fn lsp_requirement_accepts_a_working_engine() {
         .await
         .expect("a working fake engine must validate");
     assert_eq!(validated.path, engine);
-    assert_eq!(validated.version_string, "7.0.2");
-    assert_eq!(
-        validated.version,
-        verter_tsgo_api::toolchain::policy::TsgoVersion::new(7, 0, 2)
-    );
+    assert_eq!(validated.version_string, TYPESCRIPT_PIN);
+    assert_eq!(&validated.version, pinned_version());
 }
 
 // ── DISCRIMINATING: out-of-range / prerelease probes are rejected at the
@@ -101,18 +100,20 @@ async fn lsp_requirement_accepts_a_working_engine() {
 #[tokio::test]
 async fn policy_rejects_unsupported_and_prerelease_versions() {
     let err = production_validator()
-        .validate(&fake_engine("v710"), Capability::Lsp)
+        .validate(&fake_engine("outofrange"), Capability::Lsp)
         .await
-        .expect_err("7.1.0 must be rejected");
+        .expect_err("the next minor must be rejected");
     match err {
-        RejectionReason::PolicyRejected { version, .. } => assert_eq!(version, "7.1.0"),
+        RejectionReason::PolicyRejected { version, .. } => {
+            assert_eq!(version, supported_range_ceiling().to_string())
+        }
         other => panic!("expected PolicyRejected, got {other:?}"),
     }
 
     let err = production_validator()
         .validate(&fake_engine("rc"), Capability::Lsp)
         .await
-        .expect_err("an rc must be rejected in production");
+        .expect_err("an rc of a release other than the pin must be rejected");
     assert!(
         matches!(err, RejectionReason::PolicyRejected { .. }),
         "{err:?}"
@@ -121,28 +122,13 @@ async fn policy_rejects_unsupported_and_prerelease_versions() {
     let err = production_validator()
         .validate(&fake_engine("nightly"), Capability::Lsp)
         .await
-        .expect_err("a nightly must be rejected in production");
+        .expect_err("a nightly must be rejected");
     match err {
         RejectionReason::PolicyRejected { rejection, .. } => {
-            assert!(rejection
-                .to_string()
-                .contains("VERTER_TSGO_DEV_ALLOW_NIGHTLY"))
+            assert!(rejection.to_string().contains("nightly"))
         }
         other => panic!("expected PolicyRejected, got {other:?}"),
     }
-}
-
-// ── DISCRIMINATING: the DEV-ONLY override admits the integer-handle nightly
-//    end-to-end (policy + handshake + serverInfo agreement). ─────────────────
-#[tokio::test]
-async fn dev_override_admits_a_nightly_end_to_end() {
-    let validator = ProcessValidator::with_policy(VersionPolicy::with_dev_nightly_override())
-        .with_bounds(Duration::from_secs(30), Duration::from_secs(30));
-    let validated = validator
-        .validate(&fake_engine("nightly"), Capability::Lsp)
-        .await
-        .expect("the dev override must admit the integer-handle nightly");
-    assert_eq!(validated.version_string, "7.0.0-dev.20260703.1");
 }
 
 // ── DISCRIMINATING: a serverInfo that disagrees with the probe is rejected —
@@ -155,8 +141,9 @@ async fn server_info_mismatch_is_rejected() {
         .expect_err("a probe/serverInfo disagreement must be rejected");
     match err {
         RejectionReason::ServerInfoVersionMismatch { probe, server_info } => {
-            assert_eq!(probe, "7.0.2");
-            assert_eq!(server_info, "7.0.9");
+            let pin = pinned_version();
+            assert_eq!(probe, TYPESCRIPT_PIN);
+            assert_eq!(server_info, format!("{}.{}.9", pin.major, pin.minor));
         }
         other => panic!("expected ServerInfoVersionMismatch, got {other:?}"),
     }
@@ -214,7 +201,7 @@ async fn api_requirement_accepts_a_working_api_surface() {
         .validate(&fake_engine("apiok"), Capability::Api)
         .await
         .expect("a fake engine serving the full --api attach surface must validate");
-    assert_eq!(validated.version_string, "7.0.2");
+    assert_eq!(validated.version_string, TYPESCRIPT_PIN);
 }
 
 // ── DISCRIMINATING (POSITIVE, LSP): the API-capable fake also passes the

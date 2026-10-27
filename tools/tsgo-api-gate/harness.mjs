@@ -1,5 +1,5 @@
 // tsgo --api capability gate harness (the "Block 0" gate).
-// Drives the USER-INSTALLED rc `typescript` tsgo sync --api client.
+// Drives the installed `typescript` (TS>=7) sync --api client.
 // Proves whether an OFF-DISK (overlay/FS-callback-only, never written to disk)
 // generated TSX "carrier" can be a real member of a configured TS project.
 //
@@ -10,43 +10,21 @@
 // The fixture TS project lives in ./fixture (committed, hermetic; no node_modules —
 // @spike/shared, verterjsx and the global types resolve via tsconfig paths/typeRoots).
 
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
+
+import { loadSyncApi, openSnapshotLineage, overlayFileSystem } from "./sync-api.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 // The TS fixture project lives in ./fixture (committed, hermetic, no node_modules).
 const FIXTURE = path.join(ROOT, "fixture");
 
-// Resolve the sync API from the user-installed rc `typescript` (TS>=7)
-// distribution, searching the repo node_modules (passed via NM_BASE). The
-// TS7_SOURCE env names the package (`typescript` at v7); it exposes the sync
-// client at the PUBLIC export subpath `<pkg>/unstable/sync`. We import through
-// that public `exports` entry (not a hand-built dist/ path) so the gate exercises
-// exactly the surface a real consumer uses. Portable: no junctions.
-const require = createRequire(import.meta.url);
-const searchPaths = (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean);
-const opts = { paths: searchPaths.length ? searchPaths : undefined };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
-// Resolve the PUBLIC `<pkg>/unstable/sync` export (parameterized over the source
-// package: `typescript/unstable/sync`). `require.resolve` honours the package's
-// `exports` map, so this is the public entry, not an internal file path.
-let syncApiSpecifier, syncApiPath;
-for (const p of sourcePkgs) {
-  try {
-    syncApiPath = require.resolve(`${p}/unstable/sync`, opts);
-    syncApiSpecifier = `${p}/unstable/sync`;
-    break;
-  } catch {
-    /* try next */
-  }
-}
-if (!syncApiPath)
-  throw new Error(
-    `could not resolve a TS>=7 sync API (<pkg>/unstable/sync) from ${JSON.stringify(sourcePkgs)}`,
-  );
-const { API } = await import(pathToFileURL(syncApiPath).href);
+// Resolve the sync API from the installed `typescript` (TS>=7) distribution,
+// searching the repo node_modules (passed via NM_BASE), through the PUBLIC
+// export subpaths `<pkg>/sync` + `<pkg>/fs` (see ./sync-api.mjs) — exactly the
+// surface a real consumer uses. Portable: no junctions.
+const { API, serverFS, specifier: syncApiSpecifier, syncPath: syncApiPath } = await loadSyncApi();
 console.log(
   "resolved sync API via public export:",
   syncApiSpecifier,
@@ -154,47 +132,17 @@ let readFileHits = 0;
 let carrierReadHits = 0;
 
 function makeFs(currentCarrier, extra = {}) {
-  const carrierNorm = norm(CARRIER_PATH);
-  const offDisk = new Map([[carrierNorm, currentCarrier]]);
-  for (const [p, fn] of Object.entries(extra)) offDisk.set(norm(p), fn);
-  // All off-disk files in this gate share the src/components dir.
-  const sharedDirNorm = norm(path.dirname(CARRIER_PATH));
-  const injectedBases = [...offDisk.keys()].map((p) => path.basename(p));
-  return {
-    readFile(fileName) {
-      readFileHits++;
-      const fn = offDisk.get(norm(fileName));
-      if (fn) {
-        if (norm(fileName) === carrierNorm) carrierReadHits++;
-        return fn(); // string content for the off-disk file
-      }
-      return undefined; // fall back to the real filesystem
+  const carrierNorm = norm(CARRIER_PATH).toLowerCase();
+  return overlayFileSystem(
+    serverFS,
+    { [CARRIER_PATH]: currentCarrier, ...extra },
+    {
+      onRead(fileName) {
+        readFileHits++;
+        if (norm(fileName).toLowerCase() === carrierNorm) carrierReadHits++;
+      },
     },
-    fileExists(fileName) {
-      if (offDisk.has(norm(fileName))) return true;
-      return undefined; // fall back
-    },
-    getAccessibleEntries(dirName) {
-      // Make the off-disk files visible to directory enumeration so the `include`
-      // glob (src/**/*.{ts,tsx}) discovers them as project root files.
-      if (norm(dirName) === sharedDirNorm) {
-        const real = (() => {
-          try {
-            const dirents = fs.readdirSync(dirName, { withFileTypes: true });
-            return {
-              files: dirents.filter((e) => e.isFile()).map((e) => e.name),
-              directories: dirents.filter((e) => e.isDirectory()).map((e) => e.name),
-            };
-          } catch {
-            return { files: [], directories: [] };
-          }
-        })();
-        for (const b of injectedBases) if (!real.files.includes(b)) real.files.push(b);
-        return real;
-      }
-      return undefined; // fall back
-    },
-  };
+  );
 }
 
 console.log("=== tsgo --api OFF-DISK CARRIER gate ===");
@@ -206,7 +154,7 @@ console.log("");
 // ============================================================================
 // PHASE 1 — off-disk carrier as a configured-project member (gate part 1 + 2)
 // ============================================================================
-const api = new API({
+using api = new API({
   tsserverPath: process.env.TSGO_PATH, // explicit user-installed tsgo
   cwd: FIXTURE,
   // Off-disk set: the IDE carrier, the §2.9 consumer .ts, and the .vue COMPANION
@@ -227,20 +175,22 @@ try {
     `fs.existsSync(carrier) === ${fs.existsSync(CARRIER_PATH)} (must be false)`,
   );
 
-  // 1a. Open the REAL configured project.
+  // 1a. Open the REAL configured project. Every later edit advances this ONE
+  // lineage (the superseded snapshot is disposed by `advance`).
   carrierContent = CARRIER_OK;
-  let snap = api.updateSnapshot({ openProject: TSCONFIG });
+  using lineage = openSnapshotLineage(api, { openProjects: [TSCONFIG] });
+  let snap = lineage.current;
   const projects = snap.getProjects();
   console.log(
     "projects in snapshot:",
     projects.map((p) => norm(p.configFileName)),
   );
-  const project = snap.getProject(TSCONFIG);
+  const project = snap.getConfiguredProject(TSCONFIG);
   record(
     "configured_project_opened",
     !!project,
     project
-      ? `configFileName=${norm(project.configFileName)} compilerOptions.paths=${JSON.stringify(project.compilerOptions.paths)} jsx=${project.compilerOptions.jsx}`
+      ? `configFileName=${norm(project.configFileName)} compilerOptions.paths=${JSON.stringify(project.parsedCommandLine.options.paths)} jsx=${project.parsedCommandLine.options.jsx}`
       : "no project returned for tsconfig",
   );
   if (!project) throw new Error("no configured project");
@@ -256,11 +206,12 @@ try {
   );
 
   // 1c. Is the carrier actually IN the program's root files?
-  const inRoots = project.rootFiles.some((f) => norm(f) === norm(CARRIER_PATH));
+  const rootFiles = project.parsedCommandLine.fileNames;
+  const inRoots = rootFiles.some((f) => norm(f) === norm(CARRIER_PATH));
   record(
     "carrier_in_program_rootfiles",
     inRoots,
-    `rootFiles includes carrier=${inRoots}; rootFiles sample=${JSON.stringify(project.rootFiles.map(norm).filter((f) => f.includes("/src/")))}`,
+    `rootFiles includes carrier=${inRoots}; rootFiles sample=${JSON.stringify(rootFiles.map(norm).filter((f) => f.includes("/src/")))}`,
   );
 
   // 1d. Can we fetch the carrier's source file FROM the configured program?
@@ -303,12 +254,8 @@ try {
 
   // 1f. Now feed the ERROR carrier (deliberate TS2345) and re-check.
   carrierContent = CARRIER_ERR;
-  snap.dispose();
-  snap = api.updateSnapshot({
-    openProject: TSCONFIG,
-    fileChanges: { changed: [CARRIER_PATH] },
-  });
-  const projectErr = snap.getProject(TSCONFIG);
+  snap = lineage.advance({ fileNotifications: { changed: [CARRIER_PATH] } });
+  const projectErr = snap.getConfiguredProject(TSCONFIG);
   const errDiags = projectErr.program.getSemanticDiagnostics(CARRIER_PATH);
   console.log("error carrier semantic diags:", JSON.stringify(diagSummary(errDiags), null, 2));
   record(
@@ -327,19 +274,18 @@ try {
   fs.writeFileSync(ON_DISK, CARRIER_OK, "utf8");
   try {
     // New API without the overlay carrier; on-disk twin is a normal member.
-    const api2 = new API({ tsserverPath: process.env.TSGO_PATH, cwd: FIXTURE });
-    const snap2 = api2.updateSnapshot({ openProject: TSCONFIG });
-    const project2 = snap2.getProject(TSCONFIG);
+    using api2 = new API({ tsserverPath: process.env.TSGO_PATH, cwd: FIXTURE });
+    using snap2 = api2.createSnapshot({ openProjects: [TSCONFIG] });
+    const project2 = snap2.getConfiguredProject(TSCONFIG);
     const onDiskDiags = project2.program.getSemanticDiagnostics(ON_DISK);
     console.log("on-disk twin diags:", JSON.stringify(diagSummary(onDiskDiags), null, 2));
 
     // Re-fetch off-disk clean diags for an apples-to-apples compare.
     carrierContent = CARRIER_OK;
-    const snap3 = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [CARRIER_PATH] },
-    });
-    const offDiskDiags = snap3.getProject(TSCONFIG).program.getSemanticDiagnostics(CARRIER_PATH);
+    snap = lineage.advance({ fileNotifications: { changed: [CARRIER_PATH] } });
+    const offDiskDiags = snap
+      .getConfiguredProject(TSCONFIG)
+      .program.getSemanticDiagnostics(CARRIER_PATH);
 
     // Equivalence = IDENTICAL diagnostic codes (file-name + absolute pos differ
     // by design since the files have different names/paths). Both clean => both
@@ -354,9 +300,6 @@ try {
         ? `off-disk carrier and on-disk twin produce IDENTICAL diagnostic codes [${offCodes.join(",") || "none"}] — identical resolution under the configured program`
         : `mismatch: onDiskCodes=[${onCodes}] offDiskCodes=[${offCodes}]`,
     );
-    snap2.dispose();
-    snap3.dispose();
-    api2.close();
   } finally {
     fs.rmSync(ON_DISK, { force: true });
   }
@@ -365,8 +308,8 @@ try {
   // PHASE 3 — hover + definition on the off-disk carrier (gate part 2)
   // ========================================================================
   carrierContent = CARRIER_OK;
-  snap = api.updateSnapshot({ openProject: TSCONFIG, fileChanges: { changed: [CARRIER_PATH] } });
-  const proj3 = snap.getProject(TSCONFIG);
+  snap = lineage.advance({ fileNotifications: { changed: [CARRIER_PATH] } });
+  const proj3 = snap.getConfiguredProject(TSCONFIG);
 
   // Hover: type at the `who` identifier usage (should be string).
   const whoUseOff = findOffset(CARRIER_OK, "who, node");
@@ -427,13 +370,10 @@ try {
   // ========================================================================
   // PHASE 4 — incremental carrier edit updates the SAME program (gate part 3)
   // ========================================================================
-  // Edit the carrier content (off-disk) and push only a fileChanges delta.
+  // Edit the carrier content (off-disk) and push only a file notification.
   carrierContent = CARRIER_EDIT2;
-  const snapEdit = api.updateSnapshot({
-    openProject: TSCONFIG,
-    fileChanges: { changed: [CARRIER_PATH] },
-  });
-  const projEdit = snapEdit.getProject(TSCONFIG);
+  const snapEdit = lineage.advance({ fileNotifications: { changed: [CARRIER_PATH] } });
+  const projEdit = snapEdit.getConfiguredProject(TSCONFIG);
   const editDiags = projEdit.program.getSemanticDiagnostics(CARRIER_PATH);
   console.log("edited carrier (edit2) diags:", JSON.stringify(diagSummary(editDiags), null, 2));
   // edit2 assigns user.id (number) to who: string -> TS2322.
@@ -441,17 +381,16 @@ try {
     "carrier_edit_reflected_incrementally",
     hasCode(editDiags, 2322) && !hasCode(editDiags, 2345),
     hasCode(editDiags, 2322)
-      ? `after off-disk edit + fileChanges delta, NEW diag TS2322 present and OLD TS2345 gone — same project Program updated incrementally`
+      ? `after off-disk edit + file notification, NEW diag TS2322 present and OLD TS2345 gone — same project Program updated incrementally`
       : `expected TS2322 from edit2, got: ${JSON.stringify(diagSummary(editDiags))}`,
   );
 
   // Now revert and confirm it goes clean again on the same project lineage.
   carrierContent = CARRIER_OK;
-  const snapRevert = api.updateSnapshot({
-    openProject: TSCONFIG,
-    fileChanges: { changed: [CARRIER_PATH] },
-  });
-  const revertDiags = snapRevert.getProject(TSCONFIG).program.getSemanticDiagnostics(CARRIER_PATH);
+  const snapRevert = lineage.advance({ fileNotifications: { changed: [CARRIER_PATH] } });
+  const revertDiags = snapRevert
+    .getConfiguredProject(TSCONFIG)
+    .program.getSemanticDiagnostics(CARRIER_PATH);
   record(
     "carrier_edit_revert_clean",
     revertDiags.length === 0,
@@ -470,12 +409,13 @@ try {
   // FS overlay with no module-resolution-map endpoint, and that the imported
   // symbols carry the companion's real exported types. (No in-process plugin.)
   carrierContent = CARRIER_OK;
-  const snapC = api.updateSnapshot({
-    openProject: TSCONFIG,
-    fileChanges: { changed: [CARRIER_PATH, CONSUMER_PATH, VUE_COMPANION_PATH] },
+  const snapC = lineage.advance({
+    fileNotifications: { changed: [CARRIER_PATH, CONSUMER_PATH, VUE_COMPANION_PATH] },
   });
-  const projC = snapC.getProject(TSCONFIG);
-  const consumerInRoots = projC.rootFiles.some((f) => norm(f) === norm(CONSUMER_PATH));
+  const projC = snapC.getConfiguredProject(TSCONFIG);
+  const consumerInRoots = projC.parsedCommandLine.fileNames.some(
+    (f) => norm(f) === norm(CONSUMER_PATH),
+  );
   const consumerDiags = projC.program.getSemanticDiagnostics(CONSUMER_PATH);
   console.log("bare-.vue consumer diags:", JSON.stringify(diagSummary(consumerDiags), null, 2));
   // Sanity: confirm the BARE path is genuinely never served by the overlay (the
@@ -506,10 +446,6 @@ try {
 } catch (e) {
   console.error("HARNESS ERROR:", e && e.stack ? e.stack : e);
   results.__harness_error = { pass: false, detail: String(e && e.message ? e.message : e) };
-} finally {
-  try {
-    api.close();
-  } catch {}
 }
 
 // ---- typeToString helper that works whether it lives on Checker or Program --

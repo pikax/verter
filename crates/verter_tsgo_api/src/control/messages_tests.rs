@@ -128,7 +128,7 @@ fn hello_result_uses_camel_case_wire_fields() {
 #[test]
 fn wait_initialized_result_round_trips_and_is_camel_case() {
     let result = WaitInitializedResult {
-        server_info_version: Some("7.0.1-rc".to_string()),
+        server_info_version: Some(crate::toolchain::policy::TYPESCRIPT_PIN.to_string()),
         observed_initialize_id: serde_json::json!(7),
         root_uri: Some("file:///w".to_string()),
         workspace_folders: Some(serde_json::json!([{ "uri": "file:///w", "name": "w" }])),
@@ -153,7 +153,7 @@ fn wait_initialized_result_round_trips_and_is_camel_case() {
 #[test]
 fn wait_initialized_result_tolerates_a_legendless_shim_payload() {
     let legacy = serde_json::json!({
-        "serverInfoVersion": "7.0.1-rc",
+        "serverInfoVersion": crate::toolchain::policy::TYPESCRIPT_PIN,
         "observedInitializeId": 7,
         "rootUri": "file:///w",
         "workspaceFolders": null,

@@ -2,7 +2,7 @@
   "home": "examples/reference",
   "pin": {
     "node": ">=22",
-    "typescript": "7.0.2",
+    "typescript": "7.1.0-beta",
     "vue": "3.6.0-rc.5"
   },
   "examples": [

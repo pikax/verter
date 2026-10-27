@@ -15,22 +15,24 @@
 //! `ArcSwap<OverlaySnapshot>` on the transport side so the callback path reads it
 //! lock-free.
 //!
-//! Wire semantics mirrored from `dist/api/sync/client.js` + `dist/api/fs.js`:
-//! - `readFile`: a found file returns its content; a definitively-absent file
-//!   returns "not found"; an unknown path falls through to the real FS
-//!   (client.js:36-42 maps `undefined → ""` = fall through, `null → {content:null}`
-//!   = not found, string → `{content:"…"}`).
+//! Wire semantics mirrored from `dist/api/sync/client.js` +
+//! `dist/api/fsCallbacks.js` (the tagged result encoding is the actor's, see
+//! `crate::actor`):
+//! - `readFile`: a found file returns its content (`{kind:"value"}`); a
+//!   definitively-absent file returns "missing" (`{kind:"missing"}`); an
+//!   unknown path is served by the engine from the host filesystem
+//!   (`{kind:"useOS"}`), fsCallbacks.js:47-98.
 //! - `getAccessibleEntries` returns `{ files, directories }` of BASENAMES and
 //!   MUST MERGE the overlay entries with the real directory entries
 //!   (returning overlay-only would hide real files → false module-resolution
-//!   failures). Mirrors fs.js:85-101.
+//!   failures).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The accessible entries of a directory: basenames split into files and
-/// directories. Mirrors the JS `FileSystemEntries` shape (fs.d.ts:1-4,
-/// fs.js:100). Entry names are basenames, not full paths.
+/// directories. Mirrors the `getAccessibleEntries` result shape
+/// (fsCallbacks.js:58-64). Entry names are basenames, not full paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccessibleEntries {
     /// File basenames in the directory.
@@ -40,15 +42,15 @@ pub struct AccessibleEntries {
 }
 
 /// The three-state result of a `readFile` callback, mirroring the wire's
-/// `undefined`/`null`/string trichotomy (client.js:36-42).
+/// `useOS`/`missing`/value trichotomy (fsCallbacks.js:47-98).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadFileResult {
-    /// The file exists with this content (maps to `{content:"…"}`).
+    /// The file exists with this content (maps to `{kind:"value",value:"…"}`).
     Found(String),
-    /// The file is definitively absent; do NOT fall back (maps to `{content:null}`).
+    /// The file is definitively absent; do NOT fall back (maps to `{kind:"missing"}`).
     NotFound,
-    /// The path is not part of the overlay; fall through to the real filesystem
-    /// (maps to the empty-string sentinel `""`).
+    /// The path is not part of the overlay; the engine reads the host
+    /// filesystem (maps to `{kind:"useOS"}`).
     FallThrough,
 }
 
@@ -120,7 +122,7 @@ impl OverlaySnapshot {
         OverlaySnapshotBuilder::new()
     }
 
-    /// Service a `readFile` callback. Mirrors client.js:36-42.
+    /// Service a `readFile` callback (fsCallbacks.js:47-98).
     pub fn read_file(&self, path: &str) -> ReadFileResult {
         match self.files.get(&norm_path(path)) {
             Some(Some(content)) => ReadFileResult::Found(content.to_string()),
@@ -131,7 +133,7 @@ impl OverlaySnapshot {
 
     /// Service a `fileExists` callback. Returns `Some(true)` for an overlay file
     /// present with content, `Some(false)` for an overlay-known-absent file, and
-    /// `None` to fall through to the real FS (fs.js:82-84 + the wrap semantics).
+    /// `None` to fall through to the host filesystem (`useOS`).
     pub fn file_exists(&self, path: &str) -> Option<bool> {
         match self.files.get(&norm_path(path)) {
             Some(Some(_)) => Some(true),
@@ -159,8 +161,8 @@ impl OverlaySnapshot {
     }
 
     /// Service a `realpath` callback. The overlay does not remap paths, so an
-    /// overlay-known path resolves to itself (identity, mirroring the vendored
-    /// vfs `realpath: path => path`, fs.js:19); an unknown path falls through.
+    /// overlay-known path resolves to itself (identity, the `serverFS.identity`
+    /// answer, fsCallbacks.js:7-9); an unknown path falls through.
     pub fn realpath(&self, path: &str) -> Option<String> {
         let n = norm_path(path);
         if self.files.contains_key(&n) || self.directories.contains(&n) {
@@ -171,8 +173,8 @@ impl OverlaySnapshot {
     }
 
     /// Service a `getAccessibleEntries` callback. MERGES the overlay entries for
-    /// `dir` with the real directory entries (fs.js:85-101 + the gate harness's
-    /// merge at harness.mjs:180-199). Overlay basenames are unioned into the real
+    /// `dir` with the real directory entries (the gate harness's merge, in
+    /// `tools/tsgo-api-gate/harness.mjs`). Overlay basenames are unioned into the real
     /// listing so real files stay visible (overlay-only would hide them).
     ///
     /// Returns `None` only when neither the overlay nor the real source knows the

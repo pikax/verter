@@ -1173,8 +1173,8 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
 /// audited flow-return boundary, printed as `tsc --pretty false` prints
 /// each — `(line,col): error TS<code>: <message>`, then its message chain
 /// indented two spaces per level — in its order. Every expected line is
-/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
-/// off.
+/// TypeScript 7.1.0-beta's on this fixture, identical with
+/// `strictNullChecks` off.
 ///
 /// The positions are the checker's: an argument's start for TS2345 (a
 /// spread's `...` for every argument it expands to), the first argument
@@ -1356,7 +1356,7 @@ export function differing_return() { return gd<string>(1); }
 /// candidate's return, beside the fitting one's TS2345. A union is related
 /// and printed in the checker's own order, and `strictNullChecks: false`
 /// leaves `null` and `undefined` out of every message. Measured on
-/// TypeScript 7.0.2.
+/// TypeScript 7.1.0-beta.
 #[test]
 fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
     const ARG: &str = "is not assignable to parameter of type";
@@ -1574,7 +1574,7 @@ export function f4() { return g(s); }
 /// A literal keeps its spelling against `never`, an eagerly rejected
 /// argument ahead of a callback is reported against the declared parameter
 /// type without the optionality's `undefined`, and a numeric key and its
-/// string spelling are one property. Measured on TypeScript 7.0.2.
+/// string spelling are one property. Measured on TypeScript 7.1.0-beta.
 #[test]
 fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
     let host = host_with(CALL_REPORT_IDENTITY);
@@ -1604,7 +1604,7 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 
 /// A long message prints as the checker prints it. Past its node builder's
 /// truncation length a union's remaining members elide as `... N more ...`
-/// before its last, a member it begins past that length as `{ ...; }`, and
+/// before its last, an object type it begins past that length as `...`, and
 /// an object's remaining properties as `... N more ...;` before its last; a
 /// printed type of twice that length is clipped to its first 317 bytes and
 /// `...`; and a failure through a property path of 70 nested object types
@@ -1614,7 +1614,7 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 /// not generic counts as the object type it resolves to, so each is elided exactly
 /// where the checker elides it, and never withheld. Each is reported at its own
 /// call, two calls of one body in source order, cold and warm. Every
-/// expected line is TypeScript 7.0.2's on this fixture, identical with
+/// expected line is TypeScript 7.1.0-beta's on this fixture, identical with
 /// `strictNullChecks` off.
 #[test]
 fn long_messages_print_as_the_checker_abbreviates_them() {
@@ -1661,14 +1661,14 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
         properties.join("; "),
         near = "x".repeat(150),
         past = "x".repeat(155),
-        index_near = "x".repeat(138),
-        index_past = "x".repeat(139),
+        index_near = "x".repeat(141),
+        index_past = "x".repeat(142),
         label = "a".repeat(90),
         indexed = properties[..20].join("; "),
     );
     const ARG: &str = "is not assignable to parameter of type 'string'.";
     let union = format!(
-        "Argument of type '{} | {{ ...; }} | ... 26 more ... | {{ ...; }}' {ARG}\n  \
+        "Argument of type '{} | ... | ... 26 more ... | ...' {ARG}\n  \
          Type '{{ member0: 0; }}' is not assignable to type 'string'.",
         (0..12)
             .map(|ordinal| format!("{{ member{ordinal}: {ordinal}; }}"))
@@ -1725,14 +1725,14 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
                     "(20,46)",
                     &format!(
                         "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<string>; }}' {ARG}",
-                        "x".repeat(138)
+                        "x".repeat(141)
                     ),
                 ),
                 at(
                     "(20,63)",
                     &format!(
                         "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<...>; }}' {ARG}",
-                        "x".repeat(139)
+                        "x".repeat(142)
                     ),
                 ),
             ],
@@ -1790,8 +1790,10 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
 /// its signature, a class expression's instance `(Anonymous class)`, each
 /// counted as the checker's node builder counts it, so the members past
 /// the truncation length elide exactly where tsc elides them and a text of
-/// twice that length is clipped. Every expected line is TypeScript 7.0.2's
-/// on this fixture, identical with `strictNullChecks` off, cold and warm.
+/// twice that length is clipped. Every expected line is TypeScript
+/// 7.1.0-beta's on this fixture, identical with `strictNullChecks` off,
+/// cold and warm; a function type the node builder begins past the
+/// truncation length elides as `...`.
 #[test]
 fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them() {
     const WIDE: usize = 30;
@@ -1827,12 +1829,13 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
              parameter of type 'string'."
         )
     };
-    let elided = |count: usize, member: &dyn Fn(usize) -> String| {
+    // The last member begins past the truncation length: a function type
+    // there elides as `...`, a class-expression instance does not.
+    let elided = |count: usize, member: &dyn Fn(usize) -> String, last: String| {
         format!(
-            "{{ {}; ... {} more ...; {}; }}",
+            "{{ {}; ... {} more ...; {last}; }}",
             members(count, member),
             WIDE - count - 1,
-            member(WIDE - 1)
         )
     };
     let predicates = format!(
@@ -1842,17 +1845,35 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
     let rows: Vec<(&str, Vec<String>)> = vec![
         (
             "typeof_wide",
-            vec![at("(35,44)", &elided(16, &|i| format!("p{i}: () => void")))],
+            vec![at(
+                "(35,44)",
+                &elided(
+                    16,
+                    &|i| format!("p{i}: () => void"),
+                    format!("p{}: ...", WIDE - 1),
+                ),
+            )],
         ),
         (
             "qualified_wide",
-            vec![at("(37,47)", &elided(16, &|i| format!("q{i}: () => void")))],
+            vec![at(
+                "(37,47)",
+                &elided(
+                    16,
+                    &|i| format!("q{i}: () => void"),
+                    format!("q{}: ...", WIDE - 1),
+                ),
+            )],
         ),
         (
             "class_wide",
             vec![at(
                 "(42,43)",
-                &elided(5, &|i| format!("a{i}: (Anonymous class)")),
+                &elided(
+                    5,
+                    &|i| format!("a{i}: (Anonymous class)"),
+                    format!("a{}: (Anonymous class)", WIDE - 1),
+                ),
             )],
         ),
         ("class_short", vec![at("(43,44)", "(Anonymous class)")]),
@@ -1888,7 +1909,7 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
 /// declaration wrote; and a mapped type that is not generic, at the top or
 /// nested, as the object type it resolves to, `undefined` printed last; and
 /// an optional `never` element or property as `undefined`.
-/// Every expected line is TypeScript 7.0.2's on this fixture.
+/// Every expected line is TypeScript 7.1.0-beta's on this fixture.
 #[test]
 fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
     let source = format!(
@@ -2014,13 +2035,13 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
 }
 
 /// A failure through a long property path is reported while the checker's
-/// relation stack holds it, and as TS2321 where the stack overflows: the
-/// failing pair itself takes a frame when it is two object types or an
-/// intersection target's member, not when it is two primitives or an
-/// object type against a primitive. An overflow is reported twice, at the
-/// call the checker compares the types in while it chooses the candidate,
-/// then at the argument, in place of TS2345. Every line is TypeScript
-/// 7.0.2's on this fixture, identical with `strictNullChecks` off.
+/// relation stack holds it, and not at all past it, where the checker's
+/// overflowing comparison holds and reports nothing: the failing pair
+/// itself takes a frame when it is two object types or an intersection
+/// target's member, not when it is two primitives or an object type against
+/// a primitive. Every line is TypeScript 7.1.0-beta's on this fixture,
+/// identical with `strictNullChecks` off; tsc reports nothing for each
+/// empty row.
 #[test]
 fn deep_chains_report_until_the_checker_relation_stack_overflows() {
     let nest = |inner: &str, depth: usize| {
@@ -2058,16 +2079,6 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             vec!["a"; depth].join("."),
         )]
     };
-    let overflowed = |call: &str, argument: &str| {
-        [call, argument]
-            .map(|position| {
-                format!(
-                    "{position}: error TS2321: Excessive stack depth comparing types \
-                     '{clipped}' and '{clipped}'."
-                )
-            })
-            .to_vec()
-    };
     let expected: [(&str, Vec<String>); 8] = [
         (
             "object_leaf_99",
@@ -2077,7 +2088,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                 "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
             ),
         ),
-        ("object_leaf_100", overflowed("(7,44)", "(7,62)")),
+        ("object_leaf_100", Vec::new()),
         (
             "object_to_primitive_99",
             reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
@@ -2090,7 +2101,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             "primitive_leaf_100",
             reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
         ),
-        ("primitive_leaf_101", overflowed("(19,47)", "(19,68)")),
+        ("primitive_leaf_101", Vec::new()),
         (
             "intersection_98",
             reported(
@@ -2100,7 +2111,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                  Type 'string' is not assignable to type '{ p: 1; }'.",
             ),
         ),
-        ("intersection_99", overflowed("(25,44)", "(25,62)")),
+        ("intersection_99", Vec::new()),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();
@@ -2122,7 +2133,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
 }
 
 /// A diagnostic whose position the call's route cannot establish is not
-/// reported, never moved to another position. TypeScript 7.0.2 reports
+/// reported, never moved to another position. TypeScript 7.1.0-beta reports
 /// TS2345 for `un1`'s argument, which the route cannot type, while the
 /// call still answers its lone signature's declared `number`.
 #[test]
@@ -3104,7 +3115,10 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
 }
 
-/// Symbol abbreviation depends on spelling, not unrelated interning or query history.
+/// Symbol abbreviation depends on spelling, not unrelated interning or query
+/// history, and elides where the checker does: a symbol-keyed property counts
+/// its spelling, its leaf again and twenty bytes. Measured on TypeScript
+/// 7.1.0-beta, whose abbreviation is itself history-independent.
 #[test]
 fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
     use super::signature_predicate_inference_tests::checker_report;
@@ -3129,7 +3143,7 @@ fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
         source.push_str(&format!("[u{i}]: {i}; "));
     }
     source.push_str("}) { return x; }\n");
-    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; [s2]: number; [s3]: number; [s4]: number; ... 7 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
+    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; ... 10 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
     let expected: Vec<_> = source
         .match_indices("one(x)")
         .map(|(start, _)| {
@@ -3190,7 +3204,7 @@ export function mapped_infer<T>(x: { value: { [K in keyof T]: string } extends {
     let rows = [
         ("merged", "(4,48): error TS2345: Argument of type 'Merged' is not assignable to parameter of type 'string'."),
         ("spread", "(5,86): error TS2345: Argument of type '{ a: number; b: string; }' is not assignable to parameter of type 'string'."),
-        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends { ...; } ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends ... ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
         ("symbol_short", "(8,65): error TS2345: Argument of type '{ [key]: number; }' is not assignable to parameter of type 'string'."),
         ("symbol_wide", "(9,236): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; [key]: number; tail: boolean; last: string; }' is not assignable to parameter of type 'string'."),
         ("mapped", "(10,240): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: string; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
@@ -3324,11 +3338,15 @@ export function enum_wide(x: {{ padding: "{padding}"; [E.A]: number; tail: boole
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// A relation that overflows the checker's relation stack reports nothing
+/// at all — not at the call, not at the argument, elaborated or not, under
+/// overloads or not — while the same fixtures one level shallower report
+/// TS2719 and TS2769 (`elaborated_99`, `overloaded_99` in the measurement).
+/// Measured on TypeScript 7.1.0-beta, identical with `strictNullChecks` off.
 #[test]
-fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
+fn elaborated_and_overloaded_overflows_report_nothing() {
     let nest =
         |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
-    let clipped = format!("{}{{ ...", "{ e: ".repeat(63));
     for (name, overload, elaborated, count) in [
         ("elaborated", false, true, 100),
         ("overloaded", true, false, 100),
@@ -3347,31 +3365,8 @@ fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
             nest("{ x: number }", count), nest("{ y: number }", count),
             if overload { format!("declare function f(arg: {}{callback}, extra?: number): number;\n", nest("{ y: number }", count)) } else { String::new() },
             if elaborated { "{ e: x.e }" } else { "x" });
-        let line = source.lines().count();
-        let body = source.lines().last().unwrap();
-        let call = body.find("f(").unwrap() + 1;
-        let argument = call + 2;
-        let overflow =
-            format!("Excessive stack depth comparing types '{clipped}' and '{clipped}'.");
-        let mut expected = vec![format!("({line},{}): error TS2321: {overflow}", call)];
-        if overload && !elaborated {
-            expected.push(format!("({line},{argument}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {overflow}"));
-        } else if count == 101 {
-            expected.push(format!(
-                "({line},{}): error TS2321: {overflow}",
-                argument + 2
-            ));
-        } else {
-            let message = format!("Type '{clipped}' is not assignable to type '{clipped}'. Two different types with this name exist, but they are unrelated.\n  The types of '{}' are incompatible between these types.\n    Property 'y' is missing in type '{{ x: number; }}' but required in type '{{ y: number; }}'.", vec!["e"; 99].join("."));
-            if overload {
-                expected.push(format!("({line},{}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {}", argument + 2, message.replace('\n', "\n    ")));
-            } else {
-                expected.push(format!(
-                    "({line},{}): error TS2719: {message}",
-                    argument + 2
-                ));
-            }
-        }
+        // TypeScript 7.1.0-beta reports nothing for any of these calls.
+        let expected: Vec<String> = Vec::new();
         let host = host_with(&source);
         for pass in ["cold", "warm"] {
             for root in [STRICT_ROOT, LOOSE_ROOT] {
@@ -3382,22 +3377,137 @@ fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
                     expected,
                     "{pass} {root} {name}"
                 );
-                if overload {
-                    super::signature_predicate_inference_tests::observe(
-                        &host,
-                        root,
-                        name,
-                        |_, degradation, _| {
-                            assert!(
-                                degradation.is_some(),
-                                "overload recovery retains its existing typed gap"
-                            )
-                        },
-                    );
-                } else {
-                    assert_prints(&host, root, name, "number");
-                }
+                // The overflowing argument holds (`Maybe`), so the first
+                // candidate applies and the call answers its return type.
+                assert_prints(&host, root, name, "number");
             }
         }
     }
+}
+
+/// A property whose comparison overflows the checker's relation stack is
+/// one the checker counts related: it compares the sibling properties past
+/// it and reports the first that fails, in property order, whichever side
+/// of the overflowing one it sits. Only when every failing property
+/// overflows does the whole call report nothing (`both_deep`). One more
+/// object level puts 99 nested levels past the stack too (`deep_99`).
+/// Measured on TypeScript 7.1.0-beta with `--strict`; the messages are
+/// tsc's own, the argument types truncated as it prints them.
+#[test]
+fn an_overflowing_property_leaves_its_failing_siblings_reported() {
+    let nest =
+        |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
+    for (name, order, elaborated, count, expected) in [
+        ("deep_first", 0, false, 100, &["(3,41): error TS2345: Argument of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...' is not assignable to parameter of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("shallow_first", 1, false, 100, &["(3,44): error TS2345: Argument of type '{ shallow: string; deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { ...' is not assignable to parameter of type '{ shallow: number; deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { ...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("deep_first_elaborated", 0, true, 100, &["(3,68): error TS2322: Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("deep_99", 0, false, 99, &["(3,38): error TS2345: Argument of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...' is not assignable to parameter of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("both_deep", 2, false, 100, &[] as &[&str]),
+    ] {
+        let (source_type, target_type) = match order {
+            0 => (
+                format!("{{ deep: {}; shallow: string }}", nest("{ x: number }", count)),
+                format!("{{ deep: {}; shallow: number }}", nest("{ y: number }", count)),
+            ),
+            1 => (
+                format!("{{ shallow: string; deep: {} }}", nest("{ x: number }", count)),
+                format!("{{ shallow: number; deep: {} }}", nest("{ y: number }", count)),
+            ),
+            _ => (
+                format!(
+                    "{{ deep: {}; deep2: {} }}",
+                    nest("{ x: number }", count),
+                    nest("{ x: number }", count)
+                ),
+                format!(
+                    "{{ deep: {}; deep2: {} }}",
+                    nest("{ y: number }", count),
+                    nest("{ y: number }", count)
+                ),
+            ),
+        };
+        let argument = if elaborated {
+            "{ deep: x.deep, shallow: x.shallow }"
+        } else {
+            "x"
+        };
+        let source = format!(
+            "declare const x: {source_type};\ndeclare function f(arg: {target_type}): number;\nexport function {name}() {{ return f({argument}); }}\n"
+        );
+        let expected: Vec<String> = expected.iter().map(|line| (*line).to_owned()).collect();
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            assert_eq!(
+                super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    STRICT_ROOT,
+                    name,
+                    &source
+                ),
+                expected,
+                "{pass} {name}"
+            );
+        }
+    }
+}
+
+/// A function or constructor type is the checker's object type with one
+/// signature: one that begins past the truncation length prints as `...`,
+/// however it was written, while a method (a signature of the enclosing
+/// object, not a type) still prints, and so does a function type begun
+/// before the length even where its own parameter types start past it.
+/// Measured on TypeScript 7.1.0-beta with `--strict`.
+#[test]
+fn function_types_begun_past_the_truncation_length_elide() {
+    let mut mismatches = Vec::new();
+    for (name, pad, members, printed) in [
+        ("fun", 155, "fun: () => void", "fun: ...;"),
+        ("ctor", 155, "ctor: new () => object", "ctor: ...;"),
+        ("fun_typed", 155, "fun: (a: number) => string", "fun: ...;"),
+        ("generic", 155, "g: <T>(t: T) => T", "g: ...;"),
+        ("method", 155, "m(): void", "m(): void;"),
+        (
+            "fun_early",
+            100,
+            "fun: (a: number) => string; tail: boolean",
+            "fun: (a: number) => string; tail: boolean;",
+        ),
+        (
+            "nested_fn",
+            140,
+            "fun: (cb: () => void) => void",
+            "fun: (cb: () => void) => void;",
+        ),
+    ] {
+        let padding = "x".repeat(pad);
+        let source = format!(
+            "declare function one(v: string): void;\ndeclare const v: {{ padding: \"{padding}\"; {members} }};\nexport function {name}() {{ return one(v); }}\n"
+        );
+        let column = source.lines().nth(2).unwrap().find("one(").unwrap() + 5;
+        let expected = vec![format!(
+            "(3,{column}): error TS2345: Argument of type '{{ padding: \"{padding}\"; {printed} }}' is not assignable to parameter of type 'string'."
+        )];
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            let reports = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                STRICT_ROOT,
+                name,
+                &source,
+            );
+            if reports != expected {
+                mismatches.push(format!(
+                    "{pass} {name}: got {reports:?}, expected {expected:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches.join(
+            "
+"
+        )
+    );
 }

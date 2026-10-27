@@ -21,16 +21,16 @@
 use std::path::{Path, PathBuf};
 
 use super::platform::{host_platform, TsgoPlatform};
-use super::policy::{TsgoVersion, BUNDLED_TSGO_VERSION};
+use super::policy::{pinned_version, TsgoVersion};
 
 /// The integrity manifest file name inside the `tsgo/` sidecar directory.
 /// The packager writes it (digest + provenance for the shipped binary); the
 /// location is fixed here so packager and validator cannot drift.
 pub const BUNDLE_INTEGRITY_MANIFEST_FILE: &str = "verter-tsgo-bundle.json";
 
-/// The bundled tsgo version: the pinned supported floor the sidecar ships.
+/// The bundled tsgo version: the TypeScript pin, which the sidecar ships.
 pub fn bundled_version() -> TsgoVersion {
-    BUNDLED_TSGO_VERSION.clone()
+    pinned_version().clone()
 }
 
 /// The bundled sidecar path for the host platform, derived SOLELY from the
@@ -119,8 +119,7 @@ mod tests {
     //    never be self-refusing. ──────────────────────────────────────────────
     #[test]
     fn bundled_version_is_the_supported_floor() {
-        use crate::toolchain::policy::BUNDLED_TSGO_VERSION;
-        assert_eq!(bundled_version(), BUNDLED_TSGO_VERSION);
+        assert_eq!(&bundled_version(), pinned_version());
         VersionPolicy::production()
             .check(&bundled_version())
             .expect("the bundled floor must satisfy the production policy");

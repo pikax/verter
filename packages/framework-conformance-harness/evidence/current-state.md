@@ -47,13 +47,13 @@ worktree.
 
 ## Existing compatibility facts
 
-The root development manifest pins Vue/compiler-sfc `3.5.34`, Svelte `5.56.3`, and
-TypeScript `7.0.2`. The existing Vue conformance package pins `3.6.0-rc.1`; existing
+The root development manifest pins Vue/compiler-sfc `3.5.34` and Svelte `5.56.3`.
+The existing Vue conformance package pins `3.6.0-rc.1`; existing
 Svelte oracle/goldens use `5.56.3` and include known-divergence machinery. These are
 historical domains only. They cannot supply AMD-005 expectations or acceptance.
 
 The repository also contains workspace TypeScript declarations at exact `6.0.3`, a
-bundled TSGO domain at `7.0.2`, and an exact native-preview build-tool dependency.
+bundled TSGO domain, and an exact native-preview build-tool dependency.
 AMD-005 preserves those distinct owners.
 
 ## Commands

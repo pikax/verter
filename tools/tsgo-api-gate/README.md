@@ -7,30 +7,25 @@ callbacks, **never written to disk** — becomes a real member of a configured T
 project driven by the **user-installed** TS≥7 distribution, so the real `tsconfig.json`
 (`paths`/`baseUrl`/`types`/`typeRoots`/`jsx`/project references) applies to it.
 
-**Which package is "tsgo"?** The shipping TS≥7 distribution is the npm **`typescript`** package at
-v7 (e.g. `typescript@7.0.2`), whose per-platform native binaries are
-`@typescript/typescript-{platform}-{arch}` and which exports the `--api` client at
-`typescript/unstable/sync`. The `@typescript/native-preview` dev-preview channel (binaries
-`@typescript/native-preview-{platform}-{arch}`) ships the **identical** `--api` surface.
+**Which package is "tsgo"?** The TS≥7 distribution is the npm **`typescript`** package at v7 (the
+workspace pins the version Verter targets in the root `package.json`), whose per-platform native
+binaries are `@typescript/typescript-{platform}-{arch}` (`lib/tsc[.exe]`) and which exports the
+`--api` client at `typescript/sync` (with `typescript/fs` for the filesystem sentinels).
 
-**Engine selection (precise dist-tags).** The installed `typescript` package whose **major is ≥ 7**
-wins **always** (regardless of the exact version/dist-tag); `@typescript/native-preview` is accepted
-as a fallback **source** when no installed `typescript@>=7` is present. `run-gate.mjs` discovers an
-installed/repo `typescript` (major ≥ 7) **first**, then falls back to `@typescript/native-preview`,
-and drives whichever is installed (override with `TSGO_PATH`/`TS7_SOURCE`). The production
-**no-TypeScript** fallback (not exercised by this gate) **downloads** the npm `typescript` package at
-the **`latest`** dist-tag — the TS7 GA channel now that TS7 has shipped stable
-(`npm view typescript@latest` → `7.0.2`) — and **fails closed
-when offline**. It is download-only, never a bundled/forked binary.
+**Engine selection.** `run-gate.mjs` drives the installed/repo `typescript` package whose **major is
+≥ 7**, using only the platform package of that exact installed version (override with
+`TSGO_PATH`/`TS7_SOURCE`). The production **no-TypeScript** fallback (not exercised by this gate)
+**downloads** the npm `typescript` package at the version Verter pins and **fails closed when
+offline**. It is download-only, never a bundled/forked binary.
 
-It also serves as the **version-bump gate**: the tsgo `--api` surface is `unstable`/generated,
-so re-run this whenever the installed tsgo version changes. A regression here means the tsgo
+It also serves as the **version-bump gate**: the tsgo `--api` surface is generated and changes
+between TypeScript releases, so re-run this whenever the installed tsgo version changes. A regression here means the tsgo
 LSP backend must fail closed for TS≥7 on that build rather than ship a degraded path.
 
 ## Run
 
 ```bash
-# discovers the user-installed tsgo from node_modules, runs all three scripts:
+# discovers the installed tsgo from node_modules, runs all four scripts:
 node tools/tsgo-api-gate/run-gate.mjs
 
 # or drive a specific binary:
@@ -46,21 +41,28 @@ proven to resolve and WIN over the `.vue.tsx`/`.svelte.tsx` self-diagnostics car
 
 ## What it proves (mechanism — matches §2.3 of the design doc)
 
-- **Membership rides the FS overlay + `open_project`**, NOT an inline `openFiles[].defaultProject`
-  (the typescript-go #2824 _proposal_ shape is NOT what the shipped binary takes). The shipped
-  `updateSnapshot` param is `{ openProject?, fileChanges?: { changed?[], created?[], deleted?[] } | { invalidateAll } }`.
-- The sync client is imported through the **public package export** `<pkg>/unstable/sync`
-  (`@typescript/native-preview/unstable/sync`, parameterized so it also drives
-  `typescript/unstable/sync`) — resolved via `require.resolve` honouring the package `exports`
-  map, NOT a hand-built internal `dist/` path — so the gate exercises the public consumer surface.
-- `new API({ tsserverPath, cwd, fs: { readFile, fileExists, getAccessibleEntries, realpath, directoryExists } })`
-  — the FS callbacks are the VFS overlay. `readFile` returns carrier content for the carrier
-  path, `undefined` to fall through to real disk; `getAccessibleEntries` injects the off-disk
-  carrier into its directory's enumeration so the `include` glob discovers it as a root file.
+- **Membership rides the FS overlay + `openProjects`**: `api.createSnapshot({ openProjects: [tsconfig] })`
+  opens the configured project; edits go through `snapshot.update({ fileNotifications: { changed: [...] },
+  ensurePrograms: true })`, which returns the NEW active snapshot.
+- The sync client is imported through the **public package exports** `<pkg>/sync` and `<pkg>/fs`
+  (`typescript/sync`, `typescript/fs`) — resolved via `require.resolve` honouring the package
+  `exports` map, NOT a hand-built internal `dist/` path — so the gate exercises the public consumer
+  surface. The shared plumbing lives in `sync-api.mjs`.
+- **Lifetimes.** The API, every Snapshot and every Program are Disposable. The scripts declare them
+  with `using`; a lineage (`openSnapshotLineage`) always updates its CURRENT snapshot, keeps the
+  returned one and disposes the superseded one, so no snapshot is touched after it was updated away
+  or disposed.
+- `new API({ tsserverPath, cwd, fs })` — the FS callbacks are the VFS overlay, and the client
+  requires an answer for every callback (`readFile`, `fileExists`, `directoryExists`,
+  `getAccessibleEntries`, `realpath`, `stat`, `writeFile`, `removeFile`): a function or a
+  `serverFS` sentinel. The overlay answers the off-disk files itself (content, existence, a
+  `serverFS.fakeStat` stat) and returns `serverFS.useOS` to fall through to the real disk;
+  `getAccessibleEntries` injects the off-disk carrier into its directory's enumeration so the
+  `include` glob discovers it as a root file.
 - `snapshot.getDefaultProjectForFile(carrier)` returns the real tsconfig (a queryable association).
 - `project.program.getSemanticDiagnostics` / `project.checker.getTypeAtPosition` /
   `typeToString` / `getSymbolAtPosition` answer from the configured Program.
-- Incremental edit via `updateSnapshot({ openProject, fileChanges: { changed:[carrier] } })`
+- Incremental edit via `snapshot.update({ fileNotifications: { changed:[carrier] }, ensurePrograms: true })`
   flips diagnostics on the **same stable project handle** with the unchanged dependency retained.
 
 ## Carrier identity (PROVEN by GATE 5) and carrier discovery (informs Block 5)
@@ -114,5 +116,5 @@ repo's root `.gitignore` excludes) so the whole fixture is committable intact �
 `git add -n tools/tsgo-api-gate/` listing all fixture files. The off-disk carrier is synthesized
 in-memory by the harness and never written. `src/components/` is kept on disk via `.gitkeep` so the
 overlay can inject the carrier into its enumeration. The only external dependency is the
-user-installed TS≥7 distribution in the repo's own `node_modules` (the engine under test),
+installed TS≥7 distribution in the repo's own `node_modules` (the engine under test),
 consistent with the no-fork/no-bundle policy.

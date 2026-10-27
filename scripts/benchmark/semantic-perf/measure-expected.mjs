@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Measure tsc 7.0.2's answer for every scenario in all four
+// Measure the pinned tsc's answer for every scenario in all four
 // strictNullChecks x noImplicitAny settings and write expected.json, the
 // reference both benchmark arms are classified against.
 //

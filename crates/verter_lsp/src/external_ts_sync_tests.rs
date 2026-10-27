@@ -33,7 +33,7 @@ fn binding() -> ProjectBinding {
     ProjectBinding::new_for_test(
         "/proj",
         TSCONFIG,
-        "7.0.1",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         env_dims(),
         Vec::new(),
         verter_session_query::resolution::ProjectId(0),
