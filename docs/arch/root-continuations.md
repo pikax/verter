@@ -18,7 +18,7 @@ producer, returns before an incomplete nested dependency settles.
 | Delivered and exercised | Remaining conversion or proof |
 | --- | --- |
 | Store-view and per-attempt snapshot capture, owner indexing and overlay indexing suspend through their existing handoffs | Metadata computation, extraction/fallthrough and output materialization still call synchronous dependency paths |
-| Resolver flights retain task identity; converted followers cancel or withdraw independently | Cache-slot, scheduler-completion and carrier stable-parse waits do not yet provide uniform cancellation and shared-registry wait edges |
+| Cache admission, scheduler completion, resolver flights, carrier publication/stable parse, store-view capture, lowering and workspace resolution offer task-owned handoffs with independent cancellation | Higher callers must consume these owned APIs throughout their traversal instead of driving compatibility entries inside a poll |
 | Root state and converted scopes move between polling threads | Nested semantic dispatch still drives tasks or waits on subscriptions synchronously; complete-root no-replay is not proved |
 | Compile roots hand out one macro producer and retain followers | That producer runs a synchronous traversal; compile-blocker hydration also remains synchronous |
 | An external consumer fixture and a queued-wake driver exercise multiple roots | The driver does not yet prove progress across every nested family with admission closed and no retained synchronous stack |
@@ -63,13 +63,12 @@ follows the same rules:
   borrow of the producer. They are `Send` whenever their result is, so a
   suspended subscriber may resume on another thread. One poller drives a
   subscriber at a time (`poll` takes `&mut self`).
-- **Cancellation wakes where integrated.** Semantic tasks, scoped cache-node
-  handoffs and resolver followers register the cancellation that stops them.
-  Cancellation wakes those pending polls without a timer. Snapshot capture
-  proves withdrawal on drop; a readiness subscription alone does not provide
-  cancellation:
-  `SlotJoin` and `CompletionSubscription` still need cancellation/task-wait
-  integration, as listed below.
+- **Owned cancellation and task waits.** Owned dependency adapters register
+  the stop token and the waiter-to-producer edge in the shared registry.
+  Cancellation wakes and detaches that subscriber without stopping siblings.
+  Raw readiness subscriptions, including `SlotJoin` and
+  `CompletionSubscription`, acquire this ownership through their owned
+  adapters; readiness alone does not provide cancellation or a task edge.
 
 ## Host roots
 
@@ -98,9 +97,10 @@ re-exported from the crate root with `RootWork`.
   request clears the poller's request slots for the poll instead. The task
   owns the converted semantic, scoped-cache and resolver producers and is
   the waiter of their task-registered flights. Their same-path recursion and
-  wait cycles are decided by task across threads; other dependency families
-  still need that integration. Dropping a pending root releases its suspended
-  state under the same ambient state.
+  wait cycles are decided by task across threads. The other dependency
+  families expose the same ownership through their owned adapters; higher
+  callers still need to carry those adapters through traversal. Dropping a
+  pending root releases its suspended state under the same ambient state.
 - **Result and errors.** `Ready` carries exactly what the synchronous entry
   returns, including its typed failures. Polling after `Ready` panics.
 - **Dependency work.** At a converted handoff, a root transfers the
@@ -201,28 +201,29 @@ a computation can suspend while it holds them:
   in the host's one `TaskRegistry` (below).
 - **Resolver request flights** (`SingleflightGroup`, used by stable
   requests, fallthrough requests, imported roots and IndexedReady
-  materialization) take the host registry at construction. A lane's leader
-  is the task that claimed it (`FlightInner::Running { owner: TaskId }`).
-  The flight protocol is one pollable computation
-  (`run_retaining_pollable`), whose leader may suspend inside its compute;
-  `run_retaining` drives it, as a task installed for its extent. A claim by
-  the leading task — same-path re-entry — computes inline as a nested
-  leader; any other task registers its `follower -> leader` edge first and
-  follows, and a wait that would close a cycle computes inline instead.
-  Dropping a suspended leader aborts the lane so followers re-elect;
-  dropping a follower withdraws its registration and edge. Evidence:
+  materialization) take the host registry at construction. The shared core
+  retains the producer's execution task. `run_retaining_pollable` lets its
+  leader suspend inside the compute under the polling root's task;
+  `run_retaining` externally drives a distinct synchronous producer task.
+  Compatibility reentry or a wait cycle computes inline as a nested leader;
+  owned callers receive a typed cycle refusal. Other tasks register their
+  `follower -> leader` edge before following. Dropping a suspended leader
+  aborts the lane: compatibility followers re-elect and owned followers
+  receive the typed abandonment. Dropping a follower withdraws its
+  registration and edge. Evidence:
   `resolver_core::singleflight_task_tests` (two tasks on one thread share
   one leader; re-entry and cycles compute inline; dropped leaders and
   followers release), each failed by an applied thread-style or edge-less
   mutation.
-- **Workspace resolution flights** decide "this thread owes a flight, so it
-  resolves directly" from the thread's lease count. A `FlightLease` is not
-  `Send`, so a suspending computation cannot hold one across a suspension
-  and the count is exactly the leases the polling computation owes; a
-  compile-time assertion in `resolution_flights` fails once a lease is
-  `Send`.
-- **Store-view build claims** are taken, built and released within one poll;
-  a reader never suspends while it holds a claim.
+- **Workspace resolution flights** retain a producer task in an owned
+  `FlightLease`. Each follower has its own subscription and task wait edge;
+  same-path and mixed-family cycles return `Cycle`. Producer leases and
+  resolution work can move across threads without relying on a thread-local
+  lease count. See [Workspace resolution](#workspace-resolution).
+- **Store-view build claims** remain owned by their independent producer
+  through external snapshot or reclamation work. Subscribers may suspend
+  while that claim is held; reset retains a physically running claim until
+  release. See [Base store-view capture](#base-store-view-capture).
 
 ## Scopes a suspended compute carries
 
@@ -727,13 +728,15 @@ producer on the existing CPU pool.
 ### Store-view reads
 
 `StoreViewManager::base_view_pollable` (`crates/verter_session/src/resolver_store.rs`)
-is the store-view read: a warm hit answers at once; a reader that finds no
-in-flight build claims one, builds and publishes within the same poll; a
-reader that finds another thread's build in flight returns `Pending` with
-its waker registered for the claim's release (`BuildRelease`, a future), and
-holds no manager lock while it waits. `base_view` drives the same
-computation with `block_on_when_pending(StoreViewBuild, ..)`, so a reader
-announces the wait only when it would park. `HostStoreView::from_host_read_pollable`
+is a borrowed compatibility adapter over the same claim core as
+`VerterHost::begin_store_view`. A warm hit answers at once; a reader behind
+an active claim returns `Pending` with its own readiness registration and
+task edge, holding no manager lock. When it claims cold work, this adapter
+runs the producer before continuing. Callers that must also transfer that
+work outside polling use the owned entry described under
+[Base store-view capture](#base-store-view-capture).
+`base_view` drives the core with `block_on_when_pending(StoreViewBuild, ..)`,
+announcing the wait only when it would park. `HostStoreView::from_host_read_pollable`
 and `VerterHost::capture_batch_fixed_view_pollable` are its pollable callers;
 the component-metadata root captures its fixed view through them, and the
 compile root's macro bundle reads its cold seed through them.
@@ -750,8 +753,10 @@ warm reuse and stable promotion. The synchronous currentness accessor
 drives this same computation outside a poll.
 
 - **Lifetime and cancellation.** Dropping a pending read withdraws its
-  registration and its test-only parked-reader count. A claim is never held
-  across a suspension, so the self-await refusal keeps its thread identity.
+  registration, task edge and test-only parked-reader count. The borrowed
+  adapter keeps its execution-scoped reentry refusal while running producer
+  work. The owned entry also registers explicit cancellation and retains its
+  independent producer across subscriber suspension.
 - **Evidence:** `root_continuations_component_meta_root_suspends_behind_a_held_store_view_build`
   holds a real build at the test gate on another thread; the root's first
   poll answers `Pending` under a forbidding probe, the release wakes it, and
