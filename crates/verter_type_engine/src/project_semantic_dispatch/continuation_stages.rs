@@ -177,6 +177,142 @@ pub(super) struct ClassInstanceSurfaceBuild {
     observed: Option<verter_session_query::analysis::types::Hash16>,
 }
 
+/// A class's static surface between its stages: its declaration slot, type
+/// arguments and projection mode, the file versions it roots on so far, and
+/// where its composition stands.
+pub(super) struct ClassStaticSurfaceBuild {
+    decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
+    type_args: Arc<[SemanticNodeId]>,
+    mode: ProjectionMode,
+    /// Whether the declaring file served its content version.
+    observed: bool,
+    observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The effective declaring file, when the slot rebased onto one,
+    /// served no content version.
+    effective_root_missing: bool,
+    stage: ClassStaticStage,
+}
+
+/// The step of a class's static composition a read resumes.
+enum ClassStaticStage {
+    /// Reading the declaring file.
+    Declaring,
+    /// Looking the effective prepared value declaration up.
+    Owner,
+    /// Reading the effective declaring file the slot rebased onto.
+    OwnSource {
+        own: ClassStaticOwn,
+        prepared: PreparedValue,
+    },
+    /// Lowering the constructor shape and reading the heritage list.
+    Constructor {
+        own: ClassStaticOwn,
+        prepared: PreparedValue,
+    },
+    /// Composing the heritage bases in clause order: `current` is the base
+    /// being classified, the rest wait in `heritage`; a declared base's
+    /// static surface is read before the next base is classified.
+    Bases {
+        own: ClassStaticOwn,
+        own_node: SemanticNodeId,
+        heritage: std::vec::IntoIter<super::build::HeritageBase>,
+        current: Option<super::build::HeritageBase>,
+        surfaces: Vec<SemanticNodeId>,
+        partial: bool,
+    },
+    /// Folding the own surface and the bases' into the composed surface.
+    Finish {
+        own: ClassStaticOwn,
+        own_node: SemanticNodeId,
+        surfaces: Vec<SemanticNodeId>,
+        partial: bool,
+    },
+}
+
+type PreparedValue =
+    verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedValueDecl>;
+
+/// The effective declaring identity of a class's static side.
+pub(super) struct ClassStaticOwn {
+    pub(super) canonical: OwnedStr,
+    pub(super) owner: verter_type_expr::TopLevelOwnerId,
+    pub(super) symbol: OwnedStr,
+}
+
+/// The declaration read a class's static surface stands at, answered in
+/// place by its driver
+/// ([`ProjectSemanticDispatch::read_class_static_declarations`](super::ProjectSemanticDispatch::read_class_static_declarations)).
+pub(super) enum ClassStaticRead<'b> {
+    /// The effective prepared value declaration of this slot.
+    Owner(&'b crate::semantic_query::ResolvedDeclSlotIdentity),
+    /// The constructor shape lowered from `prepared`, and the heritage list.
+    Constructor {
+        own: &'b ClassStaticOwn,
+        prepared: &'b verter_session_query::type_solver::PreparedValueDecl,
+        mode: ProjectionMode,
+    },
+    /// What `base` contributes.
+    Base {
+        own: &'b ClassStaticOwn,
+        base: &'b super::build::HeritageBase,
+        mode: ProjectionMode,
+    },
+    /// The composed surface over `own_node` and the bases' `surfaces`.
+    Finish {
+        own: &'b ClassStaticOwn,
+        own_node: SemanticNodeId,
+        surfaces: &'b [SemanticNodeId],
+        type_args: &'b Arc<[SemanticNodeId]>,
+    },
+}
+
+/// The answer to a [`ClassStaticRead`].
+pub(super) enum ClassStaticAnswer {
+    Owner(Option<super::build::EffectivePreparedValueDecl>),
+    Constructor(Option<SemanticNodeId>, Vec<super::build::HeritageBase>),
+    Base(super::build::ClassBaseStatic),
+    Finish(SemanticNodeId),
+}
+
+impl ClassStaticSurfaceBuild {
+    /// The declaration read the build stands at.
+    pub(super) fn declaration_read(&self) -> ClassStaticRead<'_> {
+        match &self.stage {
+            ClassStaticStage::Owner => ClassStaticRead::Owner(&self.decl_slot),
+            ClassStaticStage::Constructor { own, prepared } => ClassStaticRead::Constructor {
+                own,
+                prepared,
+                mode: self.mode,
+            },
+            ClassStaticStage::Bases {
+                own,
+                current: Some(base),
+                ..
+            } => ClassStaticRead::Base {
+                own,
+                base,
+                mode: self.mode,
+            },
+            ClassStaticStage::Finish {
+                own,
+                own_node,
+                surfaces,
+                ..
+            } => ClassStaticRead::Finish {
+                own,
+                own_node: *own_node,
+                surfaces,
+                type_args: &self.type_args,
+            },
+            ClassStaticStage::Declaring
+            | ClassStaticStage::OwnSource { .. }
+            | ClassStaticStage::Bases { current: None, .. } => {
+                unreachable!("a class's static surface reads a file or a query here")
+            }
+        }
+    }
+}
+
 /// What a macro payload's output is rooted on: the owning file at the
 /// content version its owner stage observed, and its type arguments.
 pub(super) struct MacroPayloadRooting {
@@ -1114,6 +1250,238 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         output
             .with_observed_self_roots(observed_self_roots)
             .with_positional_guarantee()
+    }
+
+    /// The first stage of a class's static surface: its declaring file's
+    /// indexed input is read next ([`Self::resume_class_static_source`]).
+    #[inline(never)]
+    pub(super) fn begin_class_static_surface(
+        &self,
+        decl_slot: &crate::semantic_query::ResolvedDeclSlotIdentity,
+        type_args: &Arc<[SemanticNodeId]>,
+        mode: ProjectionMode,
+    ) -> FamilyStep {
+        self.graph().record_continuation_begun();
+        FamilyStep::Load(
+            Arc::from(decl_slot.defining_canonical.as_ref()),
+            Box::new(FamilyBuild::ClassStaticSurface(ClassStaticSurfaceBuild {
+                decl_slot: decl_slot.clone(),
+                type_args: Arc::clone(type_args),
+                mode,
+                observed: false,
+                observed_self_roots: Vec::new(),
+                effective_root_missing: false,
+                stage: ClassStaticStage::Declaring,
+            })),
+        )
+    }
+
+    /// Resume a class's static surface with the indexed input of the file
+    /// it read (`None` when the live view serves none, and the surface is
+    /// then never admitted): the declaring file, after which the effective
+    /// prepared value declaration is looked up; or the effective declaring
+    /// file the slot rebased onto, after which the constructor shape lowers.
+    /// The surface roots on each file's served content version.
+    #[inline(never)]
+    pub(super) fn resume_class_static_source(
+        &self,
+        mut build: ClassStaticSurfaceBuild,
+        serve: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+    ) -> FamilyStep {
+        build.stage = match std::mem::replace(&mut build.stage, ClassStaticStage::Declaring) {
+            ClassStaticStage::Declaring => {
+                if let Some(serve) = serve {
+                    build.observed = true;
+                    build.observed_self_roots.push((
+                        build.decl_slot.defining_canonical.clone(),
+                        serve.indexed.whole_hash,
+                    ));
+                }
+                ClassStaticStage::Owner
+            }
+            ClassStaticStage::OwnSource { own, prepared } => {
+                match serve {
+                    Some(serve) => build
+                        .observed_self_roots
+                        .push((own.canonical.clone(), serve.indexed.whole_hash)),
+                    // The declaring file's content version could not be
+                    // observed: refuse warm admission, which would otherwise
+                    // survive a declaring-file edit.
+                    None => build.effective_root_missing = true,
+                }
+                ClassStaticStage::Constructor { own, prepared }
+            }
+            _ => unreachable!("a class's static surface reads a file only for its declaration"),
+        };
+        FamilyStep::Declarations(Box::new(FamilyBuild::ClassStaticSurface(build)))
+    }
+
+    /// Resume a class's static surface with the answer to the declaration
+    /// read it stood at.
+    #[inline(never)]
+    pub(super) fn resume_class_static_declarations(
+        &self,
+        mut build: ClassStaticSurfaceBuild,
+        answer: ClassStaticAnswer,
+    ) -> FamilyStep {
+        let stage = std::mem::replace(&mut build.stage, ClassStaticStage::Declaring);
+        match (stage, answer) {
+            (ClassStaticStage::Owner, ClassStaticAnswer::Owner(None)) => {
+                let suppress = !build.observed;
+                FamilyStep::Done(Box::new(self.class_static_miss(build, suppress)))
+            }
+            (ClassStaticStage::Owner, ClassStaticAnswer::Owner(Some(effective))) => {
+                let (canonical, owner, symbol, prepared) = effective;
+                let rebased = canonical.as_ref() != build.decl_slot.defining_canonical.as_ref();
+                let own = ClassStaticOwn {
+                    canonical,
+                    owner,
+                    symbol,
+                };
+                if rebased {
+                    let file = Arc::from(own.canonical.as_ref());
+                    build.stage = ClassStaticStage::OwnSource { own, prepared };
+                    FamilyStep::Load(file, Box::new(FamilyBuild::ClassStaticSurface(build)))
+                } else {
+                    build.stage = ClassStaticStage::Constructor { own, prepared };
+                    FamilyStep::Declarations(Box::new(FamilyBuild::ClassStaticSurface(build)))
+                }
+            }
+            (ClassStaticStage::Constructor { .. }, ClassStaticAnswer::Constructor(None, _)) => {
+                let suppress = !build.observed || build.effective_root_missing;
+                FamilyStep::Done(Box::new(self.class_static_miss(build, suppress)))
+            }
+            (
+                ClassStaticStage::Constructor { own, .. },
+                ClassStaticAnswer::Constructor(Some(own_node), bases),
+            ) => {
+                build.stage = ClassStaticStage::Bases {
+                    own,
+                    own_node,
+                    heritage: bases.into_iter(),
+                    current: None,
+                    surfaces: Vec::new(),
+                    partial: false,
+                };
+                self.advance_class_static_bases(build)
+            }
+            (mut stage @ ClassStaticStage::Bases { .. }, ClassStaticAnswer::Base(base)) => {
+                let ClassStaticStage::Bases {
+                    current, surfaces, ..
+                } = &mut stage
+                else {
+                    unreachable!("the stage was just matched")
+                };
+                *current = None;
+                match base {
+                    super::build::ClassBaseStatic::Skip => {}
+                    super::build::ClassBaseStatic::Surface(node) => surfaces.push(node),
+                    super::build::ClassBaseStatic::Read(key) => {
+                        build.stage = stage;
+                        return FamilyStep::Need(
+                            key,
+                            Box::new(FamilyBuild::ClassStaticSurface(build)),
+                        );
+                    }
+                }
+                build.stage = stage;
+                self.advance_class_static_bases(build)
+            }
+            (ClassStaticStage::Finish { partial, .. }, ClassStaticAnswer::Finish(composed)) => {
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+                    QueryResult::Value(composed),
+                    self.project_generation_signature(),
+                )
+                    .into();
+                output.fold_partial(partial);
+                if !build.observed || build.effective_root_missing {
+                    output.cache_suppress = true;
+                }
+                output.approximation = Some(if partial {
+                    super::projection_fact::ProjectionInterpretation::PresenceOnly
+                } else {
+                    super::projection_fact::ProjectionInterpretation::Positional
+                });
+                FamilyStep::Done(Box::new(
+                    output.with_observed_self_roots(build.observed_self_roots),
+                ))
+            }
+            _ => unreachable!("a declaration read answers the stage that named it"),
+        }
+    }
+
+    /// Resume a class's static surface with the read of a declared base's
+    /// static surface: a partial read taints the composition, a value joins
+    /// the bases' surfaces, and the next base is classified.
+    #[inline(never)]
+    pub(super) fn resume_class_static_base(
+        &self,
+        mut build: ClassStaticSurfaceBuild,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> FamilyStep {
+        let ClassStaticStage::Bases {
+            surfaces, partial, ..
+        } = &mut build.stage
+        else {
+            unreachable!("a class's static surface reads a query only for a base")
+        };
+        *partial |= read.result_is_partial();
+        if let QueryResult::Value(base_node) = read.value {
+            surfaces.push(base_node);
+        }
+        self.advance_class_static_bases(build)
+    }
+
+    /// Classify the next heritage base, or fold the composition once every
+    /// base contributed.
+    fn advance_class_static_bases(&self, mut build: ClassStaticSurfaceBuild) -> FamilyStep {
+        let ClassStaticStage::Bases {
+            heritage, current, ..
+        } = &mut build.stage
+        else {
+            unreachable!("only the bases' stage advances through the heritage")
+        };
+        match heritage.next() {
+            Some(base) => *current = Some(base),
+            None => {
+                let ClassStaticStage::Bases {
+                    own,
+                    own_node,
+                    surfaces,
+                    partial,
+                    ..
+                } = std::mem::replace(&mut build.stage, ClassStaticStage::Declaring)
+                else {
+                    unreachable!("the stage was just matched")
+                };
+                build.stage = ClassStaticStage::Finish {
+                    own,
+                    own_node,
+                    surfaces,
+                    partial,
+                };
+            }
+        }
+        FamilyStep::Declarations(Box::new(FamilyBuild::ClassStaticSurface(build)))
+    }
+
+    /// The miss a static surface without an effective declaration or a
+    /// constructor shape answers, rooted on the files it read; `suppress`
+    /// when one of them served no content version.
+    fn class_static_miss(
+        &self,
+        build: ClassStaticSurfaceBuild,
+        suppress: bool,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+            QueryResult::Error(QueryError::Miss),
+            super::empty_signature(),
+        )
+            .into();
+        if suppress {
+            output.cache_suppress = true;
+        }
+        output.with_observed_self_roots(build.observed_self_roots)
     }
 
     /// The miss an apparent type without a surface answers.

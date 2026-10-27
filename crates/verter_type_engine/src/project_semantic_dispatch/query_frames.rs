@@ -2585,6 +2585,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 FamilyStep::Global(read, family) => {
                     step = self.resume_family_global(*family, read);
                 }
+                FamilyStep::Declarations(family) => {
+                    step = self.resume_family_declarations(*family);
+                }
                 FamilyStep::Done(output) => {
                     return FramePoll::Done(Box::new(self.family_value_output(key, *output)))
                 }
@@ -2593,7 +2596,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return FramePoll::Need(need);
                 }
                 FamilyStep::Need(need, family) => {
-                    let read = self.execute_via_cold_build_helper(need);
+                    let read = self.read_family_need_in_place(need, &family);
                     step = self.resume_family_build(*family, read);
                 }
             }
@@ -2638,8 +2641,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(load);
             }
         }
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
-            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx).live_basis(),
+            source.live_basis(),
+            source.fact_policy(),
         );
         let pending = {
             let _tracer = tracer.install();

@@ -1083,7 +1083,15 @@ construct lists choosing a `strictBindCallApply` interface, the global
 interface lookup with its `Function` fallback, then the interface's
 `Instantiate`) and class instance surfaces (`ResolveClassSurface` on its
 `Instance` side: the declaring file's indexed input, which the surface roots
-on, then the type-space half's `Shallow` `Instantiate`) are written this way.
+on, then the type-space half's `Shallow` `Instantiate`) and class static
+surfaces (`ResolveClassSurface` on its `Static` side: the declaring file's
+indexed input, the effective prepared value declaration, the effective
+declaring file when the slot rebases onto a re-exported declaration, the
+constructor shape and heritage list, then each heritage base in clause
+order — a declared base's own `Static` surface read as a query, a value
+base's constructor surface composed in place — and the composed surface
+with its `prototype` property and type-argument specialization) are written
+this way.
 The shared signature-list read
 (`SignatureListRead`) is one sub-continuation both overload sets and
 apparent types step, in resolution or declaration order.
@@ -1091,6 +1099,12 @@ apparent types step, in resolution or declaration order.
   `FamilyStep::Global`; both drivers make it in place
   (`first_global_declaration`), so the library and program-contributor
   files it reads still load synchronously on the polling thread.
+- **Declaration reads.** A stage names a read of prepared declarations and
+  declaration positions as `FamilyStep::Declarations`; both drivers make it
+  in place (`read_class_static_declarations`). The files those reads lower
+  from were loaded by the build's earlier `Load` stages, but a prepared
+  declaration's own import routing, a heritage argument's lowering and a
+  value base's constructor type still read synchronously inside the step.
 
 - **One implementation, two drivers.** The synchronous producer (the cold
   build every synchronous entry runs) drives the continuation in place,
@@ -1346,12 +1360,12 @@ evaluated inside other synchronous adapters still require continuation conversio
 Family continuations (above) cover macro payloads, intersection
 reductions, overload sets without explicit type arguments, apparent
 types (whose global interface lookup is still made in place) and class
-instance surfaces. Every other
+instance and static surfaces (the static side's declaration reads are still
+made in place). Every other
 family a frame or cold build reaches still builds in one synchronous step:
 path projection, mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
 through the substitution engine, whose template-literal fold reads in
-place), static class surfaces (the constructor shape, prepared value
-declarations and the bases' static surfaces), signature discovery,
+place), signature discovery,
 object-spread projection, locator lowering, relations, flow returns and the
 call walk below a suspension point. Their nested query reads and resolver
 port calls (`ensure_indexed_ready_serve`, prepared declarations, module

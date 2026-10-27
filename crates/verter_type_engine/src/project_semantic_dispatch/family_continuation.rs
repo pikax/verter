@@ -36,8 +36,8 @@ use crate::semantic_query::{
 };
 
 use super::continuation_stages::{
-    ApparentTypeBuild, ClassInstanceSurfaceBuild, MacroPayloadBuild, OverloadSetBuild,
-    ReduceIntersectionBuild,
+    ApparentTypeBuild, ClassInstanceSurfaceBuild, ClassStaticSurfaceBuild, MacroPayloadBuild,
+    OverloadSetBuild, ReduceIntersectionBuild,
 };
 use super::ProjectSemanticDispatch;
 
@@ -107,7 +107,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             declaration.owner,
             Arc::from(name),
         );
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             slot,
             Arc::from(Vec::new().into_boxed_slice()),
             self.dispatch.instantiate_context_for(
@@ -116,9 +116,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                     crate::semantic_query::ProjectionMode::Expanded,
                 ),
             ),
-        ));
-        self.dispatch.record_dispatch_intent_counters(&key);
-        key
+        ))
     }
 
     /// The instantiation a class's instance surface reads: the TYPE-space
@@ -216,6 +214,17 @@ pub(super) enum FamilyBuild {
     OverloadSet(OverloadSetBuild),
     ApparentType(ApparentTypeBuild),
     ClassInstanceSurface(ClassInstanceSurfaceBuild),
+    ClassStaticSurface(ClassStaticSurfaceBuild),
+}
+
+impl FamilyBuild {
+    /// Whether the queries this build reads are counted as dispatch intents
+    /// where a driver reads them in place: an apparent type's reads are
+    /// consumer entries, each counted once whichever driver makes it, as a
+    /// frame's need is counted at its entry.
+    fn counts_need_intent(&self) -> bool {
+        matches!(self, Self::ApparentType(_))
+    }
 }
 
 /// A global declaration lookup a stage names: the first declaration of the
@@ -240,6 +249,10 @@ pub(super) enum FamilyStep {
     /// The build looks a global declaration up next, holding everything it
     /// computed.
     Global(GlobalRead, Box<FamilyBuild>),
+    /// The build reads prepared declarations and lowers declaration
+    /// positions of the files it loaded next, holding everything it
+    /// computed. Both drivers make the read in place.
+    Declarations(Box<FamilyBuild>),
 }
 
 /// Whether `key`'s family builds as a continuation
@@ -248,15 +261,11 @@ pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
     match key {
         SemanticQueryKey::ResolveMacroPayload { .. }
         | SemanticQueryKey::ReduceIntersection { .. }
-        | SemanticQueryKey::ApparentType { .. } => true,
+        | SemanticQueryKey::ApparentType { .. }
+        | SemanticQueryKey::ResolveClassSurface { .. } => true,
         // Explicit type arguments instantiate each candidate through the
         // substitution engine, which still reads in place.
         SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
-        // The static side composes its constructor shape and its bases'
-        // static surfaces, which still read in place.
-        SemanticQueryKey::ResolveClassSurface { side, .. } => {
-            *side == crate::semantic_query::ClassSurfaceSide::Instance
-        }
         _ => false,
     }
 }
@@ -316,6 +325,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.continuation_stage()
                     .begin_class_instance_surface(decl_slot, type_args),
             ),
+            SemanticQueryKey::ResolveClassSurface {
+                decl_slot,
+                type_args,
+                side: crate::semantic_query::ClassSurfaceSide::Static,
+                context,
+            } => Some(self.continuation_stage().begin_class_static_surface(
+                decl_slot,
+                type_args,
+                context.mode,
+            )),
             _ => None,
         }
     }
@@ -346,6 +365,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.continuation_stage()
                     .finish_class_instance_surface(build, super::narrow_value_cache_read(read)),
             )),
+            FamilyBuild::ClassStaticSurface(build) => self
+                .continuation_stage()
+                .resume_class_static_base(build, super::narrow_value_cache_read(read)),
         }
     }
 
@@ -372,6 +394,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::ClassInstanceSurface(build) => self
                 .continuation_stage()
                 .resume_class_instance_source(build, serve),
+            FamilyBuild::ClassStaticSurface(build) => self
+                .continuation_stage()
+                .resume_class_static_source(build, serve),
         }
     }
 
@@ -388,10 +413,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::MacroPayload(_)
             | FamilyBuild::ReduceIntersection(_)
             | FamilyBuild::OverloadSet(_)
-            | FamilyBuild::ClassInstanceSurface(_) => {
+            | FamilyBuild::ClassInstanceSurface(_)
+            | FamilyBuild::ClassStaticSurface(_) => {
                 unreachable!("only an apparent type looks a global declaration up")
             }
         }
+    }
+
+    /// The next stage of `build`, given the answer to the declaration read
+    /// it stands at.
+    #[inline(never)]
+    pub(super) fn resume_family_declarations(&self, build: FamilyBuild) -> FamilyStep {
+        self.graph().record_continuation_resumed();
+        match build {
+            FamilyBuild::ClassStaticSurface(build) => {
+                let answer = self.read_class_static_declarations(&build.declaration_read());
+                self.continuation_stage()
+                    .resume_class_static_declarations(build, answer)
+            }
+            FamilyBuild::MacroPayload(_)
+            | FamilyBuild::ReduceIntersection(_)
+            | FamilyBuild::OverloadSet(_)
+            | FamilyBuild::ApparentType(_)
+            | FamilyBuild::ClassInstanceSurface(_) => {
+                unreachable!("only a class's static surface reads declarations in place")
+            }
+        }
+    }
+
+    /// Read `key`, the query `build` names next, in place. A read that
+    /// drives on the continuation runtime counts its intent at its root's
+    /// entry; any other read a counting build makes is counted here.
+    pub(super) fn read_family_need_in_place(
+        &self,
+        key: SemanticQueryKey,
+        build: &FamilyBuild,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        if build.counts_need_intent() && !self.drives_on_the_runtime(&key) {
+            self.record_dispatch_intent_counters(&key);
+        }
+        self.execute_via_cold_build_helper(key)
+    }
+
+    /// Build `key`'s family through the synchronous producer's driver,
+    /// outside the memo, for the reads it makes: the driver a family read
+    /// inside an open obligation is built with. `false` for a family that
+    /// does not build as a continuation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn build_family_in_place_for_tests(&self, key: &SemanticQueryKey) -> bool {
+        let Some(step) = self.begin_family_build(key) else {
+            return false;
+        };
+        let _ = self.drive_family_in_place(step);
+        true
     }
 
     /// Drive a family build to its output, reading each query it names in
@@ -402,7 +476,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match step {
                 FamilyStep::Done(output) => return *output,
                 FamilyStep::Need(key, build) => {
-                    let read = self.execute_via_cold_build_helper(key);
+                    let read = self.read_family_need_in_place(key, &build);
                     step = self.resume_family_build(*build, read);
                 }
                 FamilyStep::Load(canonical, build) => {
@@ -411,6 +485,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 FamilyStep::Global(read, build) => {
                     step = self.resume_family_global(*build, read);
+                }
+                FamilyStep::Declarations(build) => {
+                    step = self.resume_family_declarations(*build);
                 }
             }
         }

@@ -3012,6 +3012,62 @@ mod semantic_poll_contract {
         (apparent, list)
     }
 
+    /// The type-resolution hops a cold apparent type's request records:
+    /// polled on the continuation runtime, its reads the frames' needs, or
+    /// built by the synchronous producer's driver, which reads each query
+    /// its continuation names in place.
+    #[cfg(feature = "semantic-observe")]
+    fn apparent_type_hops(polled: bool) -> u64 {
+        let host = apparent_callee_host();
+        let (apparent, _) = apparent_type_keys(&ProjectSemanticDispatch::new(&*host));
+        let ctx = verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+            8,
+            Arc::from(CONTEXTUAL_FILE),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            0,
+        );
+        let _guard =
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&ctx));
+        let view = host.resolver_store_view_read().into_owned_view();
+        let captured = crate::resolver_core::HostResolverContext::<
+            verter_audit::observe::Captured,
+        >::captured_for_tests(&host, &view);
+        let mut dispatch = ProjectSemanticDispatch::new(&captured);
+        let before = ctx
+            .type_resolution_hops
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if polled {
+            let mut entry = dispatch.poll_query(apparent);
+            let _ = poll_until_ready(|waker| entry.poll(waker));
+        } else {
+            assert!(
+                dispatch.build_family_in_place_for_tests(&apparent),
+                "an apparent type builds as a continuation"
+            );
+        }
+        ctx.type_resolution_hops
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - before
+    }
+
+    /// Each read an apparent type's continuation names counts as one
+    /// dispatch intent whichever driver reads it: polled, every read is a
+    /// frame's need, counted at its entry; built in place, the driver counts
+    /// it where it reads it. The surface read is never counted twice.
+    #[cfg(feature = "semantic-observe")]
+    #[test]
+    fn a_polled_apparent_type_counts_the_dispatch_intents_the_in_place_driver_counts() {
+        let synchronous = apparent_type_hops(false);
+        assert!(
+            synchronous >= 1,
+            "the apparent type's surface read is a hop"
+        );
+        assert_eq!(apparent_type_hops(true), synchronous);
+    }
+
     /// The apparent type of a callable object surface whose call-signature
     /// list another task is producing returns `Pending` at the polled entry
     /// instead of waiting that producer out; its `Send` task stays pending
@@ -3326,6 +3382,226 @@ mod semantic_poll_contract {
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         drop(other);
         let read = dispatch.execute_via_cold_build_helper(surface);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+    }
+
+    /// A derived class whose static side inherits a base's static member
+    /// and constructor.
+    const STATIC_CLASSES: &str = "export class Base { static shared: \"base\" = \"base\"; constructor(seed: string) {} }\n\
+                                  export class Derived extends Base { static own: \"derived\" = \"derived\"; }\n";
+
+    fn static_class_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CONTEXTUAL_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(STATIC_CLASSES),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    /// The static surface of the class `name` declared in the contextual
+    /// file.
+    fn class_static_key(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        name: &str,
+    ) -> SemanticQueryKey {
+        let env = host.host_view_env_hashes_for(CONTEXTUAL_FILE);
+        SemanticQueryKey::ResolveClassSurface {
+            decl_slot: dispatch.type_slot_for(
+                CONTEXTUAL_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name,
+            ),
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            side: verter_type_engine::semantic_query::ClassSurfaceSide::Static,
+            context: verter_type_engine::semantic_query::ClassSurfaceContext {
+                parse_env_hash: env.parse_env_hash,
+                resolve_env_hash: env.resolve_env_hash,
+                mode: ProjectionMode::Shallow,
+            },
+        }
+    }
+
+    /// A derived class's static surface whose base's static surface another
+    /// task is producing returns `Pending` at the polled entry instead of
+    /// waiting that producer out; its `Send` task stays pending on another
+    /// thread while the producer holds. Once released it resumes at the
+    /// base's read — its declaring file, its effective declaration and its
+    /// constructor shape each read once — and reads exactly what the
+    /// synchronous entry, which drives the same continuations in place,
+    /// reads: answer, fact status, diagnostics and receipt, logical work
+    /// included. Released while pending instead, it leaves nothing open and
+    /// the dispatcher answers it afterwards as the synchronous entry does;
+    /// warm, it runs no stage.
+    #[test]
+    fn a_class_static_surface_whose_base_surface_is_held_yields_and_reads_what_the_synchronous_entry_reads(
+    ) {
+        let synchronous = {
+            let host = static_class_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let derived = class_static_key(&host, &dispatch, "Derived");
+            let before = continuation_stages(&host);
+            let read = dispatch.execute_via_cold_build_helper(derived);
+            let after = continuation_stages(&host);
+            assert_eq!(
+                (after.0 - before.0, after.1 - before.1),
+                (2, 10),
+                "the derived and base static surfaces each begin once; the derived one reads its file, declaration, constructor, base, base surface and composition once, the base its file, declaration, constructor and composition once"
+            );
+            read_summary(&dispatch, &read)
+        };
+        assert!(
+            synchronous.0.contains("own: \"derived\"")
+                && synchronous.0.contains("shared: \"base\"")
+                && synchronous.0.contains("new (string) => DeclRef(Derived)")
+                && !synchronous.2
+                && !synchronous.3,
+            "the derived static surface composes its own and its base's statics and inherits the base constructor, admitted complete: {synchronous:?}"
+        );
+        {
+            // `typeof Derived` reads the class's static surface inside its
+            // own build, where the synchronous producer's driver composes it
+            // in place.
+            let host = static_class_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let before = continuation_stages(&host);
+            let read = dispatch.execute_via_cold_build_helper(dispatch.typeof_key_for(
+                ValueRootKey {
+                    scope: ScopeId::file(
+                        CONTEXTUAL_FILE,
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                    name: "Derived".into(),
+                },
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+            ));
+            let after = continuation_stages(&host);
+            assert_eq!(
+                (after.0 - before.0, after.1 - before.1),
+                (2, 10),
+                "the value's static surface runs the same stages in place"
+            );
+            assert_eq!(
+                display(&dispatch, read.value()),
+                synchronous.0,
+                "the in-place driver composes the same surface"
+            );
+        }
+
+        let host = static_class_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let derived = class_static_key(&host, &dispatch, "Derived");
+        let base = class_static_key(&host, &dispatch, "Base");
+        let (tasks, leases): (Vec<_>, Vec<_>) = [
+            hold_producer(&host, graph, base.clone()),
+            hold_producer_with(
+                &host,
+                graph,
+                base.clone(),
+                ReadCapture::expression_for_tests(),
+            ),
+        ]
+        .into_iter()
+        .unzip();
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = continuation_stages(&host);
+        let mut entry = dispatch.poll_query(derived.clone());
+        let (first, frames, elsewhere, held_stages) = while_held(leases, || {
+            let first = entry.poll(&waker).is_pending();
+            let held_stages = continuation_stages(&host);
+            let task = entry.task();
+            let frames = task.as_ref().map(|task| task.live_frames_for_tests());
+            let elsewhere = task.map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, frames, elsewhere, held_stages)
+        });
+        assert!(
+            first,
+            "the derived static surface yields while its base's surface is held"
+        );
+        assert_eq!(
+            frames,
+            Some(1),
+            "the derived static surface's own frame waits"
+        );
+        assert_eq!(
+            elsewhere,
+            Some(true),
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert_eq!(
+            (held_stages.0 - before.0, held_stages.1 - before.1),
+            (1, 4),
+            "held, the derived surface stands at its base's read: its file, declaration, constructor and base classified, each once"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken static surface reads its base's surface itself"),
+        };
+        drop(entry);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (2, 10),
+            "no stage runs again: the derived surface resumes at its base's read"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+
+        let mut warm = dispatch.poll_query(derived.clone());
+        let Poll::Ready(warm_read) = warm.poll(&waker) else {
+            panic!("a warm static surface answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(derived);
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+        assert_eq!(
+            continuation_stages(&host),
+            after,
+            "a warm static surface runs no stage"
+        );
+        drop(tasks);
+
+        let host = static_class_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let derived = class_static_key(&host, &dispatch, "Derived");
+        let base = class_static_key(&host, &dispatch, "Base");
+        let (other, lease) = hold_producer(&host, graph, base);
+        let mut entry = dispatch.poll_query(derived.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(&waker).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(
+            pending,
+            "the derived static surface yields while its base's surface is held"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(derived);
         assert_eq!(read_summary(&dispatch, &read), synchronous);
     }
 
