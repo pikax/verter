@@ -13047,6 +13047,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return RelationResult::NotAssignable;
                 }
             };
+            // The key is a required property, so a source member that may
+            // be absent never satisfies it — the optional-to-required rule
+            // of [`Self::relate_property_pair`].
+            if member.optional && self.current_relation_kind() != RelationKind::Comparable {
+                return RelationResult::NotAssignable;
+            }
             let r =
                 self.relate_member(member.value, value_type, bindings, InferPosition::Covariant);
             acc = result_and(acc, r);

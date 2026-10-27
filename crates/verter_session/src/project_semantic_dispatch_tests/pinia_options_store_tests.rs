@@ -760,8 +760,9 @@ fn a_marked_stores_missing_dependency_is_not_the_recovery_refusal() {
 /// pattern, none of whose keys it declares), an alias key domain
 /// (`PropertyKey`) reads as the union it names — Pinia's `StateTree`, the
 /// constraint of a store's `S` — and a literal key is one property whether
-/// either side spells it as a number or a string. Measured on TypeScript 7.1.0-beta, all four
-/// settings.
+/// either side spells it as a number or a string, a required one an
+/// optional source member does not carry. Measured on TypeScript
+/// 7.1.0-beta, all four settings.
 #[test]
 fn a_record_over_index_keys_relates_through_its_index_signatures() {
     let failures = Project::module(
@@ -801,6 +802,10 @@ fn a_record_over_index_keys_relates_through_its_index_signatures() {
         ("{ 1: number } extends Record<\"1\", number> ? 1 : 0", "1"),
         ("{ \"1\": number } extends Record<1, number> ? 1 : 0", "1"),
         ("{ 1: string } extends Record<1, number> ? 1 : 0", "0"),
+        (
+            "{ a?: number; b: number } extends Record<\"a\" | \"b\", number> ? 1 : 0",
+            "0",
+        ),
         ("typeof treed", "{ count: number; }"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
