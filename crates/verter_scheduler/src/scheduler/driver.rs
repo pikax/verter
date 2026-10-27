@@ -343,6 +343,86 @@ pub(crate) struct DispatchPauseHook {
     pub(super) cv: parking_lot::Condvar,
 }
 
+/// TEST-ONLY: counts the native driver's completed passes — each one pumps
+/// until the pump reports no progress, right before the driver parks — so a
+/// test waits on the driver having acted instead of sampling on a timer.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Default)]
+pub(crate) struct DriverPasses {
+    count: Mutex<u64>,
+    passed: parking_lot::Condvar,
+    /// Replaces the driver's idle re-pump interval when set, so a test can
+    /// take that safety net out of play.
+    pub(crate) idle_repump_override: Mutex<Option<std::time::Duration>>,
+    /// How many times a cooperative pump has parked on its handle.
+    cooperative_parks: Mutex<u64>,
+    cooperative_parked: parking_lot::Condvar,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl DriverPasses {
+    pub(crate) fn record(&self) {
+        *self.count.lock() += 1;
+        self.passed.notify_all();
+    }
+
+    pub(crate) fn record_cooperative_park(&self) {
+        *self.cooperative_parks.lock() += 1;
+        self.cooperative_parked.notify_all();
+    }
+
+    pub(crate) fn cooperative_parks(&self) -> u64 {
+        *self.cooperative_parks.lock()
+    }
+
+    /// Wait until cooperative pumps have parked more than `after` times in
+    /// all. Returns whether that happened before `budget` ran out; the
+    /// budget is a hang guard only.
+    pub(crate) fn wait_for_cooperative_park(
+        &self,
+        after: u64,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut parks = self.cooperative_parks.lock();
+        while *parks <= after {
+            if self
+                .cooperative_parked
+                .wait_until(&mut parks, deadline)
+                .timed_out()
+            {
+                return *parks > after;
+            }
+        }
+        true
+    }
+
+    /// Wait until `ready` holds, re-checking it after every driver pass.
+    /// Returns whether it held before `budget` ran out; the budget is a hang
+    /// guard only.
+    pub(crate) fn wait_until(
+        &self,
+        mut ready: impl FnMut() -> bool,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut seen = *self.count.lock();
+        loop {
+            if ready() {
+                return true;
+            }
+            let mut count = self.count.lock();
+            while *count == seen {
+                if self.passed.wait_until(&mut count, deadline).timed_out() {
+                    drop(count);
+                    return ready();
+                }
+            }
+            seen = *count;
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub(super) struct DispatchPauseState {
@@ -1921,13 +2001,17 @@ impl Scheduler {
             // already signalled its waiters and terminalized the DAG
             // identity, so no further work is needed on the worker
             // side.
-            let mut guard = dag.lock();
             let identity = Self::dag_identity_for_task(
                 &canonical,
                 incarnation,
                 generation,
                 &TaskKind::Artifact { profile_hash },
             );
+            // Declared before the guard, so it is dropped after the lock on
+            // every exit below.
+            #[cfg(test)]
+            let _settled = dag.artifact_settled_receipt(identity.clone());
+            let mut guard = dag.lock();
             guard.token_for(&identity)?;
             if let Some(existing) = node.artifacts.get(&profile_hash) {
                 if existing.generation == generation {
@@ -2017,6 +2101,8 @@ impl Scheduler {
             } else {
                 std::time::Duration::from_millis(10)
             };
+            #[cfg(test)]
+            self.driver_passes.record_cooperative_park();
             if let Some(state) = handle.wait_timeout(timeout) {
                 return state;
             }

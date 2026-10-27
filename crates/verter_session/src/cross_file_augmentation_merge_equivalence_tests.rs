@@ -617,7 +617,9 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
          source-env identity"
     );
     assert!(
-        !p1_view.validates_fact_signature(std::slice::from_ref(&source_env_fact)),
+        !p1_view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::from(
+            std::slice::from_ref(&source_env_fact)
+        )),
         "the recorded read-set must reject as a whole on the contributor source-env move"
     );
 }

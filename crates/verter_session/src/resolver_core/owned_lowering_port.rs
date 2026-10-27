@@ -517,7 +517,7 @@ pub(crate) trait HostSourcePort {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>>;
+    ) -> Option<verter_semantic_source::decl_body_memo::RawSurfaces>;
 }
 impl<T: SourceInputProvider> HostSourcePort for T {
     fn svelte_script_facts(
@@ -569,7 +569,7 @@ impl<T: SourceInputProvider> HostSourcePort for T {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>> {
+    ) -> Option<verter_semantic_source::decl_body_memo::RawSurfaces> {
         let Some(source) = SourceInputProvider::source(self, source) else {
             missing_source();
             return None;
@@ -1319,8 +1319,8 @@ impl KeptBodyHolder for crate::VerterHost {
 }
 
 /// Deref `locator` through `memo`, reading a type body from the parts
-/// `holder`'s request kept for it when it keeps them. The charge covering
-/// taken parts is held until the deref, which reads them, returns.
+/// `holder`'s request kept for it when it keeps them
+/// ([`crate::resolver_core::request_store_view::deref_taking`]).
 fn deref_with_kept(
     holder: &impl KeptBodyHolder,
     memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
@@ -1331,12 +1331,12 @@ fn deref_with_kept(
 > {
     match holder.kept_body_holder() {
         Some((request, _)) => {
-            let charges = std::cell::RefCell::new(Vec::new());
-            memo.deref_locator_body_with(locator, &|owner, name, scope| {
-                let (parts, charge) = request.take_kept_type_body(memo, owner, name, scope)?;
-                charges.borrow_mut().push(charge);
-                Some(parts)
-            })
+            let (derefed, _charges) = crate::resolver_core::request_store_view::deref_taking(
+                memo,
+                locator,
+                |owner, name, scope| request.take_kept_type_body(memo, owner, name, scope),
+            );
+            derefed
         }
         None => memo.deref_locator_body(locator),
     }

@@ -225,6 +225,50 @@ fn relation_empty_object_assignable_to_all_optional() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+#[test]
+fn relation_weak_union_arm_checks_common_properties() {
+    let host = make_host_with_footprint();
+    let path = "/fixtures/weak_union.ts";
+    upsert_ts(
+        &host,
+        path,
+        r#"
+type __BenchInit = 0;
+type __Probe = { a: 1 } extends string | { raw?: true } ? "bail" : "no";
+export {};
+"#,
+    );
+    let (expr, _) = resolve_expr(&host, path, "__BenchInit", &[], ProjectionMode::Expanded);
+    assert_number_literal(&expr, 0.0);
+    let (expr, record) = resolve_expr(&host, path, "__Probe", &[], ProjectionMode::Expanded);
+    assert_string_literal(&expr, "no");
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn relation_weak_union_allows_nested_ref_unwrapping() {
+    let host = make_host_with_footprint();
+    let path = "/fixtures/unwrap_nested.ts";
+    upsert_ts(&host, path, include_str!("fixtures/weak_union_unwrap.ts"));
+    let (expr, _) = resolve_expr(&host, path, "__BenchInit", &[], ProjectionMode::Expanded);
+    assert_number_literal(&expr, 0.0);
+    let (mut expr, _) = resolve_expr(&host, path, "NestedProbe", &[], ProjectionMode::Expanded);
+    for depth in (0..=4).rev() {
+        let props = object_props(&expr);
+        assert_eq!(props.len(), 2);
+        assert_primitive(
+            &props[&format!("v{depth}")].ty,
+            if depth % 2 == 0 {
+                PrimitiveName::Boolean
+            } else {
+                PrimitiveName::String
+            },
+        );
+        expr = props[&format!("o{depth}")].ty.clone();
+    }
+    assert_primitive(&expr, PrimitiveName::Number);
+}
+
 // =====================================================================
 // Row 3: Readonly property assignability.
 // =====================================================================

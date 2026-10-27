@@ -29,7 +29,7 @@ disallowed-macros = [
 ]
 
 # `FactVersionRef` keys: a `ResultReceipt`'s identity never reads the
-# retention account its evidence page charges (see the workspace-root
+# retention account its own charge reaches (see the workspace-root
 # clippy.toml for the full rationale).
 # An owned, self-charged handle (`Owned`, `OwnedSlice`, `OwnedStr`) reaches
 # its cell's charge slot solely to charge and release its allocation; its

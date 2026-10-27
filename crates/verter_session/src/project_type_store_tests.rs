@@ -144,6 +144,85 @@ fn artifact_sources_stay_charged_until_the_last_artifact_reader_drops() {
 }
 
 #[test]
+fn artifact_fact_and_augmentation_readers_stay_charged_after_artifact_teardown() {
+    use crate::file_artifact_store::{FileArtifacts, FileFacts};
+    use crate::project_type_store::IndexedReady;
+    use std::sync::Arc;
+    use verter_session_query::facts::registry::{
+        Fact, FactKey, FactRegistry, InternedName, InternedSpecifier, SymbolSpace,
+    };
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
+    let baseline = account.snapshot().pinned_bytes;
+    let mut registry = FactRegistry::empty();
+    for index in 0..4096u32 {
+        registry.insert(Fact {
+            key: FactKey::Export {
+                name: InternedName::from(format!("Exported{index}").as_str()),
+                space: SymbolSpace::Type,
+            },
+            semantic_hash: [0; 16],
+            display_hash: [0; 16],
+        });
+    }
+    let augmentations = (0..1024)
+        .map(|index| ModuleAugmentationFact {
+            specifier: InternedSpecifier::from(format!("./dep{index}").as_str()),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            augmented_name: InternedName::from(format!("Augmented{index}").as_str()),
+            space: SymbolSpace::Type,
+            augmented_member_shape_fingerprint: [0; 16],
+            declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
+        })
+        .collect();
+    let key = verter_session_query::source::artifact_key::FileArtifactKey::base_for_test(
+        Arc::from("/facts.ts"),
+        [31; 16],
+    );
+    let store = crate::file_artifact_store::FileArtifactStore::default();
+    store.insert_artifacts(
+        key.clone(),
+        Arc::new(FileArtifacts {
+            storage: Default::default(),
+            indexed: Arc::new(IndexedReady::new_for_test([31; 16])),
+            facts: Arc::new(FileFacts::from_registry(registry)),
+            parse_stable_hash: [31; 16],
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+                augmentations,
+            )),
+        }),
+    );
+    let artifact = store.get_artifacts(&key).expect("published artifact");
+    let warm = account.snapshot().pinned_bytes;
+    let facts = Arc::clone(&artifact.facts);
+    let augmentations = Arc::clone(&artifact.augmentations);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        warm,
+        "cloning published children adds no second charge"
+    );
+    let registry_bytes = verter_retention::heap_size::footprint(facts.registry()).bytes;
+    let augmentation_bytes =
+        verter_retention::heap_size::footprint(&**augmentations as &Vec<_>).bytes;
+    assert!(registry_bytes > 64 * 1024 && augmentation_bytes > 16 * 1024);
+    drop(artifact);
+    drop(store);
+    assert!(
+        account.snapshot().pinned_bytes >= baseline + registry_bytes + augmentation_bytes,
+        "readers keep the fact registry and augmentation list charged after store teardown"
+    );
+    drop(facts);
+    assert!(
+        account.snapshot().pinned_bytes >= baseline + augmentation_bytes
+            && account.snapshot().pinned_bytes < baseline + registry_bytes,
+        "the last facts reader releases the registry's charge, not the augmentations'"
+    );
+    drop(augmentations);
+    assert_eq!(account.snapshot().pinned_bytes, baseline);
+}
+
+#[test]
 fn prepared_bundles_and_artifacts_share_the_shallow_pin_in_both_release_orders() {
     use crate::project_type_store::IndexedReady;
     use crate::resolver_core::prepared_decl::{build_prepared_decl_bundle, ImportCanonicalization};

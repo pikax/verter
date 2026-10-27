@@ -1396,7 +1396,7 @@ pub(crate) fn resolution_witness_fact_for_tests(
     let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {
         panic!("witness fixture resolution must be admitted");
     };
-    admitted
+    let fact = admitted
         .signature()
         .facts
         .iter()
@@ -1407,7 +1407,8 @@ pub(crate) fn resolution_witness_fact_for_tests(
             )
         })
         .expect("an admitted resolution must carry at least one resolution-currency fact")
-        .clone()
+        .clone();
+    fact
 }
 
 /// The merged-enum fixture: three global-script files whose enum

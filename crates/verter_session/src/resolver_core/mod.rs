@@ -810,14 +810,14 @@ where
 /// `ArcSwap.rcu(|old| clone, FIFO-evict if cap reached, push new)`.
 ///
 /// **Signature width**: never a refusal. A candidate's
-/// `fact_dep_signature` wider than one evidence page
-/// ([`verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH`]) is
-/// sealed into immutable evidence pages and admitted whole; every fact it
-/// holds is validated on every warm read.
+/// `fact_dep_signature` wider than
+/// [`verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH`] is
+/// sealed into its canonical order and admitted whole; every fact it holds
+/// is validated on every warm read.
 ///
-/// **Evidence retention**: a candidate retains every evidence page its
-/// signature reaches, so its admission claims each page no earlier
-/// admission claimed into one refusable `Retained` reservation on the
+/// **Evidence retention**: a candidate retains every receipt its signature
+/// reaches, so its admission claims each one no earlier admission claimed
+/// into one refusable `Retained` reservation on the
 /// process retention account
 /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]),
 /// held by the candidate for its life. A refused reservation admits
@@ -841,7 +841,7 @@ where
     V: CachedData,
 {
     entries: DashMap<K, Arc<CacheEntry<V>>>,
-    /// The account a candidate's evidence pages are claimed into.
+    /// The account a candidate's receipts are claimed into.
     retention_account: verter_session_query::retention::StoreAccount,
     /// R20 instrumentation counter: increments on each admission
     /// refused by the fact-completeness guard. Read via
@@ -924,8 +924,8 @@ pub struct Candidate<V: CachedData> {
     pub signature_fingerprint: [u8; 16],
     pub value: CachedValue<V>,
     pub fact_dep_signature: OwnedFactSignature,
-    /// This candidate's own allocations and its share of the evidence pages
-    /// its signature claimed, with the holds on its value's and its
+    /// This candidate's own allocations and its share of the receipts its
+    /// signature claimed, with the holds on its value's and its
     /// signature's cells and the other owned cells it reaches; released
     /// when the candidate's last holder drops, each cell passing to the
     /// readers still keeping it.
@@ -970,10 +970,11 @@ impl<V: CachedData> ValidatedFactAdmission<V> {
 /// bound.
 pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
-/// Seal an admitted candidate's facts: kept as recorded while they fit one
-/// evidence page, paged (never truncated, never refused) when wider.
+/// Seal an admitted candidate's facts: kept as recorded while no wider than
+/// [`verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH`],
+/// put in canonical order (never truncated, never refused) when wider.
 fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> OwnedFactSignature {
-    if facts.len() > verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH {
+    if facts.len() > verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH {
         verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)
             .iter()
             .cloned()
@@ -1058,7 +1059,7 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            if view.validates_fact_signature(&candidate.fact_dep_signature) {
+            if view.validates_fact_signature((&candidate.fact_dep_signature).into()) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
@@ -1106,7 +1107,7 @@ where
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
             if view.validates_fact_signature_with_self_roots(
-                &candidate.fact_dep_signature,
+                (&candidate.fact_dep_signature).into(),
                 self_root_canonicals,
             ) {
                 self.warm_hits
@@ -1169,9 +1170,10 @@ where
             // so the attribution comes out of the same validation the
             // hit/miss decision came out of — never a second, separately
             // written loop that could disagree with it.
-            let candidate_ok = match view
-                .validate_fact_signature(&candidate.fact_dep_signature, self_root_canonicals)
-            {
+            let candidate_ok = match view.validate_fact_signature(
+                (&candidate.fact_dep_signature).into(),
+                self_root_canonicals,
+            ) {
                 Ok(()) => true,
                 Err(index) => {
                     last_rejected_fact = candidate.fact_dep_signature.get(index).cloned();
@@ -1207,7 +1209,7 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            if view.validates_fact_signature(&candidate.fact_dep_signature) {
+            if view.validates_fact_signature((&candidate.fact_dep_signature).into()) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
@@ -1351,7 +1353,7 @@ where
     }
 
     /// Reserve one candidate's charge, held by the candidate: its own
-    /// allocations and the evidence pages its sealed signature reaches, in
+    /// allocations and the receipts its sealed signature reaches, in
     /// one refusable reservation, holding its value's and its signature's
     /// cells and the owned cells its key reaches. The refusal when the
     /// account refuses either; the value is then charged to the caller
@@ -5102,8 +5104,8 @@ mod file_source_env_fact_rail_tests {
             }
         };
         assert_eq!(
-            forward_sig.as_ref(),
-            reverse_sig.as_ref(),
+            forward_sig.to_vec(),
+            reverse_sig.to_vec(),
             "observation order must not change the finalised signature"
         );
         assert_eq!(
@@ -5351,7 +5353,7 @@ mod central_signature_rail_tests {
         }
         fn validate_fact_signature(
             &self,
-            sig: &[FactVersionRef],
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
             _self_root_canonicals: &[&str],
         ) -> Result<(), usize> {
             let mut seen: Vec<&str> = Vec::new();
@@ -5528,11 +5530,11 @@ mod central_signature_rail_tests {
         let view = StrictSelfRootRejectingView;
         let sig = [whole_hash("/own.ts", 1), whole_hash("/dep.ts", 2)];
         assert_eq!(
-            view.validates_fact_signature(&sig),
-            view.validates_fact_signature_with_self_roots(&sig, &[]),
+            view.validates_fact_signature((&sig).into()),
+            view.validates_fact_signature_with_self_roots((&sig).into(), &[]),
         );
-        assert!(view.validates_fact_signature(&sig));
-        assert!(!view.validates_fact_signature_with_self_roots(&sig, &["/own.ts"]));
+        assert!(view.validates_fact_signature((&sig).into()));
+        assert!(!view.validates_fact_signature_with_self_roots((&sig).into(), &["/own.ts"]));
     }
 }
 
@@ -5601,7 +5603,7 @@ mod receipt_validation_tests {
         }
         let signature = vec![below, middle.expect("a middle level")];
         let view = CountingView::default();
-        assert!(view.validates_fact_signature(&signature));
+        assert!(view.validates_fact_signature((&signature).into()));
         assert_eq!(
             view.validated.get(),
             64,
@@ -5613,7 +5615,7 @@ mod receipt_validation_tests {
             ..CountingView::default()
         };
         assert!(
-            !stale.validates_fact_signature(&signature),
+            !stale.validates_fact_signature((&signature).into()),
             "a fact deep inside a receipt that no longer holds invalidates the signature"
         );
     }
@@ -5631,17 +5633,17 @@ mod receipt_validation_tests {
             ..CountingView::default()
         };
         assert!(
-            view.validates_fact_signature(&signature),
+            view.validates_fact_signature((&signature).into()),
             "lazily, the self file's hash holds"
         );
         assert!(
-            !view.validates_fact_signature_with_self_roots(&signature, &["/self.ts"]),
+            !view.validates_fact_signature_with_self_roots((&signature).into(), &["/self.ts"]),
             "as a self-root it is validated strictly, inside the receipt too"
         );
     }
 
     fn wide_facts() -> Vec<FactVersionRef> {
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
             .map(|index| whole_hash(&format!("/wide/{index:05}.ts"), 1))
             .collect()
     }
@@ -5871,13 +5873,13 @@ mod receipt_validation_tests {
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
-    /// A wide candidate's admission claims the pages its sealing minted into
-    /// the cache's refusable reservation, and evicting it drains them; an
-    /// account that refuses that footprint admits nothing.
+    /// A wide candidate is retained whole — every fact of its signature in
+    /// the cache's refusable reservation — and evicting it drains that
+    /// charge; an account that refuses that footprint admits nothing.
     #[test]
-    fn a_wide_candidate_claims_its_pages_and_is_refused_for_them() {
+    fn a_wide_candidate_is_retained_whole_and_refused_for_its_footprint() {
         use verter_session_query::retention::{
-            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
         };
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
         let cache: ValidatedFactCache<&'static str, u32> =
@@ -5886,29 +5888,19 @@ mod receipt_validation_tests {
         let (_, signature) = cache
             .get_if_valid_with_facts(&"wide", &CountingView::default())
             .expect("the admitted candidate validates");
-        let pages: Vec<_> = signature
-            .iter()
-            .filter_map(|fact| match fact {
-                FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(!pages.is_empty(), "premise: the signature is paged");
-        assert!(pages
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
-        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+        assert_eq!(signature.len(), wide_facts().len(), "every fact is kept");
+        let flat_bytes = signature.len() * std::mem::size_of::<FactVersionRef>();
         let retained = account.snapshot().retained_bytes;
         assert!(
-            retained > page_bytes,
-            "the candidate's own allocations ride its pages: {retained} <= {page_bytes}"
+            retained > flat_bytes,
+            "the candidate is charged its whole signature: {retained} <= {flat_bytes}"
         );
-        drop((pages, signature));
+        drop(signature);
         cache.clear();
         assert_eq!(
             account.snapshot().retained_bytes,
             0,
-            "evicting the candidate drains its pages and its own charge"
+            "evicting the candidate drains its whole charge"
         );
 
         let tight = SemanticRetentionAccount::new(RetentionLimits {

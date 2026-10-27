@@ -1,13 +1,13 @@
 //! A `ValidatedFactCache` candidate's signature is never refused for its
-//! width: at, around and well beyond one evidence page the candidate is
-//! admitted whole, warm reads validate every fact on every page, and an edit
-//! to a fact on ANY page — the last one included — misses the warm read.
+//! width: at, around and well beyond `WIDE_SIGNATURE_WIDTH` the candidate is
+//! admitted whole, warm reads validate every fact, and an edit to ANY fact —
+//! the last in canonical order included — misses the warm read.
 
 use rustc_hash::FxHashSet;
 
 use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::facts::fact_cache::FactVersionRef;
-use verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH;
+use verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH;
 use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 #[derive(Debug)]
@@ -29,8 +29,8 @@ impl StoreView for TestView {
 }
 
 /// `count` facts in their canonical order: the zero-padded names sort as
-/// their indices do, so fact `i` sits on page `i / FACT_PAGE_WIDTH` of the
-/// sealed signature and the last facts sit on its last, partial page.
+/// their indices do, so fact `i` is the `i`-th fact of the sealed signature
+/// and the last index is its last fact in canonical order.
 fn wide_facts(prefix: &str, count: usize) -> Vec<FactVersionRef> {
     let facts: Vec<FactVersionRef> = (0..count)
         .map(|i| FactVersionRef::FileWholeHash {
@@ -40,19 +40,19 @@ fn wide_facts(prefix: &str, count: usize) -> Vec<FactVersionRef> {
         .collect();
     assert!(
         facts.windows(2).all(|pair| pair[0] < pair[1]),
-        "fixture: input order is the canonical order the pages are cut in"
+        "fixture: input order is the canonical order"
     );
     facts
 }
 
 #[test]
-fn signatures_around_and_beyond_one_page_are_admitted_whole() {
+fn signatures_around_and_beyond_the_wide_width_are_admitted_whole() {
     let cache = ValidatedFactCache::<String, usize>::default();
     for (value, width) in [
-        FACT_PAGE_WIDTH - 1,
-        FACT_PAGE_WIDTH,
-        FACT_PAGE_WIDTH + 1,
-        3 * FACT_PAGE_WIDTH + 5,
+        WIDE_SIGNATURE_WIDTH - 1,
+        WIDE_SIGNATURE_WIDTH,
+        WIDE_SIGNATURE_WIDTH + 1,
+        3 * WIDE_SIGNATURE_WIDTH + 5,
     ]
     .into_iter()
     .enumerate()
@@ -71,23 +71,23 @@ fn signatures_around_and_beyond_one_page_are_admitted_whole() {
     }
 }
 
-/// An edit to the first fact, the facts either side of every page boundary,
-/// and the first and very last fact of the last, partial page each miss the
-/// warm read — paging never lets a fact go unvalidated.
+/// An edit to the first fact, the facts either side of every multiple of
+/// `WIDE_SIGNATURE_WIDTH` in canonical order, and the very last fact each
+/// miss the warm read — width never lets a fact go unvalidated.
 #[test]
-fn an_edit_on_any_page_including_the_last_misses_the_warm_read() {
+fn an_edit_to_any_fact_including_the_last_misses_the_warm_read() {
     let cache = ValidatedFactCache::<String, usize>::default();
-    let width = 3 * FACT_PAGE_WIDTH + 5;
+    let width = 3 * WIDE_SIGNATURE_WIDTH + 5;
     let facts = wide_facts("edit", width);
     cache.insert("edit".to_string(), 7, facts.clone());
     for edited in [
         0,
-        FACT_PAGE_WIDTH - 1,
-        FACT_PAGE_WIDTH,
-        2 * FACT_PAGE_WIDTH - 1,
-        2 * FACT_PAGE_WIDTH,
-        3 * FACT_PAGE_WIDTH - 1,
-        3 * FACT_PAGE_WIDTH,
+        WIDE_SIGNATURE_WIDTH - 1,
+        WIDE_SIGNATURE_WIDTH,
+        2 * WIDE_SIGNATURE_WIDTH - 1,
+        2 * WIDE_SIGNATURE_WIDTH,
+        3 * WIDE_SIGNATURE_WIDTH - 1,
+        3 * WIDE_SIGNATURE_WIDTH,
         width - 1,
     ] {
         let mut valid: FxHashSet<FactVersionRef> = facts.iter().cloned().collect();
@@ -95,8 +95,8 @@ fn an_edit_on_any_page_including_the_last_misses_the_warm_read() {
         let view = TestView { valid_facts: valid };
         assert!(
             cache.get_if_valid(&"edit".to_string(), &view).is_none(),
-            "an edit to fact {edited} (page {}) must miss the warm read",
-            edited / FACT_PAGE_WIDTH
+            "an edit to fact {edited} (run {} of the wide width) must miss the warm read",
+            edited / WIDE_SIGNATURE_WIDTH
         );
     }
 }

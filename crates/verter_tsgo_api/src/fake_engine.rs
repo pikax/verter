@@ -19,13 +19,26 @@
 //! | `rc`             | `7.0.2-rc.1`             | handshake ok, matching serverInfo                |
 //! | `nightly`        | `7.0.0-dev.20260703.1`   | handshake ok, matching serverInfo                |
 //! | `apiok`          | `7.0.2`                  | full surface: handshake + WORKING `--api` pipe (integer snapshot handle, staged project echoed) + standalone `--api` MessagePack surface |
+//! | `apimismatch`    | `7.0.2`                  | full surface BUT `serverInfo` = `7.0.9` (the attach succeeds, the version cross-check fails) |
 //! | `apihollow`      | `7.0.2`                  | full surface BUT `updateSnapshot` returns a hollow `projects: []` |
 //! | `declfail`       | `7.0.2`                  | full surface (incl. standalone `--api`); `--project <cfg>` exits 2 with NO output |
 //! | `declhang`       | `7.0.2`                  | `--project <cfg>` spawns a pipe-holding grandchild and hangs forever |
 //! | `hang-version`   | hangs forever            | (unused)                                         |
 //! | `hold-pipe`      | prints `7.0.2`, then spawns a child that HOLDS the stdout/stderr pipes open and exits 0 |
 //! | `hang-lsp`       | `7.0.2`                  | hangs forever (never answers `initialize`)       |
+//! | `hold-lsp`       | `7.0.2`                  | spawns a pipe-holding child (`<exe>.child.pid`), then hangs |
 //! | `hang-api`       | `7.0.2`                  | full `--lsp`+pipe surface, but standalone `--api` never writes a frame |
+//!
+//! Two switches widen any scenario. `VERTER_TSGO_FAKE_STANDALONE_API` (or a
+//! `+api` file-name suffix, `verter-tsgo-fake-<scenario>+api`) makes it serve
+//! the standalone `--api` surface as `apiok` does. `VERTER_TSGO_FAKE_PID_DIR`
+//! (or a `<exe>.pids` directory beside the copy) makes every `--api` /
+//! `--lsp` process record `<mode>-<pid>.pid` there (and a standalone
+//! `--api` session `diagnostics-<pid>.done` once it served semantic
+//! diagnostics), `VERTER_TSGO_FAKE_STDERR` makes it announce itself on
+//! stderr, `VERTER_TSGO_FAKE_LSP_DELAY_MS` delays its `--lsp` `initialize`
+//! answer, and `VERTER_TSGO_FAKE_STANDALONE_HOLLOW` makes the standalone
+//! `--api` session answer a hollow project set.
 //!
 //! The `hold-pipe` grandchild writes its pid to `<exe>.child.pid` so the wedge
 //! tests can prove the bounded probe leaves NO live descendant after the tree
@@ -39,6 +52,7 @@ use std::path::PathBuf;
 enum Scenario {
     Ok,
     Mismatch,
+    ApiMismatch,
     NoServerInfo,
     Exit,
     V710,
@@ -51,6 +65,7 @@ enum Scenario {
     HangVersion,
     HoldPipe,
     HangLsp,
+    HoldLsp,
     HangApi,
 }
 
@@ -80,9 +95,11 @@ impl Scenario {
     }
 
     fn from_name(name: &str) -> Option<Self> {
-        let scenario = match name.strip_prefix("verter-tsgo-fake-").unwrap_or(name) {
+        let name = name.strip_prefix("verter-tsgo-fake-").unwrap_or(name);
+        let scenario = match name.strip_suffix(STANDALONE_API_SUFFIX).unwrap_or(name) {
             "ok" => Self::Ok,
             "mismatch" => Self::Mismatch,
+            "apimismatch" => Self::ApiMismatch,
             "noserverinfo" => Self::NoServerInfo,
             "exit" => Self::Exit,
             "v710" => Self::V710,
@@ -95,6 +112,7 @@ impl Scenario {
             "hang-version" => Self::HangVersion,
             "hold-pipe" => Self::HoldPipe,
             "hang-lsp" => Self::HangLsp,
+            "hold-lsp" => Self::HoldLsp,
             "hang-api" => Self::HangApi,
             _ => return None,
         };
@@ -115,7 +133,7 @@ impl Scenario {
     /// The `serverInfo.version` the initialize result carries, if any.
     fn server_info_version(self) -> Option<&'static str> {
         match self {
-            Self::Mismatch => Some("7.0.9"),
+            Self::Mismatch | Self::ApiMismatch => Some("7.0.9"),
             Self::NoServerInfo => None,
             other => Some(other.probe_version()),
         }
@@ -127,7 +145,7 @@ impl Scenario {
     fn serves_api_pipe(self) -> bool {
         matches!(
             self,
-            Self::ApiOk | Self::ApiHollow | Self::DeclFail | Self::HangApi
+            Self::ApiOk | Self::ApiHollow | Self::ApiMismatch | Self::DeclFail | Self::HangApi
         )
     }
 
@@ -180,12 +198,14 @@ pub fn main() {
     // never write a frame; `apiok`/`declfail` serve the tuple wire; every
     // other scenario refuses.
     if args.iter().any(|a| a == "--api") {
+        record_mode_pid("api");
         match scenario {
             Scenario::HangApi | Scenario::DeclHang => {
                 write_server_pid_file();
                 hang_forever();
             }
             Scenario::ApiOk | Scenario::DeclFail => serve_api_stdio(scenario),
+            _ if standalone_api() => serve_api_stdio(scenario),
             _ => std::process::exit(2),
         }
         return;
@@ -205,10 +225,15 @@ pub fn main() {
         }
     }
     if args.iter().any(|a| a == "--lsp") {
+        record_mode_pid("lsp");
         match scenario {
             Scenario::Exit => std::process::exit(1),
             Scenario::HangLsp => {
                 write_server_pid_file();
+                hang_forever();
+            }
+            Scenario::HoldLsp => {
+                spawn_pipe_holder();
                 hang_forever();
             }
             _ => serve_lsp(scenario),
@@ -217,6 +242,66 @@ pub fn main() {
     }
     std::process::exit(2);
 }
+
+/// When set, every scenario serves the standalone `--api` stdio surface, so
+/// a test can pair a working session engine with any `--lsp` behavior.
+const STANDALONE_API_ENV: &str = "VERTER_TSGO_FAKE_STANDALONE_API";
+
+/// When set to a directory, each `--api` and `--lsp` process writes
+/// `<dir>/<mode>-<pid>.pid` on start, so a test can find every engine process
+/// a run spawned and prove none outlives it.
+const PID_DIR_ENV: &str = "VERTER_TSGO_FAKE_PID_DIR";
+
+/// The file-name suffix with the same effect as [`STANDALONE_API_ENV`]
+/// (`verter-tsgo-fake-<scenario>+api`), for tests that cannot set the
+/// environment of the engines they start.
+const STANDALONE_API_SUFFIX: &str = "+api";
+
+fn exe_stem() -> String {
+    std::env::current_exe()
+        .unwrap_or_default()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn standalone_api() -> bool {
+    std::env::var_os(STANDALONE_API_ENV).is_some() || exe_stem().ends_with(STANDALONE_API_SUFFIX)
+}
+
+/// The pid directory: [`PID_DIR_ENV`], else a `<exe>.pids` directory beside
+/// the engine copy when one exists.
+fn pid_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(PID_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    let mut name = std::env::current_exe().ok()?.into_os_string();
+    name.push(".pids");
+    let dir = PathBuf::from(name);
+    dir.is_dir().then_some(dir)
+}
+
+fn record_mode_pid(mode: &str) {
+    if let Some(dir) = pid_dir() {
+        let pid = std::process::id();
+        let _ = std::fs::write(dir.join(format!("{mode}-{pid}.pid")), pid.to_string());
+    }
+    if std::env::var_os(STDERR_ENV).is_some() {
+        eprintln!("verter-fake-engine: {mode} started");
+    }
+}
+
+/// When set, the standalone `--api` surface answers `updateSnapshot` with a
+/// hollow `projects: []`, whatever the `--lsp` surface does.
+const STANDALONE_HOLLOW_ENV: &str = "VERTER_TSGO_FAKE_STANDALONE_HOLLOW";
+
+/// When set to a number of milliseconds, the `--lsp` surface waits that long
+/// before answering `initialize`.
+const LSP_DELAY_ENV: &str = "VERTER_TSGO_FAKE_LSP_DELAY_MS";
+
+/// When set, each `--api` and `--lsp` process writes
+/// `verter-fake-engine: <mode> started` to its stderr on start.
+const STDERR_ENV: &str = "VERTER_TSGO_FAKE_STDERR";
 
 /// The pid file a hanging server mode writes next to the engine copy
 /// (`<exe>.server.pid`) so wedge tests can prove the bounded client/validator
@@ -286,6 +371,12 @@ fn serve_lsp(scenario: Scenario) {
         let id = message.get("id").cloned();
         match (method, id) {
             ("initialize", Some(id)) => {
+                if let Some(delay) = std::env::var(LSP_DELAY_ENV)
+                    .ok()
+                    .and_then(|ms| ms.parse::<u64>().ok())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
                 let mut result = serde_json::json!({ "capabilities": {} });
                 if let Some(version) = scenario.server_info_version() {
                     result["serverInfo"] =
@@ -558,13 +649,22 @@ fn serve_api_stdio(scenario: Scenario) {
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
-                let projects = scenario.snapshot_projects(&config);
+                let projects = if std::env::var_os(STANDALONE_HOLLOW_ENV).is_some() {
+                    serde_json::json!([])
+                } else {
+                    scenario.snapshot_projects(&config)
+                };
                 serde_json::to_vec(&serde_json::json!({ "snapshot": 1, "projects": projects }))
                     .unwrap()
             }
-            "getSemanticDiagnostics"
-            | "getSyntacticDiagnostics"
-            | "getConfigFileParsingDiagnostics" => b"[]".to_vec(),
+            "getSemanticDiagnostics" => {
+                if let Some(dir) = pid_dir() {
+                    let pid = std::process::id();
+                    let _ = std::fs::write(dir.join(format!("diagnostics-{pid}.done")), "");
+                }
+                b"[]".to_vec()
+            }
+            "getSyntacticDiagnostics" | "getConfigFileParsingDiagnostics" => b"[]".to_vec(),
             // `release` and anything else: an empty (null-ish) payload resolves
             // the fire-and-forget callers without a wire error.
             _ => Vec::new(),

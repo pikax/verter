@@ -115,6 +115,8 @@ pub(crate) mod resolution_flights;
 mod resolution_interleaving_tests;
 pub mod resolver;
 pub mod snapshot_builder;
+#[cfg(test)]
+mod test_allocator;
 pub mod traits;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tsgo_virtual_config;

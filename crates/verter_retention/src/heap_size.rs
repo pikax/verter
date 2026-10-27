@@ -187,6 +187,23 @@ impl<'h, 't> HeapMeter<'h, 't> {
         self.raw.first_allocation(arc)
     }
 
+    /// Bytes an immutable shared encoding keeps alive, once per measurement
+    /// (see [`super::allocation::shared_encoding_bytes`]). A pinned owner
+    /// instead holds the encoding's one registered charge, shared with every
+    /// other pinned owner of a clone, and adds nothing to its own bytes.
+    pub fn shared_encoding_bytes(&mut self, value: &Arc<[u8]>) -> usize {
+        let Some(context) = self.pin_context else {
+            return super::allocation::shared_encoding_bytes(value, self.handles);
+        };
+        if self.raw.first_allocation(value) {
+            let hold = context
+                .aliases
+                .pin_caller(context.account(), value, |_| arc_block_bytes(value.len()));
+            self.pins.push(hold);
+        }
+        0
+    }
+
     /// The handle set owned allocations are offered to.
     pub fn handles(&mut self) -> &mut AliasSet {
         self.handles

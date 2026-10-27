@@ -2225,8 +2225,8 @@ fn resolution_decision_positive_reused_candidate_depends_on_child_decision() {
         "fixture invariant: the second attempt must reuse the warm candidate"
     );
     assert_eq!(
-        cacheable_signature(&warm).facts.as_ref(),
-        cold_witness.facts.as_ref(),
+        cacheable_signature(&warm).facts.to_vec(),
+        cold_witness.facts.to_vec(),
         "the cold and warm witnesses for one demand must be IDENTICAL — a witness that \
          depends on cache warmth defeats every identical-recomputation dedupe downstream"
     );

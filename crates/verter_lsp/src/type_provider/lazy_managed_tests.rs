@@ -602,12 +602,15 @@ async fn failed_activation_retries_after_cooldown_and_recovers() {
         "shutdown after a failed activation must never retry or spawn the managed provider"
     );
 
-    // After the cooldown the factory is retried; now it succeeds.
+    // After the cooldown the factory is retried; now it succeeds. The cooldown
+    // is measured on the Tokio clock, which is stepped past it here.
     fail.store(false, Ordering::SeqCst);
-    tokio::time::sleep(std::time::Duration::from_millis(
-        super::lazy_managed::ACTIVATION_RETRY_COOLDOWN.as_millis() as u64 + 80,
-    ))
+    tokio::time::pause();
+    tokio::time::advance(
+        super::lazy_managed::ACTIVATION_RETRY_COOLDOWN + std::time::Duration::from_millis(80),
+    )
     .await;
+    tokio::time::resume();
     for fixture in &CARRIERS {
         provider
             .get_hover(
@@ -892,10 +895,14 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
         "shutdown must not retry or spawn the real provider"
     );
 
-    tokio::time::sleep(
+    // The cooldown is measured on the Tokio clock: step it past the cooldown,
+    // then let real time run again for the live engine.
+    tokio::time::pause();
+    tokio::time::advance(
         super::lazy_managed::ACTIVATION_RETRY_COOLDOWN + std::time::Duration::from_millis(80),
     )
     .await;
+    tokio::time::resume();
     for carrier in &carriers {
         let mut last = None;
         for delay_ms in [0u64, 100, 250, 500, 1000] {

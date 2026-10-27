@@ -15,7 +15,7 @@
 //! discriminated by `component_meta_result_cache_misses` advancing.
 //!
 //! Discrimination property: removing
-//! `view.validates_fact_signature(&entry.fact_dep_signature)` from
+//! `view.validates_fact_signature((&entry.fact_dep_signature).into())` from
 //! `ComponentMetaResultDb::get_with_view` would make this test FAIL.
 //! The warm entry survives the dep's parse + own-canonical drain
 //! because there is no reverse-dependent cascade that would

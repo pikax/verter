@@ -882,7 +882,7 @@ export let count: number
 
 // Tier 6 §8.2 / T9.5 — close-host repeated-spawn lifecycle test.
 //
-// The test runs in `describe.sequential` so it does not race with
+// The suite runs with `concurrent: false` so it does not race with
 // other native-host-creating tests in this file (and other files in
 // the package) when vitest schedules them in parallel. The
 // repeated-close cycle is sensitive to CPU pressure: on Windows,
@@ -909,7 +909,7 @@ export let count: number
 // pressure the Windows OS-thread scheduler in parallel.
 const isWindowsHost = process.platform === "win32";
 
-describe.sequential("VerterHost close lifecycle (Tier 6 §8.2 / T9.5)", () => {
+describe("VerterHost close lifecycle (Tier 6 §8.2 / T9.5)", { concurrent: false }, () => {
   // The brief's named discriminating test:
   // `windows_close_native_hosts_promptly_serial`. Skipped on
   // non-Windows hosts (NOT vacuously passing — the brief gates the

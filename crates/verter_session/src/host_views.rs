@@ -48,8 +48,9 @@ impl VerterHost {
             return false;
         };
         let before = view.view().validation_token();
-        view.view().validates_fact_signature(facts)
-            && !before.externally_superseded_by(&self.current_validation_token())
+        view.view().validates_fact_signature(
+            verter_session_query::facts::fact_set::FactsRef::Slice(facts),
+        ) && !before.externally_superseded_by(&self.current_validation_token())
     }
 
     /// Get the scheduler instance.

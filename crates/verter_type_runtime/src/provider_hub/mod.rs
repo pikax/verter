@@ -61,7 +61,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
@@ -335,6 +336,8 @@ struct Lifecycle {
     /// Advanced by every deliberate shutdown. Establishments, recoveries and
     /// crash monitors captured at an older value are abandoned.
     teardown_generation: u64,
+    /// When the last establishment failed, and why. Stamped on the Tokio clock,
+    /// so the on-demand cooldown measured from it follows a paused test clock.
     last_failure: Option<(Instant, String)>,
     /// The re-arm gate of a lazily-attached transport
     /// ([`HubPolicy::lazy_attach`]): the generation discriminant of the last
@@ -369,6 +372,9 @@ struct Shared<P: ?Sized> {
     /// Desired state can be ahead of this map: a held or failed write is not
     /// an application receipt.
     applied_files: StdRwLock<HashMap<String, Arc<str>>>,
+    /// Per-hub synchronization at the compensating receipt-removal fence.
+    #[cfg(test)]
+    compensation_receipt_release_started: Notify,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -548,6 +554,8 @@ where
             generated_unit_resolver: std::sync::OnceLock::new(),
             overlay: overlay::LazyOverlayCore::new(),
             applied_files: StdRwLock::new(HashMap::new()),
+            #[cfg(test)]
+            compensation_receipt_release_started: Notify::new(),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();

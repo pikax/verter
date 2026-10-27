@@ -172,8 +172,8 @@ pub trait ArtifactNode {
     /// substrate removes a published entry. Default: no-op.
     fn removal_cleanup(&self, _key: &Self::Key, _entry: &Arc<CacheEntry<Self::Value>>) {}
     /// The account a published entry — its own allocations, its value's
-    /// owned cells and its evidence pages — is charged to. Default: the
-    /// process account.
+    /// owned cells and its signature's shared storage — is charged to.
+    /// Default: the process account.
     fn retention_account(&self) -> Arc<SemanticRetentionAccount> {
         SemanticRetentionAccount::process_local()
     }
@@ -444,7 +444,7 @@ pub trait QueryNode {
         None
     }
 
-    /// The account a published entry's evidence pages are claimed into.
+    /// The account a published entry's receipts and tree nodes are claimed into.
     /// Default: the process account.
     fn retention_account(&self) -> Arc<SemanticRetentionAccount> {
         SemanticRetentionAccount::process_local()

@@ -119,3 +119,9 @@ pub fn augmenter_matches_target(
         AugmentationTargetKind::GlobalAugmentation => specifier == GLOBAL_AUGMENTATION_TAG,
     }
 }
+
+/// A file's published augmentation facts. Readers clone this `Arc` out of
+/// its artifact and may keep it after the artifact is gone, so the list
+/// carries its own charge rather than leaning on the artifact's.
+pub type ArtifactAugmentations =
+    std::sync::Arc<verter_retention::pinned_heap::SelfPinned<Vec<ModuleAugmentationFact>>>;

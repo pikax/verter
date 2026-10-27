@@ -40,7 +40,7 @@ fn permissive_view_validates_any_signature() {
 
     // validates_fact_signature must return true for a permissive view.
     assert!(
-        view.validates_fact_signature(&sig),
+        view.validates_fact_signature((&sig).into()),
         "PermissiveStoreView must validate any non-empty signature"
     );
 }
@@ -50,7 +50,7 @@ fn permissive_view_validates_empty_signature() {
     let view = PermissiveStoreView;
     // Empty slice: trivially true.
     assert!(
-        view.validates_fact_signature(&[]),
+        view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::Slice(&[])),
         "validates_fact_signature on empty slice must return true"
     );
 }
@@ -62,7 +62,7 @@ fn reject_all_view_fails_on_single_fact() {
 
     // A view that rejects everything must return false on the first entry.
     assert!(
-        !view.validates_fact_signature(&sig),
+        !view.validates_fact_signature((&sig).into()),
         "RejectAllView must return false for any non-empty signature"
     );
 }
@@ -72,7 +72,7 @@ fn reject_all_view_empty_signature_is_true() {
     let view = RejectAllView;
     // Empty slice always returns true regardless of view (trivially valid).
     assert!(
-        view.validates_fact_signature(&[]),
+        view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::Slice(&[])),
         "validates_fact_signature on empty slice must always be true"
     );
 }
@@ -101,7 +101,15 @@ fn validates_fact_signature_short_circuits_on_first_failure() {
     let view = FirstOnlyView(first.clone());
 
     // Signature with only the first fact: should pass.
-    assert!(view.validates_fact_signature(std::slice::from_ref(&first)));
+    assert!(
+        view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::from(
+            std::slice::from_ref(&first)
+        ))
+    );
     // Signature with first + second: second fails, whole sig fails.
-    assert!(!view.validates_fact_signature(&[first, second]));
+    assert!(
+        !view.validates_fact_signature(verter_session_query::facts::fact_set::FactsRef::from(&[
+            first, second
+        ]))
+    );
 }

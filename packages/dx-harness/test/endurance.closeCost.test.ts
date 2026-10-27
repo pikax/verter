@@ -205,104 +205,108 @@ function summarize(samples: readonly CloseCostSample[]): string {
   return lines.join("\n");
 }
 
-describe.sequential(`endurance: close cost on the WSP equal-work slice [${config.route}]`, () => {
-  if (!ENABLED) {
-    it.skip("close-cost lane disabled (set VERTER_ENDURANCE_CLOSE_COST=1)", () => {});
-    return;
-  }
-  let root: string;
-  let generated = false;
-  let derivation: CorpusProbeDerivation;
-  let rig: EnduranceRig;
-
-  beforeAll(async () => {
-    const existing = process.env.VERTER_ENDURANCE_CLOSE_COST_CORPUS_DIR;
-    if (existing) {
-      root = path.resolve(existing);
-    } else {
-      root = generateSlice();
-      generated = true;
+describe(
+  `endurance: close cost on the WSP equal-work slice [${config.route}]`,
+  { concurrent: false },
+  () => {
+    if (!ENABLED) {
+      it.skip("close-cost lane disabled (set VERTER_ENDURANCE_CLOSE_COST=1)", () => {});
+      return;
     }
-    derivation = deriveCorpusProbes(root, { maxFiles: FILE_BUDGET });
-    // A 2615-file project takes the provider well past the default startup gate.
-    rig = await spawnRig(root, config, false, { readyTimeoutMs: 900_000 });
-  }, 1_800_000);
+    let root: string;
+    let generated = false;
+    let derivation: CorpusProbeDerivation;
+    let rig: EnduranceRig;
 
-  afterAll(async () => {
-    const stderrFile = process.env.VERTER_ENDURANCE_STDERR_FILE;
-    if (stderrFile) writeFileSync(stderrFile, rig.handle.client.stderr.text());
-    if (rig) await disposeRig(rig);
-    if (generated) disposeWorkspace(root);
-  });
-
-  it("records what a close costs: the close receipt, heap, resident set and counters around each close", async () => {
-    const probes: EnduranceProbe[] = derivation.lanes
-      .flatMap((section) => section.probes)
-      .filter((probe) => probe.kind === "hover");
-    const byFile = new Map<string, EnduranceProbe>();
-    for (const probe of probes)
-      if (!byFile.has(probe.relativePath)) byFile.set(probe.relativePath, probe);
-    const files = [...byFile.keys()].slice(0, FILE_BUDGET);
-    expect(files.length, "the slice must yield hoverable corpus documents").toBeGreaterThan(0);
-
-    const spawnedPid = rig.handle.client.process.pid;
-    expect(spawnedPid, "the spawned server must expose a pid").toBeDefined();
-    const serverPid = spawnedPid!;
-    const samples: CloseCostSample[] = [];
-    const failures: string[] = [];
-    let cycle = 0;
-    for (const relativePath of files) {
-      cycle += 1;
-      const probe = byFile.get(relativePath)!;
-      const text = rig.session.textOf(relativePath);
-      rig.session.openFile(relativePath, text);
-      rig.session.changeFile(
-        relativePath,
-        text.replace("</script>", `// close-cost ${cycle}\n</script>`),
-      );
-      const hoverStarted = performance.now();
-      const outcome = await rig.session.runProbe(
-        { ...probe, informational: true, label: `close-cost ${cycle} hover` },
-        config.probeTimeoutMs,
-      );
-      const hoverMs = performance.now() - hoverStarted;
-      if (outcome.classification !== "answered") {
-        failures.push(`${relativePath}: hover settled as ${outcome.classification}`);
+    beforeAll(async () => {
+      const existing = process.env.VERTER_ENDURANCE_CLOSE_COST_CORPUS_DIR;
+      if (existing) {
+        root = path.resolve(existing);
+      } else {
+        root = generateSlice();
+        generated = true;
       }
-      const before = await readRetention(rig);
-      const rssBefore = await sampleProcessTreeRss(serverPid);
-      rig.session.closeFile(relativePath);
-      const { reading: after, settleMs } = await settleClose(
-        rig,
-        before === null ? null : before.closesApplied,
-        30_000,
-      );
-      const rssAfter = await sampleProcessTreeRss(serverPid);
-      if (before !== null && after !== null && !after.lastClose) {
-        failures.push(`${relativePath}: no close receipt after the close`);
-        continue;
-      }
-      samples.push({
-        relativePath,
-        hoverMs,
-        before,
-        after,
-        release: after?.lastClose ?? null,
-        rssBefore,
-        rssAfter,
-        settleMs,
-      });
-    }
+      derivation = deriveCorpusProbes(root, { maxFiles: FILE_BUDGET });
+      // A 2615-file project takes the provider well past the default startup gate.
+      rig = await spawnRig(root, config, false, { readyTimeoutMs: 900_000 });
+    }, 1_800_000);
 
-    const summary = summarize(samples);
-    console.log(`[endurance] close cost\n${summary}`);
-    const out = process.env.VERTER_ENDURANCE_CLOSE_COST_OUT;
-    if (out) {
-      writeFileSync(
-        out,
-        `${JSON.stringify({ root: generated ? "generated WSP1B slice" : root, slice: SLICE, samples }, null, 2)}\n`,
-      );
-    }
-    expect(failures, "every close must answer its hover and land its receipt").toEqual([]);
-  }, 3_600_000);
-});
+    afterAll(async () => {
+      const stderrFile = process.env.VERTER_ENDURANCE_STDERR_FILE;
+      if (stderrFile) writeFileSync(stderrFile, rig.handle.client.stderr.text());
+      if (rig) await disposeRig(rig);
+      if (generated) disposeWorkspace(root);
+    });
+
+    it("records what a close costs: the close receipt, heap, resident set and counters around each close", async () => {
+      const probes: EnduranceProbe[] = derivation.lanes
+        .flatMap((section) => section.probes)
+        .filter((probe) => probe.kind === "hover");
+      const byFile = new Map<string, EnduranceProbe>();
+      for (const probe of probes)
+        if (!byFile.has(probe.relativePath)) byFile.set(probe.relativePath, probe);
+      const files = [...byFile.keys()].slice(0, FILE_BUDGET);
+      expect(files.length, "the slice must yield hoverable corpus documents").toBeGreaterThan(0);
+
+      const spawnedPid = rig.handle.client.process.pid;
+      expect(spawnedPid, "the spawned server must expose a pid").toBeDefined();
+      const serverPid = spawnedPid!;
+      const samples: CloseCostSample[] = [];
+      const failures: string[] = [];
+      let cycle = 0;
+      for (const relativePath of files) {
+        cycle += 1;
+        const probe = byFile.get(relativePath)!;
+        const text = rig.session.textOf(relativePath);
+        rig.session.openFile(relativePath, text);
+        rig.session.changeFile(
+          relativePath,
+          text.replace("</script>", `// close-cost ${cycle}\n</script>`),
+        );
+        const hoverStarted = performance.now();
+        const outcome = await rig.session.runProbe(
+          { ...probe, informational: true, label: `close-cost ${cycle} hover` },
+          config.probeTimeoutMs,
+        );
+        const hoverMs = performance.now() - hoverStarted;
+        if (outcome.classification !== "answered") {
+          failures.push(`${relativePath}: hover settled as ${outcome.classification}`);
+        }
+        const before = await readRetention(rig);
+        const rssBefore = await sampleProcessTreeRss(serverPid);
+        rig.session.closeFile(relativePath);
+        const { reading: after, settleMs } = await settleClose(
+          rig,
+          before === null ? null : before.closesApplied,
+          30_000,
+        );
+        const rssAfter = await sampleProcessTreeRss(serverPid);
+        if (before !== null && after !== null && !after.lastClose) {
+          failures.push(`${relativePath}: no close receipt after the close`);
+          continue;
+        }
+        samples.push({
+          relativePath,
+          hoverMs,
+          before,
+          after,
+          release: after?.lastClose ?? null,
+          rssBefore,
+          rssAfter,
+          settleMs,
+        });
+      }
+
+      const summary = summarize(samples);
+      console.log(`[endurance] close cost\n${summary}`);
+      const out = process.env.VERTER_ENDURANCE_CLOSE_COST_OUT;
+      if (out) {
+        writeFileSync(
+          out,
+          `${JSON.stringify({ root: generated ? "generated WSP1B slice" : root, slice: SLICE, samples }, null, 2)}\n`,
+        );
+      }
+      expect(failures, "every close must answer its hover and land its receipt").toEqual([]);
+    }, 3_600_000);
+  },
+);

@@ -637,7 +637,7 @@ impl LspTransport {
     /// Only the response-timeout arm used to count, so a request parked on a
     /// full lane behind a stalled writer never reached this path, so the wedge
     /// detector never fired for a stdin-side deadlock.
-    fn note_hang_failure(&self, method: &str, issued_at: std::time::Instant) {
+    fn note_hang_failure(&self, method: &str, issued_at: tokio::time::Instant) {
         let Some(count) = self.liveness.charge_strike(issued_at) else {
             return;
         };
@@ -771,7 +771,7 @@ impl LspTransport {
                 // shortened hop expiring is the CALLER running out of patience,
                 // not the engine failing to answer.
                 let full_bound = hop >= configured;
-                let issued_at = std::time::Instant::now();
+                let issued_at = tokio::time::Instant::now();
                 let deadline = tokio::time::Instant::now() + hop;
                 let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
                 match self
@@ -1560,6 +1560,8 @@ async fn read_loop(
             // our stdin, a permanent two-pipe deadlock. An unbounded, non-blocking
             // enqueue keeps stdout reading unconditional and breaks that cycle.
             let _ = control_tx.send(StdinMessage::Frame(frame.into_bytes()));
+            #[cfg(test)]
+            pending.answered_server_requests.record(method_str);
             continue;
         }
 

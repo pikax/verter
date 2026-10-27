@@ -2310,3 +2310,88 @@ fn union_rank_order_matches_searched_ranks_with_linear_probes() {
         );
     }
 }
+
+/// A union of `members`, ordered and interned through the canonical union
+/// authority, then keyed, so its member set is classified and its members
+/// compared.
+fn keyed_union(graph: &SemanticGraphStore, members: &[SemanticNodeId]) -> SemanticNodeId {
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+        members,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
+    )
+    .node;
+    let _ = stable_key_for_node(graph, union);
+    union
+}
+
+/// Ordering a union's members compares pairs by walking their key streams.
+/// Members that first differ a few levels down keep each stream's stack of
+/// open classes inline, so no comparison allocates a stack however wide the
+/// union grows; a pair that first differs past the inline depth still
+/// compares, through a spilled stack.
+#[test]
+fn member_comparisons_keep_their_stream_stacks_inline_as_the_union_widens() {
+    use crate::semantic_query::stable_key::{SPILLED_STREAMS, STREAM_COMPARISONS};
+    let reset = || {
+        STREAM_COMPARISONS.with(|count| count.set(0));
+        SPILLED_STREAMS.with(|count| count.set(0));
+    };
+    let counts = || {
+        (
+            STREAM_COMPARISONS.with(std::cell::Cell::get),
+            SPILLED_STREAMS.with(std::cell::Cell::get),
+        )
+    };
+    let mut compared = Vec::new();
+    for width in [16usize, 64, 256] {
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        // Members of one depth differ only at their leaf, so comparing two
+        // of them descends through every level they share.
+        let members: Vec<SemanticNodeId> = (0..width)
+            .map(|index| {
+                let mut node = lit_str(&graph, &format!("member{index}"));
+                for _ in 0..index % 6 {
+                    node = array_of_node(&graph, node);
+                }
+                node
+            })
+            .collect();
+        reset();
+        keyed_union(&graph, &members);
+        let (comparisons, spilled) = counts();
+        assert!(
+            comparisons >= width as u64 - 1,
+            "ordering {width} members walks at least {} pairs, walked {comparisons}",
+            width - 1
+        );
+        assert_eq!(
+            spilled, 0,
+            "{width} members nested at most six deep compare without a heap stack"
+        );
+        compared.push(comparisons);
+    }
+    assert!(
+        compared.windows(2).all(|pair| pair[1] > pair[0]),
+        "wider unions compare more pairs: {compared:?}"
+    );
+
+    let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
+    let deep_number = array_chain(&graph, 40, PrimitiveKind::Number);
+    let deep_string = array_chain(&graph, 40, PrimitiveKind::String);
+    reset();
+    let union = keyed_union(&graph, &[deep_number, deep_string]);
+    let (comparisons, spilled) = counts();
+    assert!(comparisons >= 1, "the deep pair is compared");
+    assert!(
+        spilled > 0,
+        "a pair first differing 40 levels down walks a stack past the inline depth"
+    );
+    assert_eq!(
+        union_arms(&graph, union).len(),
+        2,
+        "the deep pair stays two members"
+    );
+}

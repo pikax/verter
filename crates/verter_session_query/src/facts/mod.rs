@@ -17,6 +17,8 @@ pub mod corender;
 pub mod css;
 pub mod fact_cache;
 pub mod fact_read_set;
+pub mod fact_set;
+pub mod fact_tree;
 pub mod hashing;
 pub mod reactivity;
 pub mod receipt;

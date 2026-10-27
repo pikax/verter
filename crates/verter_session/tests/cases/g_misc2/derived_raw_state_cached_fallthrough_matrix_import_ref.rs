@@ -85,7 +85,7 @@ fn cached_fallthrough_signature_carries_import_ref() {
     // structurally admits the fact-kind.
     let permissive = PermissiveStoreView;
     assert!(
-        permissive.validates_fact_signature(&signature),
+        permissive.validates_fact_signature((&signature).into()),
         "permissive view must accept an ImportRef fact in the Arc-stored signature"
     );
 
@@ -98,7 +98,7 @@ fn cached_fallthrough_signature_carries_import_ref() {
     // PermissiveStoreView.validates returns true unconditionally.
     let rejecting = RejectImportRefView;
     assert!(
-        !rejecting.validates_fact_signature(&signature),
+        !rejecting.validates_fact_signature((&signature).into()),
         "`validates_fact_signature` must propagate a per-fact \
          rejection on the Arc-stored substrate. A view that rejects \
          ImportRef must turn the whole-signature decision negative; \

@@ -83,7 +83,7 @@ fn component_meta_result_signature_carries_member_presence() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.read_set_signature.facts),
+        view.validates_fact_signature((&entry.read_set_signature.facts).into()),
         "permissive view must accept the MemberPresence fact in the \
          entry's `read_set_signature.facts`"
     );

@@ -13,8 +13,9 @@ use crate::facts::resolution::ResolutionFactKey;
 #[cfg(test)]
 use crate::resolution::ResolutionPopulation;
 
+pub use crate::facts::fact_set::{FactSet, FactSetEdit, FactSetIter, FactsRef};
 pub use crate::facts::receipt::{
-    drop_subsumed_receipts, EvidenceKind, ReceiptVerdict, ReceiptWalk, ResultReceipt,
+    drop_subsumed_receipts, ReceiptVerdict, ReceiptWalk, ResultReceipt,
 };
 
 /// A fact signature as a reader receives it: a sealed, self-charged list.
@@ -381,7 +382,7 @@ pub trait FactVersionValidator {
     fn validates_fact_version(&self, fact: &FactVersionRef) -> bool;
 
     #[inline]
-    fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(&self, facts: FactsRef<'_>) -> bool {
         facts.iter().all(|fact| self.validates_fact_version(fact))
     }
 }
@@ -401,42 +402,6 @@ pub fn validates_through_receipts(
     match fact {
         FactVersionRef::Receipt(receipt) => walk.leaves(receipt, leaf),
         other => leaf(other),
-    }
-}
-
-/// Every entry of a signature with its evidence PAGES read through: the
-/// facts a computation observed and the receipts of the results it
-/// consumed, never a page itself. A wide signature's top level holds only
-/// pages (see [`crate::facts::fact_read_set::FACT_PAGE_WIDTH`]); a consumer
-/// looking for one particular fact of the signature reads through them
-/// here, while a consumed result's receipt stays one entry.
-pub fn signature_entries(facts: &[FactVersionRef]) -> SignatureEntries<'_> {
-    SignatureEntries {
-        stack: vec![facts.iter()],
-    }
-}
-
-/// Iterator of [`signature_entries`]: an explicit stack of page levels.
-pub struct SignatureEntries<'a> {
-    stack: Vec<std::slice::Iter<'a, FactVersionRef>>,
-}
-
-impl<'a> Iterator for SignatureEntries<'a> {
-    type Item = &'a FactVersionRef;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let level = self.stack.last_mut()?;
-            match level.next() {
-                Some(FactVersionRef::Receipt(page)) if page.is_page() => {
-                    self.stack.push(page.facts().iter());
-                }
-                Some(entry) => return Some(entry),
-                None => {
-                    self.stack.pop();
-                }
-            }
-        }
     }
 }
 
@@ -464,42 +429,43 @@ fn push_unique_canonical<'a>(
 }
 
 /// A computation's complete dependency evidence: every fact it observed,
-/// paged when wide, and the receipts of the results it consumed. Width is
-/// never a refusal reason, so a signature always holds its whole read set;
-/// whether that evidence may authorise shared-cache admission is decided at
-/// admission ([`SignatureAdmission`]), never by a flag on the signature.
+/// as one canonical set at any width, and the receipts of the results it
+/// consumed. Width is never a refusal reason, so a signature always holds
+/// its whole read set; whether that evidence may authorise shared-cache
+/// admission is decided at admission ([`SignatureAdmission`]), never by a
+/// flag on the signature.
 #[derive(Clone, Debug)]
 pub struct ReadSetSignature {
-    pub facts: Arc<[FactVersionRef]>,
+    pub facts: FactSet,
 }
 
 impl ReadSetSignature {
     #[must_use]
-    pub fn new(facts: Arc<[FactVersionRef]>) -> Self {
-        Self { facts }
+    pub fn new(facts: impl Into<FactSet>) -> Self {
+        Self {
+            facts: facts.into(),
+        }
     }
 
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            facts: Arc::from([]),
+            facts: FactSet::empty(),
         }
     }
 
     #[must_use]
     pub fn validates(&self, validator: &dyn FactVersionValidator) -> bool {
-        validator.validates_fact_signature(&self.facts)
+        validator.validates_fact_signature(FactsRef::Set(&self.facts))
     }
 
-    /// Every entry of this signature with its evidence pages read through
-    /// (see [`signature_entries`]).
-    pub fn entries(&self) -> SignatureEntries<'_> {
-        signature_entries(&self.facts)
+    /// Every entry of this signature, in canonical order.
+    pub fn entries(&self) -> FactSetIter<'_> {
+        self.facts.iter()
     }
 
-    /// How many entries this signature holds once its evidence pages are
-    /// read through: the logical width of its own read set, which no
-    /// longer equals `facts.len()` once the signature is paged.
+    /// How many entries this signature holds: the logical width of its own
+    /// read set, equal to `facts.len()`.
     #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries().count()

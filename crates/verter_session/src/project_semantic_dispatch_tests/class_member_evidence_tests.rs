@@ -17,9 +17,7 @@
 
 use super::*;
 use crate::{HostConfig, UpsertRequest, VerterHost};
-use verter_session_query::facts::fact_cache::{
-    signature_entries, FactVersionRef, ReadSetSignature,
-};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
 use verter_session_query::facts::receipt::ReceiptWalk;
 use verter_session_query::facts::{FactKey, SymbolSpace};
 use verter_type_engine::semantic_query::{FlowReturnKey, SemanticQueryOutput};
@@ -101,7 +99,7 @@ struct FlowReturnRead {
 fn leaf_facts(signature: &ReadSetSignature) -> Vec<FactVersionRef> {
     let mut walk = ReceiptWalk::default();
     let mut facts = Vec::new();
-    for entry in signature_entries(&signature.facts) {
+    for entry in signature.facts.iter() {
         match entry {
             FactVersionRef::Receipt(receipt) => {
                 walk.leaves(receipt, |fact| {
@@ -176,7 +174,7 @@ fn read_flow_return_with_mode<M: verter_audit::observe::ObserveExec>(
     let signature = dispatch
         .graph()
         .entry_read_set_signature_for_tests(&key)
-        .map(|signature| signature_entries(&signature.facts).cloned().collect())
+        .map(|signature| signature.facts.iter().cloned().collect())
         .unwrap_or_default();
     FlowReturnRead {
         ty,
@@ -1015,7 +1013,7 @@ fn standalone_augmentation_content_port_observes_the_served_snapshot() {
         "export {}; declare global { interface X { a: number } }",
     );
     host.with_base_resolver_context::<_, verter_audit::observe::Uncaptured>(|ctx| {
-        assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates_fact_signature(ctx, &facts));
+        assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates_fact_signature(ctx, verter_session_query::facts::fact_set::FactsRef::Set(&facts)));
     });
 }
 
@@ -1092,7 +1090,7 @@ fn target_population_tracks_unindexed_membership_add_remove_and_retarget() {
         upsert(&host, aug, after);
         host.with_base_resolver_context::<_, verter_audit::observe::Uncaptured>(|ctx| {
             assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates(ctx, population), "target population must reject changed binding membership without caller indexing: {before} -> {after}");
-            assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates_fact_signature(ctx, &cold.signature), "the whole retained receipt must reject changed target population");
+            assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates_fact_signature(ctx, verter_session_query::facts::fact_set::FactsRef::Slice(&cold.signature)), "the whole retained receipt must reject changed target population");
         });
         let edited = read_flow_return(&host, "f");
         let fresh = host_with("export class B { a!: string; }", reader);
@@ -1163,7 +1161,7 @@ fn global_population_retracts_unindexed_final_contributor() {
         upsert(&host, canonical, "export {};");
         host.with_base_resolver_context::<_, verter_audit::observe::Uncaptured>(|ctx| {
             assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates(ctx, population), "removing the final contributor must update standalone global population without caller indexing: {canonical}");
-            assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates_fact_signature(ctx, &cold.signature));
+            assert!(!verter_type_engine::resolver_core::fact_validation_port::FactValidation::validates_fact_signature(ctx, verter_session_query::facts::fact_set::FactsRef::Slice(&cold.signature)));
         });
         let edited = read_flow_return(&host, "f");
         let fresh = host_with("", reader);

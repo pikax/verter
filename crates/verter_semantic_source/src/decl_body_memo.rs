@@ -32,7 +32,7 @@ use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use verter_retention::heap_size::{HeapMeter, HeapSize};
-use verter_retention::pinned_heap::{PinContext, PinnedOnce, StoragePin};
+use verter_retention::pinned_heap::{PinContext, PinnedOnce, SelfPinned, StoragePin};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -162,6 +162,10 @@ impl<D: HeapSize + Send + Sync + 'static> HeapSize for DemandCell<D> {
 }
 
 type TypeCell = Arc<PinnedOnce<DemandCell<LoweredTypeDecl>>>;
+
+/// One symbol's captured raw source surfaces. Readers clone the handle out
+/// of the memo, so the allocation carries its own charge.
+pub type RawSurfaces = Arc<SelfPinned<Vec<RawSourceSurface>>>;
 type ValueCell = Arc<PinnedOnce<DemandCell<LoweredValueDecl>>>;
 type LoweredDeclGroups = (
     Vec<(DeclBindingKey, LoweredTypeDecl)>,
@@ -511,8 +515,7 @@ pub struct DeclBodyMemo {
     /// `N` times. Content-free spans and ordinals, valid exactly as long as
     /// the snapshot this memo's key names.
     macro_field_addresses: Arc<PinnedOnce<Arc<verter_semantic::analysis::MacroFieldAddressTable>>>,
-    raw_surfaces:
-        crate::per_file_map::PerFileMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
+    raw_surfaces: crate::per_file_map::PerFileMap<(DeclarationPath, SymbolSpace), RawSurfaces>,
     /// Transient body parts a batched demand ([`prime_type_bodies`]) kept
     /// from the lowering that registered their facts, waiting for the body
     /// read that follows it. A read takes its entry; the batch's
@@ -1868,7 +1871,7 @@ impl DeclBodyMemo {
     /// one `(name, symbol_space)` — captured from exactly the demanded
     /// symbol's contributing statements through the retained snapshot,
     /// memoized per triple.
-    pub fn raw_surfaces_for(&self, name: &str, space: SymbolSpace) -> Arc<Vec<RawSourceSurface>> {
+    pub fn raw_surfaces_for(&self, name: &str, space: SymbolSpace) -> RawSurfaces {
         self.raw_surfaces_for_in(TopLevelOwnerId::ordinary_file(), name, space)
     }
 
@@ -1877,7 +1880,7 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
         space: SymbolSpace,
-    ) -> Arc<Vec<RawSourceSurface>> {
+    ) -> RawSurfaces {
         let declaration = DeclarationPath::root(DeclBindingKey::new(owner, name));
         if let Some(cached) = self.raw_surfaces.get(&(declaration.clone(), space)) {
             return Arc::clone(&cached);
@@ -1962,7 +1965,7 @@ impl DeclBodyMemo {
                          missed the retained snapshot; failing closed to an uncached \
                          empty capture (ReturnOnly)"
                     );
-                    return Arc::new(Vec::new());
+                    return Arc::new(SelfPinned::new(Vec::new()));
                 };
                 surfaces
             } else {
@@ -1971,7 +1974,7 @@ impl DeclBodyMemo {
                 Vec::new()
             };
 
-        let surfaces = Arc::new(surfaces);
+        let surfaces = Arc::new(SelfPinned::new(surfaces));
         self.raw_surfaces
             .insert((declaration, space), Arc::clone(&surfaces));
         surfaces

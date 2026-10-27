@@ -57,6 +57,193 @@ pub struct TsgoClient {
     request_deadline: Option<Duration>,
 }
 
+/// A tsgo `--api` process spawned before its session starts, so the spawn
+/// overlaps the caller's own work. No request reaches it until
+/// [`TsgoClient::connect_spawned`] has passed the wire gate. Dropping it
+/// kills the whole process tree.
+#[derive(Debug)]
+pub struct SpawnedEngine {
+    transport: StdioPipeTransport,
+}
+
+impl SpawnedEngine {
+    /// Spawn `tsgo --api` at `exe` with working directory `cwd`, as
+    /// [`TsgoClient::connect`] does. Must be called within a tokio runtime.
+    pub fn spawn(exe: &Path, cwd: &Path) -> TsgoApiResult<Self> {
+        Ok(Self {
+            transport: StdioPipeTransport::spawn(exe, cwd)?,
+        })
+    }
+
+    /// [`Self::spawn`], with the engine's stderr piped through `held`.
+    fn spawn_holding_stderr(
+        exe: &Path,
+        cwd: &Path,
+        held: &Arc<crate::process::HeldStderr>,
+    ) -> TsgoApiResult<Self> {
+        Ok(Self {
+            transport: StdioPipeTransport::spawn_with_stderr(exe, cwd, Some(held))?,
+        })
+    }
+}
+
+/// A tsgo engine prepared in the background while the caller does its own
+/// work, ahead of the session that will use it.
+///
+/// Engine resolution runs the full capability-validated walk, whose last
+/// step spawns a throwaway engine to cross-check its in-band version against
+/// the `--version` probe (see [`crate::toolchain::validation`]). Run in
+/// order, that walk and the session's own spawn sit on the caller's critical
+/// path. Here the version probe runs first, then the session engine's spawn
+/// and the cross-check run side by side, all in the background.
+///
+/// Nothing is decided before the cross-check passes: [`Self::run`] waits for
+/// it after the session and returns `None` unless it passed, even when the
+/// session already produced its result. On `None` the caller resolves the
+/// engine in full and runs again, so a rejected candidate renders exactly the
+/// rejection the in-order walk renders, and a walk that would have moved on
+/// to a later candidate does so.
+///
+/// Until the cross-check passes, both engines' stderr is held back, so a
+/// rejected candidate shows nothing the in-order walk would not have shown;
+/// a cross-check that fails first cancels the session instead of waiting for
+/// it.
+///
+/// Dropping it, on any path, cancels the preparation and joins its runtime:
+/// every engine process it spawned is killed with the task that owns it.
+pub struct PreparedEngine {
+    runtime: Option<tokio::runtime::Runtime>,
+    preparation: Option<tokio::task::JoinHandle<Option<Preparation>>>,
+    /// The stderr of both engines, held until the cross-check decides.
+    held_stderr: Arc<crate::process::HeldStderr>,
+}
+
+/// What a successful preparation hands the session.
+struct Preparation {
+    engine: SpawnedEngine,
+    probed_version: String,
+    cross_check: tokio::task::JoinHandle<bool>,
+}
+
+/// How long an accepted run waits for its engines' stderr to reach end of
+/// file once they have exited.
+const STDERR_DRAIN_BOUND: Duration = Duration::from_secs(2);
+
+/// How long dropping a [`PreparedEngine`] waits for its runtime's blocking
+/// work after cancelling its tasks.
+const PREPARATION_JOIN_BOUND: Duration = Duration::from_secs(5);
+
+impl PreparedEngine {
+    /// Start preparing the engine `request` resolves, spawning its session
+    /// process with working directory `cwd`. Without a request, or when the
+    /// preparation cannot start, [`Self::run`] returns `None`. Must not be
+    /// called within a tokio runtime: it owns its own.
+    pub fn start(
+        request: Option<crate::toolchain::discovery::ResolutionRequest>,
+        cwd: &Path,
+    ) -> Self {
+        let held_stderr = Arc::new(crate::process::HeldStderr::default());
+        let (Some(request), Ok(runtime)) = (
+            request,
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build(),
+        ) else {
+            return Self {
+                runtime: None,
+                preparation: None,
+                held_stderr,
+            };
+        };
+        let cwd = cwd.to_path_buf();
+        let held = Arc::clone(&held_stderr);
+        let preparation = runtime.spawn(async move {
+            let validator = crate::toolchain::validation::ProcessValidator::from_env()
+                .holding_stderr(Arc::clone(&held));
+            let provisional =
+                crate::toolchain::discovery::resolve_provisional(&request, &validator)
+                    .await
+                    .ok()?;
+            let engine = SpawnedEngine::spawn_holding_stderr(
+                &verter_span::path::simplify_verbatim_path(provisional.path()),
+                &cwd,
+                &held,
+            )
+            .ok()?;
+            let probed_version = provisional.probed_version().to_string();
+            let cross_check =
+                tokio::spawn(async move { provisional.confirm(&validator).await.is_ok() });
+            Some(Preparation {
+                engine,
+                probed_version,
+                cross_check,
+            })
+        });
+        Self {
+            runtime: Some(runtime),
+            preparation: Some(preparation),
+            held_stderr,
+        }
+    }
+
+    /// Run `session` on the prepared engine, handing it the spawned process
+    /// and its probed version (for [`TsgoClient::connect_spawned`]). `None`
+    /// when the preparation failed or the cross-check did not pass: the
+    /// session's result and the engines' stderr are then discarded, and a
+    /// session still running when the cross-check fails is cancelled.
+    pub fn run<T, F, Fut>(mut self, session: F) -> Option<T>
+    where
+        F: FnOnce(SpawnedEngine, String) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let preparation = self.preparation.take()?;
+        let runtime = self.runtime.as_ref()?;
+        let held = Arc::clone(&self.held_stderr);
+        runtime.block_on(async move {
+            let Some(prepared) = preparation.await.ok().flatten() else {
+                held.discard();
+                return None;
+            };
+            let session = session(prepared.engine, prepared.probed_version);
+            tokio::pin!(session);
+            let mut cross_check = prepared.cross_check;
+            let decided = tokio::select! {
+                result = &mut session => match cross_check.await {
+                    Ok(true) => {
+                        held.release();
+                        Some(result)
+                    }
+                    _ => None,
+                },
+                confirmed = &mut cross_check => match confirmed {
+                    Ok(true) => {
+                        held.release();
+                        Some(session.await)
+                    }
+                    _ => None,
+                },
+            };
+            if decided.is_some() {
+                held.drained(STDERR_DRAIN_BOUND).await;
+            } else {
+                held.discard();
+            }
+            decided
+        })
+    }
+}
+
+impl Drop for PreparedEngine {
+    fn drop(&mut self) {
+        if let Some(preparation) = self.preparation.take() {
+            preparation.abort();
+        }
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_timeout(PREPARATION_JOIN_BOUND);
+        }
+    }
+}
+
 /// The bound on the version probe inside [`TsgoClient::connect`] (mirrors the
 /// toolchain validator's probe bound).
 const CONNECT_PROBE_BOUND: Duration = Duration::from_secs(5);
@@ -86,6 +273,29 @@ impl TsgoClient {
         let transport = StdioPipeTransport::spawn(exe, cwd)?;
         let handle = spawn_actor(transport, snapshot, queue_depth);
 
+        Ok(Self {
+            handle,
+            clearance,
+            first_snapshot_validated: Arc::new(AtomicBool::new(false)),
+            first_validation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            request_deadline: None,
+        })
+    }
+
+    /// Connect over an engine spawned ahead of time with
+    /// [`SpawnedEngine::spawn`], gating on `probed_version`: the version a
+    /// bounded `--version` probe of the SAME binary reported. The wire gate
+    /// runs before the actor starts, exactly as in [`Self::connect`], so a
+    /// refused engine never receives a request; it is torn down with the
+    /// dropped [`SpawnedEngine`].
+    pub fn connect_spawned(
+        engine: SpawnedEngine,
+        probed_version: &str,
+        snapshot: OverlaySnapshot,
+        queue_depth: usize,
+    ) -> TsgoApiResult<Self> {
+        let clearance = gate::validate(&ObservedEngine::from_codec_wire(probed_version))?;
+        let handle = spawn_actor(engine.transport, snapshot, queue_depth);
         Ok(Self {
             handle,
             clearance,

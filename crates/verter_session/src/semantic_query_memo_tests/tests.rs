@@ -4737,7 +4737,7 @@ fn prefix_backfill_carries_traced_facts() {
          publish call site is still passing only the legacy \
          `dep_signature` to `warm_publish_one_if_absent`, dropping \
          the parent's path-precise facts.",
-        facts = prefix_carrier.facts.as_ref()
+        facts = prefix_carrier.facts.to_vec()
     );
     // A read of the prefix pays what reaching the prefix cost, never the
     // whole parent build it was materialized on the way to.
@@ -9418,9 +9418,9 @@ mod prepared_identity_bijection {
 /// canonical with no matching `FileWholeHash` fact on the carrier refuses
 /// — the force's typed incomplete — never a silently SHRUNK root set that
 /// would validate at mint/force and let a `mint -> force -> mint` chain
-/// serve stale-complete after a dead-operand edit. A wide carrier's
-/// evidence pages are read through, so a root whose fact sits on any page
-/// reconstructs exactly as on a narrow carrier.
+/// serve stale-complete after a dead-operand edit. A wide carrier is read
+/// whole, so a root whose fact sits anywhere in its set reconstructs
+/// exactly as on a narrow carrier.
 #[test]
 fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     use verter_session_query::facts::fact_cache::FactVersionRef;
@@ -9467,10 +9467,11 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     )
     .is_none());
 
-    // A paged carrier: the producer root's fact sorts LAST, so it sits on
-    // the final page, behind more than one page of unrelated dependencies.
+    // A wide carrier, extended so it is held in shared storage: the producer
+    // root's fact sorts LAST, behind more than a wide signature of unrelated
+    // dependencies.
     let mut wide: Vec<FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 1)
             .map(|index| FactVersionRef::FileWholeHash {
                 canonical_id: format!("/w/dep-{index:05}.ts").into(),
                 hash: [3u8; 16],
@@ -9480,15 +9481,21 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
         canonical_id: root_producer.as_ref().to_string().into(),
         hash: [4u8; 16],
     });
-    let paged = verter_session_query::facts::fact_cache::ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(wide),
+    let wide = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(wide[..1].to_vec())
+            .union_with_facts(&wide[1..]),
     );
     assert!(
-        paged.facts.len() <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
-        "fixture invariant: the carrier is paged"
+        wide.facts.tree_storage().is_some()
+            && wide.facts.last()
+                == Some(&FactVersionRef::FileWholeHash {
+                    canonical_id: root_producer.as_ref().to_string().into(),
+                    hash: [4u8; 16],
+                }),
+        "fixture invariant: a wide tree carrier whose last fact backs the root"
     );
-    let evidence = semantic_operand_evidence(&paged, &[Arc::clone(&root_producer)], &dep)
-        .expect("a root backed on a page reconstructs");
+    let evidence = semantic_operand_evidence(&wide, &[Arc::clone(&root_producer)], &dep)
+        .expect("a root backed by a wide carrier's last fact reconstructs");
     assert_eq!(
         evidence.self_roots(),
         &[(verter_type_expr::OwnedStr::from(&root_producer), [4u8; 16])]

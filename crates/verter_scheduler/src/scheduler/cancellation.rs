@@ -96,6 +96,18 @@ impl ScopedCacheFlight {
         if state.terminal.is_some() {
             return false;
         }
+        self.bind_aggregate(&mut state, aggregate)
+    }
+
+    /// Install `aggregate` as the flight's job token and register every
+    /// current owner on it. Whichever of admission and dispatch reaches the
+    /// flight first binds it; the other finds it bound. Returns `false`, with
+    /// the flight terminal-cancelled, when the token no longer accepts owners.
+    fn bind_aggregate(
+        &self,
+        state: &mut ScopedCacheFlightState,
+        aggregate: CancellationToken,
+    ) -> bool {
         if state.aggregate.is_some() {
             return true;
         }
@@ -105,14 +117,16 @@ impl ScopedCacheFlight {
         aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
             &self.delivery,
         ))));
-        for owner in state.owners.values_mut() {
-            let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
-                state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.producer = None;
-                state.owners.clear();
-                self.delivery.deliver(vec![state.wakers.take()]);
-                return false;
-            };
+        let Some(registrations) =
+            aggregate.register_owners(state.owners.values().map(|owner| owner.request.clone()))
+        else {
+            state.terminal = Some(ScopedCacheTerminal::Cancelled);
+            state.producer = None;
+            state.owners.clear();
+            self.delivery.deliver(vec![state.wakers.take()]);
+            return false;
+        };
+        for (owner, registration) in state.owners.values_mut().zip(registrations) {
             owner.aggregate_registration = Some(registration);
         }
         state.aggregate = Some(aggregate);
@@ -157,7 +171,9 @@ impl ScopedCacheFlight {
             }
             return false;
         }
-        state.aggregate.get_or_insert(aggregate);
+        if !self.bind_aggregate(&mut state, aggregate) {
+            return false;
+        }
         state.dispatched = true;
         self.delivery.deliver(vec![state.wakers.take()]);
         true

@@ -34,6 +34,7 @@ mod flow_return_substrate;
 mod footprint;
 mod function_advanced;
 mod generic_defaults;
+mod generic_interface_identity;
 mod index_signatures;
 mod indexed_utilities;
 mod jsdoc_types;

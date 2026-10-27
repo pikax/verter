@@ -1495,7 +1495,10 @@ where
 impl<L> RequestBoundAdapter<L> {
     /// Complete edited parse facts before the view captures its validation
     /// epoch. Indexing during a leaf check would tear that epoch instead.
-    fn prepare_validation_inputs(&self, facts: &[FactVersionRef]) -> Result<(), usize>
+    fn prepare_validation_inputs(
+        &self,
+        facts: verter_session_query::facts::fact_set::FactsRef<'_>,
+    ) -> Result<(), usize>
     where
         L: RequestBoundLifecycle,
         Self: verter_type_engine::resolver_core::request_ports::OwnedLowering,
@@ -1597,7 +1600,8 @@ where
             verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: Vec<FactVersionRef>,
+        traced: &verter_session_query::facts::fact_set::FactSet,
+        extra: Vec<FactVersionRef>,
     ) -> Result<
         verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
         verter_audit::NonAdmissionReason,
@@ -1608,7 +1612,8 @@ where
         verter_type_engine::semantic_query_memo::semantic_graph_carrier(
             self.0.request_view(),
             roots,
-            facts,
+            traced,
+            extra,
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -1639,14 +1644,18 @@ where
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {
         verter_type_engine::count_resolver_context_call!("FactValidation::validates");
-        self.prepare_validation_inputs(std::slice::from_ref(fact))
-            .is_ok()
+        self.prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Slice(
+            std::slice::from_ref(fact),
+        ))
+        .is_ok()
             && self.0.request_view().validates(fact)
     }
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
         verter_type_engine::count_resolver_context_call!("FactValidation::validates_parse_domain");
-        self.prepare_validation_inputs(&[FactVersionRef::Parse(fact.clone())])
-            .is_ok()
+        self.prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Slice(&[
+            FactVersionRef::Parse(fact.clone()),
+        ]))
+        .is_ok()
             && self.0.request_view().validates_parse_domain(fact)
     }
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
@@ -1659,8 +1668,10 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_route_surface_domain"
         );
-        self.prepare_validation_inputs(&[FactVersionRef::RouteSurface(fact.clone())])
-            .is_ok()
+        self.prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Slice(&[
+            FactVersionRef::RouteSurface(fact.clone()),
+        ]))
+        .is_ok()
             && self.0.request_view().validates_route_surface_domain(fact)
     }
     fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
@@ -1737,7 +1748,10 @@ where
         verter_type_engine::count_resolver_context_call!("FactValidation::aggregate_basis_seed");
         self.0.request_view().aggregate_basis_seed()
     }
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(
+        &self,
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
+    ) -> bool {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_fact_signature"
         );
@@ -1746,7 +1760,7 @@ where
     }
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         verter_type_engine::count_resolver_context_call!("FactValidation::validate_fact_signature");
@@ -1757,7 +1771,7 @@ where
     }
     fn validates_fact_signature_with_self_roots(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> bool {
         verter_type_engine::count_resolver_context_call!(
@@ -1771,13 +1785,14 @@ where
     }
     fn validates_retained_signature_with_self_roots(
         &self,
-        sig: &Arc<[FactVersionRef]>,
+        sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_retained_signature_with_self_roots"
         );
-        self.prepare_validation_inputs(sig).is_ok()
+        self.prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Set(sig))
+            .is_ok()
             && self
                 .0
                 .request_view()

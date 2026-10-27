@@ -50,13 +50,13 @@ fn component_meta_outcome_from_tracer(
     let cache_refusal = match finalise {
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
             if let Some(resolved) = value.as_mut() {
-                resolved.fact_versions = facts.to_vec();
+                resolved.fact_versions = facts.iter().cloned().collect();
             }
             None
         }
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) => {
             if let Some(resolved) = value.as_mut() {
-                resolved.fact_versions = facts.to_vec();
+                resolved.fact_versions = facts.iter().cloned().collect();
             }
             Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }

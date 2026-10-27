@@ -147,6 +147,77 @@ fn late_owner_cannot_revive_an_unpolled_cancelled_aggregate() {
     assert!(aggregate.is_cancelled());
 }
 
+#[test]
+fn owner_batch_keeps_live_requests_in_either_order() {
+    for cancelled_first in [false, true] {
+        let aggregate = CancellationToken::aggregate();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let live = CancellationToken::new();
+        let requests = if cancelled_first {
+            [Some(cancelled), Some(live.clone())]
+        } else {
+            [Some(live.clone()), Some(cancelled)]
+        };
+        let (count, waker) = counting();
+        let mut waiting = aggregate.subscribe();
+        assert!(waiting.poll(&waker).is_pending());
+        let registrations = aggregate.register_owners(requests).unwrap();
+        assert_eq!(registrations.len(), 2);
+        assert!(registrations[usize::from(cancelled_first)]
+            .state
+            .request
+            .as_ref()
+            .unwrap()
+            .same_source(&live));
+        assert!(!aggregate.is_cancelled());
+        assert_eq!(wakes(&count), 0);
+        live.cancel();
+        assert!(waiting.poll(&waker).is_ready());
+        assert_eq!(wakes(&count), 1);
+        assert!(aggregate.register_owners([None]).is_none());
+        drop(registrations);
+        assert_eq!(registered(&live), 0);
+    }
+}
+
+#[test]
+fn owner_batch_preserves_ownerless_and_terminal_states() {
+    let aggregate = CancellationToken::aggregate();
+    assert!(aggregate.register_owners([]).unwrap().is_empty());
+    assert!(!aggregate.has_registered_owners());
+    assert!(!aggregate.is_cancelled());
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let mut registrations = aggregate
+        .register_owners([Some(cancelled.clone()), None])
+        .unwrap();
+    assert!(!aggregate.is_cancelled(), "an uncancellable owner is live");
+    drop(registrations.pop());
+    // No probe between the last live owner's detach and registration: the
+    // registration itself must discover the terminal gap, just as a single
+    // late owner does.
+    assert!(aggregate.register_owners([None]).is_none());
+    assert!(aggregate.is_cancelled());
+    drop(registrations);
+
+    let all_cancelled = CancellationToken::aggregate();
+    let (count, waker) = counting();
+    let mut waiting = all_cancelled.subscribe();
+    assert!(waiting.poll(&waker).is_pending());
+    let registrations = all_cancelled
+        .register_owners([Some(cancelled.clone()), Some(cancelled)])
+        .unwrap();
+    assert!(waiting.poll(&waker).is_ready());
+    assert_eq!(wakes(&count), 1);
+    assert!(all_cancelled.register_owners([None]).is_none());
+    drop(registrations);
+
+    let explicitly_cancelled = CancellationToken::aggregate();
+    explicitly_cancelled.cancel();
+    assert!(explicitly_cancelled.register_owners([None]).is_none());
+}
+
 fn examined(aggregate: &CancellationToken) -> u64 {
     aggregate
         .state

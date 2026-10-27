@@ -364,7 +364,7 @@ mod carrier {
                 crate::semantic_query::QueryError,
             >,
         > {
-            self.node_id.map(|node| self.roots.0.node_ref(node))
+            self.node_id.map(|node| self.roots.node_ref(node))
         }
 
         /// The accumulated dependency signature (facts-rail metadata — always
@@ -461,7 +461,7 @@ mod carrier {
 
     impl Clone for MaterializedOutputTypeExpr {
         fn clone(&self) -> Self {
-            self.roots.0.retain_for_construction();
+            self.roots.retain_for_construction();
             Self {
                 roots: self.roots.clone(),
                 node_id: self.node_id,
