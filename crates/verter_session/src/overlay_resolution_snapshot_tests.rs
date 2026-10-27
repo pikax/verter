@@ -462,21 +462,15 @@ fn concurrent_sessions_never_adopt_each_others_answers() {
                 .map(|_| resolve_through_host(&host, BARREL, "P"))
                 .collect::<Vec<_>>()
         });
-        assert!(creating
-            .join()
-            .unwrap()
-            .into_iter()
-            .all(|answer| answer == p_from_helper()));
-        assert!(without
-            .join()
-            .unwrap()
-            .into_iter()
-            .all(|answer| answer.is_none()));
-        assert!(workspace
-            .join()
-            .unwrap()
-            .into_iter()
-            .all(|answer| answer.is_none()));
+        for (view, answers, expected) in [
+            ("helper overlay", creating.join().unwrap(), p_from_helper()),
+            ("unrelated overlay", without.join().unwrap(), None),
+            ("workspace", workspace.join().unwrap(), None),
+        ] {
+            for (iteration, answer) in answers.into_iter().enumerate() {
+                assert_eq!(answer, expected, "{view}, request {iteration}");
+            }
+        }
     });
 }
 

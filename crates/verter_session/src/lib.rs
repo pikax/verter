@@ -227,6 +227,8 @@ mod value_symbol_depth_equivalence_tests;
 // `ReadSetSignature` — the return type of the public inspector
 // `compile_slot_fact_dep_signature` — selectively re-exported below.
 #[cfg(test)]
+mod fact_policy_test_support;
+#[cfg(test)]
 mod fact_signature_helpers_host_tests;
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 #[cfg(test)]

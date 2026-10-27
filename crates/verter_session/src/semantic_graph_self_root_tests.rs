@@ -1072,14 +1072,15 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
     );
 }
 
-/// A self-rooted carrier wider than a wide signature validates against the
-/// live view only while every fact holds: an edit to the file whose fact is
-/// LAST in canonical order misses the warm read exactly as an edit to the
-/// first does.
-#[test]
-fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
-    let host = host();
-    let width = 2 * WIDE_SIGNATURE_WIDTH + 3;
+/// A self-rooted carrier wider than its policy's fresh-slice width — a tree
+/// set — validates against the live view only while every fact holds: an
+/// edit to the file whose fact is LAST in canonical order misses the warm
+/// read exactly as an edit to the first does. The gate runs it on a host
+/// whose policy makes a 67-fact carrier wide; the nightly tier runs it at
+/// the production width.
+fn check_every_fact_of_a_wide_carrier(host: VerterHost) {
+    let policy = host.project_type_store().fact_policy();
+    let width = 2 * policy.fresh_slice_max() + 3;
     let paths: Vec<String> = (0..width)
         .map(|index| format!("/sg_self_root/wide/{index:05}.ts"))
         .collect();
@@ -1097,11 +1098,15 @@ fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
     };
     let carrier = ReadSetSignature::new(
         verter_session_query::facts::fact_read_set::seal_canonical_signature(
-            verter_session_query::facts::policy::FactPolicy::production(),
+            policy,
             observe(&host),
         ),
     );
     assert_eq!(carrier.facts.len(), width, "the carrier holds every fact");
+    assert!(
+        carrier.facts.tree_storage().is_some(),
+        "a carrier past the fresh-slice width is sealed into tree storage"
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(paths[0].as_str())]);
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
@@ -1115,6 +1120,14 @@ fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
         !carrier.validate_with_self_roots(ctx, &self_roots),
         "an edit to the file of the last fact must miss the warm read"
     );
+}
+
+#[test]
+fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
+    check_every_fact_of_a_wide_carrier(crate::fact_policy_test_support::standalone_host_under(
+        HostConfig::default(),
+        crate::fact_policy_test_support::narrow_storage(32),
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -3374,5 +3387,16 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             ),
             other => panic!("child-kept: expected the published Value, got {other:?}"),
         }
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier
+/// (`.config/nextest.toml`); the gate runs each one's narrow-policy version.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
+        check_every_fact_of_a_wide_carrier(host());
     }
 }
