@@ -2248,7 +2248,11 @@ impl Scheduler {
     /// hang guard only.
     #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
     #[doc(hidden)]
-    pub fn test_wait_until_job_queue_depth(&self, depth: usize, budget: std::time::Duration) -> bool {
+    pub fn test_wait_until_job_queue_depth(
+        &self,
+        depth: usize,
+        budget: std::time::Duration,
+    ) -> bool {
         let deadline = std::time::Instant::now() + budget;
         loop {
             // Note the re-drain count BEFORE reading the depth, so a re-drain landing in between
@@ -2256,6 +2260,9 @@ impl Scheduler {
             let seen = self.dispatch_pause.state.lock().redrains;
             if self.test_job_queue_depth() >= depth {
                 return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
             }
             let mut state = self.dispatch_pause.state.lock();
             while state.redrains == seen {
@@ -2290,6 +2297,10 @@ impl Scheduler {
         let mut state = self.dispatch_pause.state.lock();
         state.released = true;
         self.dispatch_pause.cv.notify_all();
+        drop(state);
+        // The parked driver blocks on the inbox; a wake there lets it see the release. A full
+        // inbox already holds a submission that wakes it.
+        let _ = self.inbox.sender.try_send(Submission::Wake);
     }
 
     /// Test-only: install the mid-batch admission seam hook. Fired once

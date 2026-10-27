@@ -456,8 +456,9 @@ fn threaded_drive_parks_on_the_driver_instead_of_inline_pumping() {
             );
         })
     };
-    // A drive that parks on the driver blocks on its handle; one that pumps inline never
-    // parks there and completes the work itself. The budget is a hang guard only.
+    // A drive that parks on the driver blocks in the handle's plain wait; one that pumps
+    // (inline, or through the cooperative pump's bounded waits) never parks there. The budget
+    // is a hang guard only.
     assert!(
         parked_on.test_wait_until_parked(1, Duration::from_secs(10)),
         "with the driver parked, a threaded drive must park on its handle rather than pump"

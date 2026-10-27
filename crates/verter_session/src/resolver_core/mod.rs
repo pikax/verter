@@ -4271,8 +4271,8 @@ mod tests {
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
         // Each leader computes only once both lanes are claimed, so the lanes always overlap. A
-        // caller that never computes (a coalescing regression) leaves the other to the hang
-        // guard, and the assertions below then fail rather than hang.
+        // caller that never computes (a coalescing regression) fails the other's rendezvous at
+        // the hang guard instead of hanging the test.
         let both_computing = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
 
         let handles: Vec<_> = [
@@ -4301,13 +4301,17 @@ mod tests {
                         let (computing, all_in) = &*both_computing;
                         *computing.lock().unwrap() += 1;
                         all_in.notify_all();
-                        let _ = all_in
+                        let (_computing, rendezvous) = all_in
                             .wait_timeout_while(
                                 computing.lock().unwrap(),
                                 Duration::from_secs(10),
                                 |n| *n < 2,
                             )
                             .unwrap();
+                        assert!(
+                            !rendezvous.timed_out(),
+                            "both leaders must be computing at once"
+                        );
                         Ok(token.epoch as usize)
                     })
                     .unwrap()
@@ -4932,8 +4936,8 @@ mod tests {
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
         // Each leader computes only once both lanes are claimed, so the lanes always overlap. A
-        // caller that never computes (a coalescing regression) leaves the other to the hang
-        // guard, and the assertions below then fail rather than hang.
+        // caller that never computes (a coalescing regression) fails the other's rendezvous at
+        // the hang guard instead of hanging the test.
         let both_computing = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
 
         let handles: Vec<_> = [
@@ -4962,13 +4966,17 @@ mod tests {
                         let (computing, all_in) = &*both_computing;
                         *computing.lock().unwrap() += 1;
                         all_in.notify_all();
-                        let _ = all_in
+                        let (_computing, rendezvous) = all_in
                             .wait_timeout_while(
                                 computing.lock().unwrap(),
                                 Duration::from_secs(10),
                                 |n| *n < 2,
                             )
                             .unwrap();
+                        assert!(
+                            !rendezvous.timed_out(),
+                            "both leaders must be computing at once"
+                        );
                         Ok(token.validity_fingerprint as usize)
                     })
                     .unwrap()

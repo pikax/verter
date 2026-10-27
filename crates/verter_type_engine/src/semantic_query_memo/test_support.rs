@@ -179,6 +179,9 @@ impl SemanticGraphStore {
             if self.test_inflight_strong_count(key) > more_than {
                 return true;
             }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
             let mut referenced = self.inflight_referenced.0.lock();
             while *referenced == seen {
                 if self

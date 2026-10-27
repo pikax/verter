@@ -264,9 +264,12 @@ struct CompletionSlot<T: Clone> {
     /// Each pending subscription's registration; taken by the completion
     /// that resolves the slot.
     wakers: WakerSet,
-    /// TEST-ONLY: threads currently parked in [`CompletionHandle::wait`] or `wait_timeout`.
+    /// TEST-ONLY: threads currently parked in [`CompletionHandle::wait`].
     #[cfg(any(test, feature = "test-support"))]
     parked: usize,
+    /// TEST-ONLY: threads currently parked in `wait_timeout`.
+    #[cfg(any(test, feature = "test-support"))]
+    timed_parked: usize,
 }
 
 /// Internal shared state between handle and sender.
@@ -304,6 +307,8 @@ pub fn completion_pair<T: Clone>() -> (CompletionHandle<T>, CompletionSender<T>)
             wakers: WakerSet::default(),
             #[cfg(any(test, feature = "test-support"))]
             parked: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            timed_parked: 0,
         }),
         condvar: Condvar::new(),
         #[cfg(any(test, feature = "test-support"))]
@@ -400,7 +405,7 @@ impl<T: Clone> CompletionHandle<T> {
     }
 
     /// TEST-ONLY: block until at least `waiters` threads are parked in
-    /// [`Self::wait`] or `wait_timeout` on this handle. Returns whether they parked before
+    /// [`Self::wait`] on this handle. Returns whether they parked before
     /// `budget` ran out; the budget is a hang guard only.
     #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
     #[doc(hidden)]
@@ -415,6 +420,26 @@ impl<T: Clone> CompletionHandle<T> {
                 .timed_out()
             {
                 return slot.parked >= waiters;
+            }
+        }
+        true
+    }
+
+    /// TEST-ONLY: block until at least `waiters` threads are parked in the
+    /// bounded `wait_timeout` on this handle. The budget is a hang guard only.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    #[doc(hidden)]
+    pub fn test_wait_until_timed_parked(&self, waiters: usize, budget: Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut slot = self.inner.slot.lock();
+        while slot.timed_parked < waiters {
+            if self
+                .inner
+                .parked_cv
+                .wait_until(&mut slot, deadline)
+                .timed_out()
+            {
+                return slot.timed_parked >= waiters;
             }
         }
         true
@@ -435,13 +460,13 @@ impl<T: Clone> CompletionHandle<T> {
         }
         #[cfg(any(test, feature = "test-support"))]
         {
-            slot.parked += 1;
+            slot.timed_parked += 1;
             self.inner.parked_cv.notify_all();
         }
         let result = self.inner.condvar.wait_for(&mut slot, timeout);
         #[cfg(any(test, feature = "test-support"))]
         {
-            slot.parked -= 1;
+            slot.timed_parked -= 1;
         }
         if result.timed_out() && slot.state.is_none() {
             None
@@ -754,7 +779,7 @@ mod tests {
         let h2 = handle.clone();
         // The signal arrives once the waiter is parked in wait_timeout().
         let t = std::thread::spawn(move || {
-            assert!(handle.test_wait_until_parked(1, Duration::from_secs(10)));
+            assert!(handle.test_wait_until_timed_parked(1, Duration::from_secs(10)));
             sender.send(CompletionState::Ready("ok"));
         });
         let observed = h2.wait_timeout(Duration::from_secs(5));

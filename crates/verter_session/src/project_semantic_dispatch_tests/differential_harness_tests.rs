@@ -2035,7 +2035,7 @@ fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
             work();
             let _ = sender.send(());
         });
-        await_row(&thread, &receiver, cpu_budget, backstop)
+        (await_row(&thread, &receiver, cpu_budget, backstop), thread)
     };
     let spin: fn() = || {
         let started = Instant::now();
@@ -2044,20 +2044,28 @@ fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
             n = std::hint::black_box(n.wrapping_add(1));
         }
     };
-    // A row that makes no progress at all: it parks and is never unparked.
-    let block: fn() = || loop {
-        std::thread::park();
+    // A row that makes no progress at all: it parks until the test, having observed the
+    // backstop, releases it.
+    static RELEASE_BLOCKED_ROW: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let block: fn() = || {
+        while !RELEASE_BLOCKED_ROW.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::park();
+        }
     };
     let answer: fn() = || {};
     let cpu_budget = Duration::from_millis(200);
     assert_eq!(
-        run(spin, cpu_budget, Duration::from_secs(4)),
+        run(spin, cpu_budget, Duration::from_secs(4)).0,
         Err(RowOverdue::Cpu(cpu_budget))
     );
-    let blocked = run(block, cpu_budget, Duration::from_millis(300));
+    let (blocked, blocked_row) = run(block, cpu_budget, Duration::from_millis(300));
+    RELEASE_BLOCKED_ROW.store(true, std::sync::atomic::Ordering::SeqCst);
+    blocked_row.thread().unpark();
+    blocked_row.join().expect("the released row returns");
     assert!(
         matches!(blocked, Err(RowOverdue::NoProgress(..))) || thread_cpu::SOURCE.is_none(),
         "{blocked:?}"
     );
-    assert_eq!(run(answer, cpu_budget, Duration::from_secs(4)), Ok(()));
+    assert_eq!(run(answer, cpu_budget, Duration::from_secs(4)).0, Ok(()));
 }
