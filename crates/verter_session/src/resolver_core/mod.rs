@@ -1878,6 +1878,10 @@ where
     /// that lock.
     #[cfg(test)]
     joiner_park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// TEST-ONLY: notified, under the `flights` lock, whenever a caller takes a reference to
+    /// an existing lane, so a test waits for a lane's strong count to rise without polling it.
+    #[cfg(any(test, feature = "test-support"))]
+    lane_joined: parking_lot::Condvar,
 }
 
 #[derive(Debug)]
@@ -2122,6 +2126,8 @@ where
             non_retained_seam_hook: SeamHookSlot::default(),
             #[cfg(test)]
             joiner_park_tx: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            lane_joined: parking_lot::Condvar::new(),
         }
     }
 
@@ -2155,6 +2161,8 @@ where
                 existing
                     .pins
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(any(test, feature = "test-support"))]
+                self.lane_joined.notify_all();
                 existing
             } else {
                 let state = Arc::new(FlightState {
@@ -2349,6 +2357,8 @@ where
                     existing
                         .pins
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.lane_joined.notify_all();
                     // Claim a Pending lane (created by a participation pin)
                     // by transitioning it to Running under this task.
                     let mut leader = false;
@@ -2599,6 +2609,37 @@ where
     /// Exposed under `cfg(any(test, feature = "test-support"))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can reach it
     /// transitively through the per-DB test-only accessors.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_wait_for_flight_strong_count(
+        &self,
+        key: &K,
+        token: StoreViewCompatToken,
+        more_than: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let lane_key = (key.clone(), token);
+        let deadline = std::time::Instant::now() + budget;
+        let count = |flights: &FlightTable<K, V, E>| {
+            flights
+                .lanes
+                .get(&lane_key)
+                .map(Arc::strong_count)
+                .unwrap_or(0)
+        };
+        let mut flights = self.flights.lock();
+        while count(&flights) <= more_than {
+            if self
+                .lane_joined
+                .wait_until(&mut flights, deadline)
+                .timed_out()
+            {
+                return count(&flights) > more_than;
+            }
+        }
+        true
+    }
+
+    /// Test-only: the strong count of the lane for `(key, token)` (0 when absent).
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_flight_strong_count(&self, key: &K, token: StoreViewCompatToken) -> usize {
         let lane_key = (key.clone(), token);
@@ -3314,12 +3355,16 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
+        // The leader's compute holds until the other caller has parked on its flight, so the
+        // two always overlap.
+        let joiner_parked = Arc::new(std::sync::Mutex::new(group.subscribe_joiner_park()));
 
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let group = Arc::clone(&group);
                 let start = Arc::clone(&start);
                 let computes = Arc::clone(&computes);
+                let joiner_parked = Arc::clone(&joiner_parked);
                 std::thread::spawn(move || {
                     start.wait();
                     group
@@ -3332,7 +3377,11 @@ mod tests {
                             },
                             || {
                                 computes.fetch_add(1, Ordering::SeqCst);
-                                std::thread::sleep(Duration::from_millis(50));
+                                joiner_parked
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(Duration::from_secs(10))
+                                    .expect("the other caller parks on the leader's flight");
                                 Ok(42)
                             },
                         )
@@ -4221,6 +4270,10 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
+        // Each leader computes only once both lanes are claimed, so the lanes always overlap. A
+        // caller that never computes (a coalescing regression) leaves the other to the hang
+        // guard, and the assertions below then fail rather than hang.
+        let both_computing = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
 
         let handles: Vec<_> = [
             StoreViewCompatToken {
@@ -4239,12 +4292,22 @@ mod tests {
             let group = Arc::clone(&group);
             let start = Arc::clone(&start);
             let computes = Arc::clone(&computes);
+            let both_computing = Arc::clone(&both_computing);
             std::thread::spawn(move || {
                 start.wait();
                 group
                     .run("node".to_string(), token, || {
                         computes.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(50));
+                        let (computing, all_in) = &*both_computing;
+                        *computing.lock().unwrap() += 1;
+                        all_in.notify_all();
+                        let _ = all_in
+                            .wait_timeout_while(
+                                computing.lock().unwrap(),
+                                Duration::from_secs(10),
+                                |n| *n < 2,
+                            )
+                            .unwrap();
                         Ok(token.epoch as usize)
                     })
                     .unwrap()
@@ -4868,6 +4931,10 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
+        // Each leader computes only once both lanes are claimed, so the lanes always overlap. A
+        // caller that never computes (a coalescing regression) leaves the other to the hang
+        // guard, and the assertions below then fail rather than hang.
+        let both_computing = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
 
         let handles: Vec<_> = [
             StoreViewCompatToken {
@@ -4886,12 +4953,22 @@ mod tests {
             let group = Arc::clone(&group);
             let start = Arc::clone(&start);
             let computes = Arc::clone(&computes);
+            let both_computing = Arc::clone(&both_computing);
             std::thread::spawn(move || {
                 start.wait();
                 group
                     .run("node".to_string(), token, || {
                         computes.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(50));
+                        let (computing, all_in) = &*both_computing;
+                        *computing.lock().unwrap() += 1;
+                        all_in.notify_all();
+                        let _ = all_in
+                            .wait_timeout_while(
+                                computing.lock().unwrap(),
+                                Duration::from_secs(10),
+                                |n| *n < 2,
+                            )
+                            .unwrap();
                         Ok(token.validity_fingerprint as usize)
                     })
                     .unwrap()

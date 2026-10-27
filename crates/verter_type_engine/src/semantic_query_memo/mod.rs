@@ -623,6 +623,15 @@ pub struct SemanticGraphStore {
     /// the production cooperative-wait path is unchanged.
     #[cfg(any(test, feature = "test-support"))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
+    /// TEST-ONLY: the lock and wake a joiner announces its suspension under, so a test can
+    /// wait for [`Self::joiner_on_condvar_count`] to rise without polling it.
+    #[cfg(any(test, feature = "test-support"))]
+    joiner_suspended: (parking_lot::Mutex<()>, parking_lot::Condvar),
+    /// TEST-ONLY: how many times a claimant has taken a reference to an in-flight entry,
+    /// announced on the paired condvar, so a test waits for an entry's strong count to rise
+    /// without polling it.
+    #[cfg(any(test, feature = "test-support"))]
+    inflight_referenced: (parking_lot::Mutex<u64>, parking_lot::Condvar),
     /// Direct-edge reverse index: each canonical names the evidence
     /// (carriers and receipts, cached or not) whose own facts read
     /// it, each consumed receipt names the evidence that consumed it, and
@@ -925,6 +934,10 @@ impl SemanticGraphStore {
             invalidate_canonical_inflight_abort_gate: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             joiner_on_condvar_count: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            joiner_suspended: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            inflight_referenced: Default::default(),
             canonical_to_entries,
             dep_signature_interner,
             project_dep_name,

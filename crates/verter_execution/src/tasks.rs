@@ -110,6 +110,9 @@ impl RegistryState {
 #[derive(Clone, Debug, Default)]
 pub struct TaskRegistry {
     state: Arc<Mutex<RegistryState>>,
+    /// TEST-ONLY: notified, under `state`, whenever a wait-for edge is registered.
+    #[cfg(any(test, feature = "test-support"))]
+    wait_registered: Arc<parking_lot::Condvar>,
 }
 
 /// Current occupancy of a registry's wait-for graph, read under one lock.
@@ -195,6 +198,8 @@ impl TaskRegistry {
             cursor = next;
         }
         state.link_wait(waiter, producer);
+        #[cfg(any(test, feature = "test-support"))]
+        self.wait_registered.notify_all();
         Ok(WaitEdge {
             registry: self.clone(),
             waiter,
@@ -281,6 +286,24 @@ impl TaskRegistry {
             .iter()
             .filter(|slot| slot.active)
             .count()
+    }
+
+    /// Wait until at least `edges` wait-for edges are registered. Edges are registered and
+    /// announced under one lock, so none is missed; the budget is a hang guard only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wait_for_wait_count_for_tests(&self, edges: usize, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut state = self.state.lock();
+        while state.waits.len() < edges {
+            if self
+                .wait_registered
+                .wait_until(&mut state, deadline)
+                .timed_out()
+            {
+                return state.waits.len() >= edges;
+            }
+        }
+        true
     }
 
     /// How many wait-for edges are registered.

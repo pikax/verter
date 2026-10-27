@@ -668,14 +668,20 @@ impl SemanticGraphStore {
             }
             let inflight = {
                 let mut table = self.site_inflight(attempt.site).lock();
-                table
+                let inflight = table
                     .entry(prepared.clone())
                     .or_insert_with(|| {
                         let mut cell = FlightCell::charged(self.retention_account());
                         cell.site = attempt.site;
                         Arc::new(cell)
                     })
-                    .clone()
+                    .clone();
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    *self.inflight_referenced.0.lock() += 1;
+                    self.inflight_referenced.1.notify_all();
+                }
+                inflight
             };
             {
                 let mut state = inflight.state.lock();
@@ -895,9 +901,13 @@ impl Subscription<'_> {
         // holds `state`, and either parks on the condvar, which atomically
         // releases `state`, or returns pending with its waker registered).
         #[cfg(any(test, feature = "test-support"))]
-        self.store
-            .joiner_on_condvar_count
-            .fetch_add(1, Ordering::SeqCst);
+        {
+            let _announce = self.store.joiner_suspended.0.lock();
+            self.store
+                .joiner_on_condvar_count
+                .fetch_add(1, Ordering::SeqCst);
+            self.store.joiner_suspended.1.notify_all();
+        }
         self.parked = Some(Parked {
             _edge: edge,
             #[cfg(feature = "semantic-observe")]

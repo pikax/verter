@@ -24,7 +24,6 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
@@ -45,19 +44,6 @@ defineProps<Props>()
   </div>
 </template>
 "#;
-
-/// Wait until the sampler has had at least `min_ticks` opportunities to
-/// fire (~50 ms each on the host-owned sampler thread). The wait is
-/// busy-loopless: `thread::sleep` honours the OS scheduler, so the
-/// sampler thread runs at least `min_ticks` times before this returns
-/// (modulo scheduler jitter).
-fn wait_for_sampler_ticks(min_ticks: u32) {
-    let dwell = Duration::from_millis(50 * u64::from(min_ticks) + 25);
-    let start = Instant::now();
-    while start.elapsed() < dwell {
-        thread::sleep(Duration::from_millis(20));
-    }
-}
 
 #[test]
 fn each_host_sampler_attributes_peak_only_to_its_own_request() {
@@ -95,10 +81,6 @@ fn each_host_sampler_attributes_peak_only_to_its_own_request() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-
-    // Force a quiet baseline before either request runs so the
-    // sampler can't latch onto cached state from a sibling test.
-    wait_for_sampler_ticks(1);
 
     // Run host_a's request on a worker thread that lingers in the
     // request scope long enough for the sampler to tick at least

@@ -3965,25 +3965,23 @@ const WINNER_ONLY_INFLIGHT_REFS: usize = 3;
 /// Each `execute_cooperative` caller clones the entry's `Arc` (step 3
 /// of the dispatch loop). While only the cold winner is mid-build the
 /// strong count is [`WINNER_ONLY_INFLIGHT_REFS`]; it rises by one once
-/// a joiner has joined. Polling that count is a deterministic
-/// alternative to a wall-clock `sleep`, which races the joiner under
-/// parallel test load — if a joiner-retry test aborted the entry
-/// before the joiner joined, the joiner would become a fresh winner
-/// and never retry, intermittently failing the test.
+/// a joiner has joined. Waiting on that count, rather than a wall-clock
+/// `sleep` that races the joiner under parallel test load, matters: if a
+/// joiner-retry test aborted the entry before the joiner joined, the
+/// joiner would become a fresh winner and never retry.
 ///
-/// The poll is bounded: it spins for at most ~10 s, then panics so a
-/// genuine hang fails loudly rather than blocking the suite forever.
+/// The wait is bounded at ~10 s and then panics, so a genuine hang fails
+/// loudly rather than blocking the suite forever.
 fn wait_for_joiner_admitted(store: &SemanticGraphStore, key: &SemanticQueryKey) {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while store.test_inflight_strong_count(key) <= WINNER_ONLY_INFLIGHT_REFS {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for a joiner to be admitted onto the \
-             in-flight entry (strong count never exceeded {WINNER_ONLY_INFLIGHT_REFS})",
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    assert!(
+        store.test_wait_for_inflight_strong_count(
+            key,
+            WINNER_ONLY_INFLIGHT_REFS,
+            std::time::Duration::from_secs(10)
+        ),
+        "timed out waiting for a joiner to be admitted onto the \
+         in-flight entry (strong count never exceeded {WINNER_ONLY_INFLIGHT_REFS})",
+    );
 }
 
 /// Block the calling (test) thread until at least one cooperative
@@ -3995,23 +3993,18 @@ fn wait_for_joiner_admitted(store: &SemanticGraphStore, key: &SemanticQueryKey) 
 /// joiner reaches `wait_while`. For a condvar-PAIRING test — one whose
 /// stated intent is that the joiner is genuinely parked on the condvar
 /// when the winner publishes — admitted-count is insufficient. This
-/// probe instead polls the store's `joiner_on_condvar_count`, which is
-/// incremented immediately before `wait_while`, so a return proves the
-/// joiner is committed to the condvar wait.
+/// probe instead waits on the store's `joiner_on_condvar_count`, which is
+/// raised (and announced) immediately before `wait_while`, so a return
+/// proves the joiner is committed to the condvar wait.
 ///
-/// The poll is bounded: it spins for at most ~10 s, then panics so a
-/// genuine hang fails loudly rather than blocking the suite forever.
+/// The wait is bounded at ~10 s and then panics, so a genuine hang fails
+/// loudly rather than blocking the suite forever.
 fn wait_for_joiner_on_condvar(store: &SemanticGraphStore) {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while store.test_joiner_on_condvar_count() == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for a joiner to suspend on the per-entry \
-             condvar (joiner_on_condvar_count never rose above 0)",
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    assert!(
+        store.test_wait_for_joiners_on_condvar(1, std::time::Duration::from_secs(10)),
+        "timed out waiting for a joiner to suspend on the per-entry \
+         condvar (joiner_on_condvar_count never rose above 0)",
+    );
 }
 
 /// Joiner threads cooperatively blocked on an in-flight condvar

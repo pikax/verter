@@ -78,6 +78,14 @@ impl SemanticGraphStore {
         self.produce_hook.lock().clone()
     }
 
+    /// Test-only: wait until at least `edges` wait-for edges are registered. The budget is a
+    /// hang guard only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wait_for_wait_edges_for_tests(&self, edges: usize, budget: std::time::Duration) -> bool {
+        self.task_registry
+            .wait_for_wait_count_for_tests(edges, budget)
+    }
+
     /// Test-only active execution-owner and wait-edge counts.
     #[cfg(any(test, feature = "test-support"))]
     pub fn wait_graph_counts_for_tests(&self) -> (usize, usize) {
@@ -153,6 +161,39 @@ impl SemanticGraphStore {
         table.get(&probe).map_or(0, Arc::strong_count)
     }
 
+    /// Test-only: wait until `key`'s in-flight entry has more than `more_than` strong
+    /// references, re-checking after each claimant takes one. The reference count is noted
+    /// before each read, so a reference taken in between is waited past rather than missed;
+    /// the budget is a hang guard only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn test_wait_for_inflight_strong_count(
+        &self,
+        key: &SemanticQueryKey,
+        more_than: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let seen = *self.inflight_referenced.0.lock();
+            if self.test_inflight_strong_count(key) > more_than {
+                return true;
+            }
+            let mut referenced = self.inflight_referenced.0.lock();
+            while *referenced == seen {
+                if self
+                    .inflight_referenced
+                    .1
+                    .wait_until(&mut referenced, deadline)
+                    .timed_out()
+                {
+                    drop(referenced);
+                    return self.test_inflight_strong_count(key) > more_than;
+                }
+            }
+        }
+    }
+
     /// Test-only observability accessor: the number of cooperative
     /// joiners that have reached the point of suspending on a per-entry
     /// `ready` condvar (the increment fires immediately before
@@ -172,6 +213,35 @@ impl SemanticGraphStore {
     pub fn test_joiner_on_condvar_count(&self) -> usize {
         self.joiner_on_condvar_count
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test-only: wait until [`Self::test_joiner_on_condvar_count`] reaches `joiners`. Each
+    /// joiner announces its suspension under one lock, so none is missed; the budget is a hang
+    /// guard only. Returns whether the count was reached.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn test_wait_for_joiners_on_condvar(
+        &self,
+        joiners: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let count = || {
+            self.joiner_on_condvar_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        let mut announced = self.joiner_suspended.0.lock();
+        while count() < joiners {
+            if self
+                .joiner_suspended
+                .1
+                .wait_until(&mut announced, deadline)
+                .timed_out()
+            {
+                return count() >= joiners;
+            }
+        }
+        true
     }
 
     /// Test-only observability accessor: how many joiners forked away from

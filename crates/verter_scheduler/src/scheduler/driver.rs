@@ -440,6 +440,8 @@ pub(super) struct DispatchPauseState {
     pub(super) consumed: bool,
     /// `true` once the test has released the parked driver.
     pub(super) released: bool,
+    /// How many inbox re-drains the parked driver has completed.
+    pub(super) redrains: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -479,6 +481,8 @@ impl DispatchPauseHook {
             drop(state);
             redrain();
             state = self.state.lock();
+            state.redrains += 1;
+            self.cv.notify_all();
             if state.released {
                 break;
             }

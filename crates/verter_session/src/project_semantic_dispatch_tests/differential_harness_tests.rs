@@ -2044,7 +2044,10 @@ fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
             n = std::hint::black_box(n.wrapping_add(1));
         }
     };
-    let block: fn() = || std::thread::sleep(Duration::from_secs(5));
+    // A row that makes no progress at all: it parks and is never unparked.
+    let block: fn() = || loop {
+        std::thread::park();
+    };
     let answer: fn() = || {};
     let cpu_budget = Duration::from_millis(200);
     assert_eq!(
