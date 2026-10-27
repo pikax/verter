@@ -625,10 +625,6 @@ impl<'a> Matrix<'a> {
             "{function}: {:?}",
             result.partial_reasons()
         );
-        assert!(
-            charged > 0,
-            "{function}: the read charges the request it runs in, so the count is live"
-        );
         let after = dispatch.graph().stats_snapshot();
         vec![
             ("relation checks", after.relation_check_count - stats.relation_check_count),

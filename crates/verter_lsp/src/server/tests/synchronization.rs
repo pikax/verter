@@ -1770,6 +1770,9 @@ async fn pending_snapshot_provider_sync_redrives_transiently_failed_source_after
         backoff_factor: 1,
         max_attempts: 50,
     };
+    let mut chains = drain
+        .carrier_transaction_coordinator
+        .subscribe_pending_redrive_chains();
     drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
 
     assert!(
@@ -1780,13 +1783,10 @@ async fn pending_snapshot_provider_sync_redrives_transiently_failed_source_after
     // The provider recovers (its replacement now serves).
     provider.set_fail_file_ops(false);
 
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    // The chain ends on its own once the queue drains (or at its attempt
+    // cap); its end is reported by the chain itself.
+    let drained = wait_for_redrive_chains_to_end(&mut chains, 1).await
+        && !pending_snapshot_provider_sync.contains("/workspace/src/App.vue");
     assert!(
         drained,
         "the bounded successor chain must re-drive the transiently failed source after recovery"
@@ -1853,23 +1853,15 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
         backoff_factor: 1,
         max_attempts: 2,
     };
+    let mut chains = drain
+        .carrier_transaction_coordinator
+        .subscribe_pending_redrive_chains();
     drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
 
     // Wait for the armed successor pass to run and the chain to end at its
-    // attempt cap: the provider call count stabilizes with the entry queued.
-    let stabilized = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut last = provider.file_sync_calls().len();
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let now = provider.file_sync_calls().len();
-            if now == last {
-                break;
-            }
-            last = now;
-        }
-    })
-    .await
-    .is_ok();
+    // attempt cap: the chain reports its own end. The timeout is a liveness
+    // watchdog, never the decision.
+    let stabilized = wait_for_redrive_chains_to_end(&mut chains, 1).await;
     assert!(stabilized, "the bounded chain must end at its attempt cap");
     assert!(
         pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
@@ -1882,10 +1874,17 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
     );
 
     // A coordinator-style plain arm — even after the provider recovers —
-    // must NOT restart a chain for the exhausted entry.
+    // must NOT restart a chain for the exhausted entry. The arm decides
+    // synchronously: a chain it starts is counted before it returns, so no
+    // chain started means no retry can follow.
     provider.set_fail_file_ops(false);
+    let before_wake = *chains.borrow();
     arm_pending_sync_redrive_once(&drain, redrive);
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(
+        *chains.borrow(),
+        before_wake,
+        "a plain wake must not start a chain for an entry that spent its chain budget"
+    );
     assert_eq!(
         provider.file_sync_calls().len(),
         budget_calls,
@@ -1900,13 +1899,8 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
     // engine-(re)start path's guarantee that a replacement gap longer than
     // one bounded chain cannot strand the parked sync.
     signal_pending_sync_redrive(&drain, redrive);
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    let drained = wait_for_redrive_chains_to_end(&mut chains, before_wake.started + 1).await
+        && !pending_snapshot_provider_sync.contains("/workspace/src/App.vue");
     assert!(
         drained,
         "the retry signal must re-arm the chain and settle the recovered entry"
@@ -1925,23 +1919,30 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
     let settled_calls = provider.file_sync_calls().len();
     provider.set_fail_file_ops(true);
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+    let before_new_work = *chains.borrow();
     arm_pending_sync_redrive_once(&drain, redrive);
-    let attempted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if provider.file_sync_calls().len() > settled_calls
-                || !pending_snapshot_provider_sync.contains("/workspace/src/App.vue")
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    let attempted = wait_for_redrive_chains_to_end(&mut chains, before_new_work.started + 1).await
+        && (provider.file_sync_calls().len() > settled_calls
+            || !pending_snapshot_provider_sync.contains("/workspace/src/App.vue"));
     assert!(
         attempted,
         "work queued after the last exhaustion stays eligible for a plain arm"
     );
+}
+
+/// Wait until at least `started` re-drive chains were spawned and every
+/// spawned chain has ended. `false` when that does not happen within a
+/// generous liveness watchdog.
+async fn wait_for_redrive_chains_to_end(
+    chains: &mut tokio::sync::watch::Receiver<crate::external_ts::PendingRedriveChains>,
+    started: u64,
+) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        chains.wait_for(|chains| chains.started >= started && chains.finished == chains.started),
+    )
+    .await
+    .is_ok_and(|changed| changed.is_ok())
 }
 
 /// DISCRIMINATING: a retry signal (an engine start repairing the inputs the
@@ -1999,6 +2000,7 @@ async fn pending_sync_redrive_signal_landing_during_a_pass_is_not_swallowed() {
         backoff_factor: 1,
         max_attempts: 2,
     };
+    let mut chains = carrier_transaction_coordinator.subscribe_pending_redrive_chains();
     drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
     assert!(
         pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
@@ -2035,14 +2037,11 @@ async fn pending_sync_redrive_signal_landing_during_a_pass_is_not_swallowed() {
     }
 
     // No further signal is issued by the test: the chain itself must hand the
-    // mid-pass signal its fresh chain, which settles the recovered entry.
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    // mid-pass signal its fresh chain, which settles the recovered entry. A
+    // chain starts its successor before it reports its own end, so once every
+    // started chain has ended the handover has run its course.
+    let drained = wait_for_redrive_chains_to_end(&mut chains, 1).await
+        && !pending_snapshot_provider_sync.contains("/workspace/src/App.vue");
     assert!(
         drained,
         "a retry signal landing mid-pass must not be swallowed by the chain's exhaustion record"
@@ -10892,6 +10891,12 @@ async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() 
     // the caller asserts on, and the first the client replays — last.
     let gate = fixture.provider.gate_diagnostics();
     fixture.provider.clear_calls();
+    // Every open's quiet window has elapsed by the time the tickets drop: the
+    // window is zero for this coordinator, so the whole replay is ranked at
+    // once without waiting a real window out.
+    server
+        .sync_coordinator
+        .set_quiet_window_for_test(std::time::Duration::ZERO);
     let held: Vec<_> = docs
         .iter()
         .map(|(id, _)| server.sync_coordinator.change_received(id.clone()))
@@ -10910,7 +10915,26 @@ async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() 
         )
         .await;
     }
-    tokio::time::sleep(crate::edit_quiet_window::EDIT_QUIET_WINDOW * 2).await;
+    // Each open also queues its carrier's provider sync for the background
+    // drain. That sync advances the document's compile generation, which
+    // supersedes a pull the coordinator started before it and re-queues the
+    // document as the newest work, so every replayed open's queued sync has
+    // drained before the replay is ranked.
+    await_after_drain_passes(
+        server,
+        || {
+            docs.iter()
+                .all(|(id, _)| !server.pending_snapshot_provider_sync.contains(id))
+        },
+        "every replayed open's queued provider sync must drain",
+    )
+    .await;
+    // The other re-queue source, a semantic-ready event, cannot fire: this
+    // client asked for no native semantic enrichment.
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "precondition: no semantic-ready event may re-queue a pulled document"
+    );
     for ticket in held.into_iter().rev() {
         drop(ticket);
     }

@@ -3847,7 +3847,11 @@ async fn debounced_sync_only_syncs_latest() {
     let canonical_id = "C:/project/src/App.vue".to_string();
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
 
-    // Simulate 5 rapid "changes" — each increments gen and spawns a debounced task
+    // Simulate 5 rapid "changes" — each increments gen and spawns a debounced
+    // task. A task's debounce window closes when the test says so, which is
+    // after every change: no task can check its generation before the last
+    // bump, however the runtime schedules them.
+    let (window_closed, window) = tokio::sync::watch::channel(false);
     let mut handles = Vec::new();
     for i in 0..5u64 {
         needs_sync.insert(canonical_id.clone());
@@ -3862,8 +3866,9 @@ async fn debounced_sync_only_syncs_latest() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let content = format!("version {i}");
+        let mut window = window.clone();
         handles.push(tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = window.wait_for(|closed| *closed).await;
             if gen_map.get(&cid).map(|v| *v) != Some(gen) {
                 return; // Stale
             }
@@ -3872,8 +3877,10 @@ async fn debounced_sync_only_syncs_latest() {
         }));
     }
 
+    window_closed.send_replace(true);
+
     // Deterministically wait for every debounced task to run to
-    // completion (its debounce delay + the supersession check + any
+    // completion (its debounce window + the supersession check + any
     // sync), then assert on the settled call set. Joining the spawned
     // tasks replaces a fixed 300ms "hope they're done" sleep — under
     // load a task could outlast the window and the call count would race.
@@ -3924,10 +3931,11 @@ async fn debounced_sync_skipped_when_superseded() {
     // Spawn debounced task with gen=1
     needs_sync.insert(canonical_id.clone());
     sync_gen.insert(canonical_id.clone(), 1);
-    // Immediately bump gen to 2 (simulating another keystroke) BEFORE
-    // the task's debounce delay elapses, so the gen=1 task observes the
-    // supersession and skips its sync. The bump happens before the
-    // spawn yields, guaranteeing the ordering deterministically.
+    // Bump gen to 2 (simulating another keystroke) BEFORE the task's
+    // debounce window closes, so the gen=1 task observes the supersession
+    // and skips its sync. The window closes on the test's signal after the
+    // bump, so the ordering is decided rather than raced.
+    let (window_closed, mut window) = tokio::sync::watch::channel(false);
     let handle = {
         let sync_clone = sync.clone();
         let needs_clone = Arc::clone(&needs_sync);
@@ -3935,7 +3943,7 @@ async fn debounced_sync_skipped_when_superseded() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let h = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = window.wait_for(|closed| *closed).await;
             if gen_map.get(&cid).map(|v| *v) != Some(1) {
                 return; // Stale
             }
@@ -3945,6 +3953,8 @@ async fn debounced_sync_skipped_when_superseded() {
         sync_gen.insert(canonical_id.clone(), 2);
         h
     };
+    // The task's debounce window closes only after the bump.
+    window_closed.send_replace(true);
 
     // Deterministically wait for the superseded task to run to
     // completion, then assert no sync fired. Joining the task replaces a
@@ -4037,7 +4047,9 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     let canonical_id = "C:/project/src/App.vue".to_string();
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
 
-    // Simulate 5 rapid changes (each marks dirty + increments gen + spawns debounced task)
+    // Simulate 5 rapid changes (each marks dirty + increments gen + spawns
+    // debounced task). The debounce windows close on the test's signal.
+    let (window_closed, window) = tokio::sync::watch::channel(false);
     let mut handles = Vec::new();
     for i in 0..5u64 {
         needs_sync.insert(canonical_id.clone());
@@ -4052,8 +4064,9 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let content = format!("version {i}");
+        let mut window = window.clone();
         handles.push(tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = window.wait_for(|closed| *closed).await;
             if gen_map.get(&cid).map(|v| *v) != Some(gen) {
                 return;
             }
@@ -4063,11 +4076,12 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     }
 
     // Immediately after the 5th change, simulate the completion flush
-    // (the interactive dirty-flag flush equivalent). This runs before any
-    // debounced task's delay elapses, so it is the first sync call.
+    // (the interactive dirty-flag flush equivalent). It runs before any
+    // debounced task's window closes, so it is the first sync call.
     if needs_sync.remove(&canonical_id).is_some() {
         let _ = sync.sync_tsx(&tsx_path, "latest for completion").await;
     }
+    window_closed.send_replace(true);
 
     // Deterministically wait for every debounced task to resolve, then
     // assert on the settled call set. Joining the tasks replaces a fixed
@@ -4251,8 +4265,7 @@ fn consecutive_failure_counter_tracks_correctly() {
 /// Assertion: canary did NOT run while workers were blocked → starvation confirmed.
 #[test]
 fn rwlock_contention_starves_runtime() {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4266,51 +4279,48 @@ fn rwlock_contention_starves_runtime() {
     let guard = lock.lock().unwrap();
 
     // Track how many tasks have reached the blocking lock.lock() call.
-    let started = Arc::new(AtomicU32::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
 
     // Spawn 2 tasks (= number of worker threads). Each blocks a worker thread.
     for _ in 0..2 {
         let lock = Arc::clone(&lock);
-        let started = Arc::clone(&started);
+        let started_tx = started_tx.clone();
         rt.spawn(async move {
-            started.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
             // This blocks the worker thread (std::sync::Mutex::lock is blocking).
             // Simulates host.upsert() holding std::sync::RwLock write lock.
             let _g = lock.lock().unwrap();
         });
     }
 
-    // Wait (bounded) until both worker threads are blocked on the lock.
-    // Panics on a real stall instead of spinning forever.
-    let block_deadline = Instant::now() + Duration::from_secs(10);
-    while started.load(Ordering::SeqCst) < 2 {
-        assert!(
-            Instant::now() < block_deadline,
-            "timed out waiting for both worker tasks to reach the blocking lock"
-        );
-        std::thread::sleep(Duration::from_millis(1));
+    // Wait until both tasks report reaching the blocking lock; the receive
+    // timeout is a hang guard only.
+    for _ in 0..2 {
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("timed out waiting for both worker tasks to reach the blocking lock");
     }
     // Both workers have reached lock.lock() and are now blocked.
 
     // Canary: a trivial task that can only run if a worker thread is free.
-    let canary_ran = Arc::new(AtomicBool::new(false));
-    let canary_flag = Arc::clone(&canary_ran);
+    let (canary_tx, canary_rx) = std::sync::mpsc::channel::<()>();
     rt.spawn(async move {
-        canary_flag.store(true, Ordering::SeqCst);
+        let _ = canary_tx.send(());
     });
 
-    // Negative-evidence window: the test thread holds `guard`, so BOTH
-    // worker tasks are permanently parked on `lock.lock()` and no worker
-    // can pick up the canary. The canary therefore cannot run for as
-    // long as the guard is held — this is a deterministic outcome, not a
-    // timing gamble. A short bounded window gives the runtime a fair
-    // scheduling opportunity to (fail to) run the canary before we
-    // assert.
-    std::thread::sleep(Duration::from_millis(100));
+    // The test thread holds `guard`, so BOTH worker tasks are parked on
+    // `lock.lock()` inside their first poll and no worker can pick up the
+    // canary: it sits in the runtime's global queue for as long as the guard
+    // is held. That queue state is the evidence, read directly.
+    assert_eq!(
+        rt.metrics().global_queue_depth(),
+        1,
+        "the canary must be queued with no worker free to take it"
+    );
 
     // ASSERT: canary did NOT run — all worker threads are blocked → runtime starved.
     assert!(
-        !canary_ran.load(Ordering::SeqCst),
+        canary_rx.try_recv().is_err(),
         "BUG REPRODUCED: canary task could not run because all 2 worker threads \
          are blocked on std::sync::Mutex (simulating host's std::sync::RwLock). \
          In production, this is the freeze: fast typing → concurrent did_change \
@@ -4318,18 +4328,13 @@ fn rwlock_contention_starves_runtime() {
     );
 
     // Cleanup: release the lock → workers unblock → canary runs → runtime
-    // recovers. Poll for the canary deterministically instead of sleeping
-    // a fixed window; panic on a real hang.
+    // recovers. Wait for the canary's own signal; the receive timeout is a
+    // hang guard only.
     drop(guard);
-    let recover_deadline = Instant::now() + Duration::from_secs(10);
-    while !canary_ran.load(Ordering::SeqCst) {
-        assert!(
-            Instant::now() < recover_deadline,
-            "canary should run after the blocking lock is released, but it \
-             never did within the recovery window"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    canary_rx.recv_timeout(Duration::from_secs(10)).expect(
+        "canary should run after the blocking lock is released, but it \
+             never did within the recovery window",
+    );
 }
 
 /// Proves the fix: serializing `did_change` handlers with `tokio::sync::Mutex`
@@ -4344,8 +4349,7 @@ fn rwlock_contention_starves_runtime() {
 /// - Canary runs on worker 2 → no starvation!
 #[test]
 fn serialized_handlers_prevent_runtime_starvation() {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4356,7 +4360,7 @@ fn serialized_handlers_prevent_runtime_starvation() {
     let lock = Arc::new(std::sync::Mutex::new(()));
     let guard = lock.lock().unwrap();
 
-    let started = Arc::new(AtomicU32::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
     let tokio_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
     // Same 2 tasks, but gated by tokio::sync::Mutex (the fix).
@@ -4364,49 +4368,38 @@ fn serialized_handlers_prevent_runtime_starvation() {
     // awaits the tokio mutex and YIELDS its worker thread.
     for _ in 0..2 {
         let lock = Arc::clone(&lock);
-        let started = Arc::clone(&started);
+        let started_tx = started_tx.clone();
         let tokio_mutex = Arc::clone(&tokio_mutex);
         rt.spawn(async move {
             // This .await YIELDS the worker thread if the mutex is held.
             let _tg = tokio_mutex.lock().await;
-            started.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
             // Only 1 task reaches here at a time.
             let _g = lock.lock().unwrap();
         });
     }
 
-    // Wait (bounded) for exactly 1 task to reach the blocking lock (the
-    // other is yielded). Panics on a real stall instead of spinning.
-    let start_deadline = Instant::now() + Duration::from_secs(10);
-    while started.load(Ordering::SeqCst) < 1 {
-        assert!(
-            Instant::now() < start_deadline,
-            "timed out waiting for the first task to reach the blocking lock"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    // Wait for exactly 1 task to report reaching the blocking lock (the
+    // other is yielded); the receive timeout is a hang guard only.
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("timed out waiting for the first task to reach the blocking lock");
     // Task 1: blocked on lock (worker 1 blocked)
     // Task 2: awaiting tokio_mutex (worker 2 FREE — yielded back to scheduler)
 
-    let canary_ran = Arc::new(AtomicBool::new(false));
-    let canary_flag = Arc::clone(&canary_ran);
+    let (canary_tx, canary_rx) = std::sync::mpsc::channel::<()>();
     rt.spawn(async move {
-        canary_flag.store(true, Ordering::SeqCst);
+        let _ = canary_tx.send(());
     });
 
     // ASSERT: canary DID run — worker 2 is free because tokio::sync::Mutex
-    // yields. Poll for the canary deterministically (panic on a real
-    // hang) instead of sleeping a fixed window and hoping.
-    let canary_deadline = Instant::now() + Duration::from_secs(10);
-    while !canary_ran.load(Ordering::SeqCst) {
-        assert!(
-            Instant::now() < canary_deadline,
-            "FIX VERIFIED expectation FAILED: canary task should have run \
+    // yields. The canary signals when it runs; the receive timeout is a hang
+    // guard only.
+    canary_rx.recv_timeout(Duration::from_secs(10)).expect(
+        "FIX VERIFIED expectation FAILED: canary task should have run \
              because tokio::sync::Mutex serialization keeps one worker thread \
-             free, but it never ran within the window."
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+             free, but it never ran within the window.",
+    );
 
     drop(guard);
 }
@@ -4564,8 +4557,7 @@ function reset() {{ count.value = 0 }}
 /// `block_in_place()` is necessary.
 #[test]
 fn runtime_liveness_under_blocking_host_operations() {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4599,18 +4591,18 @@ const msg = ref('hello')
     let gate = Arc::new(std::sync::Mutex::new(()));
     let gate_guard = gate.lock().unwrap();
 
-    let started = Arc::new(AtomicU32::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
 
     // Spawn 2 tasks (= worker_threads) that block their worker thread.
     // These simulate concurrent did_change handlers that call did_change_incremental()
     // which blocks on the host's internal write lock.
     for _ in 0..2 {
         let gate = Arc::clone(&gate);
-        let started = Arc::clone(&started);
+        let started_tx = started_tx.clone();
         let reg = Arc::clone(&registry);
         let u = uri.clone();
         rt.spawn(async move {
-            started.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
             // Simulate the blocking portion of did_change_incremental:
             // 1. First do a real registry operation (fast)
             let _ = reg.get_ide(&u);
@@ -4621,55 +4613,48 @@ const msg = ref('hello')
         });
     }
 
-    // Wait (bounded) until both worker threads are blocked. Panics on a
-    // real stall instead of spinning forever.
-    let block_deadline = Instant::now() + Duration::from_secs(10);
-    while started.load(Ordering::SeqCst) < 2 {
-        assert!(
-            Instant::now() < block_deadline,
-            "timed out waiting for both worker tasks to block on the gate"
-        );
-        std::thread::sleep(Duration::from_millis(1));
+    // Wait until both tasks report reaching the gate; the receive timeout is
+    // a hang guard only.
+    for _ in 0..2 {
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("timed out waiting for both worker tasks to block on the gate");
     }
 
     // Canary: a timer task that should fire if any worker thread is available.
     // With block_in_place(), tokio spawns replacement workers → canary fires.
     // Without block_in_place(), both workers are blocked → canary can't fire.
-    let canary_ran = Arc::new(AtomicBool::new(false));
-    let canary_flag = Arc::clone(&canary_ran);
+    let (canary_tx, canary_rx) = std::sync::mpsc::channel::<()>();
     rt.spawn(async move {
-        canary_flag.store(true, Ordering::SeqCst);
+        let _ = canary_tx.send(());
     });
 
-    // Negative-evidence window: the test thread holds `gate_guard`, so
-    // both worker tasks are permanently parked on `gate.lock()` and no
-    // worker can run the canary. The canary cannot fire while the guard
-    // is held — a deterministic outcome, not a timing gamble. A short
-    // bounded window gives the runtime a fair scheduling opportunity to
-    // (fail to) run the canary before we assert.
-    std::thread::sleep(Duration::from_millis(100));
+    // The test thread holds `gate_guard`, so both worker tasks are parked on
+    // `gate.lock()` inside their first poll and no worker can run the
+    // canary: it sits in the runtime's global queue for as long as the guard
+    // is held. That queue state is the evidence, read directly.
+    assert_eq!(
+        rt.metrics().global_queue_depth(),
+        1,
+        "the canary must be queued with no worker free to take it"
+    );
 
     // ASSERT: canary did NOT run — runtime is starved.
     // This proves that blocking host operations without block_in_place() is unsafe.
     assert!(
-        !canary_ran.load(Ordering::SeqCst),
+        canary_rx.try_recv().is_err(),
         "canary should NOT run while both worker threads are blocked — \
          this proves blocking host operations (did_change_incremental, upsert) \
          without block_in_place() causes runtime starvation"
     );
 
-    // Cleanup: release gate → workers unblock → canary runs. Poll for the
-    // canary deterministically (panic on a real hang) instead of sleeping.
+    // Cleanup: release gate → workers unblock → canary runs. Wait for the
+    // canary's own signal; the receive timeout is a hang guard only.
     drop(gate_guard);
-    let recover_deadline = Instant::now() + Duration::from_secs(10);
-    while !canary_ran.load(Ordering::SeqCst) {
-        assert!(
-            Instant::now() < recover_deadline,
-            "canary should run after the blocking gate is released, but it \
-             never did within the recovery window"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    canary_rx.recv_timeout(Duration::from_secs(10)).expect(
+        "canary should run after the blocking gate is released, but it \
+             never did within the recovery window",
+    );
 }
 
 /// Prove the fix: wrapping blocking host operations in `block_in_place()` prevents
@@ -4680,8 +4665,7 @@ const msg = ref('hello')
 /// `block_in_place()` — the canary task SHOULD run even while operations block.
 #[test]
 fn block_in_place_prevents_runtime_starvation() {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4713,16 +4697,16 @@ const msg = ref('hello')
     let gate = Arc::new(std::sync::Mutex::new(()));
     let gate_guard = gate.lock().unwrap();
 
-    let started = Arc::new(AtomicU32::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
 
     // Same as above, but with block_in_place() wrapping the blocking operation.
     for _ in 0..2 {
         let gate = Arc::clone(&gate);
-        let started = Arc::clone(&started);
+        let started_tx = started_tx.clone();
         let reg = Arc::clone(&registry);
         let u = uri.clone();
         rt.spawn(async move {
-            started.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
             // block_in_place() tells tokio to move pending tasks off this thread
             // before blocking, preventing worker thread exhaustion.
             tokio::task::block_in_place(|| {
@@ -4732,38 +4716,28 @@ const msg = ref('hello')
         });
     }
 
-    // Wait (bounded) until both tasks have started (and called
-    // block_in_place). Panics on a real stall instead of spinning.
-    let start_deadline = Instant::now() + Duration::from_secs(10);
-    while started.load(Ordering::SeqCst) < 2 {
-        assert!(
-            Instant::now() < start_deadline,
-            "timed out waiting for both tasks to start and call block_in_place"
-        );
-        std::thread::sleep(Duration::from_millis(1));
+    // Wait until both tasks report starting (and calling block_in_place);
+    // the receive timeout is a hang guard only.
+    for _ in 0..2 {
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("timed out waiting for both tasks to start and call block_in_place");
     }
 
     // Canary: should run because block_in_place() freed up worker threads.
-    let canary_ran = Arc::new(AtomicBool::new(false));
-    let canary_flag = Arc::clone(&canary_ran);
+    let (canary_tx, canary_rx) = std::sync::mpsc::channel::<()>();
     rt.spawn(async move {
-        canary_flag.store(true, Ordering::SeqCst);
+        let _ = canary_tx.send(());
     });
 
-    // ASSERT: canary DID run — block_in_place() prevented starvation. Poll
-    // for the canary deterministically: this also subsumes the wait for
-    // tokio to provision a replacement worker. Panics on a real hang
-    // instead of sleeping a fixed window and hoping.
-    let canary_deadline = Instant::now() + Duration::from_secs(10);
-    while !canary_ran.load(Ordering::SeqCst) {
-        assert!(
-            Instant::now() < canary_deadline,
-            "canary SHOULD run because block_in_place() allows tokio to spawn \
+    // ASSERT: canary DID run — block_in_place() prevented starvation. The canary
+    // signals when it runs, which also covers tokio provisioning a
+    // replacement worker; the receive timeout is a hang guard only.
+    canary_rx.recv_timeout(Duration::from_secs(10)).expect(
+        "canary SHOULD run because block_in_place() allows tokio to spawn \
              replacement workers while the original threads are blocked, but it \
-             never ran within the window."
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+             never ran within the window.",
+    );
 
     // Cleanup
     drop(gate_guard);

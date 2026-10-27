@@ -483,10 +483,10 @@ impl ResolutionFactKey {
 
     /// The importer canonical owned by a derived decision node.
     #[must_use]
-    pub fn owner_canonical(&self) -> Option<&str> {
+    pub fn owner_canonical(&self) -> Option<&CanonicalResolutionId> {
         match self {
             Self::Decision { query } => match &query.entry {
-                ResolutionEntry::Importer(canonical) => Some(canonical.as_str()),
+                ResolutionEntry::Importer(canonical) => Some(canonical),
                 ResolutionEntry::ExplicitProject(_) => None,
             },
             _ => None,

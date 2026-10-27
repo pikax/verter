@@ -31243,8 +31243,25 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     );
 }
 
+/// The same cold mapped-type demand over a 4,100-deep finite `KeyOf` chain on
+/// an 896 KiB thread: the gate version of the 10,000-deep test in the nightly
+/// scale tier. The chain is still past the structural depth-fuse cap
+/// (`MAX_DEPTH`, 4,096), so depth alone is shown not to be a limit, and with
+/// the demand's measured 192 to 256 KiB fixed need, 896 KiB allows at most
+/// 0.17 KiB a level, no more than the 2 MiB test thread allows over 10,000.
 #[test]
-fn real_query_deep_finite_nested_demand_completes_and_warms() {
+fn real_query_deep_finite_nested_demand_past_the_depth_cap_completes_and_warms() {
+    std::thread::Builder::new()
+        .stack_size(896 << 10)
+        .spawn(|| deep_finite_nested_demand_completes_and_warms_at(4_100))
+        .expect("spawn the demand thread")
+        .join()
+        .expect("the demand completes");
+}
+
+/// A cold `MappedType` demand whose per-key value is a `depth`-deep finite
+/// `KeyOf` chain completes, stays admissible and warms on repeat.
+fn deep_finite_nested_demand_completes_and_warms_at(depth: usize) {
     // REAL-QUERY structural-depth control. Drive a cold `MappedType` query whose
     // per-key value is a 10,000-deep finite `KeyOf` chain. The heap evaluator must
     // materialise it as Complete: structural depth alone is not an operational
@@ -31255,7 +31272,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mut current = leaf;
-    for _ in 0..10_000 {
+    for _ in 0..depth {
         current = graph.intern_node(SemanticNodeData::KeyOf { base: current });
     }
     let deep_value = current;
@@ -34601,5 +34618,16 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
                 0
             );
         }
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn real_query_deep_finite_nested_demand_completes_and_warms() {
+        deep_finite_nested_demand_completes_and_warms_at(10_000);
     }
 }
