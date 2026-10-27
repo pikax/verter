@@ -1770,6 +1770,9 @@ async fn pending_snapshot_provider_sync_redrives_transiently_failed_source_after
         backoff_factor: 1,
         max_attempts: 50,
     };
+    let mut chains = drain
+        .carrier_transaction_coordinator
+        .subscribe_pending_redrive_chains();
     drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
 
     assert!(
@@ -1780,13 +1783,10 @@ async fn pending_snapshot_provider_sync_redrives_transiently_failed_source_after
     // The provider recovers (its replacement now serves).
     provider.set_fail_file_ops(false);
 
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    // The chain ends on its own once the queue drains (or at its attempt
+    // cap); its end is reported by the chain itself.
+    let drained = wait_for_redrive_chains_to_end(&mut chains, 1).await
+        && !pending_snapshot_provider_sync.contains("/workspace/src/App.vue");
     assert!(
         drained,
         "the bounded successor chain must re-drive the transiently failed source after recovery"
@@ -2000,6 +2000,7 @@ async fn pending_sync_redrive_signal_landing_during_a_pass_is_not_swallowed() {
         backoff_factor: 1,
         max_attempts: 2,
     };
+    let mut chains = carrier_transaction_coordinator.subscribe_pending_redrive_chains();
     drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
     assert!(
         pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
@@ -2036,14 +2037,11 @@ async fn pending_sync_redrive_signal_landing_during_a_pass_is_not_swallowed() {
     }
 
     // No further signal is issued by the test: the chain itself must hand the
-    // mid-pass signal its fresh chain, which settles the recovered entry.
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    // mid-pass signal its fresh chain, which settles the recovered entry. A
+    // chain starts its successor before it reports its own end, so once every
+    // started chain has ended the handover has run its course.
+    let drained = wait_for_redrive_chains_to_end(&mut chains, 1).await
+        && !pending_snapshot_provider_sync.contains("/workspace/src/App.vue");
     assert!(
         drained,
         "a retry signal landing mid-pass must not be swallowed by the chain's exhaustion record"
@@ -10893,6 +10891,12 @@ async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() 
     // the caller asserts on, and the first the client replays — last.
     let gate = fixture.provider.gate_diagnostics();
     fixture.provider.clear_calls();
+    // Every open's quiet window has elapsed by the time the tickets drop: the
+    // window is zero for this coordinator, so the whole replay is ranked at
+    // once without waiting a real window out.
+    server
+        .sync_coordinator
+        .set_quiet_window_for_test(std::time::Duration::ZERO);
     let held: Vec<_> = docs
         .iter()
         .map(|(id, _)| server.sync_coordinator.change_received(id.clone()))
@@ -10911,7 +10915,26 @@ async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() 
         )
         .await;
     }
-    tokio::time::sleep(crate::edit_quiet_window::EDIT_QUIET_WINDOW * 2).await;
+    // Each open also queues its carrier's provider sync for the background
+    // drain. That sync advances the document's compile generation, which
+    // supersedes a pull the coordinator started before it and re-queues the
+    // document as the newest work, so every replayed open's queued sync has
+    // drained before the replay is ranked.
+    await_after_drain_passes(
+        server,
+        || {
+            docs.iter()
+                .all(|(id, _)| !server.pending_snapshot_provider_sync.contains(id))
+        },
+        "every replayed open's queued provider sync must drain",
+    )
+    .await;
+    // The other re-queue source, a semantic-ready event, cannot fire: this
+    // client asked for no native semantic enrichment.
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "precondition: no semantic-ready event may re-queue a pulled document"
+    );
     for ticket in held.into_iter().rev() {
         drop(ticket);
     }

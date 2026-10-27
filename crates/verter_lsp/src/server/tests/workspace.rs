@@ -1750,16 +1750,7 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
     // Fence on the LAST revision being committed. Waiting longer can only let
     // more commit-path compiles land, so it cannot turn a real per-notification
     // compile into a pass.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "precondition: every queued notification must be committed; the document \
-             is still at {:?}",
-            host.get_source(&canonical_id)
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    await_committed_source(&host, &coordinator, &canonical_id, &final_source).await;
     let in_flight = cold_compile_runs(&host) - before;
 
     assert_eq!(
@@ -1782,7 +1773,7 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
     // parse errors at all. A `Never` here is the empty-diagnostics regression;
     // a per-notification count is #96.
     drop(ticket);
-    let settled = await_settled_cold_compiles(&host, before).await;
+    let settled = await_settled_cold_compiles(&host, &coordinator, before).await;
     assert_eq!(
         settled, 1,
         "after the burst went quiet the debounced coordinator must compile the \

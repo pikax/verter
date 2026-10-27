@@ -6239,6 +6239,8 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     // post-shutdown pulse would have nothing left to discriminate on. The
     // entry is queued only after the loop has exited.
     let pending_snapshot_provider_sync: Arc<DashSet<String>> = Arc::new(DashSet::new());
+    let carrier_transaction_coordinator =
+        Arc::new(crate::external_ts::CarrierTransactionCoordinator::new());
     let deps = Arc::new(SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
@@ -6260,9 +6262,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         )),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
-        carrier_transaction_coordinator: Arc::new(
-            crate::external_ts::CarrierTransactionCoordinator::new(),
-        ),
+        carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
     });
 
     let (wake_tx, wake_rx) = mpsc::channel(1);
@@ -6303,17 +6303,33 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         "coordinator_loop must return once its wake channel closes"
     );
 
+    // The listener stops with the loop: its task is dropped, which it reports
+    // itself. RED-before: the listener leaked past shutdown, so this receipt
+    // never arrives. The timeout is a liveness watchdog only.
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(30),
+        receipts.pulse_listener_stopped.notified(),
+    )
+    .await
+    .is_ok();
+    assert!(
+        stopped,
+        "the restart-pulse listener must stop with the coordinator loop"
+    );
+
     // A late engine-start pulse must not start drain passes on the retired
-    // coordinator. RED-before: the leaked listener armed the successor chain
-    // for the freshly queued entry, which attempted provider file ops after
-    // the production initial delay.
+    // coordinator. With the listener gone nothing else waits on the pulse, so
+    // no chain is started and no provider file op follows.
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
     let calls_before = provider.file_sync_calls().len();
+    let chains = carrier_transaction_coordinator.subscribe_pending_redrive_chains();
+    let chains_before = *chains.borrow();
     pulse.notify_one();
-    tokio::time::sleep(Duration::from_millis(
-        crate::server::PENDING_SYNC_REDRIVE.initial_delay_ms + 400,
-    ))
-    .await;
+    assert_eq!(
+        *chains.borrow(),
+        chains_before,
+        "a restart pulse after coordinator shutdown must not start a redrive chain"
+    );
     assert_eq!(
         provider.file_sync_calls().len(),
         calls_before,
@@ -6584,15 +6600,15 @@ async fn a_document_touch_survives_a_busy_lane_retry() {
         .await;
 
     let paused = handle.pause_dispatch_for_test().await;
-    // The retry's quiet time is allowed to elapse while dispatch is held; no
-    // ordering assertion depends on whether a document is still debounced.
+    // The retry's quiet window has elapsed by the time dispatch resumes: the
+    // window is zero for this coordinator, so no real window is waited out.
+    handle.set_quiet_window_for_test(Duration::ZERO);
     needs_sync.insert(replayed_id.to_string());
     handle.signal(
         replayed_id.to_string(),
         replayed_uri.to_string(),
         old_open + Duration::from_millis(1),
     );
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 2)).await;
     // The coordinator's own retry is the delivery under observation here.
     pending_sync.remove(requested_id);
     let (requested_arrived, release_requested) = test_hooks::block_after_lane_probe(requested_id);
