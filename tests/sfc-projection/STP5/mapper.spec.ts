@@ -484,9 +484,20 @@ test("STP5 fixture mapper: JSON-RPC over stdio with Content-Length framing; exit
     { stdio: ["pipe", "pipe", "inherit"] },
   );
   const replies = [];
+  let resolveReplies: () => void;
+  const received = new Promise<void>((resolve, reject) => {
+    const guard = setTimeout(() => reject(new Error("mapper replies never arrived")), 10000);
+    resolveReplies = () => {
+      clearTimeout(guard);
+      resolve();
+    };
+  });
   child.stdout.on(
     "data",
-    createFrameReader((message) => replies.push(message)),
+    createFrameReader((message) => {
+      replies.push(message);
+      if (replies.length === 4) resolveReplies();
+    }),
   );
   const send = (id, method, params) =>
     writeFrame(child.stdin, { jsonrpc: "2.0", id, method, params });
@@ -496,11 +507,11 @@ test("STP5 fixture mapper: JSON-RPC over stdio with Content-Length framing; exit
   send("a3", "bogus", {});
   // Asked for utf-8 but offered only utf-16: refused, never a silent fallback.
   send("a4", "initialize", { positionEncodings: ["utf-16"] });
-  const deadline = Date.now() + 10000;
-  while (replies.length < 4 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+  try {
+    await received;
+  } finally {
+    child.stdin.end();
   }
-  child.stdin.end();
   assert.equal(await exited, 0);
   assert.deepEqual(
     replies.map((reply) => reply.id),

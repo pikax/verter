@@ -70,7 +70,24 @@ describe("WSP1-AC1 stalled client reader", () => {
       .then(() => {
         markerSeen = true;
       });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    const stdout = client.process.stdout!;
+    let readable: () => void;
+    try {
+      // The request and marker already reject on hangs; readiness comes from stdout.
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          readable = () => {
+            if (client.pausedTransportByteLength > 0) resolve();
+          };
+          stdout.on("readable", readable);
+          readable();
+        }),
+        pending,
+        marker,
+      ]);
+    } finally {
+      stdout.off("readable", readable!);
+    }
     expect(client.unreadByteLength).toBeGreaterThan(0);
     expect(markerSeen).toBe(false);
     client.resumeReads();
