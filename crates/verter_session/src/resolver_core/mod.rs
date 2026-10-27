@@ -979,6 +979,30 @@ fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> OwnedFactSignature {
     )
 }
 
+/// Run `compare` on `facts` in the form [`seal_admitted_signature`] stores
+/// them, so a recorded witness is matched against a stored candidate as the
+/// same set whatever order it lists its facts in. A witness already in that
+/// form (strictly increasing, with fewer than two receipts, so no receipt can
+/// consume another) is compared as it is, without a copy.
+fn compare_as_admitted<R>(
+    facts: &[FactVersionRef],
+    compare: impl FnOnce(&[FactVersionRef]) -> R,
+) -> R {
+    let canonical = facts.windows(2).all(|pair| pair[0] < pair[1])
+        && facts
+            .iter()
+            .filter(|fact| matches!(fact, FactVersionRef::Receipt(_)))
+            .nth(1)
+            .is_none();
+    if canonical {
+        compare(facts)
+    } else {
+        compare(
+            &verter_session_query::facts::fact_read_set::canonical_signature_facts(facts.to_vec()),
+        )
+    }
+}
+
 fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     use std::hash::{BuildHasher, Hash, Hasher};
     // Two FxHasher passes seeded with distinct salts to produce 16
@@ -1490,11 +1514,13 @@ where
     #[must_use]
     pub fn holds_candidate_with_signature(&self, key: &K, facts: &[FactVersionRef]) -> bool {
         match self.entries.get(key) {
-            Some(entry) => entry
-                .candidates
-                .load()
-                .iter()
-                .any(|candidate| candidate.fact_dep_signature.as_ref() == facts),
+            Some(entry) => compare_as_admitted(facts, |facts| {
+                entry
+                    .candidates
+                    .load()
+                    .iter()
+                    .any(|candidate| candidate.fact_dep_signature.as_ref() == facts)
+            }),
             None => false,
         }
     }
@@ -1519,8 +1545,10 @@ where
         V: PartialEq,
     {
         match self.entries.get(key) {
-            Some(entry) => entry.candidates.load().iter().any(|candidate| {
-                candidate.fact_dep_signature.as_ref() == facts && *candidate.value == *value
+            Some(entry) => compare_as_admitted(facts, |facts| {
+                entry.candidates.load().iter().any(|candidate| {
+                    candidate.fact_dep_signature.as_ref() == facts && *candidate.value == *value
+                })
             }),
             None => false,
         }
