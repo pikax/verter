@@ -54,7 +54,6 @@ export function validateHermeticList(doc) {
   const exclusions = Array.isArray(doc?.exclusions) ? doc.exclusions : null;
   if (!exclusions) problems.push("exclusions must be an array");
   const matchers = [];
-  const patterns = [];
   for (const [i, entry] of (exclusions ?? []).entries()) {
     if (!nonEmpty(entry?.reason)) problems.push(`exclusions[${i}] states no reason`);
     if (!Array.isArray(entry?.patterns) || entry.patterns.length === 0) {
@@ -66,10 +65,13 @@ export function validateHermeticList(doc) {
       if (!regex)
         problems.push(`exclusions[${i}].patterns[${j}] must be a valid regular expression`);
       else matchers.push(regex);
-      patterns.push(pattern);
+    }
+    // One pattern may carry several reasons, each in its own exclusion, but not
+    // the same reason twice.
+    if (new Set(entry.patterns).size !== entry.patterns.length) {
+      problems.push(`exclusions[${i}] repeats a pattern`);
     }
   }
-  if (new Set(patterns).size !== patterns.length) problems.push("exclusion patterns repeat");
 
   const candidates = Array.isArray(doc?.candidates) ? doc.candidates : null;
   if (!candidates || !candidates.every((id) => nonEmpty(id) && id.includes(" "))) {
@@ -94,17 +96,20 @@ export function validateHermeticList(doc) {
   return problems;
 }
 
-/** Every exclusion pattern of the list. */
+/** Every distinct exclusion pattern of the list. */
 export function exclusionPatterns(doc) {
-  return doc.exclusions.flatMap((entry) => entry.patterns);
+  return [...new Set(doc.exclusions.flatMap((entry) => entry.patterns))];
 }
 
-/** The reason an exclusion gives for `id`, or null when none names it. */
+/**
+ * The reasons the exclusions give for `id`, in list order and joined into one
+ * text, or null when none names it.
+ */
 export function exclusionReason(doc, id) {
-  for (const entry of doc.exclusions) {
-    if (entry.patterns.some((p) => new RegExp(p, "u").test(id))) return entry.reason;
-  }
-  return null;
+  const reasons = doc.exclusions
+    .filter((entry) => entry.patterns.some((p) => new RegExp(p, "u").test(id)))
+    .map((entry) => entry.reason);
+  return reasons.length > 0 ? reasons.join(" ") : null;
 }
 
 /** Reads and validates the list; throws on a malformed document. */

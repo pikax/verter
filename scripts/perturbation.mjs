@@ -54,7 +54,7 @@ const CONFIG_PATH = join(REPO_ROOT, "scripts", "manifests", "perturbation.json")
  * nextest's exit code when tests ran and some failed: a rerun outcome, not a
  * harness failure. Defined as `NextestExitCode::TEST_RUN_FAILED` in the
  * nextest-metadata crate:
- * https://docs.rs/nextest-metadata/latest/nextest_metadata/struct.NextestExitCode.html#associatedconstant.TEST_RUN_FAILED
+ * https://docs.rs/nextest-metadata/latest/nextest_metadata/enum.NextestExitCode.html#associatedconstant.TEST_RUN_FAILED
  */
 const NEXTEST_TESTS_FAILED = 100;
 

@@ -81,6 +81,62 @@ test("the committed list excludes tests that read the clock for a budget, in nes
   }
 });
 
+test("the committed list excludes tests depending on any env!/option_env! build-environment value", () => {
+  const list = readHermeticListDocument();
+  for (const [id, value] of [
+    // Dependency-closure guards run the cargo whose path env!("CARGO") baked in.
+    [
+      "verter_compiler::main cases::compiler_layer_dependency_closure::compiler_production_closure_does_not_reach_host_session_or_transport_crates",
+      /env!\("CARGO"\)/,
+    ],
+    [
+      "verter_identity::main cases::workspace_dependency_layers::analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents",
+      /env!\("CARGO"\)/,
+    ],
+    [
+      "verter_session_query::main cases::dependency_closure_guard::closure_walk_sees_front_end_crates_from_verter_session",
+      /env!\("CARGO"\)/,
+    ],
+    [
+      "verter_session carrier_artifact_cohort::tests::carrier_identity_owner_crates_cannot_depend_on_consumer_protocol",
+      /env!\("CARGO"\)/,
+    ],
+    // Reads fixtures under env!("CARGO_MANIFEST_DIR").
+    [
+      "verter_session::main cases::g_block::typeinfo_graph_taxonomy::framework_surface_kind_entry_field_numbers_are_stable",
+      /CARGO_MANIFEST_DIR/,
+    ],
+    // Launches a companion binary through cargo_test_binary_path!.
+    [
+      "verter_tsc::main cases::typecheck_fail_closed::a_dead_api_pipe_fails_closed",
+      /CARGO_BIN_EXE_/,
+    ],
+    // Compares against env!("CARGO_PKG_VERSION").
+    [
+      "verter_session platform_services::platform_services_tests::browser_profile_routes_classes_through_browser_seams",
+      /CARGO_PKG_VERSION/,
+    ],
+  ]) {
+    const reason = exclusionReason(list, id) ?? "";
+    assert.match(reason, /Build-time value:/, id);
+    assert.match(reason, value, id);
+  }
+  // A test excluded for two reasons reports both.
+  const both = exclusionReason(
+    list,
+    "verter_session::main cases::g_audit::audit_request_registration_survives_worker_tls_churn::active_request_registration_survives_worker_tls_install_drop_churn",
+  );
+  assert.match(both ?? "", /^Timing budget:.* Build-time value:/s);
+});
+
+test("one pattern may carry several reasons, and an id reports every reason naming it", () => {
+  const list = structuredClone(LIST);
+  list.exclusions.push({ reason: "timing budget.", patterns: ["^b(::\\S+)? "] });
+  assert.deepEqual(validateHermeticList(list), []);
+  assert.equal(exclusionReason(list, "b m::x"), "build-time value timing budget.");
+  assert.equal(exclusionReason(list, "a m::one"), null);
+});
+
 test("only an approved list makes a test hermetic, and never an excluded one", () => {
   assert.deepEqual([...hermeticTestIds(LIST)], []);
   const approved = { ...LIST, approved: true, approvedBy: "operator", approvedOn: "2026-10-02" };
@@ -103,7 +159,7 @@ test("a malformed list is refused", () => {
     (l) => (l.exclusions[0].reason = ""),
     (l) => (l.exclusions[0].patterns = []),
     (l) => (l.exclusions[0].patterns = ["("]),
-    (l) => l.exclusions.push({ reason: "again", patterns: ["^b(::\\S+)? "] }),
+    (l) => l.exclusions[0].patterns.push("^b(::\\S+)? "),
   ];
   for (const mutate of mutations) {
     const list = structuredClone(LIST);
