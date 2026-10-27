@@ -1,1 +1,1 @@
-//! Reserved home for TypeScript lowering.
+//! Reserved home for TypeScript lowering (owning node: TSE2).

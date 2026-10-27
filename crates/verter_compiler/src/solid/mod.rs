@@ -1,1 +1,1 @@
-//! Reserved home for Solid JSX compilation.
+//! Reserved home for Solid JSX compilation (owning node: SXC1).

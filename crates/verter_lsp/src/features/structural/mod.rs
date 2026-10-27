@@ -1,1 +1,1 @@
-//! Reserved home for structural navigation adapters.
+//! Reserved home for structural navigation adapters (owning node: LSPX1).

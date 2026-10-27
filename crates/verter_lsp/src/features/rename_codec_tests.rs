@@ -1,1 +1,1 @@
-//! Tests for source rename codecs.
+//! Tests for source rename codecs (owning node: STP48).

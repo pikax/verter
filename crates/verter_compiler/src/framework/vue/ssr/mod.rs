@@ -1,1 +1,1 @@
-//! Reserved home for Vue SSR code generation.
+//! Reserved home for Vue SSR code generation (owning node: VCP4).

@@ -1,1 +1,1 @@
-//! Reserved home for Vue output assembly.
+//! Reserved home for Vue output assembly (owning node: VCP6).

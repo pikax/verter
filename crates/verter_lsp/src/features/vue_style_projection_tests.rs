@@ -1,1 +1,1 @@
-//! Tests for Vue style projection.
+//! Tests for Vue style projection (owning node: STP51).

@@ -1,1 +1,1 @@
-//! Reserved home for TypeScript declaration emission.
+//! Reserved home for TypeScript declaration emission (owning node: TSD1).

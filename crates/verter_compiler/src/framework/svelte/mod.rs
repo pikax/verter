@@ -1,4 +1,4 @@
-//! Reserved home for the Svelte compiler pipeline.
+//! Reserved home for the Svelte compiler pipeline (owning node: SCP1).
 pub mod assembly;
 pub mod client;
 pub mod module;

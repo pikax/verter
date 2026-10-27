@@ -1,1 +1,1 @@
-//! Reserved home for TypeScript enhancement providers.
+//! Reserved home for TypeScript enhancement providers (owning node: LSPX11).
