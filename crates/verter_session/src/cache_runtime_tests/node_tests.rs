@@ -527,10 +527,6 @@ const WIDE_FACTS: usize =
 const GATE_WIDE_FACTS: usize = 300;
 
 impl WideArtifactNode {
-    fn new(account: Arc<verter_session_query::retention::SemanticRetentionAccount>) -> Self {
-        Self::of_width(account, WIDE_FACTS)
-    }
-
     fn of_width(
         account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
         width: usize,
@@ -816,14 +812,30 @@ impl QueryNode for WideQueryNode {
     }
 }
 
+/// A query whose signature is a freshly sealed wide (tree-stored) set
+/// delivers its value under retention refusal, validates it after compute,
+/// and lowers an invalid candidate, tainting its consumer. The gate runs it
+/// on a host whose policy makes a 67-fact fresh seal wide; the nightly tier
+/// runs it at the production width.
 #[test]
 fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
+    let policy = crate::fact_policy_test_support::narrow_storage(32);
+    check_query_retention_refusal(
+        Arc::new(crate::fact_policy_test_support::standalone_host_under(
+            HostConfig::default(),
+            policy,
+        )),
+        2 * policy.fresh_slice_max() + 3,
+    );
+}
+
+fn check_query_retention_refusal(host: Arc<VerterHost>, width: usize) {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let policy = host.project_type_store().fact_policy();
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     // Admit the identical dependency files only once. Seal a fresh set for
     // each case so its retention account owns independent signature storage.
-    let facts = WideArtifactNode::valid_dependency_facts(&host, WIDE_FACTS);
+    let facts = WideArtifactNode::valid_dependency_facts(&host, width);
     for (limit, stale, lower) in [
         (usize::MAX, false, false),
         (1, false, false),
@@ -832,15 +844,22 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         (usize::MAX, true, true),
         (1, true, true),
     ] {
-        let mut artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
-            max_entry_bytes: limit,
-            ..RetentionLimits::defaults()
-        }));
+        let mut artifact = WideArtifactNode::of_width(
+            SemanticRetentionAccount::new(RetentionLimits {
+                max_entry_bytes: limit,
+                ..RetentionLimits::defaults()
+            }),
+            1,
+        );
         artifact.signature = ReadSetSignature::new(
             verter_session_query::facts::fact_read_set::seal_canonical_signature(
-                verter_session_query::facts::policy::FactPolicy::production(),
+                policy,
                 facts.clone(),
             ),
+        );
+        assert!(
+            artifact.signature.facts.tree_storage().is_some(),
+            "the fresh seal past the fresh-slice width is tree storage"
         );
         if stale {
             let host = Arc::clone(&host);
@@ -1062,5 +1081,13 @@ mod nightly_scale {
     #[test]
     fn retention_refusal_preserves_artifact_post_compute_validation() {
         assert_retention_refusal_preserves_post_compute_validation(WIDE_FACTS);
+    }
+
+    #[test]
+    fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
+        check_query_retention_refusal(
+            Arc::new(VerterHost::new_standalone(HostConfig::default())),
+            WIDE_FACTS,
+        );
     }
 }
