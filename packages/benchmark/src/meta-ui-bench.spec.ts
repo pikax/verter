@@ -295,7 +295,9 @@ describe("createWorkerBackendInstance", () => {
       {
         workerEntryPath: workerPath,
         queryTimeoutMs: 25,
-        setupTimeoutMs: 1_000,
+        // Setup is awaited on the worker's own ready message; only the query
+        // timeout is under test, so setup carries no wall-clock bound.
+        setupTimeoutMs: 0,
       },
     );
 
@@ -697,21 +699,10 @@ describe("bench_meta_ui_per_component_isolation", () => {
         transformedSource: "<template />",
       });
       // takeLastQueryStderr returns the stderr captured DURING
-      // the most recent query window. Stderr is asynchronously
-      // delivered via the child process, so we may need to wait
-      // briefly for the chunk handler to drain.
-      let firstStderr: string | null = null;
-      for (
-        let attempt = 0;
-        attempt < 40 && (firstStderr === null || firstStderr === "");
-        attempt++
-      ) {
-        firstStderr = (instance as any).takeLastQueryStderr?.() ?? null;
-        if (firstStderr) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      // the most recent query window. The capture is sealed when the
+      // query's result arrives, before `query` resolves, and taking it
+      // clears it, so one read observes everything this query captured.
+      const firstStderr: string | null = (instance as any).takeLastQueryStderr?.() ?? null;
       expect(firstStderr).toMatch(/stderr-for=src\/runtime\/ComponentA\.vue/);
       // Discriminator: B's stderr line must NOT be present yet.
       expect(firstStderr).not.toMatch(/ComponentB/);
@@ -722,18 +713,7 @@ describe("bench_meta_ui_per_component_isolation", () => {
         relativePath: "src/runtime/ComponentB.vue",
         transformedSource: "<template />",
       });
-      let secondStderr: string | null = null;
-      for (
-        let attempt = 0;
-        attempt < 40 && (secondStderr === null || secondStderr === "");
-        attempt++
-      ) {
-        secondStderr = (instance as any).takeLastQueryStderr?.() ?? null;
-        if (secondStderr) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      const secondStderr: string | null = (instance as any).takeLastQueryStderr?.() ?? null;
       expect(secondStderr).toMatch(/stderr-for=src\/runtime\/ComponentB\.vue/);
       // Discriminator: A's stderr line must NOT bleed into B's
       // capture. This is the per-component isolation invariant.
