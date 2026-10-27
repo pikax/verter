@@ -3,10 +3,11 @@
 // to close (BWH1-AC1/AC2/AC3) and passes only with real injected evidence.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   RECEIPT_MARKER,
@@ -691,4 +692,36 @@ test("runProbes requires the query audit record exactly when capture is availabl
       /capture availability is not reported/,
     );
   }
+});
+
+// The browser-host CI job runs in the official Playwright image instead of
+// downloading browsers. The image tag selects the browser builds, so it must
+// equal the Playwright version the lockfile resolves.
+test("browser-host CI job image tag matches the resolved @playwright/test version", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const lock = readFileSync(path.join(repo, "pnpm-lock.yaml"), "utf8");
+  // The version appears in both the `packages:` and `snapshots:` sections.
+  const resolved = [
+    ...new Set([...lock.matchAll(/^ {2}'@playwright\/test@([^']+)':/gm)].map((m) => m[1])),
+  ];
+  assert.equal(resolved.length, 1, `expected one resolved @playwright/test, got ${resolved}`);
+
+  const workflow = readFileSync(path.join(repo, ".github", "workflows", "ci.yml"), "utf8");
+  const start = workflow.indexOf("\n  browser-host:\n");
+  assert.ok(start >= 0, "browser-host job not found");
+  const next = workflow.slice(start + 1).search(/\n {2}[A-Za-z0-9_-]+:\n/);
+  const job = workflow.slice(start, next < 0 ? undefined : start + 1 + next);
+
+  const image = job.match(/^ {4}container:\n {6}image: (\S+)$/m);
+  assert.ok(image, "browser-host must run in a container image");
+  assert.equal(
+    image[1].replace(/-(noble|jammy)$/, ""),
+    `mcr.microsoft.com/playwright:v${resolved[0]}`,
+    "image tag drifted from the resolved @playwright/test version; bump both together",
+  );
+  assert.doesNotMatch(
+    job.replace(/^\s*#.*$/gm, ""),
+    /playwright install/,
+    "browsers come from the image, not a download",
+  );
 });

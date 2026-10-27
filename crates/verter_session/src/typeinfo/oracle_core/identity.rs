@@ -30,15 +30,20 @@ use super::normalize::{canonical_json_string, ProjectionModeKind};
 // ---------------------------------------------------------------------------
 
 /// The pinned engine version that produces every oracle snapshot value: the
-/// TypeScript 7 native compiler (`tsc[.exe] --version` → `Version 7.0.2`) that
+/// TypeScript 7 native compiler (`tsc[.exe] --version` → `Version 7.1.0-beta`) that
 /// the workspace `typescript` devDependency installs through its platform
 /// package (`@typescript/typescript-<os>-<arch>`). The generator resolves the
 /// binary through the product toolchain resolver and refuses any other
 /// version; the consumption driver validates the stored `tsgo_version` on every
 /// read. Bumping this re-keys EVERY `snapshot_id` (hence every checked-in
 /// snapshot filename) and every value must be re-measured.
+///
+/// It is the TypeScript pin (`verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN`)
+/// spelled locally because this crate's default closure stays tsgo-free;
+/// `oracle_toolchain_lock` ties it to the toolchain record and to the
+/// workspace `typescript` devDependency.
 #[allow(dead_code)]
-pub(crate) const TSGO_VERSION: &str = "7.0.2";
+pub(crate) const TSGO_VERSION: &str = "7.1.0-beta";
 
 /// Version of THIS snapshot FILE SHAPE (field set + per-kind `identity` shape).
 /// Bumped on any schema-field change AND whenever a new `oracle_value_kind` is

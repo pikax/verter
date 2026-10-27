@@ -1074,7 +1074,8 @@ fn wide_refusal_root() -> (
 fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use verter_session_query::facts::fact_cache::FactVersionRef;
-    use verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH;
+    const WIDE_SIGNATURE_WIDTH: usize =
+        verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max();
 
     let (host, key) = wide_refusal_root();
     let refused = root_read(&host, &key, WIDE_PREFIX_WORK);
@@ -2272,8 +2273,11 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
             verter_type_engine::semantic_query::ReadReceipt::Unpriced,
         )
     };
-    let carrier =
-        || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));
+    let carrier = || {
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
+        )
+    };
     let entry = store.refusal_entry_for_tests(&host);
     for name in 0..=REFUSAL_SUMMARY_CAP {
         assert!(store.seal_refusal_for_tests(
@@ -2637,9 +2641,16 @@ fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
     // cached.
     let base = ResultReceipt::new(vec![file("/w/base.ts")]);
     let mid = ResultReceipt::new(vec![file("/w/mid.ts"), FactVersionRef::Receipt(base)]);
-    let through_prefix =
-        || ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(mid.clone())]));
-    let elsewhere = ReadSetSignature::new(Arc::from(vec![file("/w/other.ts")]));
+    let through_prefix = || {
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of(vec![FactVersionRef::Receipt(mid.clone())]),
+        )
+    };
+    let elsewhere = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![file("/w/other.ts")]),
+    );
 
     let entry = store.refusal_entry_for_tests(&host);
     assert!(store.seal_refusal_for_tests(

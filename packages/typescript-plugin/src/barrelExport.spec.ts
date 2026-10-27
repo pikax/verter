@@ -262,7 +262,7 @@ type __OmitNew<T> = { [K in keyof T]: T[K] }
 
 const __comp = defineComponent({})
 
-declare const ${name}: __OmitNew<typeof __comp> & {
+declare const ${name}: {
   new(): Omit<import("vue").ComponentPublicInstance<{}, {}, {}, {}, {}, {}, {}, {}>, ${omitKeys}> & {
     $props: import("vue").PublicProps & { ${propsFields} },
     $emit: ${emit},
@@ -270,7 +270,7 @@ declare const ${name}: __OmitNew<typeof __comp> & {
     $attrs: {},
     $refs: {},
   }
-}
+} & __OmitNew<typeof __comp>
 export default ${name}
 `;
 }
@@ -439,7 +439,8 @@ describe("barrel export type preservation", () => {
   //
   // Fix: `__OmitNew<typeof __comp>` (mapped type) strips the construct sig,
   // leaving only static members. Then a single `new()` with the correct types
-  // is the only construct signature, so barrels can't pick the wrong one.
+  // is the only construct signature, so barrels can't pick the wrong one. The
+  // typed shape is the first intersection member, as generate_code() emits it.
 
   describe("__OmitNew barrel fix: construct sig stripping", () => {
     // Demonstrates the BUG: raw typeof __comp with conflicting new()
@@ -475,18 +476,18 @@ export default Overlay
     });
 
     // The FIX: __OmitNew strips construct sig, so only our typed new() exists.
-    it("FIX: __OmitNew<typeof __comp> & { new(): { $props: T } } preserves $props through barrel", () => {
+    it("FIX: { new(): { $props: T } } & __OmitNew<typeof __comp> preserves $props through barrel", () => {
       const decl = `
 type __OmitNew<T> = { [K in keyof T]: T[K] }
 interface EmptyInstance { $props: {}; $emit: (event: string) => void; }
 declare const __comp: { new(): EmptyInstance };
-declare const Overlay: __OmitNew<typeof __comp> & {
+declare const Overlay: {
   new(): {
     $props: { zIndex?: number; show?: boolean; lockScroll?: boolean },
     $emit: (event: string) => void,
     $data: {}, $attrs: {}, $refs: {},
   }
-}
+} & __OmitNew<typeof __comp>
 export default Overlay
 `;
       const { checker, getSourceFile } = createVirtualProgram({

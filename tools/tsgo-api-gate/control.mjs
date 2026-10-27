@@ -1,38 +1,21 @@
 // Negative control + incrementality evidence for the tsgo --api gate.
 //
 // (A) Prove the off-disk carrier in a CONFIG-LESS / inferred-style context
-//     (no openProject; parse the file standalone) FAILS where the configured
+//     (no openProjects; parse the file standalone) FAILS where the configured
 //     project passes — i.e. today's inferred overlay cannot satisfy the gate.
-// (B) Prove updateSnapshot reports a real per-project incremental `changes`
+// (B) Show the snapshot update's per-project incremental `changes`
 //     delta (changed file listed; project reused) rather than a full rebuild.
 
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
-import fs from "node:fs";
+
+import { loadSyncApi, overlayFileSystem } from "./sync-api.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(ROOT, "fixture");
 const norm = (p) => p.replace(/\\/g, "/");
-const require = createRequire(import.meta.url);
-const opts = { paths: (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean) };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
-// Import via the PUBLIC `<pkg>/unstable/sync` export (parameterized over the
-// source package), honouring the package `exports` map — not a hand-built dist/ path.
-let syncApiPath;
-for (const p of sourcePkgs) {
-  try {
-    syncApiPath = require.resolve(`${p}/unstable/sync`, opts);
-    break;
-  } catch {
-    /* try next */
-  }
-}
-if (!syncApiPath)
-  throw new Error(
-    `could not resolve a TS>=7 sync API (<pkg>/unstable/sync) from ${JSON.stringify(sourcePkgs)}`,
-  );
-const { API } = await import(pathToFileURL(syncApiPath).href);
+// The public `<pkg>/sync` + `<pkg>/fs` exports (see ./sync-api.mjs).
+const { API, serverFS } = await loadSyncApi();
 
 const TSCONFIG = path.join(FIXTURE, "tsconfig.json");
 const CARRIER_PATH = path.join(FIXTURE, "src", "components", "Widget.carrier.tsx");
@@ -56,47 +39,25 @@ const fmt = (ds) =>
   );
 
 function overlay(targetPath, getContent) {
-  const tNorm = norm(targetPath);
-  const dirNorm = norm(path.dirname(targetPath));
-  const base = path.basename(targetPath);
-  const read = typeof getContent === "function" ? getContent : () => getContent;
-  return {
-    readFile: (f) => (norm(f) === tNorm ? read() : undefined),
-    fileExists: (f) => (norm(f) === tNorm ? true : undefined),
-    getAccessibleEntries: (d) => {
-      if (norm(d) !== dirNorm) return undefined;
-      let real;
-      try {
-        const e = fs.readdirSync(d, { withFileTypes: true });
-        real = {
-          files: e.filter((x) => x.isFile()).map((x) => x.name),
-          directories: e.filter((x) => x.isDirectory()).map((x) => x.name),
-        };
-      } catch {
-        real = { files: [], directories: [] };
-      }
-      if (!real.files.includes(base)) real.files.push(base);
-      return real;
-    },
-  };
+  return overlayFileSystem(serverFS, { [targetPath]: getContent });
 }
 
 console.log("=== (A) NEGATIVE CONTROL: config-less / inferred-style standalone parse ===");
 // Standalone path lives OUTSIDE src/ so it is NOT covered by tsconfig include,
-// and we do NOT pass openProject — mirroring the inferred/config-less path.
+// and we do NOT pass openProjects — mirroring the inferred/config-less path.
 {
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: overlay(STANDALONE, CARRIER),
   });
-  try {
-    // No openProject -> snapshot has no configured project. This is the
+  {
+    // No openProjects -> snapshot has no configured project. This is the
     // "config-less" condition the design doc says cannot pass the gate.
-    const snap = api.updateSnapshot({});
+    using snap = api.createSnapshot();
     const projects = snap.getProjects();
     console.log(
-      "projects without openProject:",
+      "projects without openProjects:",
       projects.map((p) => norm(p.configFileName)),
     );
 
@@ -130,19 +91,16 @@ console.log("=== (A) NEGATIVE CONTROL: config-less / inferred-style standalone p
     console.log(
       `NEGATIVE CONTROL RESULT: ${
         negConfirmed
-          ? "CONFIRMED — config-less path (no openProject) yields NO configured project for the carrier (zero projects / 'no project found' / false TS2307|TS2304). The inferred/config-less overlay CANNOT satisfy the gate; the configured-project path is required."
+          ? "CONFIRMED — config-less path (no openProjects) yields NO configured project for the carrier (zero projects / 'no project found' / false TS2307|TS2304). The inferred/config-less overlay CANNOT satisfy the gate; the configured-project path is required."
           : "UNEXPECTED — config-less path resolved cleanly (would weaken the 'inferred cannot pass' claim)"
       }`,
     );
     if (!negConfirmed) process.exitCode = 1;
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 
 console.log(
-  "\n=== (B) INCREMENTALITY EVIDENCE (informational): updateSnapshot `changes` delta ===",
+  "\n=== (B) INCREMENTALITY EVIDENCE (informational): snapshot update `changes` delta ===",
 );
 // NOTE: this is INFORMATIONAL only — it introspects a private response field
 // (`changes`) whose population varies across tsgo `--api` builds. The
@@ -152,31 +110,30 @@ console.log(
 // installed binary exposes so a version bump's delta shape is visible.
 {
   let content = CARRIER;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: overlay(CARRIER_PATH, () => content),
   });
+  // The base snapshot goes through the public API (it initializes the session
+  // and owns the base handle's lifetime); only the update is a raw request, so
+  // the raw response — including `changes` — is visible, and its handle is
+  // released explicitly below.
+  using base = api.createSnapshot({ openProjects: [TSCONFIG] }); // snapshot 1
+  const client = api["client"];
+  let raw;
   try {
-    const client = api["client"];
-    const base = client.apiRequest("updateSnapshot", { openProject: TSCONFIG }); // snapshot 1
-    const baseProjHandle = base.projects?.[0]?.id;
-    console.log(
-      "snapshot1 project handle:",
-      baseProjHandle,
-      "(changes absent on first snapshot:",
-      base.changes === undefined,
-      ")",
-    );
+    const baseProjHandle = base.getConfiguredProject(TSCONFIG)?.id;
+    console.log("snapshot1 project handle:", baseProjHandle);
 
     // Edit the off-disk carrier content, then push a changed-file delta.
     content = CARRIER.replace(
       'export const label = formatLabel("hello", opts);',
       'export const label: number = formatLabel("hello", opts); // now wrong',
     );
-    const raw = client.apiRequest("updateSnapshot", {
-      openProject: TSCONFIG,
-      fileChanges: { changed: [CARRIER_PATH] },
+    raw = client.apiRequest("updateSnapshot", {
+      snapshot: base.id,
+      changes: { fileNotifications: { changed: [CARRIER_PATH] }, ensurePrograms: true },
     });
     console.log("snapshot2 response keys:", Object.keys(raw));
     console.log(
@@ -190,7 +147,10 @@ console.log(
     const changed = raw.changes?.changedProjects
       ? Object.values(raw.changes.changedProjects)[0]
       : undefined;
-    const carrierListed = changed?.changedFiles?.some((f) => norm(f) === norm(CARRIER_PATH));
+    // changedFiles are canonical path keys (lower-cased on case-insensitive hosts).
+    const carrierListed = changed?.changedFiles?.some(
+      (f) => norm(f).toLowerCase() === norm(CARRIER_PATH).toLowerCase(),
+    );
     console.log(
       `INCREMENTAL EVIDENCE: ${
         raw.changes && changed
@@ -199,6 +159,6 @@ console.log(
       }`,
     );
   } finally {
-    api.close();
+    if (raw && raw.snapshot !== base.id) client.apiRequest("release", { snapshot: raw.snapshot });
   }
 }

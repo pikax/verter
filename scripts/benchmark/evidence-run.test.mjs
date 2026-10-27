@@ -218,7 +218,10 @@ function syntheticResults({ arms = ["verter", "tsc-api", "verter-counted"], drop
       scenarios: { "baseline-empty/strict": { id: "baseline-empty", setting: "strict" } },
       binaries: { supervisor: { origin: "workspace", sha256: "b".repeat(64) } },
       build: { cargo: "cargo 1.97.0" },
-      typescript: { versionText: "Version 7.0.2", platformPackage: "@typescript/typescript-test" },
+      typescript: {
+        versionText: "Version 7.1.0-beta",
+        platformPackage: "@typescript/typescript-test",
+      },
     },
     invocations: [{ arm: "verter", supervisor: { backend: "test-backend", containment: "hard" } }],
     summary: {

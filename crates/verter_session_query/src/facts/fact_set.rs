@@ -6,11 +6,12 @@
 //! ([`FactSet::contains`], [`FactSet::iter_from`]) and compares it, and
 //! nothing it can ask depends on how the set is stored:
 //!
-//! * a set no wider than [`FACT_SET_INLINE_WIDTH`], and a freshly sealed
-//!   set no wider than [`WIDE_SIGNATURE_WIDTH`], is one shared slice,
-//!   charged inline by whoever retains it;
-//! * a wider set built by extending another set, and every freshly sealed
-//!   set wider than [`WIDE_SIGNATURE_WIDTH`], is a persistent B+tree
+//! * a set built by extending another set no wider than its policy's
+//!   [`FactPolicy::extension_slice_max`], and a freshly sealed set no wider
+//!   than its policy's [`FactPolicy::fresh_slice_max`], is one shared
+//!   slice, charged inline by whoever retains it;
+//! * a wider set built by extending another set, and every wider freshly
+//!   sealed set, is a persistent B+tree
 //!   ([`super::fact_tree`]) whose nodes carry their own charges: it shares
 //!   every node of the set it was built from except the paths its own
 //!   insertions and removals copied, so a chain of nested results — each
@@ -41,6 +42,13 @@
 //!   there is no slice view of a tree. [`FactSet::as_flat`] answers only for
 //!   a set already held as one.
 //!
+//! ## Policy
+//!
+//! Every set carries the [`FactPolicy`] it was built under, and every set
+//! built from it inherits that policy: no constructor works without one.
+//! Combining sets of different policies is checked before any shortcut
+//! that reuses one set's storage for another.
+//!
 //! ## Retention
 //!
 //! A slice set is charged inline by its holder: its block and its facts'
@@ -54,14 +62,9 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use super::fact_read_set::WIDE_SIGNATURE_WIDTH;
 use super::fact_tree::{self, Node};
+use super::policy::FactPolicy;
 use super::version::FactVersionRef;
-
-/// The widest set held as a plain shared slice when it is built by
-/// extending another set. Wider extensions are trees. A layout width only:
-/// no reader can tell the two apart.
-pub const FACT_SET_INLINE_WIDTH: usize = 32;
 
 /// A strong, process-stable hash of one fact: the unit of a set's digest.
 #[inline]
@@ -80,15 +83,31 @@ fn digest_of<'f>(facts: impl IntoIterator<Item = &'f FactVersionRef>) -> u128 {
 
 /// One canonical set of facts. See the module docs.
 #[derive(Clone)]
-pub struct FactSet(Repr);
+pub struct FactSet {
+    repr: Repr,
+    policy: FactPolicy,
+}
 
 #[derive(Clone)]
 enum Repr {
     /// Strictly increasing facts in one shared slice.
     Flat(Arc<[FactVersionRef]>),
-    /// More than [`FACT_SET_INLINE_WIDTH`] facts, built by extending
-    /// another set.
+    /// More facts than the policy holds in one slice.
     Tree(Arc<TreeStorage>),
+}
+
+// The policy a set carries costs a shipped build nothing: the set is
+// exactly its storage handle.
+#[cfg(not(any(test, feature = "test-support")))]
+const _: () = assert!(std::mem::size_of::<FactSet>() == std::mem::size_of::<Repr>());
+
+impl FactSet {
+    /// The bytes a set spends on its policy: none in a shipped build (checked
+    /// above at compile time), the policy's widths under test support. A
+    /// layout test pinning a shipped size adds it once per set the measured
+    /// value holds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const POLICY_BYTES: usize = std::mem::size_of::<FactSet>() - std::mem::size_of::<Repr>();
 }
 
 /// A tree set's header: its root and its digest. Its block is charged by
@@ -99,25 +118,29 @@ pub struct TreeStorage {
     digest: u128,
 }
 
-impl Default for FactSet {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
 impl FactSet {
-    /// The empty set.
-    #[must_use]
-    pub fn empty() -> Self {
+    /// The empty set under `policy` ([`FactPolicy::empty_set`]).
+    pub(crate) fn empty_under(policy: FactPolicy) -> Self {
         thread_local! {
             static EMPTY: Arc<[FactVersionRef]> = Arc::from(Vec::new());
         }
-        Self(Repr::Flat(EMPTY.with(Arc::clone)))
+        Self {
+            repr: Repr::Flat(EMPTY.with(Arc::clone)),
+            policy,
+        }
     }
 
-    /// The set of `facts`, in any order and with any repetition.
+    /// The policy this set was built under, which every set built from it
+    /// inherits.
+    #[inline]
     #[must_use]
-    pub fn from_facts(mut facts: Vec<FactVersionRef>) -> Self {
+    pub fn policy(&self) -> FactPolicy {
+        self.policy
+    }
+
+    /// The set of `facts` under `policy`, in any order and with any
+    /// repetition ([`FactPolicy::set_of`]).
+    pub(crate) fn from_facts_under(policy: FactPolicy, mut facts: Vec<FactVersionRef>) -> Self {
         if !facts.windows(2).all(|pair| pair[0] < pair[1]) {
             facts.sort_unstable_by(|a, b| {
                 super::fact_read_set::record_signature_work(1);
@@ -125,54 +148,73 @@ impl FactSet {
             });
             facts.dedup();
         }
-        Self::from_canonical_vec(facts)
+        Self::from_canonical_vec(policy, facts)
+    }
+
+    /// The set of a shared run under `policy` ([`FactPolicy::set_of_shared`]).
+    pub(crate) fn from_shared_under(policy: FactPolicy, facts: Arc<[FactVersionRef]>) -> Self {
+        if facts.len() <= policy.fresh_slice_max() && facts.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Self {
+                repr: Repr::Flat(facts),
+                policy,
+            };
+        }
+        Self::from_facts_under(policy, facts.to_vec())
     }
 
     /// The set of `facts`, already strictly increasing: only this crate's
     /// sealer, which sorts first, calls it (checked in debug builds only).
     ///
-    /// A freshly sealed set no wider than [`WIDE_SIGNATURE_WIDTH`] is one
-    /// shared slice, charged by whoever holds it; a wider one is sealed into
-    /// tree storage, so it carries its own charge from birth and every
-    /// retaining admission is charged and refused for it — even one that
-    /// charges no bytes of its own.
+    /// A freshly sealed set no wider than the policy's
+    /// [`FactPolicy::fresh_slice_max`] is one shared slice, charged by
+    /// whoever holds it; a wider one is sealed into tree storage, so it
+    /// carries its own charge from birth and every retaining admission is
+    /// charged and refused for it — even one that charges no bytes of its
+    /// own.
     #[must_use]
-    pub(crate) fn from_canonical_vec(facts: Vec<FactVersionRef>) -> Self {
-        if facts.len() > WIDE_SIGNATURE_WIDTH {
-            return Self::sealed_tree(&facts);
+    pub(crate) fn from_canonical_vec(policy: FactPolicy, facts: Vec<FactVersionRef>) -> Self {
+        if facts.len() > policy.fresh_slice_max() {
+            return Self::sealed_tree(policy, &facts);
         }
-        Self::from_canonical_slice(&facts)
+        Self::from_canonical_slice(policy, &facts)
     }
 
     /// [`Self::from_canonical_vec`] over a borrowed run.
     #[must_use]
-    pub(crate) fn from_canonical_slice(facts: &[FactVersionRef]) -> Self {
+    pub(crate) fn from_canonical_slice(policy: FactPolicy, facts: &[FactVersionRef]) -> Self {
         #[cfg(debug_assertions)]
         assert!(
             facts.windows(2).all(|pair| pair[0] < pair[1]),
             "a canonical set is strictly increasing"
         );
-        if facts.len() > WIDE_SIGNATURE_WIDTH {
-            return Self::sealed_tree(facts);
+        if facts.len() > policy.fresh_slice_max() {
+            return Self::sealed_tree(policy, facts);
         }
-        Self(Repr::Flat(Arc::from(facts)))
+        Self {
+            repr: Repr::Flat(Arc::from(facts)),
+            policy,
+        }
     }
 
     /// A wide canonical run sealed into tree storage, every node charged.
-    fn sealed_tree(facts: &[FactVersionRef]) -> Self {
+    fn sealed_tree(policy: FactPolicy, facts: &[FactVersionRef]) -> Self {
         let mut root = fact_tree::build(facts).expect("a wide run is not empty");
         fact_tree::seal(&mut root);
-        Self(Repr::Tree(Arc::new(TreeStorage {
-            root,
-            digest: digest_of(facts.iter()),
-        })))
+        Self {
+            repr: Repr::Tree(Arc::new(TreeStorage {
+                root,
+                digest: digest_of(facts.iter()),
+            })),
+            policy,
+        }
     }
 
     /// How many facts the set holds.
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => facts.len(),
             Repr::Tree(tree) => tree.root.len(),
         }
@@ -188,7 +230,7 @@ impl FactSet {
     /// The facts in canonical order.
     #[inline]
     pub fn iter(&self) -> FactSetIter<'_> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => FactSetIter(IterRepr::Flat(facts.iter())),
             Repr::Tree(tree) => FactSetIter(IterRepr::Tree(fact_tree::Iter::new(&tree.root))),
         }
@@ -197,7 +239,7 @@ impl FactSet {
     /// Whether the set holds `fact`.
     #[must_use]
     pub fn contains(&self, fact: &FactVersionRef) -> bool {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => facts.binary_search(fact).is_ok(),
             Repr::Tree(tree) => fact_tree::contains(&tree.root, fact),
         }
@@ -208,7 +250,7 @@ impl FactSet {
     /// whole-file facts together, so a reader after one kind of fact starts
     /// at that kind's least value.
     pub fn iter_from<'a>(&'a self, from: &FactVersionRef) -> FactSetIter<'a> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => {
                 let start = facts.partition_point(|fact| fact < from);
                 FactSetIter(IterRepr::Flat(facts[start..].iter()))
@@ -222,7 +264,7 @@ impl FactSet {
     /// The least fact.
     #[must_use]
     pub fn first(&self) -> Option<&FactVersionRef> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => facts.first(),
             Repr::Tree(tree) => Some(fact_tree::first(&tree.root)),
         }
@@ -231,7 +273,7 @@ impl FactSet {
     /// The greatest fact.
     #[must_use]
     pub fn last(&self) -> Option<&FactVersionRef> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => facts.last(),
             Repr::Tree(tree) => Some(fact_tree::last(&tree.root)),
         }
@@ -249,7 +291,7 @@ impl FactSet {
     /// answers `None`: it has no slice, and none is ever made for it.
     #[must_use]
     pub fn as_flat(&self) -> Option<&[FactVersionRef]> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => Some(facts),
             Repr::Tree(_) => None,
         }
@@ -258,7 +300,7 @@ impl FactSet {
     /// The order-independent content digest (see the module laws).
     #[must_use]
     pub fn digest(&self) -> u128 {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => digest_of(facts.iter()),
             Repr::Tree(tree) => tree.digest,
         }
@@ -267,7 +309,7 @@ impl FactSet {
     /// Whether two sets share one storage.
     #[must_use]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
+        match (&self.repr, &other.repr) {
             (Repr::Flat(a), Repr::Flat(b)) => Arc::ptr_eq(a, b),
             (Repr::Tree(a), Repr::Tree(b)) => Arc::ptr_eq(a, b) || Arc::ptr_eq(&a.root, &b.root),
             _ => false,
@@ -278,7 +320,7 @@ impl FactSet {
     /// for a cache keyed by the signature it was given.
     #[must_use]
     pub fn address(&self) -> usize {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => Arc::as_ptr(facts).cast::<FactVersionRef>() as usize,
             Repr::Tree(tree) => Arc::as_ptr(tree) as usize,
         }
@@ -287,13 +329,14 @@ impl FactSet {
     /// Whether every fact of `other` is in this set.
     #[must_use]
     pub fn is_superset(&self, other: &Self) -> bool {
+        self.policy.assert_compatible(other.policy);
         if other.len() > self.len() {
             return false;
         }
         if self.ptr_eq(other) {
             return true;
         }
-        match (&self.0, &other.0) {
+        match (&self.repr, &other.repr) {
             (Repr::Flat(whole), Repr::Flat(part)) => {
                 let mut at = 0;
                 'parts: for fact in part.iter() {
@@ -320,7 +363,7 @@ impl FactSet {
     /// The shared slice block of a slice set, charged inline by its holder.
     #[must_use]
     pub fn flat_arc(&self) -> Option<&Arc<[FactVersionRef]>> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(facts) => Some(facts),
             Repr::Tree(_) => None,
         }
@@ -330,7 +373,7 @@ impl FactSet {
     /// themselves.
     #[must_use]
     pub fn tree_storage(&self) -> Option<&Arc<TreeStorage>> {
-        match &self.0 {
+        match &self.repr {
             Repr::Flat(_) => None,
             Repr::Tree(tree) => Some(tree),
         }
@@ -503,11 +546,12 @@ enum Work {
 impl FactSetEdit {
     fn work_mut(&mut self) -> &mut Work {
         if matches!(self.work, Work::Unchanged) {
-            self.work = match &self.base.0 {
+            self.work = match &self.base.repr {
                 // Room for the insertions an edit usually makes, up to the
                 // width at which the set becomes a tree.
-                Repr::Flat(facts) if facts.len() <= FACT_SET_INLINE_WIDTH => {
-                    let room = (facts.len() * 2).clamp(8, FACT_SET_INLINE_WIDTH + 1);
+                Repr::Flat(facts) if facts.len() <= self.base.policy.extension_slice_max() => {
+                    let tree_at = self.base.policy.extension_slice_max() + 1;
+                    let room = (facts.len() * 2).clamp(8.min(tree_at), tree_at);
                     let mut copy = Vec::with_capacity(room);
                     copy.extend_from_slice(facts);
                     Work::Flat(copy)
@@ -528,6 +572,13 @@ impl FactSetEdit {
             };
         }
         &mut self.work
+    }
+
+    /// The policy the edited set is built under: its base's.
+    #[inline]
+    #[must_use]
+    pub fn policy(&self) -> FactPolicy {
+        self.base.policy
     }
 
     /// How many facts the edited set holds now.
@@ -590,12 +641,13 @@ impl FactSetEdit {
         if self.contains(&fact) {
             return false;
         }
+        let inline = self.base.policy.extension_slice_max();
         match self.work_mut() {
             Work::Unchanged => unreachable!("work_mut never leaves the edit unchanged"),
             Work::Flat(facts) => {
                 let at = facts.partition_point(|held| *held < fact);
                 facts.insert(at, fact);
-                if facts.len() > FACT_SET_INLINE_WIDTH {
+                if facts.len() > inline {
                     let facts = std::mem::take(facts);
                     let digest = digest_of(facts.iter());
                     self.work = Work::Tree {
@@ -658,9 +710,13 @@ impl FactSetEdit {
     /// charged.
     #[must_use]
     pub fn finish(self) -> FactSet {
+        let policy = self.base.policy;
         match self.work {
             Work::Unchanged => self.base,
-            Work::Flat(facts) => FactSet(Repr::Flat(Arc::from(facts))),
+            Work::Flat(facts) => FactSet {
+                repr: Repr::Flat(Arc::from(facts)),
+                policy,
+            },
             Work::Tree {
                 root,
                 digest,
@@ -670,13 +726,19 @@ impl FactSetEdit {
                     return self.base;
                 }
                 let Some(mut root) = root else {
-                    return FactSet::empty();
+                    return FactSet::empty_under(policy);
                 };
-                if root.len() <= FACT_SET_INLINE_WIDTH {
-                    return FactSet(Repr::Flat(fact_tree::Iter::new(&root).cloned().collect()));
+                if root.len() <= policy.extension_slice_max() {
+                    return FactSet {
+                        repr: Repr::Flat(fact_tree::Iter::new(&root).cloned().collect()),
+                        policy,
+                    };
                 }
                 fact_tree::seal(&mut root);
-                FactSet(Repr::Tree(Arc::new(TreeStorage { root, digest })))
+                FactSet {
+                    repr: Repr::Tree(Arc::new(TreeStorage { root, digest })),
+                    policy,
+                }
             }
         }
     }
@@ -860,7 +922,7 @@ impl PartialEq for FactSet {
         if self.len() != other.len() {
             return false;
         }
-        if let (Repr::Tree(a), Repr::Tree(b)) = (&self.0, &other.0) {
+        if let (Repr::Tree(a), Repr::Tree(b)) = (&self.repr, &other.repr) {
             if a.digest != b.digest {
                 return false;
             }
@@ -918,51 +980,6 @@ impl Hash for FactSet {
 impl std::fmt::Debug for FactSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
-    }
-}
-
-impl From<Vec<FactVersionRef>> for FactSet {
-    fn from(facts: Vec<FactVersionRef>) -> Self {
-        Self::from_facts(facts)
-    }
-}
-
-impl From<&[FactVersionRef]> for FactSet {
-    fn from(facts: &[FactVersionRef]) -> Self {
-        Self::from_facts(facts.to_vec())
-    }
-}
-
-impl From<Box<[FactVersionRef]>> for FactSet {
-    fn from(facts: Box<[FactVersionRef]>) -> Self {
-        Self::from_facts(facts.into_vec())
-    }
-}
-
-impl From<&Vec<FactVersionRef>> for FactSet {
-    fn from(facts: &Vec<FactVersionRef>) -> Self {
-        Self::from_facts(facts.clone())
-    }
-}
-
-impl<const N: usize> From<[FactVersionRef; N]> for FactSet {
-    fn from(facts: [FactVersionRef; N]) -> Self {
-        Self::from_facts(facts.into())
-    }
-}
-
-impl From<Arc<[FactVersionRef]>> for FactSet {
-    fn from(facts: Arc<[FactVersionRef]>) -> Self {
-        if facts.len() <= WIDE_SIGNATURE_WIDTH && facts.windows(2).all(|pair| pair[0] < pair[1]) {
-            return Self(Repr::Flat(facts));
-        }
-        Self::from_facts(facts.to_vec())
-    }
-}
-
-impl FromIterator<FactVersionRef> for FactSet {
-    fn from_iter<I: IntoIterator<Item = FactVersionRef>>(iter: I) -> Self {
-        Self::from_facts(iter.into_iter().collect())
     }
 }
 

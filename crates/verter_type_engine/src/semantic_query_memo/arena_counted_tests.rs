@@ -13,10 +13,13 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 
     const WAIT: Duration = Duration::from_secs(30);
     const HOLD: Duration = Duration::from_millis(20);
+    let base = crate::instant::Instant::now();
     for (hit, acquisition) in [(true, 1), (false, 1), (false, 2)] {
         let mut arena = NodeArena::default();
         let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
         arena.provenance = Some(Arc::clone(&provenance));
+        // The wait clock is stepped by the test, not read from the wall.
+        *arena.wait_clock.lock() = Some(base);
         let data = SemanticNodeData::Literal(LiteralValue::String("contended".into()));
         // The hit case's seed stays owned across the worker's intern, so
         // the worker finds it live rather than interning a fresh node.
@@ -27,14 +30,21 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
         let (parked_tx, parked_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let resume_rx = parking_lot::Mutex::new(resume_rx);
+        let (timing_tx, timing_rx) = mpsc::channel();
         let acquisitions = AtomicUsize::new(0);
-        *arena.race_hook.lock() = Some(Arc::new(move |event| {
-            if event == ArenaRaceEvent::BeforeInnerWrite
-                && acquisitions.fetch_add(1, Ordering::Relaxed) + 1 == acquisition
+        let targeted = std::sync::atomic::AtomicBool::new(false);
+        *arena.race_hook.lock() = Some(Arc::new(move |event| match event {
+            ArenaRaceEvent::BeforeInnerWrite
+                if acquisitions.fetch_add(1, Ordering::Relaxed) + 1 == acquisition =>
             {
+                targeted.store(true, Ordering::Relaxed);
                 parked_tx.send(()).unwrap();
                 resume_rx.lock().recv_timeout(WAIT).unwrap();
             }
+            ArenaRaceEvent::InnerWriteClockStarted if targeted.swap(false, Ordering::Relaxed) => {
+                let _ = timing_tx.send(());
+            }
+            _ => {}
         }));
         std::thread::scope(|threads| {
             // Disconnect a parked worker before joining on assertion failure.
@@ -43,7 +53,10 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             parked_rx.recv_timeout(WAIT).unwrap();
             let held = arena.inner.write();
             resume.send(()).unwrap();
-            std::thread::sleep(HOLD);
+            // The worker reports once its wait clock is running; the clock then steps HOLD
+            // forward while the lock is still held, so the counted wait is exactly HOLD.
+            timing_rx.recv_timeout(WAIT).unwrap();
+            *arena.wait_clock.lock() = Some(base + HOLD);
             drop(held);
             let interned = worker.join().unwrap();
             if let Some(seeded) = &seeded {
@@ -55,7 +68,7 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             .node_arena_inner_write_wait_ns
             .load(Ordering::Relaxed)
             - before;
-        assert!(waited >= HOLD.as_nanos() as u64 / 2,
+        assert!(waited == HOLD.as_nanos() as u64,
             "hit={hit}, acquisition={acquisition}: blocked write acquisition was not counted ({waited}ns)");
     }
 }

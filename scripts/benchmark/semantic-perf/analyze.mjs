@@ -14,7 +14,7 @@ export { RESOURCE_CODES };
 /** The arms, what each measures and whether it enters the head-to-head. */
 export const ARMS = {
   verter: { tool: "verter", kind: "probe", headline: true, label: "Verter (production defaults)" },
-  "tsc-api": { tool: "tsc", kind: "probe", headline: true, label: "tsc 7.0.2 native API" },
+  "tsc-api": { tool: "tsc", kind: "probe", headline: true, label: "tsc native API" },
   "verter-obs": {
     tool: "verter",
     kind: "probe",

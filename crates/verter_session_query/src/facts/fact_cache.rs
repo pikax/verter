@@ -440,17 +440,18 @@ pub struct ReadSetSignature {
 }
 
 impl ReadSetSignature {
+    /// The signature of a sealed set. A raw collection becomes a set only
+    /// through a policy ([`crate::facts::policy::FactPolicy::seal`]).
     #[must_use]
-    pub fn new(facts: impl Into<FactSet>) -> Self {
-        Self {
-            facts: facts.into(),
-        }
+    pub fn new(facts: FactSet) -> Self {
+        Self { facts }
     }
 
+    /// The signature with no fact, under `policy`.
     #[must_use]
-    pub fn empty() -> Self {
+    pub fn empty(policy: crate::facts::policy::FactPolicy) -> Self {
         Self {
-            facts: FactSet::empty(),
+            facts: policy.empty_set(),
         }
     }
 

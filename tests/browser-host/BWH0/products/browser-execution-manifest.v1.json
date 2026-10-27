@@ -239,7 +239,7 @@
     {
       "id": "tsc.engine-tsgo",
       "hostExecutionClass": "ExternalOwner",
-      "engine": "tsgo >=7.0.2, <7.1.0 (native terminal only)",
+      "engine": "tsgo >=7.1.0-beta, <7.2.0 (native terminal only)",
       "browserAdmitted": false,
       "crossOriginIsolationRequired": false,
       "sharedArrayBufferRequired": false,
@@ -253,7 +253,7 @@
       "receiptBasis": {
         "sourceRevisions": "no browser result exists; native execution binds its own input basis under the producing owner (crates/verter_tsc)",
         "projectConfiguration": "no browser project identity; native project checks bind tsconfig and provider mode under the producing owner",
-        "engineIdentity": "tsgo >=7.0.2, <7.1.0 (native terminal only)",
+        "engineIdentity": "tsgo >=7.1.0-beta, <7.2.0 (native terminal only)",
         "hostIdentity": "native terminal or explicitly selected local-native companion; never a browser runtime",
         "completenessState": "unsupported in-browser by design: any browser-facing presentation is a labelled gap, and a claimed browser result without a shipped build is rejected (DX0-AC2 lineage)"
       }

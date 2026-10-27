@@ -186,19 +186,17 @@ fn a_supervisor_dying_between_spawn_and_release_leaves_no_orphan() {
         .trim()
         .parse()
         .unwrap();
-    // Give a running (Linux) child the chance to start its grandchild.
-    std::thread::sleep(Duration::from_millis(300));
-    let mut tree = vec![(
+    assert_gone(&[(
         child,
         "the child of a supervisor that died after spawning it",
-    )];
+    )]);
+    // The child is gone, so any grandchild a running (Linux) child started is already published.
     if let Ok(text) = std::fs::read_to_string(&pidfile) {
-        tree.push((
+        assert_gone(&[(
             text.trim().parse().unwrap(),
             "the grandchild of a supervisor that died after spawning its parent",
-        ));
+        )]);
     }
-    assert_gone(&tree);
     assert_ne!(run.0, Some(0));
     assert!(!dir.join("result.json").exists());
 }

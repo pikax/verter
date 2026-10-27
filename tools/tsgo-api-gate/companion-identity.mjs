@@ -42,33 +42,16 @@
 // Run: NM_BASE="$PWD" TSGO_PATH="<tsgo exe>" node tools/tsgo-api-gate/companion-identity.mjs
 // (run-gate.mjs discovers TSGO_PATH and runs this with the other scripts).
 
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
-import fs from "node:fs";
+
+import { loadSyncApi, overlayFileSystem } from "./sync-api.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(ROOT, "fixture");
 const norm = (p) => p.replace(/\\/g, "/");
-const require = createRequire(import.meta.url);
-const opts = { paths: (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean) };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
-// Import via the PUBLIC `<pkg>/unstable/sync` export (honouring the package
-// `exports` map) — the same public surface a real consumer uses.
-let syncApiPath;
-for (const p of sourcePkgs) {
-  try {
-    syncApiPath = require.resolve(`${p}/unstable/sync`, opts);
-    break;
-  } catch {
-    /* try next */
-  }
-}
-if (!syncApiPath)
-  throw new Error(
-    `could not resolve a TS>=7 sync API (<pkg>/unstable/sync) from ${JSON.stringify(sourcePkgs)}`,
-  );
-const { API } = await import(pathToFileURL(syncApiPath).href);
+// The public `<pkg>/sync` + `<pkg>/fs` exports (see ./sync-api.mjs).
+const { API, serverFS } = await loadSyncApi();
 
 const TSCONFIG = path.join(FIXTURE, "tsconfig.json");
 const DIR = path.join(FIXTURE, "src", "components");
@@ -92,36 +75,11 @@ function record(name, pass, detail) {
   console.log(`[${pass ? "PASS" : "FAIL"}] ${name}: ${detail}`);
 }
 
-// Build a sparse FS overlay over a fixed set of off-disk files (abs path -> content),
-// injecting their basenames into the shared dir enumeration so `include` discovers them.
+// A sparse FS overlay over a fixed set of off-disk files (abs path -> content):
+// their basenames are injected into the shared dir enumeration so `include`
+// discovers them; everything else falls through to the real filesystem.
 function makeOverlay(offDiskMap) {
-  const map = new Map(Object.entries(offDiskMap).map(([p, c]) => [norm(p), c]));
-  const dirNorm = norm(DIR);
-  const bases = [...map.keys()].map((p) => path.basename(p));
-  return {
-    readFile(f) {
-      const v = map.get(norm(f));
-      return v === undefined ? undefined : v;
-    },
-    fileExists(f) {
-      return map.has(norm(f)) ? true : undefined;
-    },
-    getAccessibleEntries(d) {
-      if (norm(d) !== dirNorm) return undefined;
-      let real;
-      try {
-        const e = fs.readdirSync(d, { withFileTypes: true });
-        real = {
-          files: e.filter((x) => x.isFile()).map((x) => x.name),
-          directories: e.filter((x) => x.isDirectory()).map((x) => x.name),
-        };
-      } catch {
-        real = { files: [], directories: [] };
-      }
-      for (const b of bases) if (!real.files.includes(b)) real.files.push(b);
-      return real;
-    },
-  };
+  return overlayFileSystem(serverFS, offDiskMap);
 }
 
 function typeAtStr(project, file, offset) {
@@ -147,17 +105,14 @@ console.log("fixture root:", norm(FIXTURE));
   const verterCompanion = path.join(DIR, "CompA.vue.verter.tsx"); // the .verter. infix identity
   const CONSUMER_SRC = `import { widget } from "./CompA.vue";\nexport const a: string = widget.label;\n`;
   const COMPANION_SRC = `export const widget = { label: "hi" as string };\n`;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: makeOverlay({ [consumer]: CONSUMER_SRC, [verterCompanion]: COMPANION_SRC }),
   });
-  try {
-    const snap = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, verterCompanion] },
-    });
-    const project = snap.getProject(TSCONFIG);
+  {
+    using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+    const project = snap.getConfiguredProject(TSCONFIG);
     const diags = project.program.getSemanticDiagnostics(consumer);
     console.log(
       "[A] ConsumerA diags (serving .verter.tsx only):",
@@ -171,9 +126,6 @@ console.log("fixture root:", norm(FIXTURE));
         : "expected TS2307 (the .verter. infix is unreachable by tsgo's basename probe), got: " +
             JSON.stringify(diagSummary(diags)),
     );
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 
@@ -195,17 +147,14 @@ console.log("fixture root:", norm(FIXTURE));
   const CONSUMER_SRC = `import { widget } from "./CompB.vue";\nconst lbl = widget.label;\nexport const b: string = lbl;\n`;
   // Minimal hand-written declaration: `widget.label` is `string`.
   const DECL_SRC = `declare const widget: { label: string };\nexport { widget };\n`;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: makeOverlay({ [consumer]: CONSUMER_SRC, [declCarrier]: DECL_SRC }),
   });
-  try {
-    const snap = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, declCarrier] },
-    });
-    const project = snap.getProject(TSCONFIG);
+  {
+    using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+    const project = snap.getConfiguredProject(TSCONFIG);
     const diags = project.program.getSemanticDiagnostics(consumer);
     console.log("[B] ConsumerB diags (serving .d.vue.ts):", JSON.stringify(diagSummary(diags)));
     // Type at `lbl` binding (whose initializer is widget.label : string).
@@ -223,9 +172,6 @@ console.log("fixture root:", norm(FIXTURE));
             " flows into the plain .ts; PRODUCTION declaration carrier identity is .d.vue.ts."
         : "unexpected: diags=" + JSON.stringify(diagSummary(diags)) + " lblTy=" + lblTy,
     );
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 
@@ -246,17 +192,14 @@ console.log("fixture root:", norm(FIXTURE));
   const CONSUMER_SRC = `import { widget } from "./CompB2.vue";\nconst lbl = widget.label;\nexport const which = lbl;\n`;
   const DECL_SRC = `declare const widget: { label: string };\nexport { widget };\n`;
   const IDE_SRC = `export const widget = { label: 0 as number };\n`;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: makeOverlay({ [consumer]: CONSUMER_SRC, [declCarrier]: DECL_SRC, [ideCarrier]: IDE_SRC }),
   });
-  try {
-    const snap = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, declCarrier, ideCarrier] },
-    });
-    const project = snap.getProject(TSCONFIG);
+  {
+    using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+    const project = snap.getConfiguredProject(TSCONFIG);
     const diags = project.program.getSemanticDiagnostics(consumer);
     console.log(
       "[B2] ConsumerB2 diags (serving BOTH .d.vue.ts + .vue.tsx):",
@@ -294,9 +237,6 @@ console.log("fixture root:", norm(FIXTURE));
             "); diags=" +
             JSON.stringify(diagSummary(diags)),
     );
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 
@@ -327,7 +267,7 @@ console.log("fixture root:", norm(FIXTURE));
     `increment();\n` +
     `export const out = { props, c };\n` +
     `export type ComponentIsCallable = typeof Widget;\n`;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: makeOverlay({
@@ -336,12 +276,9 @@ console.log("fixture root:", norm(FIXTURE));
       [svelteRuneModule]: RUNE_MODULE_SRC,
     }),
   });
-  try {
-    const snap = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, svelteComponentCarrier, svelteRuneModule] },
-    });
-    const project = snap.getProject(TSCONFIG);
+  {
+    using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+    const project = snap.getConfiguredProject(TSCONFIG);
     const diags = project.program.getSemanticDiagnostics(consumer);
     console.log(
       "[C] ConsumerC diags (svelte component carrier + rune module):",
@@ -390,9 +327,6 @@ console.log("fixture root:", norm(FIXTURE));
         ? "bare ./Widget.svelte resolved to the .svelte.tsx COMPONENT carrier (WidgetProps in scope), distinct from the .svelte.ts rune module reached via ./state.svelte."
         : "bare ./Widget.svelte did not pick the component carrier: propLabelTy=" + propLabelTy,
     );
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 
@@ -414,7 +348,7 @@ let svelteProbeWinner = "?";
   const tsCandidate = path.join(DIR, "Probe.svelte.ts");
   const tsxCandidate = path.join(DIR, "Probe.svelte.tsx");
   const CONSUMER_SRC = `import { which } from "./Probe.svelte";\nexport const picked = which;\n`;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: makeOverlay({
@@ -423,12 +357,9 @@ let svelteProbeWinner = "?";
       [tsxCandidate]: `export const which = "tsx" as const;\n`,
     }),
   });
-  try {
-    const snap = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, tsCandidate, tsxCandidate] },
-    });
-    const project = snap.getProject(TSCONFIG);
+  {
+    using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+    const project = snap.getConfiguredProject(TSCONFIG);
     const ty = typeAtStr(
       project,
       consumer,
@@ -445,9 +376,6 @@ let svelteProbeWinner = "?";
         svelteProbeWinner +
         " FIRST for a bare .svelte import. (.svelte.ts before .svelte.tsx => a bare .svelte.ts API-carrier identity would collide with a rune module; the REDIRECT-reached .ts API carrier must use a non-bare-probed identity.)",
     );
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 {
@@ -455,7 +383,7 @@ let svelteProbeWinner = "?";
   const carrier = path.join(DIR, "Same.svelte.tsx");
   const rune = path.join(DIR, "Same.svelte.ts");
   const CONSUMER_SRC = `import Comp from "./Same.svelte";\nexport const out = Comp;\n`;
-  const api = new API({
+  using api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
     fs: makeOverlay({
@@ -464,12 +392,9 @@ let svelteProbeWinner = "?";
       [rune]: `export const x = 1;\n`, // a rune module: NO default export
     }),
   });
-  try {
-    const snap = api.updateSnapshot({
-      openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, carrier, rune] },
-    });
-    const project = snap.getProject(TSCONFIG);
+  {
+    using snap = api.createSnapshot({ openProjects: [TSCONFIG] });
+    const project = snap.getConfiguredProject(TSCONFIG);
     const diags = project.program.getSemanticDiagnostics(consumer);
     console.log("[D2] same-stem collision diags:", JSON.stringify(diagSummary(diags)));
     // The .ts rune (no default export) shadows the .tsx carrier -> TS1192.
@@ -481,9 +406,6 @@ let svelteProbeWinner = "?";
         : "expected TS1192 (same-stem .ts shadows .tsx), got: " +
             JSON.stringify(diagSummary(diags)),
     );
-    snap.dispose();
-  } finally {
-    api.close();
   }
 }
 

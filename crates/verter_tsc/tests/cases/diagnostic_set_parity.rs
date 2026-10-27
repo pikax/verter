@@ -401,11 +401,10 @@ fn create_junction_or_symlink(src: &Path, dest: &Path) {
 //
 // The `--noEmit` typecheck now runs the gated in-memory tsgo `--api` backend,
 // which requires the `@typescript/typescript-*` native engine the wire gate
-// pins (`typescript@7.0.2`, a workspace-root devDep installed by
+// pins (the workspace-root `typescript` devDep installed by
 // `pnpm install --frozen-lockfile`). The temp project's junctioned
 // `packages/example/node_modules` does NOT carry that engine (it pins an older
-// `typescript`), and the retired native-preview `tsgo` (npx cache) fails the wire
-// gate — so this preflight resolves the gated engine once (an explicit
+// `typescript`) — so this preflight resolves the gated engine once (an explicit
 // `VERTER_TSGO_BIN` wins; else the SHARED `verter_tsgo_api` discovery against the
 // workspace root) and threads it to the verter-tsc subprocess via
 // `VERTER_TSGO_BIN`. A genuinely-absent engine SKIPs — the pinned multiset is
@@ -414,7 +413,7 @@ fn create_junction_or_symlink(src: &Path, dest: &Path) {
 /// Resolve the gated `--api` engine through the 4-tier toolchain resolver
 /// (`VERTER_TSGO_BIN` wins; then shared PATH, project-local `node_modules`
 /// under the workspace root — where `pnpm install --frozen-lockfile` installs
-/// `typescript@7.0.2` — the update cache, and the bundled sidecar),
+/// the pinned `typescript` — the update cache, and the bundled sidecar),
 /// capability-validated (bounded version probe + support policy + a `--lsp`
 /// capability smoke per candidate).
 fn resolve_gated_engine() -> Option<PathBuf> {
@@ -449,7 +448,7 @@ fn verter_tsc_diagnostic_set_parity() {
         Some(p) => p,
         None => {
             eprintln!(
-                "SKIP: gated tsgo `--api` engine (typescript@7.0.2) not found — the pinned set \
+                "SKIP: gated tsgo `--api` engine (the pinned typescript) not found — the pinned set \
                  is engine-specific; set VERTER_TSGO_BIN or run `pnpm install --frozen-lockfile` \
                  in the workspace so the pinned engine is discoverable"
             );
@@ -647,7 +646,7 @@ fn vue_export_star_members_resolve_without_spurious_errors() {
         Some(p) => p,
         None => {
             eprintln!(
-                "SKIP: gated tsgo `--api` engine (typescript@7.0.2) not found — set \
+                "SKIP: gated tsgo `--api` engine (the pinned typescript) not found — set \
                  VERTER_TSGO_BIN or run `pnpm install --frozen-lockfile` in the workspace"
             );
             drop(temp_dir);

@@ -17,10 +17,12 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// `canonical`. The hash byte distinguishes distinct content versions.
 fn sig_for(canonical: &str, hash_byte: u8) -> ReadSetSignature {
     let facts: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: [hash_byte; 16],
-        }]);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [hash_byte; 16],
+            },
+        ]);
     ReadSetSignature::new(facts)
 }
 
@@ -672,7 +674,10 @@ fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
         receipts.push(ResultReceipt::new(facts));
     }
     let carrier = |receipt: &ResultReceipt| {
-        ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())]))
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of(vec![FactVersionRef::Receipt(receipt.clone())]),
+        )
     };
     let store: ReverseIndexedCandidateStore<u32, u32> =
         ReverseIndexedCandidateStore::with_counter(crate::cache_runtime::OccupancyCounter::new());
@@ -744,7 +749,10 @@ fn a_candidate_charge_does_not_grow_with_the_canonicals_its_receipts_reach() {
         store.insert_for_test(
             key,
             0,
-            ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())])),
+            ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of(vec![FactVersionRef::Receipt(receipt.clone())]),
+            ),
             Arc::from(Vec::new()),
             0,
             0u32.retained_footprint(),

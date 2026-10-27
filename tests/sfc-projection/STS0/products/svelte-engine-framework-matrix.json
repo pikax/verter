@@ -16,7 +16,7 @@
     {
       "id": "ts-native",
       "package": "typescript",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "source": "tests/sfc-projection/STP1/products/engine-matrix.json",
       "executableResolution": "typescript native platform package (mapper-capable)"
     }
@@ -46,7 +46,7 @@
       "checking": "engine-checked",
       "provenance": {
         "package": "typescript",
-        "version": "7.0.2",
+        "version": "7.1.0-beta",
         "source": "tests/sfc-projection/STP1/products/engine-matrix.json"
       }
     }

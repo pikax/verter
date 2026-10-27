@@ -100,7 +100,12 @@ fn synthetic_carrier_deepen_round_trips_through_content_free_identity() {
 
     // Publish the deep type under the content-free synthetic-binding
     // identity.
-    db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep.clone());
+    db.insert_synthetic_carrier_deep_for_test(
+        &carrier,
+        ProjectionMode::Shallow,
+        deep.clone(),
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
 
     // The cache must hold exactly one entry — the synthetic-binding deep
     // entry. Discriminates against a silent no-op insert.
@@ -151,7 +156,12 @@ fn synthetic_carrier_deepen_collapses_same_identity_carriers_by_dropping_value_n
     let deep_a = TypeExpr::Literal(verter_type_expr::LiteralValue::String("DEEP_A".to_string()));
 
     // Insert under carrier-A.
-    db.insert_synthetic_carrier_deep_for_test(&carrier_a, ProjectionMode::Shallow, deep_a.clone());
+    db.insert_synthetic_carrier_deep_for_test(
+        &carrier_a,
+        ProjectionMode::Shallow,
+        deep_a.clone(),
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
 
     // A lookup under carrier-B (different `value_node`, same identity)
     // MUST warm-hit the entry inserted under carrier-A. On the retired
@@ -174,7 +184,12 @@ fn synthetic_carrier_deepen_collapses_same_identity_carriers_by_dropping_value_n
     // the discriminating inverse of the retired
     // `..._distinguishes_same_name_carriers_by_value_node` test (which
     // asserted `live_count() == 2`).
-    db.insert_synthetic_carrier_deep_for_test(&carrier_b, ProjectionMode::Shallow, deep_a.clone());
+    db.insert_synthetic_carrier_deep_for_test(
+        &carrier_b,
+        ProjectionMode::Shallow,
+        deep_a.clone(),
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     assert_eq!(
         db.live_count(),
         1,
@@ -199,7 +214,12 @@ fn synthetic_carrier_deepen_still_discriminates_identity_axes() {
         7,
     );
     let deep = deep_type_for_proof();
-    db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep.clone());
+    db.insert_synthetic_carrier_deep_for_test(
+        &carrier,
+        ProjectionMode::Shallow,
+        deep.clone(),
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
 
     // Different scope_canonical_id MUST miss.
     let other_scope = SyntheticCarrierKey {

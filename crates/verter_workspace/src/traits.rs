@@ -850,6 +850,11 @@ pub trait WorkspaceRead: Send + Sync {
 /// `set_exact_resolutions`, `configure_resolver`) are reachable only via
 /// host wrappers that run the cache-cascade discipline.
 pub trait WorkspaceAccess: WorkspaceRead {
+    /// The fact policy this workspace seals its resolution witnesses under,
+    /// chosen when it was composed. A host bound to the workspace builds
+    /// under the same policy, so the witnesses it absorbs are compatible.
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy;
+
     /// Open and close a strict-self-root authority write bracket. Backends
     /// that expose a generation override these together with the active-
     /// writer read above.
@@ -1574,6 +1579,9 @@ mod ambient_default_tests {
     }
 
     impl WorkspaceAccess for StubWs {
+        fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+            verter_session_query::facts::policy::FactPolicy::production()
+        }
         // Reader-only stub overrides (R6/R7). Rationale (§2.16b):
         // `StubWs` lives inside a `#[cfg(test)]` ambient_default_tests module;
         // constructed only by trait-default coverage tests that don't invoke
@@ -1698,6 +1706,9 @@ mod ambient_default_tests {
     }
 
     impl WorkspaceAccess for TypedProbeWs {
+        fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+            verter_session_query::facts::policy::FactPolicy::production()
+        }
         fn record_parsed_edges(&self, _id: &str, _edges: &[ParsedEdge]) {}
         fn set_exact_resolutions(
             &self,

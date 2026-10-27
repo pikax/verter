@@ -122,7 +122,7 @@ impl AttachOwnership for NonOwning {
 }
 
 /// The LSP `custom/` method that asks a `tsgo --lsp` server to mint an `--api`
-/// session sharing its `project.Session`. Verified against the shipped rc
+/// session sharing its `project.Session`. Verified against the pinned
 /// `typescript` engine binary (the JS package carries only the doc comment; the
 /// method + result shape live in the Go server).
 pub const INITIALIZE_API_SESSION_METHOD: &str = "custom/initializeAPISession";
@@ -366,7 +366,7 @@ pub struct TsgoAttach<O: AttachOwnership = Owned> {
     api: ApiAttachClient,
     session: ApiSessionHandle,
     /// The engine version the wire gate accepted for this attach — the value
-    /// that flows to the `--api` `updateSnapshot` rail.
+    /// that flows to the `--api` first-snapshot rail.
     observed_version: String,
     /// How that version was observed (in-band `serverInfo` vs a probe).
     witness: EngineVersionWitness,
@@ -463,7 +463,7 @@ impl<O: AttachOwnership> TsgoAttach<O> {
     /// ordered sync barrier, and `custom/initializeAPISession` re-emission —
     /// everything else is refused before the wire (deny-by-default). On a
     /// non-owning attach this is the only public `--lsp` carrier-write
-    /// surface (the `--api` snapshot rail — `api()` / `update_snapshot()` —
+    /// surface (the `--api` snapshot rail — `api()` / `current_snapshot()` —
     /// is separate).
     #[must_use]
     pub fn injection_channel(&self) -> CarrierInjectionChannel<'_> {
@@ -487,7 +487,7 @@ impl<O: AttachOwnership> TsgoAttach<O> {
     }
 
     /// The engine version the wire gate accepted for this attach — the value
-    /// the `--api` `updateSnapshot` rail is driven with.
+    /// the `--api` first-snapshot rail is driven with.
     #[must_use]
     pub fn observed_version(&self) -> &str {
         &self.observed_version
@@ -499,13 +499,15 @@ impl<O: AttachOwnership> TsgoAttach<O> {
         self.witness
     }
 
-    /// Open / refresh the configured-project snapshot using the STORED
-    /// gate-accepted engine version (the in-band witness) — the convenience
-    /// over [`ApiAttachClient::update_snapshot_open_project`] so callers never
-    /// re-supply (or hardcode) the version the gate already validated.
-    pub async fn update_snapshot(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
+    /// Read the language server's current snapshot with `tsconfig_path` open,
+    /// using the STORED gate-accepted engine version (the in-band witness) —
+    /// the convenience over [`ApiAttachClient::current_snapshot_for_project`] so
+    /// callers never re-supply (or hardcode) the version the gate already
+    /// validated. The returned snapshot is the caller's to release through
+    /// [`ApiAttachClient::release`] (`self.api().release(..)`).
+    pub async fn current_snapshot(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
         self.api
-            .update_snapshot_open_project(tsconfig_path, &self.observed_version)
+            .current_snapshot_for_project(tsconfig_path, &self.observed_version)
             .await
     }
 }
@@ -530,7 +532,7 @@ impl TsgoAttach<Owned> {
     /// connection Verter spawned, READ the in-band `serverInfo.version`
     /// witness from the `initialize` result, and feed it to the wire gate
     /// (fail-closed on an unknown channel). Returns the accepted clearance
-    /// (its `observed_version` flows to the `--api` `updateSnapshot` rail).
+    /// (its `observed_version` flows to the `--api` first-snapshot rail).
     /// This is the ONLY place Verter originates an `initialize` — an
     /// editor-owned connection is already initialized and MUST NOT be
     /// re-initialized.
@@ -538,13 +540,13 @@ impl TsgoAttach<Owned> {
         conn: &JsonRpcConnection,
         root_uri: &str,
     ) -> TsgoApiResult<GateClearance> {
-        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::from_env()).await
+        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::production()).await
     }
 
     /// The policy-explicit handshake-half (crate-internal): the toolchain
     /// validator injects its own [`VersionPolicy`] so the in-band gate and the
     /// provisioning policy cannot disagree. [`TsgoAttach::lsp_handshake`]
-    /// delegates here with the env-derived policy.
+    /// delegates here with the production policy.
     pub(crate) async fn lsp_handshake_with_policy(
         conn: &JsonRpcConnection,
         root_uri: &str,
@@ -581,7 +583,7 @@ impl TsgoAttach<Owned> {
     /// initialized, and a second Verter-originated `initialize` would be a
     /// protocol violation — use [`TsgoAttach::attach_to_initialized`] instead.
     pub async fn attach_over(lsp: TsgoLspConnection, root_uri: &str) -> TsgoApiResult<Self> {
-        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::from_env()).await
+        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::production()).await
     }
 
     /// The policy-explicit owned composer (crate-internal): like

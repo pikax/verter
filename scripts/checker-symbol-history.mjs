@@ -1,14 +1,20 @@
-// Reproduce the pinned native checker's symbol-ID-dependent abbreviation.
-// This optional oracle experiment needs the installed TypeScript package;
+// Prove the pinned native checker abbreviates symbol-keyed types the same
+// with and without unrelated symbol work first (TypeScript 7.1 counts a
+// symbol key by its spelling, not by a process-global symbol id). This
+// optional oracle experiment needs the installed TypeScript package;
 // provider-free consumer regressions live in flow_narrowing_parity_tests.rs.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { version } from "typescript";
-import { API } from "typescript/unstable/sync";
+import { API } from "typescript/sync";
 
-assert.equal(version, "7.0.2", "reassess this compatibility exception on oracle upgrades");
+const pin = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+).devDependencies.typescript;
+assert.equal(version, pin, "reassess this compatibility exception on oracle upgrades");
 const dir = mkdtempSync(join(tmpdir(), "verter-symbol-history-")).replaceAll("\\", "/");
 const keys = Array.from({ length: 12 }, (_, i) => `declare const s${i}: unique symbol;`).join("\n");
 const props = Array.from({ length: 12 }, (_, i) => `[s${i}]: number;`).join(" ");
@@ -22,30 +28,20 @@ const source =
   "\nexport function plain(x: { a: number }) { return one(x); }" +
   "\nexport function short(x: { [s0]: number }) { return one(x); }";
 
+// Each API and snapshot is disposed when its block ends (the API last), and
+// none is touched after it is disposed.
 function read(prewarm, strictNullChecks) {
-  const api = new API({ cwd: dir });
-  try {
-    if (prewarm) {
-      const snapshot = api.updateSnapshot({ openProjects: [`${dir}/warm.json`] });
-      try {
-        assert.deepEqual(snapshot.getProjects()[0].program.getSemanticDiagnostics(), []);
-      } finally {
-        snapshot.dispose();
-      }
-    }
-    const config = `${dir}/${strictNullChecks ? "strict" : "loose"}.json`;
-    const snapshot = api.updateSnapshot({ openProjects: [config] });
-    try {
-      return snapshot
-        .getProject(config)
-        .program.getSemanticDiagnostics()
-        .map(({ code, pos, end, text, messageChain }) => ({ code, pos, end, text, messageChain }));
-    } finally {
-      snapshot.dispose();
-    }
-  } finally {
-    api.close();
+  using api = new API({ cwd: dir });
+  if (prewarm) {
+    using snapshot = api.createSnapshot({ openProjects: [`${dir}/warm.json`] });
+    assert.deepEqual(snapshot.getProjects()[0].program.getSemanticDiagnostics(), []);
   }
+  const config = `${dir}/${strictNullChecks ? "strict" : "loose"}.json`;
+  using snapshot = api.createSnapshot({ openProjects: [config] });
+  return snapshot
+    .getConfiguredProject(config)
+    .program.getSemanticDiagnostics()
+    .map(({ code, pos, end, text, messageChain }) => ({ code, pos, end, text, messageChain }));
 }
 
 try {
@@ -83,7 +79,7 @@ try {
     const differences = fresh.flatMap((diagnostic, i) =>
       diagnostic.text === warmed[i].text ? [] : [{ fresh: diagnostic, warmed: warmed[i] }],
     );
-    assert(differences.length > 0, "the oracle must reproduce the history-sensitive abbreviation");
+    assert.deepEqual(differences, [], "the pinned checker abbreviates independently of history");
     assert.deepEqual(fresh.slice(-2), warmed.slice(-2), "unaffected exact-checker controls");
     assert.equal(
       fresh.at(-2).text,

@@ -656,7 +656,8 @@ async fn drive_hover(
 }
 
 /// Resolve the PINNED engine binary the oracle harness generates with —
-/// EXACTLY `identity::TSGO_VERSION` (`tsc --version` → `Version 7.0.2`): the
+/// EXACTLY `identity::TSGO_VERSION` (the TypeScript pin, `tsc --version` →
+/// `Version <pin>`): the
 /// platform binary `lib/tsc[.exe]` of the `@typescript/typescript-<os>-<arch>`
 /// package the workspace `typescript` devDependency installs.
 ///
@@ -667,10 +668,10 @@ async fn drive_hover(
 /// `node_modules` (flat + pnpm-store layouts, walked upward from this crate's
 /// manifest dir), the update cache, the bundled sidecar — with the real
 /// `--version` probe, the version policy and the `--lsp` capability handshake.
-/// The harness pin is STRICTER than the product's support window
-/// (`>=7.0.2, <7.1.0`): every snapshot records the exact engine version and the
+/// The harness pin is STRICTER than the product's support window (the pin's
+/// release line): every snapshot records the exact engine version and the
 /// consumption driver validates it, so a supported-but-unpinned engine (a later
-/// `7.0.x` on `PATH`) would produce snapshots the env-pin rail rejects.
+/// patch on `PATH`) would produce snapshots the env-pin rail rejects.
 /// [`ExactPinValidator`] expresses that as a validator layered on the product
 /// one — an unpinned candidate is REJECTED with an actionable reason and the
 /// walk continues to the next tier, so a stray `PATH` install never shadows the
@@ -678,9 +679,7 @@ async fn drive_hover(
 /// exact pin is [`GenError::TsgoUnavailable`] (a skip) carrying the resolver's
 /// per-candidate rejection report.
 ///
-/// The harness used to carry its own `node_modules` walk because it pinned a
-/// nightly build the product policy refuses outright; the pin is a stable
-/// release inside the supported window now, so a second discovery
+/// The pin is inside the product's supported window, so a second discovery
 /// implementation has no reason to exist. The resolution is memoised per
 /// process — every spec drives the same binary, and the capability handshake is
 /// not free.
@@ -700,7 +699,7 @@ async fn resolve_pinned_engine() -> Result<String, GenError> {
         Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
     );
     let validator = ExactPinValidator {
-        product: ProcessValidator::from_env(),
+        product: ProcessValidator::production(),
     };
     match discovery::resolve_with(&request, &validator).await {
         Ok(resolution) => Ok(resolution.path.to_string_lossy().into_owned()),
@@ -713,11 +712,9 @@ async fn resolve_pinned_engine() -> Result<String, GenError> {
 
 /// The harness's exact-pin validator: the product's real `--version` probe,
 /// version policy and `--lsp` handshake first, then EXACT equality of the
-/// probed version with `identity::TSGO_VERSION`. Any other engine — a nightly,
-/// a later supported stable, a pre-7 `tsc` — is a rejection carrying the
-/// reported version, never an accepted candidate. (The product validator's
-/// dev-nightly environment override is moot under the exact pin: a nightly it
-/// let through is rejected here.)
+/// probed version with `identity::TSGO_VERSION`. Any other engine — a later
+/// supported patch or release candidate, a pre-7 `tsc` — is a rejection carrying
+/// the reported version, never an accepted candidate.
 struct ExactPinValidator {
     product: ProcessValidator,
 }
@@ -798,7 +795,7 @@ async fn drive_hover_over_files(
         Duration::from_secs(15),
         provider.get_hover(
             &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(
-                &hover_abs.to_string_lossy(),
+                hover_abs.to_string_lossy(),
             ),
             hover_offset,
         ),
@@ -1246,7 +1243,7 @@ fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
         ))
     })?;
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .ok_or_else(|| {
             GenError::PreflightUnclean(format!(
                 "{}::{}: resolved node did not project to a TypeExpr (carrier/operator shell)",

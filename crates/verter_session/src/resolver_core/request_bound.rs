@@ -1370,6 +1370,7 @@ impl crate::VerterHost {
                 &seed,
                 &self.live_aggregate_counters(),
             ),
+            self.project_type_store().fact_policy(),
             f,
         )
     }

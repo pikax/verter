@@ -528,6 +528,7 @@ mod tests {
             receipt::ResultReceipt,
         };
         let facts = seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
             (0..2051)
                 .map(|index| FactVersionRef::FileWholeHash {
                     canonical_id: format!("/wide/{index}.ts").into(),

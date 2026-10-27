@@ -17,8 +17,8 @@
 //!   TypeScript extension publishes for it).
 //! - **tsgo** (LSP-native `textDocument/semanticTokens/full`): indices into the
 //!   legend the SERVER advertises in its `initialize` result. That legend's
-//!   order is server-owned and version-dependent (observed live on the pinned
-//!   7.0.2: 22 types with `interface = 3`, where Verter publishes
+//!   order is server-owned and version-dependent (observed live on
+//!   7.1.0-beta: 22 types with `interface = 3`, where Verter publishes
 //!   `interface = 4`), so it must be RETAINED at initialize time and remapped
 //!   per token — never assumed to match anyone else's order.
 //!

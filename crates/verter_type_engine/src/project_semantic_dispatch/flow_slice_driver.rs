@@ -180,7 +180,7 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
                     // Content-addressed: the key pins every input, so the
                     // fact rail stays EMPTY — no slice identity ever
                     // enters `ReadSetSignature.facts`.
-                    signature: ReadSetSignature::empty(),
+                    signature: ReadSetSignature::empty(cx.resolver.request_flags().fact_policy()),
                     self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
                     validated_at_generation: cx.generation(),
                 }
@@ -251,7 +251,7 @@ impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
                 bundle.graph(),
                 bundle.skeleton(),
             )),
-            signature: ReadSetSignature::empty(),
+            signature: ReadSetSignature::empty(cx.resolver.request_flags().fact_policy()),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             validated_at_generation: cx.generation(),
         }

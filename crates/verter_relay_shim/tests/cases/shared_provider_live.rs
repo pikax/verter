@@ -1,5 +1,5 @@
 //! LIVE end-to-end proof of the SHARED editor-attach tsgo provider against the
-//! REAL 7.0.2 engine, through the REAL relay-shim + control protocol.
+//! REAL pinned engine, through the REAL relay-shim + control protocol.
 //!
 //! `[fake editor] -> [real verter-relay-shim] -> [real tsgo]`, with `verter_lsp`'s
 //! `TsgoSharedProvider` as the SEPARATE control-client actor. A FAKE EDITOR spawns
@@ -500,7 +500,7 @@ fn resolved_binding(workspace_root: &str, tsconfig: &str) -> CarrierOwnershipRes
     let resolver = WorkspaceProjectResolver::new(
         &snapshot,
         &vfs as &dyn WorkspaceRead,
-        "7.0.2",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         &env_dims_source,
         true,
     );
@@ -527,7 +527,7 @@ fn resolved_dual_claimant_binding(workspace_root: &str) -> CarrierOwnershipResol
     let resolver = WorkspaceProjectResolver::new(
         &snapshot,
         &vfs as &dyn WorkspaceRead,
-        "7.0.2",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         &env_dims_source,
         true,
     );
@@ -572,7 +572,7 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
     .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
-        Some("7.0.2"),
+        Some(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor
@@ -645,7 +645,7 @@ async fn setup_dual_claimant(tsgo: &Path, tag: &str) -> Harness {
     .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
-        Some("7.0.2"),
+        Some(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor
@@ -1350,7 +1350,7 @@ fn shared_route_dual_claimant_carrier_resolves_to_single_bound_owner() {
     let resolver = WorkspaceProjectResolver::new(
         &snapshot,
         &vfs as &dyn WorkspaceRead,
-        "7.0.2",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         &env_dims_source,
         true,
     );
@@ -1453,7 +1453,7 @@ fn two_project_reference_fixture_resolves_as_one_closure() {
     let resolver = WorkspaceProjectResolver::new(
         &snapshot,
         &vfs as &dyn WorkspaceRead,
-        "7.0.2",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         &env_dims_source,
         true,
     );
@@ -1543,7 +1543,7 @@ async fn setup_composite(
     .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
-        Some("7.0.2"),
+        Some(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor
@@ -1998,7 +1998,7 @@ async fn setup_composite_monorepo(
     .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
-        Some("7.0.2"),
+        Some(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN),
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor

@@ -112,7 +112,7 @@ fn run_declaration(
 // ── DISCRIMINATING: a tier-1 candidate that passes `--version` but
 //    FAILS capability validation must NOT mask the working project-local
 //    candidate. Today the declaration stage selects the first candidate passing
-//    only `--version` + policy (the `mismatch` fake: version 7.0.2, serverInfo
+//    only `--version` + policy (the `mismatch` fake: the pinned version, serverInfo
 //    disagrees), so its stderr names the WRONG engine; the validated resolver
 //    skips it and names the working `apiok` engine. RED: stderr names
 //    `verter-tsgo-fake-mismatch`. GREEN: stderr names `verter-tsgo-fake-apiok`.

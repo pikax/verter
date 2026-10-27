@@ -64,7 +64,7 @@ export interface InContextLs {
   compilerOptions: tsNs.CompilerOptions;
 }
 
-/** `"6.0.3"` / `"7.0.1-rc"` → the numeric major. `NaN`-safe (returns 0). */
+/** `"6.0.3"` / `"7.1.0-beta"` → the numeric major. `NaN`-safe (returns 0). */
 export function tsMajorOf(version: string): number {
   const major = Number.parseInt(version.split(".")[0] ?? "", 10);
   return Number.isNaN(major) ? 0 : major;

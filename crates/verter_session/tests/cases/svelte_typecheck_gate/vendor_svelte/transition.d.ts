@@ -5,9 +5,9 @@
 // checks the function's call signature against them.
 //
 // The params types are NAMED exported interfaces (as in the real package), not
-// inline object literals — under the TSGO native-preview a wrong-typed value on
-// a KNOWN OPTIONAL property of an INLINE imported object type is not flagged,
-// whereas a named interface discriminates reliably (the gate relies on this).
+// inline object literals: a named interface discriminates a wrong-typed value
+// on a KNOWN OPTIONAL property reliably (the gate relies on this), where early
+// tsgo dev builds did not flag it on an INLINE imported object type.
 
 export interface TransitionConfig {
   delay?: number;

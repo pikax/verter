@@ -226,7 +226,7 @@ mod harness {
 
     /// Resolve the gated `--api` engine through the shared capability-validated
     /// toolchain resolver against the workspace root (where
-    /// `pnpm install --frozen-lockfile` installs the pinned `typescript@7.0.2`).
+    /// `pnpm install --frozen-lockfile` installs the pinned `typescript`).
     pub fn gated_engine_resolution() -> Result<
         verter_tsgo_api::toolchain::discovery::Resolution,
         verter_tsgo_api::toolchain::discovery::ResolveError,
@@ -486,8 +486,8 @@ mod harness {
         let ready = resolve_gated_engine(Ok(verter_tsgo_api::toolchain::discovery::Resolution {
             path: PathBuf::from("/opt/tsgo"),
             provenance: Provenance::ProjectLocal,
-            version: verter_tsgo_api::toolchain::policy::TsgoVersion::parse("7.0.2").unwrap(),
-            version_string: "7.0.2".to_string(),
+            version: verter_tsgo_api::toolchain::policy::pinned_version().clone(),
+            version_string: verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN.to_string(),
             rejections: Vec::new(),
         }))
         .expect("a validated engine must be handed through");

@@ -2475,6 +2475,17 @@ pub struct RelationDomainRuntime {
         usize,
         crate::semantic_query::checker_policy::RelationComplexity,
     )>,
+    /// The pairs each open relation chain has related with an answer that
+    /// rested on a `Maybe` (a deeply nested pair, or one past the depth
+    /// limit), keyed by the stack index of the chain's first frame: the
+    /// checker's `maybeKeys`. Such an answer is never admitted, so without
+    /// these a union reaching one pair along `2ⁿ` paths would relate it
+    /// `2ⁿ` times; the checker answers a pair already in `maybeKeys`
+    /// `Maybe` at once. Same lifetime as [`Self::chain_comparisons`].
+    pub(crate) chain_maybe_keys: Vec<(
+        usize,
+        rustc_hash::FxHashSet<crate::semantic_query::RelateMemoKey>,
+    )>,
     /// The order in which this transaction first met each signature
     /// instance as a recursion identity: its position stands in for the
     /// checker's type id, which orders a type's creation, so an inference

@@ -19,7 +19,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use crate::actor::{read_one_frame, DuplexTransport};
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::process::{configure_tree_spawn, reap_child_bounded, TreeKill, REAP_BOUND};
-use crate::transport::spawn::build_sync_api_args;
+use crate::transport::spawn::{build_sync_api_args, host_file_system_is_case_sensitive};
 
 /// A live tsgo `--api` process and its stdio pipes.
 ///
@@ -54,7 +54,7 @@ impl StdioPipeTransport {
         held: Option<&std::sync::Arc<crate::process::HeldStderr>>,
     ) -> TsgoApiResult<Self> {
         let cwd_str = cwd.to_string_lossy();
-        let args = build_sync_api_args(&cwd_str, true);
+        let args = build_sync_api_args(&cwd_str, host_file_system_is_case_sensitive(exe), true);
 
         let mut command = tokio::process::Command::new(exe);
         command

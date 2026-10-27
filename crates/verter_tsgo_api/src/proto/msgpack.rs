@@ -7,7 +7,7 @@
 //! for byte, so the bytes this writer emits are identical to the JS writer's
 //! and the reader accepts exactly what the JS reader accepts.
 //!
-//! Mirrored format constants (msgpack.js:4-8):
+//! Mirrored format constants (msgpack.js:5-9):
 //! - `MSGPACK_FIXARRAY3 = 0x93` — a 3-element fixarray header.
 //! - `MSGPACK_BIN8 = 0xc4`, `MSGPACK_BIN16 = 0xc5`, `MSGPACK_BIN32 = 0xc6`.
 //! - `MSGPACK_UINT8 = 0xcc`.
@@ -21,7 +21,7 @@
 
 use crate::error::{TsgoApiError, TsgoApiResult};
 
-// ── MessagePack format constants (msgpack.js:4-8) ───────────────────────────
+// ── MessagePack format constants (msgpack.js:5-9) ───────────────────────────
 /// 3-element fixarray header byte (`0x93`). Mirrors `MSGPACK_FIXARRAY3`.
 pub const MSGPACK_FIXARRAY3: u8 = 0x93;
 /// `bin 8` marker. Mirrors `MSGPACK_BIN8`.
@@ -35,7 +35,7 @@ pub const MSGPACK_UINT8: u8 = 0xcc;
 
 /// Compute the MessagePack `bin` header size for a given data length.
 ///
-/// Mirrors `binHeaderSize` (msgpack.js:11-17): BIN8 → 2, BIN16 → 3, BIN32 → 5.
+/// Mirrors `binHeaderSize` (msgpack.js:12-18): BIN8 → 2, BIN16 → 3, BIN32 → 5.
 pub fn bin_header_size(len: usize) -> usize {
     if len < 0x100 {
         2
@@ -48,7 +48,7 @@ pub fn bin_header_size(len: usize) -> usize {
 
 /// Append a MessagePack `bin` header for `len` payload bytes to `out`.
 ///
-/// Mirrors `writeBinHeader` (msgpack.js:19-37). Big-endian sizes.
+/// Mirrors `writeBinHeader` (msgpack.js:20-38). Big-endian sizes.
 pub fn write_bin_header(out: &mut Vec<u8>, len: usize) {
     if len < 0x100 {
         out.push(MSGPACK_BIN8);
@@ -108,7 +108,9 @@ impl MsgpackWriter {
 
     /// Write a UTF-8 string. Mirrors `writeString` (msgpack.js:101-127):
     /// `0xa0|len`, `0xd9`+u8, `0xda`+u16, or `0xdb`+u32 (big-endian) then bytes.
-    /// The length is the UTF-8 byte length, not the char count.
+    /// The length is the UTF-8 byte length, not the char count. The JS writer
+    /// encodes WTF-8 (`encodeWtf8`), which is byte-identical to UTF-8 for every
+    /// Rust `&str` (a `&str` cannot hold the lone surrogates WTF-8 adds).
     pub fn write_string(&mut self, s: &str) {
         let bytes = s.as_bytes();
         let len = bytes.len();
@@ -134,7 +136,7 @@ impl MsgpackWriter {
 
     /// Write a `bin` field: a [`write_bin_header`] followed by the raw bytes.
     /// The JS side emits this shape for the tuple `name`/`payload` fields
-    /// (syncChannel.js:264-317).
+    /// (syncChannel.js:302-361).
     pub fn write_bin(&mut self, data: &[u8]) {
         write_bin_header(&mut self.buf, data.len());
         self.buf.extend_from_slice(data);
@@ -290,7 +292,7 @@ impl<'a> MsgpackReader<'a> {
     }
 
     /// Read a `bin` field, returning the borrowed payload bytes. Mirrors the
-    /// `readBin` logic in the channel reader (syncChannel.js:347-368).
+    /// `readBin` logic in the channel reader (syncChannel.js:385-408).
     pub fn read_bin(&mut self) -> TsgoApiResult<&'a [u8]> {
         let marker = self.read_byte()?;
         let len = match marker {
@@ -311,7 +313,7 @@ impl<'a> MsgpackReader<'a> {
 mod tests {
     use super::*;
 
-    // ── bin_header_size mirrors msgpack.js:11-17 ────────────────────────────
+    // ── bin_header_size mirrors msgpack.js:12-18 ────────────────────────────
     #[test]
     fn bin_header_size_matches_reference_thresholds() {
         assert_eq!(bin_header_size(0), 2);
@@ -321,7 +323,7 @@ mod tests {
         assert_eq!(bin_header_size(0x10000), 5);
     }
 
-    // ── write_bin_header mirrors msgpack.js:19-37 (big-endian) ──────────────
+    // ── write_bin_header mirrors msgpack.js:20-38 (big-endian) ──────────────
     #[test]
     fn write_bin_header_emits_exact_reference_bytes() {
         let mut b = Vec::new();

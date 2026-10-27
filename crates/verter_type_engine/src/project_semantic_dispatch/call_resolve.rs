@@ -31,6 +31,7 @@ use crate::semantic_query::{
 };
 pub(super) use context::{ArgumentReadLiterals, ArrayLiteralShape};
 pub(super) use contextual::ContextualCallState;
+pub(super) use elaboration::is_object_type;
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
