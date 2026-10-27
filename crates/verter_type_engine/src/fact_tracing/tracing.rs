@@ -289,12 +289,11 @@ pub(crate) fn clear() {
 /// computation: whatever it reads is not a dependency of the answer being
 /// computed, so it must reach no enclosing read set.
 pub(crate) fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
-    struct Restore(
-        Option<(
-            SmallVec<[ActiveTracer; 8]>,
-            SmallVec<[*const FactReadRecorder; 4]>,
-        )>,
+    type Suspended = (
+        SmallVec<[ActiveTracer; 8]>,
+        SmallVec<[*const FactReadRecorder; 4]>,
     );
+    struct Restore(Option<Suspended>);
     impl Drop for Restore {
         fn drop(&mut self) {
             if let Some((tracers, recorders)) = self.0.take() {
