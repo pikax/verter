@@ -448,7 +448,8 @@ Run after **every** change. Verter's crates are highly interconnected — a chan
 ```bash
 node scripts/gate.mjs 2>&1 | tee /tmp/test-output.txt   # Canonical provider-free core Rust gate: the wasm JS-boundary lane plus archive-backed Surface 1; dedicated CI owns providers, Svelte conformance, compile contracts, and proto freshness.
 node scripts/compile-contracts.mjs
-node scripts/observe-lane.mjs run   # Instrumentation lane: every crate declaring `semantic-observe`, built with it on, under the core filter. Suites that read optional capture (audit records, footprints, provenance counters, including the lazy-lowering and fallthrough-reuse counter guards) run only here; CI's `rust-observe` job runs the same command.
+node scripts/observe-lane.mjs smoke # PR instrumentation smoke: real host output and stored capture, plus the audit-disabled control, without full test-harness builds.
+node scripts/observe-lane.mjs run   # Full instrumentation lane: every crate declaring `semantic-observe`, built with it on, under the core filter. Suites that read optional capture (audit records, footprints, provenance counters, including the lazy-lowering and fallthrough-reuse counter guards) run only here; nightly's `rust-observe` job runs the same command.
 pnpm proto:check
 cargo test --no-fail-fast -p verter_svelte_conformance --features conformance-tests --lib --bin verter_svelte_conformance --test main -- --test-threads=4
 cargo clippy --workspace --all-targets -- -D warnings
