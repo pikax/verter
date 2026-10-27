@@ -4358,6 +4358,9 @@ mod semantic_poll_contract {
 
     type ValueRead = verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>;
 
+    /// What [`read_summary`] reports of a read.
+    type ReadSummary = (String, String, bool, bool, Vec<String>, Option<String>);
+
     type HostDispatch<'a> = ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
 
     /// Resume `entry`'s pending task on another thread until it completes —
@@ -4656,18 +4659,20 @@ mod semantic_poll_contract {
         read: ValueRead,
     }
 
+    /// The tasks holding producers, and the producers they hold.
+    type HeldProducers<'g> = (
+        Vec<verter_execution::tasks::ExecutionTask>,
+        Vec<verter_type_engine::semantic_query_memo::ProducerLease<'g>>,
+    );
+
     /// The producers of `held` another task holds: at the site a frame's
     /// need claims it and, for `expression_site`, at an expression's.
-    #[allow(clippy::type_complexity)]
     fn hold_seam<'g>(
         host: &crate::VerterHost,
         graph: &'g verter_type_engine::semantic_query_memo::SemanticGraphStore,
         held: SemanticQueryKey,
         expression_site: bool,
-    ) -> (
-        Vec<verter_execution::tasks::ExecutionTask>,
-        Vec<verter_type_engine::semantic_query_memo::ProducerLease<'g>>,
-    ) {
+    ) -> HeldProducers<'g> {
         let mut holds = vec![hold_producer(host, graph, held.clone())];
         if expression_site {
             holds.push(hold_producer_with(
@@ -4751,12 +4756,7 @@ mod semantic_poll_contract {
 
     /// `seam`'s root read through the synchronous entry on a fresh host: its
     /// summary and the stages it ran.
-    fn synchronous_across(
-        seam: &HeldSeam,
-    ) -> (
-        (String, String, bool, bool, Vec<String>, Option<String>),
-        (u64, u64),
-    ) {
+    fn synchronous_across(seam: &HeldSeam) -> (ReadSummary, (u64, u64)) {
         let host = (seam.host)();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
