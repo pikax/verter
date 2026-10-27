@@ -891,7 +891,7 @@ pub fn drop_subsumed_receipts(facts: &mut Vec<FactVersionRef>) {
 /// many, so dropping them allocates nothing in the common case.
 #[derive(Default)]
 struct ConsumedReceipts {
-    few: smallvec::SmallVec<[*const ResultEvidence; 8]>,
+    few: smallvec::SmallVec<[*const ResultEvidence; 16]>,
     many: Option<rustc_hash::FxHashSet<*const ResultEvidence>>,
 }
 
@@ -906,10 +906,14 @@ impl ConsumedReceipts {
         if self.few.contains(&evidence) {
             return;
         }
-        self.few.push(evidence);
-        if self.few.len() > Self::LINEAR {
-            self.many = Some(self.few.drain(..).collect());
+        if self.few.len() == Self::LINEAR {
+            let mut many: rustc_hash::FxHashSet<*const ResultEvidence> =
+                self.few.drain(..).collect();
+            many.insert(evidence);
+            self.many = Some(many);
+            return;
         }
+        self.few.push(evidence);
     }
 
     fn contains(&self, evidence: *const ResultEvidence) -> bool {

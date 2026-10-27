@@ -4730,7 +4730,7 @@ impl Engine {
                     let node = ResolutionFactKey::decision(query);
                     let version = captured.world.fact_version(&node);
                     admission =
-                        SignatureAdmission::Cacheable(verter_session_query::facts::fact_cache::ReadSetSignature::new(self.fact_policy.set_of([
+                        SignatureAdmission::Cacheable(verter_session_query::facts::fact_cache::ReadSetSignature::new(self.fact_policy.set_of_shared(Arc::from([
                             verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
                                 verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(
                                     crate::resolution_currency::ResolutionFactRef {
@@ -4739,7 +4739,7 @@ impl Engine {
                                     },
                                 ),
                             ),
-                        ])));
+                        ]))));
                 }
             }
             // The workspace's own edge store records only what the
