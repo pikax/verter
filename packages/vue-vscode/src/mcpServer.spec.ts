@@ -334,7 +334,7 @@ describe("startMcpServerProcess", { timeout: 30_000 }, () => {
       handle.dispose();
     }
     // The child must not outlive the rejected launch.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await handle.terminated;
     expect(handle.isRunning()).toBe(false);
   });
 
@@ -367,7 +367,7 @@ describe("startMcpServerProcess", { timeout: 30_000 }, () => {
     const handle = startMcpServerProcess({ command, args, log: silentLog, readyTimeoutMs: 15_000 });
     await handle.ready;
     handle.dispose();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await handle.terminated;
     expect(handle.isRunning()).toBe(false);
   });
 
