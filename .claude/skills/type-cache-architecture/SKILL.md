@@ -36,6 +36,30 @@ End-state rule:
 
 ## Cache Runtime Hard Rules
 
+Parse-artifact publication uses embedded `StoragePin` owners and charged
+`PinnedOnce` lazy cells. Any Arc record handed out independently of its
+publication cell must carry its own pin; the cell's adjacent pin cannot follow
+a raw Arc clone. Indexed/shallow input records, lowered declarations, whole-file
+environments, shallow/route lenses, function program indexes and registered
+carrier envelopes follow this rule. Environment clones reset their fact pin
+before assembly and are measured at Arc publication; their content-free
+witness remains enforced by `FactStoragePin`. Index
+clones and stable-hash refolds reset their root pin; shared child tables keep
+one charge when the new index is published. Accounting state does not
+participate in index equality. `FactStoragePin` restricts its
+initializer to transitive `NoTypeExpr` facts, preserving that witness through
+erased accounting metadata. `HeapSize` derives may declare an embedded-pin
+hook with `#[heap_size(pin = "path")]` while still measuring every field.
+Pinned heap walks keep one iterative worklist and attribute each deferred node
+to its owning allocation before registering shared charges.
+Contiguous buffers use `HeapSize::heap_size_of_slice` for element heap, beside
+their full capacity/block charge. Inline scalars and Copy arrays summarize
+their zero element heap without walking every byte; owning elements retain
+the exhaustive default walk and owned-handle collection.
+Test-only `PinContext::enter_for_test` scopes isolated accounting on one thread; host
+stage executors explicitly carry it to workers. Production defaults still
+share the single process account and registry.
+
 The generic final-component backing store is
 `verter_type_engine::component_meta_result_db`. The session owns its payload
 and publication policy. Production reads use the request dispatch's
@@ -412,10 +436,25 @@ moves the tree out of its cell when the carrier is the cell's last holder
 (`Owned::try_unwrap`, releasing the charge as the tree leaves) and
 otherwise hands the caller an unshared deep copy
 (`verter_retention::unshared::Unshared`, `#[derive(Unshared)]`), never an
-alias of a retained payload. The parse-artifact layer (`FileArtifactStore`
-entries, `DeclBodyMemo`, scheduler snapshots) stays outside the account;
-a prepared-declaration bundle counts what it reaches of it while it lives
-and charges none of the layer's own storage.
+alias of a retained payload. The parse-artifact layer is pinned on the same process account. `IndexedReady`,
+`FileArtifacts`, `ShallowFileState`, scheduler source/analysis snapshots and
+lazy declaration products carry capacity-based charges. Raw allocations shared
+by these owners use the process `PinContext` alias registry; owned cells keep
+their own charges. A prepared bundle retains the same shallow-state Arc, so
+either release order keeps its single pin until the final state holder drops.
+`PinnedOnce` charges lazy publications before waiters can observe them. Per-file
+map entries charge their variable payloads and settle only the affected shard
+capacity; artifact version chains charge keys, entries and spilled buffers,
+with only each touched table shard's capacity settled after its guard drops.
+Read capacity before taking accounting's lock, and retain its monotonic maximum
+because DashMap removals keep bucket storage. Never scan unrelated shards: an
+admission callback can hold one while publishing a different artifact.
+`PerFileMap` entry guards expose heap-owning values immutably; replace those
+values through `insert`, which replaces the payload and its pin together.
+Copy-only counters retain mutable entry access.
+No capture feature gates these charges, and no admission limit refuses them.
+The full allocation conventions and field owners are recorded in
+`crates/verter_type_engine/observe-inventory/SKR-OWN-ACCOUNT-ARTIFACTS.md`.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure}` both map
 to `NonAdmissionReason::RetentionPressure`,

@@ -48,7 +48,7 @@ impl DeclMapKey for DeclBindingKey {
 }
 
 /// Single-authority declaration map keyed canonically by `(owner, name)`.
-#[derive(Debug, Clone, NoTypeExpr)]
+#[derive(Debug, Clone, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct DeclMap<V> {
     entries: FxHashMap<DeclBindingKey, V>,
 }
@@ -145,7 +145,16 @@ impl<V> Index<&DeclBindingKey> for DeclMap<V> {
 
 /// Owner coordinates of one `Program.body` statement.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, NoTypeExpr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TopLevelStatementOwner {
     pub owner: TopLevelOwnerId,
@@ -153,7 +162,9 @@ pub struct TopLevelStatementOwner {
 }
 
 /// Owner resolution for a parser-authored comment attachment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct TopLevelAttachedOwner {
     pub owner: TopLevelOwnerId,
     pub statement_index: Option<u32>,
@@ -163,7 +174,9 @@ pub struct TopLevelAttachedOwner {
 /// Explicit authored source region owned by one neutral top-level owner.
 /// Carrier/session code supplies these ranges; semantic code never infers
 /// framework roles from source text or hard-coded block kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct TopLevelOwnerRegion {
     pub owner: TopLevelOwnerId,
     pub span: Span,
@@ -230,7 +243,7 @@ impl std::fmt::Display for TopLevelOwnerTableError {
 impl std::error::Error for TopLevelOwnerTableError {}
 
 /// Validated, immutable owner coordinates parallel to `Program.body`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct TopLevelOwnerTable {
     statements: Arc<[TopLevelStatementOwner]>,
     regions: Arc<[TopLevelOwnerRegion]>,

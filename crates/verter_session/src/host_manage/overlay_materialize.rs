@@ -1129,6 +1129,7 @@ impl VerterHost {
         let export_signatures = Some(snapshot.export_signatures.clone());
 
         let indexed = Arc::new(crate::project_type_store::IndexedReady {
+            storage: Default::default(),
             whole_hash,
             file_language: overlay_file_language,
             shallow_state: Arc::clone(&shallow_state),
@@ -1152,6 +1153,7 @@ impl VerterHost {
             ),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         });
+        indexed.pin_storage();
 
         // Publish via the multi-candidate surface — base candidate (if
         // any) under its own base key stays untouched.

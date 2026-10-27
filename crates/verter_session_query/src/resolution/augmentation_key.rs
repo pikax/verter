@@ -72,7 +72,9 @@ impl ProjectIdentity {
 /// augmenter (`declare module "./local" {}`, or `declare module "pkg" {}`
 /// in a module), wildcard ambients (`declare module "*.css" {}`), and the
 /// global block (`declare global {}`).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub enum AugmentationTargetKind {
     /// `declare module "vue" {}` — bare specifier resolved through the
     /// project's module resolver under the resolve env.
@@ -99,7 +101,9 @@ pub enum AugmentationTargetKind {
 /// discriminant carries the overlay-set CONTENT fingerprint (the session
 /// view's `fingerprint()`) — not a raw session id — so this stays a
 /// content-addressed identity dimension, never a live session handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub enum AugmentationPopulation {
     /// Base resolve-domain population — base artifacts only.
     Base,
@@ -118,7 +122,9 @@ pub enum AugmentationPopulation {
 /// R21 scoping rule: this key carries `lib_env_hash` because module
 /// augmentations live inside libs / ambient corpora — a lib update CAN
 /// change which augmenters are visible.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct AugmentationTargetKey {
     pub project_identity: ProjectIdentity,
     pub resolve_env_hash: Hash16,
@@ -149,7 +155,7 @@ pub struct AugmentationTargetKey {
 /// stitch consumer self-heals that exact-key miss by re-deriving the
 /// augmenter's current key from the scheduler-authoritative content
 /// hash and writing the refreshed key back here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AugmenterEntry {
     /// Exact content-addressed key of the augmenter artifact.
     pub artifact_key: crate::source::artifact_key::FileArtifactKey,
@@ -169,7 +175,7 @@ impl AugmenterEntry {
 /// The set of augmenter files that contribute to a given
 /// [`AugmentationTargetKey`], sorted by `(augmenter_canonical,
 /// augmenter_parse_stable_hash)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AugmenterSet {
     /// Per-augmenter contribution identities, sorted by
     /// `(canonical, parse_stable_hash)`.

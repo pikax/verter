@@ -542,9 +542,10 @@ fn held_readers_survive_close_and_release_in_either_order() {
             drop(last);
             drain(&host);
             assert_at_baseline_beside_live_host(&host, &baseline, &context);
-            // The closed host goes with its own store storage before the
-            // unrelated host, measured on the same process account, is
-            // compared with its footprint.
+            // The account is process-wide: the closed host's own tables stay
+            // allocated, and charged, until it drops. It goes with its own
+            // store storage before the unrelated host, measured on the same
+            // process account, is compared with its footprint.
             drop(host);
 
             assert_eq!(

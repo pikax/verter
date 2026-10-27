@@ -487,7 +487,7 @@ pub(crate) trait HostSourcePort {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>>;
+    ) -> Option<verter_semantic_source::decl_body_memo::RawSurfaces>;
 }
 impl<T: SourceInputProvider> HostSourcePort for T {
     fn svelte_script_facts(
@@ -539,7 +539,7 @@ impl<T: SourceInputProvider> HostSourcePort for T {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>> {
+    ) -> Option<verter_semantic_source::decl_body_memo::RawSurfaces> {
         let Some(source) = SourceInputProvider::source(self, source) else {
             missing_source();
             return None;
