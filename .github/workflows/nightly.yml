@@ -68,6 +68,8 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: ${{ matrix.group == 'compiler' && 'pnpm' || '' }}
+          # Rust-only groups do not install pnpm; disable packageManager auto-detection.
+          package-manager-cache: false
       - run: pnpm install --frozen-lockfile
         if: matrix.group == 'compiler'
       - name: Verify compiler contracts lane and cache ownership

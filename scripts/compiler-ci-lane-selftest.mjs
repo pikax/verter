@@ -180,6 +180,18 @@ test("PR and nightly matrices run every group with isolated caches and an active
       .map((value) => value.trim());
     assert.deepEqual(matrix, Object.keys(CONTRACT_GROUPS), file);
     assert.match(job, /fail-fast: false/);
+    // setup-node otherwise auto-detects packageManager and invokes pnpm even
+    // for Rust-only groups, where pnpm/action-setup deliberately does not run.
+    const nodeSetup = job.match(
+      /uses: actions\/setup-node@v5\r?\n([\s\S]*?)(?=\r?\n      - )/,
+    )?.[1];
+    assert.ok(nodeSetup, file);
+    assert.match(nodeSetup, /package-manager-cache: false/, file);
+    assert.match(
+      nodeSetup,
+      /cache: \$\{\{ matrix\.group == 'compiler' && 'pnpm' \|\| '' \}\}/,
+      file,
+    );
     assert.match(job, /cargo build -p verter_compiler/);
     assert.match(job, /RUSTC_WRAPPER: sccache/);
     assert.match(job, /CARGO_INCREMENTAL: "0"/);

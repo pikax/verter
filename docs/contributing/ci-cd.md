@@ -93,7 +93,9 @@ The sccache wrapper is explicitly enabled with incremental compilation off and
 a common namespace across groups and workflows. These jobs disable dev/test
 debug-symbol emission, including inside trybuild's generated workspaces, while
 retaining debug assertions and every original feature configuration. Only the
-compiler group needs the pnpm install and the isolated compiler build/tests. The plain production
+compiler group needs the pnpm install and the isolated compiler build/tests.
+Both workflows disable `setup-node`'s automatic package-manager cache detection;
+only the compiler group explicitly enables pnpm caching. The plain production
 `cargo build` remains necessary: the compiler's test targets enable its
 `test-support` dev-dependency self-edge. Each invocation logs `COMPILE CONTRACT TIME`
 for its fetches and configurations plus a group total, and each matrix leg uploads
