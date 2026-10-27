@@ -947,8 +947,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             crate::semantic_query::CheckerDiagnosticSite {
                 operation_start: Some(call.report_point),
                 operation_end: Some(call.report_end),
-                expression_start: Some(span.start),
-                expression_end: Some(span.end),
                 arguments: call
                     .args
                     .iter()

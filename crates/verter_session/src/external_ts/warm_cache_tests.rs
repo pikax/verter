@@ -38,9 +38,9 @@ fn facts(version: &str, pin: u64, generation: u64) -> EngineSessionFacts {
 /// generation (and a matching wire pin), so a reconnect is modeled by bumping it.
 fn candidates(shared_gen: u64) -> EngineSessionCandidates {
     EngineSessionCandidates {
-        owned: OwnedSessionFacts::new(facts("7.0.1", 1, 0)),
+        owned: OwnedSessionFacts::new(facts("7.1.1", 1, 0)),
         shared: Some(SharedSessionFacts::new(facts(
-            "7.0.1",
+            "7.1.1",
             100 + shared_gen,
             shared_gen,
         ))),
@@ -282,7 +282,7 @@ fn owned_decision_is_refused_and_never_collides() {
 fn owned_decision(id: ProjectIdentity) -> ComponentModeDecision {
     let g = single(id);
     let no_shared = EngineSessionCandidates {
-        owned: OwnedSessionFacts::new(facts("7.0.1", 1, 0)),
+        owned: OwnedSessionFacts::new(facts("7.1.1", 1, 0)),
         shared: None,
     };
     let d = select_component_mode(&g, &id, &no_shared);

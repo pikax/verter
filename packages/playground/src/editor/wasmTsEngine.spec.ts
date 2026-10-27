@@ -54,7 +54,7 @@ describe("wasm_ts_lib_version_skew (#7)", () => {
     expect(key).toContain(ts.version);
     expect(key).toContain("lib.es5.d.ts");
     // A version bump changes EVERY key — stale engine libs can never serve.
-    expect(libCacheKey("7.0.0", "lib.es5.d.ts")).not.toBe(key);
+    expect(libCacheKey("7.1.0-beta", "lib.es5.d.ts")).not.toBe(key);
   });
 });
 
@@ -63,7 +63,7 @@ describe("capabilityForWasm fail-closed gate", () => {
     expect(capabilityForWasm(6)).toEqual({ inContextLS: true, tsgo: false });
     expect(capabilityForWasm(7)).toEqual({ inContextLS: false, tsgo: false });
     expect(capabilityForWasm(8)).toEqual({ inContextLS: false, tsgo: false });
-    expect(tsMajorOf("7.0.1-rc")).toBe(7);
+    expect(tsMajorOf("7.1.0-beta")).toBe(7);
     // The shipped pin keeps the gate OPEN.
     expect(capabilityForWasm(tsMajorOf(ts.version)).inContextLS).toBe(true);
   });
@@ -72,7 +72,7 @@ describe("capabilityForWasm fail-closed gate", () => {
     // A trap facade: reading ANY member except `version` throws — proving
     // the gated factory checks capability BEFORE touching the engine.
     const trapTs = new Proxy(
-      { version: "7.0.1-rc" },
+      { version: "7.1.0-beta" },
       {
         get(target, prop) {
           if (prop === "version") return target.version;

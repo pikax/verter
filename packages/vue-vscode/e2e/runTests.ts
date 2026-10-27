@@ -4,7 +4,7 @@ import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-e
 import * as os from "os";
 import {
   copyLspBinaryToTemp,
-  findWorkspaceRcTsgoBinary,
+  findWorkspacePinnedTsgoBinary,
   provisionVsCodeExtension,
   readE2eEnv,
   resolveVscodeExecutablePath,
@@ -389,15 +389,15 @@ async function main() {
   const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
     explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
   });
-  const requiresRcTsgo = routesToRun.some(
+  const requiresPinnedTsgo = routesToRun.some(
     ({ typeProvider }) => typeProvider === "tsgo" || typeProvider === "shared-tsgo",
   );
-  const rcTsgoBinaryPath = requiresRcTsgo
-    ? findWorkspaceRcTsgoBinary(extensionDevelopmentPath)
+  const pinnedTsgoBinaryPath = requiresPinnedTsgo
+    ? findWorkspacePinnedTsgoBinary(extensionDevelopmentPath)
     : undefined;
-  if (requiresRcTsgo && !rcTsgoBinaryPath) {
+  if (requiresPinnedTsgo && !pinnedTsgoBinaryPath) {
     throw new Error(
-      "E2E requested tsgo but no @typescript/typescript-<platform> RC binary was found; " +
+      "E2E requested tsgo but no @typescript/typescript-<platform> binary was found; " +
         "install the pinned workspace dependency or set VERTER_TSGO_BIN",
     );
   }
@@ -598,8 +598,9 @@ async function main() {
               VERTER_LOG: "debug",
               ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
               ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
-              ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
-                ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
+              ...(pinnedTsgoBinaryPath &&
+              (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
+                ? { VERTER_TSGO_BIN: pinnedTsgoBinaryPath }
                 : {}),
               ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
                 ? { VERTER_E2E_ONLY: "editor-owned-project.test" }

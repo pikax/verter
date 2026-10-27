@@ -575,8 +575,10 @@ fn every_project_store_shares_the_one_process_local_account() {
 #[test]
 fn the_project_store_charges_its_interned_identities() {
     let account = account(10_000_000, 10_000_000);
-    let store =
-        crate::project_type_store::ProjectTypeStore::with_retention_account(Arc::clone(&account));
+    let store = crate::project_type_store::ProjectTypeStore::with_retention_account(
+        Arc::clone(&account),
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     let before = account.snapshot().retained_bytes;
     let interned = store
         .identity_interner()
@@ -691,7 +693,7 @@ fn the_result_entry_footprint_scales_with_the_entry() {
         crate::component_meta_result_db::ComponentMetaResultEntry {
             payload: Arc::new(0u32),
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                Arc::from(facts),
+                verter_session_query::facts::policy::FactPolicy::production().set_of(facts),
             ),
             validated_at_generation: 0,
         }
@@ -721,7 +723,7 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
         ComponentMetaResultEntry {
             payload: Arc::new(value),
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                Arc::from(vec![
+                verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                         canonical_id: "/src/Owner.vue".into(),
                         hash: [1u8; 16],

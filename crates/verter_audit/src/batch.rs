@@ -286,11 +286,10 @@ mod tests {
 
     #[test]
     fn since_filter_excludes_strictly_older_entries() {
+        // Strictly ordered instants, built rather than waited for.
         let early = Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let watermark = Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let late = Instant::now();
+        let watermark = early + std::time::Duration::from_millis(2);
+        let late = watermark + std::time::Duration::from_millis(2);
         let source = VecSource {
             entries: vec![
                 (early, record(1, RequestKind::ComponentMeta, 1.0, false)),

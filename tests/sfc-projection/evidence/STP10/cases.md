@@ -2,7 +2,7 @@
 
 Input snapshot (job baseline): docs(doc): deliver architecture and contributor documentation (DOC2) (#639) 2026-09-19 on `tama_dag/0.1.0-tama/STP10`.
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3`, ts-native `typescript@7.0.2`. Vue pin: `vue@3.6.0-rc.5`.
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3`, ts-native `typescript@7.1.0-beta`. Vue pin: `vue@3.6.0-rc.5`.
 
 Selected case IDs: `STP10-roundtrip`, `STP10-role`, `STP10-overlap`, `STP10-stale-map`, `STP10-synthetic`.
 

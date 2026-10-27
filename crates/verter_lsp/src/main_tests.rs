@@ -295,7 +295,7 @@ fn plant_configured_project(package: &std::path::Path) {
     fs::write(package.join("tsconfig.json"), r#"{ "include": ["src"] }"#).unwrap();
 }
 
-/// A TS7-family install (here a 7.0.1-rc) resolved by the explicit
+/// A TS7-family install (here the pinned prerelease) resolved by the explicit
 /// `--type-provider=tsserver` route classifies as the native (tsgo) family
 /// BEFORE any process spawn — the typed `NativeFamily` error is the
 /// reclassification signal the tsserver arm turns into the managed-TSGO route.
@@ -304,7 +304,7 @@ fn tsserver_route_reclassifies_ts7_family_install_before_any_spawn() {
     let tmp = tempfile::tempdir().unwrap();
     let package = tmp.path().join("packages/app");
     plant_configured_project(&package);
-    plant_typescript(&package, "7.0.1-rc");
+    plant_typescript(&package, verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN);
 
     let root = tmp.path().to_string_lossy().into_owned();
     let probe = project_router::probe_workspace_tsserver(&root, None);
@@ -762,7 +762,7 @@ fn a_ts5_or_ts6_install_is_never_a_plausible_tsgo_candidate_on_any_tier() {
 #[test]
 fn a_ts7_install_stays_a_plausible_tsgo_candidate() {
     use verter_tsgo_api::toolchain::discovery::Provenance;
-    let (_tmp, tsc) = fake_npm_tsc("7.0.2");
+    let (_tmp, tsc) = fake_npm_tsc(verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN);
     for provenance in [Provenance::SharedPath, Provenance::EnvOverride] {
         assert!(
             plausible_tsgo_candidate(&tsc, provenance, false),

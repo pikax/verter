@@ -108,7 +108,7 @@
     {
       "id": "verter-tsc",
       "kind": "npm launcher over the native Rust CLI (crates/verter_tsc); vue-tsc replacement",
-      "capabilities": "-p/--project, -b/--build, --noEmit (default), declaration emit, --listFiles/--listEmittedFiles; tsgo-only engine >=7.0.2 <7.1.0, no tsc fallback",
+      "capabilities": "-p/--project, -b/--build, --noEmit (default), declaration emit, --listFiles/--listEmittedFiles; tsgo-only engine >=7.1.0-beta <7.2.0, no tsc fallback",
       "evidence": ["crates/verter_tsc/src/main.rs", "packages/verter-tsc/package.json"]
     },
     {

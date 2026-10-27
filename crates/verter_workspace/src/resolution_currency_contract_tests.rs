@@ -190,6 +190,9 @@ impl WorkspaceRead for ContractReader {
 }
 
 impl WorkspaceAccess for ContractReader {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {}
 
     fn set_exact_resolutions(
@@ -3299,7 +3302,9 @@ fn owner_resolution_set_advances_with_any_child_decision() {
     resolve_in(&workspace, owner, "./dep");
     resolve_in(&workspace, owner, "./other");
     let fact = owner_set_fact(&workspace, owner).expect("published owner set");
-    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([fact]));
+    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of([fact]),
+    );
     assert!(witness.validates(
         engine
             .capture_published_resolution_world(population)
@@ -3338,7 +3343,9 @@ fn owner_resolution_set_unchanged_for_unrelated_decision() {
 
     resolve_in(&workspace, owner, "./dep");
     let fact = owner_set_fact(&workspace, owner).expect("published owner set");
-    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([fact]));
+    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of([fact]),
+    );
 
     // A second owner, in its own directory, with its own decision.
     workspace.inject_file("/q/far.ts".to_string(), Arc::from("export const far = 1"));

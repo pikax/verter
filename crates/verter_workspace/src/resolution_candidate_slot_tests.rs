@@ -131,6 +131,9 @@ impl WorkspaceRead for SlotReader {
 }
 
 impl WorkspaceAccess for SlotReader {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {}
 
     fn set_exact_resolutions(

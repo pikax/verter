@@ -6683,7 +6683,7 @@ fn declaration_mode_carries_the_instance_component_surface() {
     // the instance surface (the `new(...)` construct signature exposing
     // `$props`) and default-exports `C`, which is what a consumer importing the
     // component and using it as `<C/>` / `createApp(C)` needs. The non-
-    // declaration-legal `__OmitNew<typeof __comp> &` prefix is intentionally
+    // declaration-legal `& __OmitNew<typeof __comp>` member is intentionally
     // absent (it is value-bearing).
     let sfc = r#"<script setup lang="ts">
 defineProps<{ msg: string; count?: number }>()
@@ -7702,7 +7702,7 @@ fn a_javascript_options_api_stub_widens_in_jsdoc_with_a_typescript_labeled_twin(
         "__Verter_DataAttrs",
         "__Verter_FallthroughOverlay",
         "./Child.vue",
-        "@type {__OmitNew<typeof __Verter_ComponentOptions>",
+        "& __OmitNew<typeof __Verter_ComponentOptions>}",
         "$props:",
         "export default TestComp",
     ] {

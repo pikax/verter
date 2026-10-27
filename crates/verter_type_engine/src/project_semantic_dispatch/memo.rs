@@ -1461,8 +1461,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                 )
             })
             .cloned()
-            .collect::<verter_session_query::facts::fact_set::FactSet>();
-        ReadSetSignature::new(facts)
+            .collect::<Vec<_>>();
+        ReadSetSignature::new(evidence.facts.policy().set_of(facts))
     }
 
     /// Admit a traced final result only while its complete external-input
@@ -1668,6 +1668,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                 &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
                 &self.snapshot.clocks().live(),
             ),
+            self.snapshot.fact_policy(),
         );
         let mut compute = std::pin::pin!(async {
             if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
@@ -1752,6 +1753,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                 &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
                 &self.snapshot.clocks().live(),
             ),
+            self.snapshot.fact_policy(),
             |_cell| compute(),
         );
         (value, read_set.finalise())
@@ -1771,6 +1773,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         crate::fact_signature_helpers::install_fact_tracer(
             &crate::fact_signature_helpers::FactTracerBasisSource::unbound_observers(
                 &self.binding.observers.forcing,
+                self.snapshot.fact_policy(),
             ),
             compute,
         )

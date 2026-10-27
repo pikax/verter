@@ -20,6 +20,7 @@ pub mod fact_read_set;
 pub mod fact_set;
 pub mod fact_tree;
 pub mod hashing;
+pub mod policy;
 pub mod reactivity;
 pub mod receipt;
 pub mod registry;

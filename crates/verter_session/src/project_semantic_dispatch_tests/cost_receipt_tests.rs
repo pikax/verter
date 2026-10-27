@@ -992,26 +992,38 @@ fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
     );
 }
 
-/// Imported modules whose relation [`wide_refusal_root`] reads: enough that
-/// the refusal's proving prefix is wider than `WIDE_SIGNATURE_WIDTH` while
-/// every fact domain stays precise.
+/// Imported modules whose relation [`wide_refusal_root`] reads at the
+/// production policy: enough that the refusal's proving prefix is wider than
+/// the fresh-slice width while every fact domain stays precise.
 const WIDE_PREFIX_MODULES: usize = 300;
 
-/// Work units that refuse [`wide_refusal_root`] only after it has read every
-/// module.
+/// Work units that refuse [`wide_refusal_root`] at [`WIDE_PREFIX_MODULES`]
+/// only after it has read every module.
 const WIDE_PREFIX_WORK: usize = 2_000;
 
+/// The gate's module count, under [`GATE_PREFIX_POLICY_WIDTH`]: a proving
+/// prefix wider than that fresh-slice width.
+const GATE_PREFIX_MODULES: usize = 40;
+
+/// Work units that refuse [`wide_refusal_root`] at [`GATE_PREFIX_MODULES`]
+/// only after it has read every module.
+const GATE_PREFIX_WORK: usize = 200;
+
+/// The fresh-slice width of the gate's host.
+const GATE_PREFIX_POLICY_WIDTH: u16 = 64;
+
 /// A host whose probe relates `S`, a union of one type imported from each
-/// of [`WIDE_PREFIX_MODULES`] sibling modules, to the reversed union `T`,
+/// of `modules` sibling modules, to the reversed union `T`,
 /// and that relation as a root key.
-fn wide_refusal_root() -> (
+fn wide_refusal_root(
+    modules: usize,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> (
     Arc<VerterHost>,
     verter_type_engine::semantic_query::SemanticQueryKey,
 ) {
-    let names: Vec<String> = (0..WIDE_PREFIX_MODULES)
-        .map(|i| format!("m{i:04}.ts"))
-        .collect();
-    let sources: Vec<String> = (0..WIDE_PREFIX_MODULES)
+    let names: Vec<String> = (0..modules).map(|i| format!("m{i:04}.ts")).collect();
+    let sources: Vec<String> = (0..modules)
         .map(|i| format!("export type A{i} = {{ p{i}: {i} }};\n"))
         .collect();
     let files: Vec<(&str, &str)> = names
@@ -1023,12 +1035,12 @@ fn wide_refusal_root() -> (
         files: &files,
         ..Default::default()
     };
-    let host = super::checker_probe_lane_tests::probe_host(project);
-    let imports: String = (0..WIDE_PREFIX_MODULES)
+    let host = super::checker_probe_lane_tests::probe_host_under(project, policy);
+    let imports: String = (0..modules)
         .map(|i| format!("import type {{ A{i} }} from \"./m{i:04}\";\n"))
         .collect();
-    let source_arms: Vec<String> = (0..WIDE_PREFIX_MODULES).map(|i| format!("A{i}")).collect();
-    let target_arms: Vec<String> = (0..WIDE_PREFIX_MODULES)
+    let source_arms: Vec<String> = (0..modules).map(|i| format!("A{i}")).collect();
+    let target_arms: Vec<String> = (0..modules)
         .rev()
         .map(|i| format!("{{ p{i}: number }}"))
         .collect();
@@ -1070,26 +1082,53 @@ fn wide_refusal_root() -> (
 /// project-generation fact — which sorts after every file fact, at the end
 /// of the canonical order — misses the refusal, so the root evaluates
 /// afresh.
+///
+/// The gate runs it at [`GATE_PREFIX_MODULES`] on a host whose policy makes
+/// that prefix wide; the nightly tier runs it at the production width.
 #[test]
 fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
+    check_wide_refusal_replay(
+        GATE_PREFIX_MODULES,
+        GATE_PREFIX_WORK,
+        crate::fact_policy_test_support::narrow_storage(GATE_PREFIX_POLICY_WIDTH),
+    );
+}
+
+fn check_wide_refusal_replay(
+    modules: usize,
+    work: usize,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use verter_session_query::facts::fact_cache::FactVersionRef;
-    use verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH;
+    let wide_signature_width = policy.fresh_slice_max();
 
-    let (host, key) = wide_refusal_root();
-    let refused = root_read(&host, &key, WIDE_PREFIX_WORK);
+    let (host, key) = wide_refusal_root(modules, policy);
+    let refused = root_read(&host, &key, work);
     assert!(
         refused.partial,
-        "{WIDE_PREFIX_WORK} units cannot relate {WIDE_PREFIX_MODULES} reversed arms"
+        "{work} units cannot relate {modules} reversed arms"
     );
     let store = Arc::clone(host.project_type_store().semantic_graph());
     let carriers = store.refusal_carriers_for_tests();
     assert_eq!(carriers.len(), 1, "the refused root sealed its refusal");
     let carrier = &carriers[0];
     assert!(
-        carrier.facts.len() > WIDE_SIGNATURE_WIDTH,
+        carrier.facts.len() > wide_signature_width,
         "the proving prefix is wider than a wide signature: {} facts",
         carrier.facts.len()
+    );
+    assert_eq!(
+        carrier
+            .facts
+            .iter()
+            .filter(|fact| matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id.contains("/m")
+            ))
+            .count(),
+        modules,
+        "the root refused only after reading every imported module"
     );
     let storage = carrier.facts.tree_footprint();
     assert!(
@@ -1130,14 +1169,14 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
 
     let misses = semantic_misses(&host);
     assert_eq!(
-        root_read(&host, &key, WIDE_PREFIX_WORK),
+        root_read(&host, &key, work),
         refused,
         "the repeat answers the sealed refusal, charged as the refused root"
     );
     assert_eq!(semantic_misses(&host), misses, "and evaluates nothing");
 
     host.project_type_store().bump_project_generation();
-    let _ = root_read(&host, &key, WIDE_PREFIX_WORK);
+    let _ = root_read(&host, &key, work);
     assert!(
         semantic_misses(&host) > misses,
         "a change to the carrier's last file-independent fact misses the refusal"
@@ -1153,7 +1192,7 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
     drop(carriers);
 
     // A follower parked on a producer's flight answers as the root alone.
-    let (host, key) = wide_refusal_root();
+    let (host, key) = wide_refusal_root(modules, policy);
     let store = Arc::clone(host.project_type_store().semantic_graph());
     let claimed = Arc::new(AtomicBool::new(false));
     let held = Arc::new(AtomicBool::new(false));
@@ -1177,11 +1216,11 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
     };
     let _hook = ProduceHookGuard::install(&store, hook);
     let (producer, follower) = std::thread::scope(|scope| {
-        let producer = scope.spawn(|| root_read(&host, &key, WIDE_PREFIX_WORK));
+        let producer = scope.spawn(|| root_read(&host, &key, work));
         wait_until("the producer to claim the root", || {
             claimed.load(Ordering::SeqCst)
         });
-        let follower = scope.spawn(|| root_read(&host, &key, WIDE_PREFIX_WORK));
+        let follower = scope.spawn(|| root_read(&host, &key, work));
         (
             producer.join().expect("the producer completes"),
             follower.join().expect("the follower completes"),
@@ -2272,8 +2311,11 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
             verter_type_engine::semantic_query::ReadReceipt::Unpriced,
         )
     };
-    let carrier =
-        || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));
+    let carrier = || {
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
+        )
+    };
     let entry = store.refusal_entry_for_tests(&host);
     for name in 0..=REFUSAL_SUMMARY_CAP {
         assert!(store.seal_refusal_for_tests(
@@ -2637,9 +2679,16 @@ fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
     // cached.
     let base = ResultReceipt::new(vec![file("/w/base.ts")]);
     let mid = ResultReceipt::new(vec![file("/w/mid.ts"), FactVersionRef::Receipt(base)]);
-    let through_prefix =
-        || ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(mid.clone())]));
-    let elsewhere = ReadSetSignature::new(Arc::from(vec![file("/w/other.ts")]));
+    let through_prefix = || {
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of(vec![FactVersionRef::Receipt(mid.clone())]),
+        )
+    };
+    let elsewhere = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![file("/w/other.ts")]),
+    );
 
     let entry = store.refusal_entry_for_tests(&host);
     assert!(store.seal_refusal_for_tests(
@@ -3105,5 +3154,14 @@ mod nightly_scale {
     #[test]
     fn cold_query_entries_fit_within_the_checker_relation_envelope() {
         assert_cold_query_entries_fit_the_relation_envelope(200, 20_000);
+    }
+
+    #[test]
+    fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
+        check_wide_refusal_replay(
+            WIDE_PREFIX_MODULES,
+            WIDE_PREFIX_WORK,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
     }
 }

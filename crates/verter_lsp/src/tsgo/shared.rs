@@ -13,7 +13,7 @@
 //! - the directly-connected `--api` checker ([`verter_tsgo_api::api_attach::ApiAttachClient`]):
 //!   the shim mints an `--api` session (`initializeApiSession`) and returns its
 //!   pipe; `verter_lsp` connects it DIRECTLY and OWNS the `--api` queries
-//!   (`updateSnapshot`, `getSemanticDiagnostics`) — the shim stays dumb.
+//!   (`getCurrentLanguageServerSnapshot`, `getSemanticDiagnostics`) — the shim stays dumb.
 //! - the live session DECISION layer ([`verter_session::external_ts`]): SHARED is
 //!   served ONLY when the queried component's decision is
 //!   [`ServeMode::Shared`] — composed from the provenance-typed eligibility facts
@@ -49,7 +49,6 @@ use verter_tsgo_api::control::{Advertisement, ControlClient, OverlayBatcher};
 use verter_tsgo_api::gate::{self, ObservedEngine};
 use verter_tsgo_api::jsonrpc::framing::{encode_message, MessageFramer};
 use verter_tsgo_api::jsonrpc::JsonRpcConnection;
-use verter_tsgo_api::proto::types::OpaqueHandle;
 use verter_tsgo_api::transport::pipe_attach::connect_attach_pipe;
 
 use verter_session::external_ts::{
@@ -413,7 +412,7 @@ pub struct TsgoSharedProvider {
     /// [`TsgoSharedProvider::overlay_diagnostics_in_project`].
     tsconfig_path: String,
     /// The in-band engine-version witness the wire gate accepted — flowed to the
-    /// `--api` `updateSnapshot` rail (never a hardcoded literal).
+    /// `--api` first-snapshot rail (never a hardcoded literal).
     observed_version: String,
     /// The per-carrier ORDERED injection state ([`CarrierSyncState`]): the
     /// barrier-SYNCED carrier slots (the ONLY content served / positioned from), the
@@ -424,9 +423,6 @@ pub struct TsgoSharedProvider {
     /// injection — so the local overlay view never diverges from the Program on a sync
     /// timeout.
     sync: CarrierSyncState,
-    /// The current `--api` snapshot context `(snapshot_handle, project_id)`,
-    /// refreshed on demand.
-    snapshot: SyncMutex<Option<(OpaqueHandle, String)>>,
 }
 
 impl std::fmt::Debug for TsgoSharedProvider {
@@ -648,7 +644,6 @@ impl TsgoSharedProvider {
             tsconfig_path: params.tsconfig_path.to_string(),
             observed_version: observed_version.to_string(),
             sync: CarrierSyncState::new(),
-            snapshot: SyncMutex::new(None),
         })
     }
 
@@ -760,14 +755,16 @@ impl TsgoSharedProvider {
         self.api_carrier_diagnostics(&carrier, tsconfig, true).await
     }
 
-    /// The shared `--api` carrier-diagnostics core: open `tsconfig` on the checker,
-    /// require the carrier is a Program ROOT of that configured project (fail closed
-    /// to `Ok(None)` for a non-member / non-openable project — never a wrong-project
-    /// result), get its `--api` diagnostics, and map their UTF-16 offsets to carrier
-    /// bytes through the SAME [`position_carrier_diagnostics`] authority the OWNED
-    /// path uses — over the carrier text Verter injected. The `.vue`/`.svelte`
-    /// map-back is the feature layer's `ProviderPositionMapper` step (never a forged
-    /// `(0,0)`).
+    /// The shared `--api` carrier-diagnostics core: read the language server's
+    /// snapshot with `tsconfig` open on the checker, require the carrier is a
+    /// Program ROOT of that configured project (fail closed to `Ok(None)` for a
+    /// non-member / non-openable project — never a wrong-project result), get its
+    /// `--api` diagnostics, and map their UTF-16 offsets to carrier bytes through
+    /// the SAME [`position_carrier_diagnostics`] authority the OWNED path uses —
+    /// over the carrier text Verter injected. The `.vue`/`.svelte` map-back is the
+    /// feature layer's `ProviderPositionMapper` step (never a forged `(0,0)`). The
+    /// snapshot is released on every path once its requests are done, and through
+    /// its lease when the query is cancelled first.
     async fn api_carrier_diagnostics(
         &self,
         carrier: &str,
@@ -777,7 +774,7 @@ impl TsgoSharedProvider {
         let api_started = std::time::Instant::now();
         let snap = match self
             .api
-            .update_snapshot_open_project(tsconfig, &self.observed_version)
+            .current_snapshot_for_project(tsconfig, &self.observed_version)
             .await
         {
             Ok(snap) => snap,
@@ -789,17 +786,46 @@ impl TsgoSharedProvider {
             }
         };
         let snapshot_ms = api_started.elapsed().as_millis() as u64;
+        // Released below; a query cancelled mid-request (an edit aborting the
+        // diagnostics task, the composite timeout) releases on the lease drop.
+        let lease = self.api.lease(snap.snapshot);
+        let result = self
+            .api_carrier_diagnostics_in(&snap, carrier, tsconfig, include_syntactic)
+            .await;
+        if let Err(err) = lease.release().await {
+            tracing::warn!(
+                "shared tsgo `--api` could not release snapshot {:?}: {err}",
+                snap.snapshot
+            );
+        }
+        tracing::debug!(
+            carrier,
+            snapshot_ms,
+            total_ms = api_started.elapsed().as_millis() as u64,
+            "shared --api carrier diagnostics"
+        );
+        result
+    }
+
+    /// [`Self::api_carrier_diagnostics`] against one read snapshot (the caller
+    /// releases it).
+    async fn api_carrier_diagnostics_in(
+        &self,
+        snap: &verter_tsgo_api::api_attach::AttachSnapshot,
+        carrier: &str,
+        tsconfig: &str,
+        include_syntactic: bool,
+    ) -> Result<Option<Vec<TypeDiagnostic>>, TypeProviderError> {
         let Some((project_id, engine_carrier)) =
-            select_configured_project_carrier(&snap, tsconfig, carrier)
+            select_configured_project_carrier(snap, tsconfig, carrier)
         else {
             return Ok(None);
         };
         let project_check_js = snap
             .project_for_config(|config| verter_span::path::fs_paths_equal(config, tsconfig))
-            .and_then(|project| project.compiler_options.get("checkJs"))
+            .and_then(|project| project.compiler_options().get("checkJs"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
 
         // Read only the carrier revision whose ordered injection barrier completed,
         // and use that exact content for both policy and UTF-16 positioning.
@@ -831,12 +857,6 @@ impl TsgoSharedProvider {
             );
         }
 
-        tracing::debug!(
-            carrier,
-            snapshot_ms,
-            total_ms = api_started.elapsed().as_millis() as u64,
-            "shared --api carrier diagnostics"
-        );
         Ok(Some(position_carrier_diagnostics(
             &diags,
             Some(content),

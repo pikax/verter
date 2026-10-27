@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Equivalent-demand semantic benchmark: Verter (production release probe)
-// vs TypeScript 7.0.2 (native API, plus `tsc -p` in both thread modes for
+// vs the pinned TypeScript (native API, plus `tsc -p` in both thread modes for
 // whole-program reference), every invocation under verter-supervise.
 //
 //   node scripts/benchmark/semantic-perf.mjs [--only a,b] [--repeat N] [--out dir] ...

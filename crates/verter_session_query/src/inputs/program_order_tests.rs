@@ -105,8 +105,9 @@ fn only_two_distinct_program_files_need_an_order() {
 /// first, an unknown library last — and, among equals, by visit order;
 /// a file's reference to a library does not place it after that file.
 ///
-/// Measured on TypeScript 7.0.2 with `lib: ["es5"]` and a root file
-/// referencing `es2015`: the program lists `lib.es5.d.ts`,
+/// Measured on the pinned TypeScript (re-measured on 7.1.0-beta) with
+/// `lib: ["es5"]` and a root file referencing `es2015`: the program lists
+/// `lib.es5.d.ts`,
 /// `lib.es2015.d.ts`, `lib.es2015.core.d.ts`,
 /// `lib.es2015.collection.d.ts`, then the root — although
 /// `lib.es2015.d.ts` references `es5` first and is reached first.

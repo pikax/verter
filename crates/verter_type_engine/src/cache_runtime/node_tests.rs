@@ -23,7 +23,9 @@ use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::Fac
 fn cacheable_arm_holds_unwrapped_value() {
     let admission: CacheAdmission<String> = CacheAdmission::Cacheable {
         value: "bare".to_string(),
-        signature: ReadSetSignature::empty(),
+        signature: ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         validated_at_generation: 0,
     };
@@ -46,7 +48,9 @@ fn cacheable_arm_holds_unwrapped_value() {
 fn cache_admission_has_three_arms_with_typed_reasons() {
     let cacheable: CacheAdmission<u8> = CacheAdmission::Cacheable {
         value: 1,
-        signature: ReadSetSignature::empty(),
+        signature: ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ),
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         validated_at_generation: 0,
     };
@@ -88,10 +92,12 @@ fn cache_admission_has_three_arms_with_typed_reasons() {
 #[test]
 fn signature_admission_from_ok_finalise_is_cacheable() {
     let facts: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: "/a.ts".into(),
-            hash: [1u8; 16],
-        }]);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/a.ts".into(),
+                hash: [1u8; 16],
+            },
+        ]);
     let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(facts.clone()));
 
     match &admission {
@@ -121,10 +127,12 @@ fn signature_admission_from_ok_finalise_is_cacheable() {
 #[test]
 fn signature_admission_from_non_cacheable_finalise_refuses_admission() {
     let facts: verter_session_query::facts::fact_set::FactSet =
-        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: "/a.ts".into(),
-            hash: [1u8; 16],
-        }]);
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/a.ts".into(),
+                hash: [1u8; 16],
+            },
+        ]);
     let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(facts));
 
     match &admission {

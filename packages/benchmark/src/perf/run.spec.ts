@@ -73,7 +73,7 @@ describe("run.ts attribution: a missing measurement is null, never a fabricated 
       isGateCorpus: false,
       threads: 1,
       runsPerWorkload: 1,
-      tsgoVersion: "typescript@7.0.1-rc",
+      tsgoVersion: "typescript@7.1.0-beta",
       results: [
         {
           id: "axis-a-codegen",
@@ -147,7 +147,7 @@ describe("run.ts memory print is honest (median-peak null renders (not sampled),
       isGateCorpus: false,
       threads: 1,
       runsPerWorkload: 1,
-      tsgoVersion: "typescript@7.0.1-rc",
+      tsgoVersion: "typescript@7.1.0-beta",
       results: [
         {
           id: "cold-typecheck",

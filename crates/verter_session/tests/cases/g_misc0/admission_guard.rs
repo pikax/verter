@@ -27,11 +27,12 @@
 
 use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::analysis::types::Hash16;
-use verter_session_query::facts::{
-    fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::WIDE_SIGNATURE_WIDTH,
-};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
+
+/// The production fresh-slice width these fixtures straddle.
+const WIDE_SIGNATURE_WIDTH: usize =
+    verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max();
 
 fn fake_fact(name: &str) -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {

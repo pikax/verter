@@ -3801,6 +3801,7 @@ impl VerterHost {
         // never admitted.
         if resolution_unretained {
             let surface = crate::owner_import_surface::build_owner_import_surface(
+                self.project_type_store().fact_policy(),
                 Arc::from(owner_canonical),
                 whole_hash,
                 entries,
@@ -3825,6 +3826,7 @@ impl VerterHost {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let surface = crate::owner_import_surface::build_owner_import_surface(
+                self.project_type_store().fact_policy(),
                 Arc::from(owner_canonical),
                 whole_hash,
                 entries,
@@ -3889,6 +3891,7 @@ impl VerterHost {
                         verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                     let surface = crate::owner_import_surface::build_owner_import_surface(
+                        self.project_type_store().fact_policy(),
                         Arc::from(owner_canonical),
                         whole_hash,
                         entries,
@@ -3904,6 +3907,7 @@ impl VerterHost {
         }
 
         let surface = crate::owner_import_surface::build_owner_import_surface(
+            self.project_type_store().fact_policy(),
             Arc::from(owner_canonical),
             whole_hash,
             entries,

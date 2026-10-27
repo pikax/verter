@@ -366,7 +366,8 @@ impl ImportedRegistryDb {
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                .empty_set(),
             validated_at_generation: 0,
         });
         self.insert_for_test(key, entry);
@@ -1379,7 +1380,11 @@ impl ShapeCacheDb {
             crate::semantic_query::DepSignature::default(),
             false,
         );
-        let entry = Arc::new(self.charged_entry(&key, value));
+        let entry = Arc::new(self.charged_entry(
+            &key,
+            value,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ));
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1428,6 +1433,7 @@ impl ShapeCacheDb {
         carrier: &verter_type_expr::SyntheticCarrierKey,
         mode: ProjectionMode,
         deep_type: TypeExpr,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) {
         use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
         let key = ShapeCacheKey::synthetic_binding_whole(
@@ -1440,7 +1446,7 @@ impl ShapeCacheDb {
             crate::semantic_query::DepSignature::default(),
             false,
         );
-        let entry = Arc::new(self.charged_entry(&key, value));
+        let entry = Arc::new(self.charged_entry(&key, value, policy));
         // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`
         // returns `Some(old)` on overwrite, `None` on a fresh insert — an
         // unconditional `fetch_add` over-counts when two same-identity
@@ -1487,11 +1493,12 @@ impl ShapeCacheDb {
         &self,
         key: &ShapeCacheKey,
         value: MaterializedOutputTypeExpr,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) -> CacheEntry<MaterializedOutputTypeExpr> {
         let footprint = verter_session_query::retention::heap_size::footprint(&(key, &value));
         CacheEntry::admit::<ShapeCacheKey>(
             value,
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(policy),
             Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
             0,
             footprint,
@@ -1661,7 +1668,12 @@ mod retention_tests {
             TypeExpr::Literal(LiteralValue::String("l".repeat(TEXT))),
             TypeExpr::Literal(LiteralValue::String("small".into())),
         ]));
-        db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep);
+        db.insert_synthetic_carrier_deep_for_test(
+            &carrier,
+            ProjectionMode::Shallow,
+            deep,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         let retained = account.snapshot().retained_bytes;
         assert!(
             retained > TEXT,
@@ -1724,7 +1736,8 @@ mod retention_tests {
             key(),
             Arc::new(super::ImportedRegistryEntry {
                 value: Some(value.clone()),
-                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                    .empty_set(),
                 validated_at_generation: 0,
             }),
         );
@@ -1778,11 +1791,11 @@ mod retention_tests {
         let admitted = crate::cache_runtime::Candidate::admit::<super::ImportedRegistryKey>(
             crate::cache_runtime::FactCandidateDiscriminant {
                 validated_at_generation: 0,
-                facts: crate::fact_signature_helpers::empty_fact_signature(),
+                facts: verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             },
             (),
             verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ),
             Arc::from(Vec::<Arc<str>>::new()),
             0,

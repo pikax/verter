@@ -16,6 +16,7 @@
     "dayjs": "^1.11.23",
     "debug": "^4.4.3",
     "mermaid": "^11.17.2",
+    "typescript": "7.1.0-beta",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vue": "3.6.0-rc.5"

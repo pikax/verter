@@ -5615,6 +5615,7 @@ impl crate::VerterHost {
         verter_type_engine::resolver_core::RequestSnapshot::new_in::<M>(
             self.project_type_store().project_generation_clock(),
             self.aggregate_clock_reader(),
+            self.project_type_store().fact_policy(),
         )
     }
 

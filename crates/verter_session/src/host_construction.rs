@@ -634,11 +634,16 @@ impl VerterHost {
         // another shares — and composes the project store over it. The
         // engine grants stay here: the root lends them to the request
         // attachment alone.
+        // The host builds every fact set under its workspace's fact policy,
+        // so the resolution witnesses the workspace seals are compatible with
+        // every set the host builds around them.
+        let fact_policy = workspace_lock.read().fact_policy();
         let (project_type_store, engine_grants) =
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),
                 task_registry.clone(),
                 memo_family_bound,
+                fact_policy,
             );
         let project_type_store = Arc::new(project_type_store);
         // Retained artifacts own their canonical's freshness evidence in the
@@ -1892,6 +1897,10 @@ mod resource_policy_lazy_tests {
 }
 
 impl verter_type_engine::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.project_type_store.fact_policy()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn engine_test_knobs(&self) -> &verter_type_engine::engine_test_knobs::TestKnobs {
         &self.test_force.engine

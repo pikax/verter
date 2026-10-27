@@ -1,7 +1,7 @@
 //! Rust-native client for the tsgo (`typescript-go`) `--api` protocol.
 //!
 //! This crate drives the tsgo `--api` MessagePack protocol DIRECTLY from Rust.
-//! The official generated JavaScript `--api` client (shipped in the rc
+//! The official generated JavaScript `--api` client (shipped in the pinned
 //! `typescript` package) is used ONLY as a test/parity oracle and is never
 //! referenced from production code here.
 //!
@@ -12,7 +12,7 @@
 //! `u8`, `name` is the method/callback name as a `bin` field, and `payload` is
 //! a `bin` field carrying a UTF-8 JSON document for the high-level ops. This
 //! crate hand-writes the MessagePack subset and the frame codec by mirroring
-//! the shipped rc `typescript` reference implementation; the mirrored source
+//! the pinned `typescript` reference implementation; the mirrored source
 //! lines are cited in [`proto`].
 //!
 //! # Module layout

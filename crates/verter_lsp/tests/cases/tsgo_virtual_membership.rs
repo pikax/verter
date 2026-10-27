@@ -32,9 +32,7 @@ use verter_session::{HostConfig, VerterHost};
 use verter_session_query::resolution::ConfiguredMembership;
 use verter_session_query::resolution::ProjectId;
 use verter_tsgo_api::actor::spawn_actor;
-use verter_tsgo_api::proto::types::{
-    method, Diagnostic, InitializeResponse, UpdateSnapshotResponse,
-};
+use verter_tsgo_api::proto::types::{method, Diagnostic, InitializeResponse, SnapshotResponse};
 use verter_tsgo_api::snapshot::{AccessibleEntries, OverlaySnapshot, RealDirSource};
 use verter_tsgo_api::transport::pipe::StdioPipeTransport;
 use verter_tsgo_api::{ClientHandle, RequestOptions};
@@ -217,12 +215,14 @@ fn write_vue_specific_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf
 }
 
 fn find_project<'a>(
-    snap: &'a UpdateSnapshotResponse,
+    snap: &'a SnapshotResponse,
     tsconfig: &Path,
 ) -> &'a verter_tsgo_api::proto::types::ProjectResponse {
     snap.projects
         .iter()
-        .find(|p| norm(Path::new(&p.config_file_name)) == norm(tsconfig))
+        .find(|p| {
+            norm(Path::new(p.config_file_name.as_deref().unwrap_or_default())) == norm(tsconfig)
+        })
         .expect("the opened project is in the snapshot")
 }
 
@@ -231,7 +231,7 @@ fn carrier_is_root(
     companion: &str,
 ) -> bool {
     project
-        .root_files
+        .root_files()
         .iter()
         .any(|f| norm(Path::new(f)) == companion)
 }
@@ -264,9 +264,9 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
 
         let _init: InitializeResponse =
             req_json(&handle, method::INITIALIZE, serde_json::Value::Null).await;
-        let snap: UpdateSnapshotResponse = req_json(
+        let snap: SnapshotResponse = req_json(
             &handle,
-            method::UPDATE_SNAPSHOT,
+            method::CREATE_SNAPSHOT,
             serde_json::json!({ "openProjects": [tsconfig_norm] }),
         )
         .await;
@@ -275,7 +275,7 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
             !carrier_is_root(project, &companion_norm),
             "NEGATIVE: under the real `*.vue`-only config the `.vue.tsx` companion must NOT be a \
              Program root (virtualization is genuinely needed): {:?}",
-            project.root_files
+            project.root_files()
         );
         handle.close().await.expect("close negative leg");
     }
@@ -305,9 +305,9 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
         req_json(&handle, method::INITIALIZE, serde_json::Value::Null).await;
     assert!(!init.current_directory.is_empty());
 
-    let snap: UpdateSnapshotResponse = req_json(
+    let snap: SnapshotResponse = req_json(
         &handle,
-        method::UPDATE_SNAPSHOT,
+        method::CREATE_SNAPSHOT,
         serde_json::json!({ "openProjects": [tsconfig_norm] }),
     )
     .await;
@@ -318,7 +318,7 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
     assert!(
         carrier_is_root(project, &companion_norm),
         "POSITIVE: the virtualized config makes the `.vue.tsx` companion a Program root file: {:?}",
-        project.root_files
+        project.root_files()
     );
 
     // It type-checks clean (no TS2307 → `./util` resolved through the REAL
@@ -326,7 +326,7 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
     let clean: Vec<Diagnostic> = req_json(
         &handle,
         method::GET_SEMANTIC_DIAGNOSTICS,
-        serde_json::json!({ "snapshot": snap.snapshot, "project": project.id, "file": companion_norm }),
+        serde_json::json!({ "snapshot": snap.snapshot, "project": project.id, "files": [companion_norm] }),
     )
     .await;
     assert!(
@@ -355,9 +355,9 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
     let handle2 = spawn_actor(transport2, err_snapshot, 16);
     let _init2: InitializeResponse =
         req_json(&handle2, method::INITIALIZE, serde_json::Value::Null).await;
-    let snap2: UpdateSnapshotResponse = req_json(
+    let snap2: SnapshotResponse = req_json(
         &handle2,
-        method::UPDATE_SNAPSHOT,
+        method::CREATE_SNAPSHOT,
         serde_json::json!({ "openProjects": [tsconfig_norm] }),
     )
     .await;
@@ -365,12 +365,12 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
     assert!(
         carrier_is_root(project2, &companion_norm),
         "the broken companion is still a member: {:?}",
-        project2.root_files
+        project2.root_files()
     );
     let err: Vec<Diagnostic> = req_json(
         &handle2,
         method::GET_SEMANTIC_DIAGNOSTICS,
-        serde_json::json!({ "snapshot": snap2.snapshot, "project": project2.id, "file": companion_norm }),
+        serde_json::json!({ "snapshot": snap2.snapshot, "project": project2.id, "files": [companion_norm] }),
     )
     .await;
     assert!(

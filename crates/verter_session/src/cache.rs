@@ -284,7 +284,9 @@ mod tests {
                 diagnostics: DiagnosticsSnapshot::default(),
                 last_access_tick: 1,
                 fact_dep_signature:
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                        verter_session_query::facts::policy::FactPolicy::production(),
+                    ),
             }
             .into_slot(),
         );

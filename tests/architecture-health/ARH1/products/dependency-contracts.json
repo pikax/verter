@@ -359,6 +359,7 @@
           "crates/verter_session/src/materialized_structure_equivalence_tests.rs",
           "crates/verter_session/src/meta_batch_fixed_view_tests.rs",
           "crates/verter_session/src/prepared_surface_intersection_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/checker_probe_lane_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
           "crates/verter_session/src/root_continuation.rs",

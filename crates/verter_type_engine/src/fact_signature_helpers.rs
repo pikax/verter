@@ -79,7 +79,8 @@ use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::{seal_edit, FactReadSet, FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
+    fact_read_set::{seal_edit, FactReadSet, FactReadSetFinalise},
+    policy::FactPolicy,
 };
 
 /// Bracket one cold-compute closure with a push-style fact tracer.
@@ -131,6 +132,7 @@ where
     let (value, read_set) =
         crate::resolver_core::resolver_context::with_delivering_fact_tracer_cell(
             source.live_basis(),
+            source.fact_policy(),
             |_cell| {
                 #[cfg(any(test, feature = "test-support"))]
                 force_tracer_refusal(source, None);
@@ -168,8 +170,10 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     StepwiseFactTracer<'h, W>
 {
     pub(crate) fn new(source: FactTracerBasisSource<'h, W>) -> Self {
-        let tracer =
-            crate::resolver_core::resolver_context::OwnedFactTracer::new(source.live_basis());
+        let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
+            source.live_basis(),
+            source.fact_policy(),
+        );
         Self {
             source,
             tracer,
@@ -241,9 +245,14 @@ impl verter_session_query::facts::clocks::WorkspaceClocks for UnboundClocks {
     }
 }
 
-/// The owner of the state an unbound basis source reads: (under test
-/// support) the engine forcing record it consults.
+/// The owner of the state an unbound basis source reads: the fact policy
+/// its scopes seal under and (under test support) the engine forcing record
+/// it consults.
 pub trait UnboundBasisOwner {
+    /// The fact policy an unbound scope seals under: the owning host's.
+    /// "No bound view" never means "production widths".
+    fn fact_policy(&self) -> FactPolicy;
+
     /// The engine forcing record an unbound scope consults.
     #[cfg(any(test, feature = "test-support"))]
     fn engine_test_knobs(&self) -> &crate::engine_test_knobs::TestKnobs;
@@ -273,12 +282,16 @@ impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
     /// its producer or reader is compiled, and absent everywhere else, so no
     /// build configuration holds a store, counter or mirror with no reader.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn unbound_observers(forcing: &'h crate::engine_test_knobs::TestKnobs) -> Self {
+    pub(crate) fn unbound_observers(
+        forcing: &'h crate::engine_test_knobs::TestKnobs,
+        policy: FactPolicy,
+    ) -> Self {
         Self {
             authority: BasisAuthority::Unbound {
                 non_cacheable: &forcing.force_fact_tracer_non_cacheable_read,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            policy,
         }
     }
 }
@@ -288,6 +301,9 @@ impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
 pub struct FactTracerBasisSource<'h, W> {
     authority: BasisAuthority<'h, W>,
     seed: verter_session_query::facts::fact_cache::AggregateBasisSeed,
+    /// The policy every scope this source opens seals under: the
+    /// request's, or the owning host's for an unbound scope.
+    policy: FactPolicy,
 }
 
 impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
@@ -336,6 +352,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                 clocks: snapshot.clocks(),
             },
             seed: ctx.aggregate_basis_seed(),
+            policy: snapshot.fact_policy(),
         }
     }
 
@@ -359,8 +376,6 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// context's two arms share one source type.
     #[must_use]
     fn unbound_with_clocks(host: &'h impl UnboundBasisOwner) -> Self {
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = host;
         Self {
             authority: BasisAuthority::Unbound {
                 #[cfg(any(test, feature = "test-support"))]
@@ -369,6 +384,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                     .force_fact_tracer_non_cacheable_read,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            policy: host.fact_policy(),
         }
     }
 
@@ -380,6 +396,13 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                 non_cacheable.load(std::sync::atomic::Ordering::Relaxed)
             }
         }
+    }
+
+    /// The policy every scope this source opens seals under.
+    #[inline]
+    #[must_use]
+    pub fn fact_policy(&self) -> FactPolicy {
+        self.policy
     }
 
     /// Open a tracer scope carrying this source's basis. Thin forward to
@@ -399,7 +422,11 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     where
         F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
     {
-        crate::resolver_core::resolver_context::with_fact_tracer_cell(self.live_basis(), f)
+        crate::resolver_core::resolver_context::with_fact_tracer_cell(
+            self.live_basis(),
+            self.policy,
+            f,
+        )
     }
 
     /// Re-compose the basis against the CURRENT live counters.
@@ -1147,7 +1174,9 @@ pub fn fact_signature_for_canonical_member<C: crate::resolver_core::ResolverCapa
         FactVersionRef::Parse(presence_fact),
         FactVersionRef::Parse(body_fact),
     ];
-    SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(entries)))
+    SignatureAdmission::Cacheable(ReadSetSignature::new(
+        ctx.request_flags().fact_policy().set_of(entries),
+    ))
 }
 
 /// Build a provenance-pure signature for a cache whose validity
@@ -1241,7 +1270,9 @@ pub fn fact_signature_for_exported_type<C: crate::resolver_core::ResolverCapabil
         FactVersionRef::Parse(local_decl_fact),
         FactVersionRef::Parse(member_shape_fact),
     ];
-    SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(entries)))
+    SignatureAdmission::Cacheable(ReadSetSignature::new(
+        ctx.request_flags().fact_policy().set_of(entries),
+    ))
 }
 
 /// Build a provenance-pure, whole-canonical signature for a cache
@@ -1293,16 +1324,9 @@ pub fn fact_signature_for_canonical_surface<C: crate::resolver_core::ResolverCap
         observed_self_root_fact(canonical_id, observed_hash),
         FactVersionRef::Parse(surface_fact),
     ];
-    SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(entries)))
-}
-
-/// Empty signature constructor for cache entries published outside
-/// any observable cold-compute pass (e.g. test fixtures, synthetic
-/// publish paths). Validator trivially accepts; readers fall back to
-/// the existing whole-hash regime in the legacy producer.
-#[inline]
-pub fn empty_fact_signature() -> verter_session_query::facts::fact_set::FactSet {
-    verter_session_query::facts::fact_set::FactSet::empty()
+    SignatureAdmission::Cacheable(ReadSetSignature::new(
+        ctx.request_flags().fact_policy().set_of(entries),
+    ))
 }
 
 /// Maps a `(canonical, DepVersion)` fence accumulator into the
@@ -1326,6 +1350,7 @@ pub fn empty_fact_signature() -> verter_session_query::facts::fact_set::FactSet 
 ///   the value is not safely cacheable; the caller must not admit it.
 #[must_use]
 pub fn fact_signature_from_fence(
+    policy: FactPolicy,
     fence: &[crate::semantic_query::DepEntry],
 ) -> Option<verter_session_query::facts::fact_set::FactSet> {
     use crate::semantic_query::DepVersion;
@@ -1351,9 +1376,7 @@ pub fn fact_signature_from_fence(
             }
         }
     }
-    Some(verter_session_query::facts::fact_set::FactSet::from_facts(
-        out,
-    ))
+    Some(policy.set_of(out))
 }
 
 /// The pair a structural-carrier signature producer returns: the
@@ -1390,7 +1413,8 @@ pub fn root_fact_visits_for_tests() -> usize {
 /// shared rather than rebuilt: completing it would seal the same facts in
 /// the same order. `None` when the completion adds or rewrites anything (a
 /// missing fact, a self-root observed at two versions or traced at another,
-/// or a set wider than [`WIDE_SIGNATURE_WIDTH`], which the strict-root
+/// or a set wider than its policy's
+/// [`FactPolicy::strict_root_threshold`], which the strict-root
 /// rewrite of [`bound_completed_structural_carrier`] may apply to); the
 /// caller completes it in full. Width is never a refusal: every carrier,
 /// however wide, is sealed whole.
@@ -1401,7 +1425,7 @@ pub(crate) fn shared_completed_structural_carrier(
 ) -> Option<StructuralCarrierReadSet> {
     // A sealed set is canonical by construction; it is read in place, never
     // copied.
-    if traced.len() > WIDE_SIGNATURE_WIDTH {
+    if traced.len() > traced.policy().strict_root_threshold() {
         return None;
     }
     for fact in fence {
@@ -1454,7 +1478,7 @@ pub(crate) fn shared_completed_carrier_rooting_traced_files(
     observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
     traced: &verter_session_query::facts::fact_set::FactSet,
 ) -> Option<StructuralCarrierReadSet> {
-    if traced.len() > WIDE_SIGNATURE_WIDTH {
+    if traced.len() > traced.policy().strict_root_threshold() {
         return None;
     }
     // Canonical order puts one file's whole-file facts side by side, so a
@@ -1519,13 +1543,14 @@ fn whole_file_facts<'a>(
 ///
 /// The rule reads logical widths alone — how many distinct facts a set
 /// holds — never how a set is stored. A completed carrier wider than
-/// [`WIDE_SIGNATURE_WIDTH`] carries its self-roots as one strict-world
+/// the traced set's [`FactPolicy::strict_root_threshold`] carries its
+/// self-roots as one strict-world
 /// witness, minted only after every root validates in the exact effective
 /// view, in place of every precise root fact, when its completion is what
-/// made it wide: the traced set alone is no wider than
-/// [`WIDE_SIGNATURE_WIDTH`], or the facts the completion actually adds
-/// (the self-root facts the traced set lacked among them, each counted
-/// once) outnumber [`WIDE_SIGNATURE_WIDTH`]. A traced set already wider keeps its few
+/// made it wide: the traced set alone is no wider than the threshold, or
+/// the facts the completion actually adds (the self-root facts the traced
+/// set lacked among them, each counted once) outnumber it. A traced set
+/// already wider keeps its few
 /// precise roots: a precise root stays valid in any view that agrees on the
 /// root's content, where a witness is bound to the one view that minted it,
 /// so a wide read set is not made fragile by the roots it adds.
@@ -1545,9 +1570,10 @@ pub(crate) fn bound_completed_structural_carrier(
     for fact in extra {
         added += usize::from(facts.insert(fact));
     }
+    let strict_root_threshold = traced.policy().strict_root_threshold();
     let completion_made_it_wide =
-        traced.len() <= WIDE_SIGNATURE_WIDTH || added > WIDE_SIGNATURE_WIDTH;
-    if facts.len() > WIDE_SIGNATURE_WIDTH
+        traced.len() <= strict_root_threshold || added > strict_root_threshold;
+    if facts.len() > strict_root_threshold
         && completion_made_it_wide
         && !self_root_canonicals.is_empty()
     {
@@ -1873,6 +1899,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
 ///   admitted to the shared `MaterializeMemoDb`; no production path
 ///   constructs the variant.
 pub fn engine_fact_signature_for_materialize_memo(
+    policy: FactPolicy,
     observed_scope: &crate::resolver_core::MaterializeScopeObservation,
     observed_scope_syntactic_export_set: verter_session_query::facts::fact_cache::ParseFactRef,
     materialized_dep_signature: &crate::semantic_query::DepSignature,
@@ -1950,9 +1977,7 @@ pub fn engine_fact_signature_for_materialize_memo(
         }
     }
     SignatureAdmission::Cacheable(
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(std::sync::Arc::from(
-            entries,
-        )),
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(policy.set_of(entries)),
     )
 }
 
