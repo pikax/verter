@@ -3866,7 +3866,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let value = SemanticQueryValue::FlowReturn(
                     verter_session_query::retention::owned::Owned::new(published),
                 );
-                self.observe_retained_reference_versions(&value);
                 let mut output: QueryBuildOutput<SemanticQueryValue> =
                     QueryBuildOutput::from((QueryResult::Value(value), fence))
                         .with_observed_self_roots(scc_self_roots);
@@ -3962,7 +3961,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// whose only contact with a dependency is such a reference therefore
     /// misses on that dependency's next edit and re-interns the live
     /// version, instead of serving a superseded one.
-    fn observe_retained_reference_versions(&self, value: &SemanticQueryValue) {
+    pub(super) fn observe_retained_reference_versions(&self, value: &SemanticQueryValue) {
         let mut pending: Vec<SemanticNodeId> = Vec::new();
         value.for_each_retained_node(|node| pending.push(node));
         let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = Default::default();

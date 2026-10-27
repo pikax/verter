@@ -5436,7 +5436,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     // The producer owns this envelope on the heap while the
                     // tracer passes it through its generic scope frames.
-                    Box::new(raw_build())
+                    let built = raw_build();
+                    // Every retained family roots on the exact version each
+                    // interned reference embeds, inside this build's tracer.
+                    if let QueryResult::Value(value) = &built.result {
+                        self.observe_retained_reference_versions(value);
+                    }
+                    Box::new(built)
                 });
             let build_local = taint_guard.finish();
             let (output, rooted) = self.close_cold_build(
