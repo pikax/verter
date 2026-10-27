@@ -1435,6 +1435,14 @@ impl PreparedValueDeclCache {
     }
 }
 
+/// One run of an owner's import-route witness: the evidence the resolution
+/// of one authored specifier recorded, or the whole witness when no
+/// specifier attribution exists (`specifier: None`, always replayed).
+struct ResolutionWitnessSegment {
+    specifier: Option<String>,
+    facts: verter_session_query::facts::fact_set::FactSet,
+}
+
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -1446,7 +1454,7 @@ pub struct PreparedDeclBundle {
     input_projection: OnceLock<Held<verter_session_query::inputs::prepared::PreparedInputRecord>>,
     /// Immutable producing route witnesses, replayed even on committed
     /// declaration slots and request-memo/shared/follower bundle hits.
-    resolution_facts: OnceLock<verter_session_query::facts::fact_set::FactSet>,
+    resolution_facts: OnceLock<Vec<ResolutionWitnessSegment>>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1610,6 +1618,8 @@ fn base_table_heap<'t>(
 }
 
 impl PreparedDeclBundle {
+    /// Seal the owner's whole witness as one unattributed run that every
+    /// read replays.
     pub(crate) fn seal_resolution_facts(
         &self,
         policy: verter_session_query::facts::policy::FactPolicy,
@@ -1617,17 +1627,65 @@ impl PreparedDeclBundle {
     ) {
         // A sealed set is replayed as one shared run per read, not fact by fact.
         if let Some(witness) = witness {
-            let _ = self.resolution_facts.set(policy.set_of(witness));
+            let _ = self.resolution_facts.set(vec![ResolutionWitnessSegment {
+                specifier: None,
+                facts: policy.set_of(witness),
+            }]);
         }
     }
 
+    /// Seal the owner's witness grouped by the authored specifier whose
+    /// resolution recorded each run, so a declaration read replays only the
+    /// imports it uses.
+    pub(crate) fn seal_resolution_segments(
+        &self,
+        policy: verter_session_query::facts::policy::FactPolicy,
+        witness: Option<
+            Vec<(
+                String,
+                Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+            )>,
+        >,
+    ) {
+        if let Some(witness) = witness {
+            let _ = self.resolution_facts.set(
+                witness
+                    .into_iter()
+                    .map(|(specifier, facts)| ResolutionWitnessSegment {
+                        specifier: Some(specifier),
+                        facts: policy.set_of(facts),
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    /// Observe the owner's whole import-route witness, for a read whose
+    /// import use is not known.
     pub(crate) fn observe_read(&self) {
+        self.observe_read_of(|_| true);
+    }
+
+    /// Observe the witness of exactly the imports `deps` names, for a read
+    /// of one declaration: its prepared cross-file dependencies are the
+    /// complete frontier of the imports it uses.
+    pub(crate) fn observe_read_for(&self, deps: &[PreparedExternalDep]) {
+        self.observe_read_of(|specifier| deps.iter().any(|dep| dep.source_specifier == specifier));
+    }
+
+    fn observe_read_of(&self, uses_specifier: impl Fn(&str) -> bool) {
         super::owned_lowering_port::observe_whole_content(
             &self.prepared_type_decls.canonical_id,
             self.owner_whole_hash,
         );
-        if let Some(facts) = self.resolution_facts.get() {
-            verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(facts);
+        if let Some(segments) = self.resolution_facts.get() {
+            for segment in segments {
+                if segment.specifier.as_deref().is_none_or(&uses_specifier) {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                        &segment.facts,
+                    );
+                }
+            }
         } else if !self
             .prepared_type_decls
             .state

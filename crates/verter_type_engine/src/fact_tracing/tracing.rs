@@ -283,6 +283,33 @@ pub(crate) fn clear() {
     });
 }
 
+/// Run `f` with no fact tracer or recorder installed, then restore the stack.
+///
+/// For work that serves the cache's own validation rather than the enclosing
+/// computation: whatever it reads is not a dependency of the answer being
+/// computed, so it must reach no enclosing read set.
+pub(crate) fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(
+        Option<(
+            SmallVec<[ActiveTracer; 8]>,
+            SmallVec<[*const FactReadRecorder; 4]>,
+        )>,
+    );
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some((tracers, recorders)) = self.0.take() {
+                ACTIVE_TRACERS.with(|slot| *slot.borrow_mut() = tracers);
+                ACTIVE_RECORDERS.with(|slot| *slot.borrow_mut() = recorders);
+            }
+        }
+    }
+    let _restore = Restore(Some((
+        ACTIVE_TRACERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+        ACTIVE_RECORDERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+    )));
+    f()
+}
+
 /// Return the top-of-stack tracer, or `None` when the stack is empty.
 ///
 /// Used by existing single-tracer callers that only need the innermost

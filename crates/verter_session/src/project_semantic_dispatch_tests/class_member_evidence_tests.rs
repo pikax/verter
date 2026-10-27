@@ -1291,3 +1291,29 @@ fn nonneutral_augmentation_suffixes_keep_content_and_diagnostics() {
         );
     }
 }
+
+/// A heritage clause supplies members the class itself never declares, so a
+/// suffix skip that dropped the `extends` contributor would lose them.
+#[test]
+fn augmentation_heritage_contribution_survives_the_suffix_cutoff() {
+    let aug = "/ws/class-member-evidence/aug.ts";
+    let reader =
+        "import { B } from './c'; import './aug'; export function f(b: B) { return b.later; }";
+    let source = "import './c'; interface Extra { later: number } declare module './c' { interface B extends Extra {} } export {};";
+    let make = || {
+        let host = host_with("export class B { a!: string; }", reader);
+        upsert(&host, aug, source);
+        host.ensure_indexed_ready_serve(aug).unwrap();
+        host
+    };
+    let host = make();
+    let cold = read_flow_return(&host, "f");
+    let number = TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    assert_eq!(
+        cold.ty,
+        Some(number),
+        "the heritage contributor must supply `later`"
+    );
+    let fresh = read_flow_return(&make(), "f");
+    assert_eq!((cold.ty, cold.complete), (fresh.ty, fresh.complete));
+}

@@ -1504,9 +1504,12 @@ impl<L> RequestBoundAdapter<L> {
         L: RequestBoundLifecycle,
         Self: verter_type_engine::resolver_core::request_ports::OwnedLowering,
     {
-        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
-        let population_ready = std::cell::Cell::new(false);
-        facts.iter().enumerate().try_for_each(|(index, fact)| {
+        // Completing parse facts serves the validation: what it reads is no
+        // dependency of the computation that is validating a candidate.
+        verter_type_engine::resolver_core::resolver_context::without_fact_observers(|| {
+            let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
+            let population_ready = std::cell::Cell::new(false);
+            facts.iter().enumerate().try_for_each(|(index, fact)| {
             let valid = verter_session_query::facts::fact_cache::validates_through_receipts(
                 fact,
                 &mut walk,
@@ -1577,6 +1580,7 @@ impl<L> RequestBoundAdapter<L> {
                 },
             );
             valid.then_some(()).ok_or(index)
+        })
         })
     }
 }

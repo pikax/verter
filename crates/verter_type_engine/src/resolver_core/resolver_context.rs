@@ -430,6 +430,13 @@ pub fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersio
     tracer_stack::observe_fan_out(fact);
 }
 
+/// Run `f` with every installed fact tracer and recorder suspended: what it
+/// reads serves cache validation and is no dependency of the enclosing
+/// computation.
+pub fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
+    tracer_stack::without_fact_observers(f)
+}
+
 /// [`observe_fan_out`] that builds the fact only when an observer is installed.
 #[inline]
 pub fn observe_fan_out_lazy(

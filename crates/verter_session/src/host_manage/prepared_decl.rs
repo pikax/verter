@@ -1308,11 +1308,14 @@ impl VerterHost {
         // perfectly well-formed signature — so the producer must refuse
         // here, exactly as the sibling `resolved_import_facts_witness`
         // and `framework::script_facts` producers do.
-        let import_route_witness =
-            self.owner_import_route_witness_in::<M>(observation, canonical_id);
-        bundle.seal_resolution_facts(
+        let import_route_segments =
+            self.owner_import_route_segments_in::<M>(observation, canonical_id);
+        let import_route_witness = import_route_segments
+            .as_ref()
+            .map(|witness| witness.flat.clone());
+        bundle.seal_resolution_segments(
             self.project_type_store.fact_policy(),
-            import_route_witness.clone(),
+            import_route_segments.map(|witness| witness.segments),
         );
         let mut facts = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
@@ -1522,11 +1525,14 @@ impl VerterHost {
         // keeps serving its pre-appearance resolved edges for as long as
         // the owner's bytes stay put, which is precisely the invalidation
         // this rail exists to provide.
-        let import_route_witness =
-            self.owner_import_route_witness_in::<M>(observation, canonical_id);
-        bundle.seal_resolution_facts(
+        let import_route_segments =
+            self.owner_import_route_segments_in::<M>(observation, canonical_id);
+        let import_route_witness = import_route_segments
+            .as_ref()
+            .map(|witness| witness.flat.clone());
+        bundle.seal_resolution_segments(
             self.project_type_store.fact_policy(),
-            import_route_witness.clone(),
+            import_route_segments.map(|witness| witness.segments),
         );
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![
@@ -1667,8 +1673,11 @@ impl VerterHost {
         ) else {
             return Ok(None);
         };
-        bundle.observe_read();
         let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
+        match &result {
+            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
+            _ => bundle.observe_read(),
+        }
         component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"prepared_type_decl_result",
             format!(
                 "owner={} symbol={} source=bundle_hit hit={}",
@@ -1701,8 +1710,12 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        bundle.observe_read();
-        bundle.prepared_type_decls.get_in(owner, symbol_name)
+        let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
+        match &result {
+            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
+            _ => bundle.observe_read(),
+        }
+        result
     }
 
     /// Lossy Option-shaped convenience wrapper — used by consumers (the
@@ -1772,8 +1785,12 @@ impl VerterHost {
         ) else {
             return Ok(None);
         };
-        bundle.observe_read();
-        bundle.prepared_value_decls.get_in(owner, symbol_name)
+        let result = bundle.prepared_value_decls.get_in(owner, symbol_name);
+        match &result {
+            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
+            _ => bundle.observe_read(),
+        }
+        result
     }
 
     pub(crate) fn prepared_value_decl_in_with_context<M: verter_audit::observe::ObserveExec>(
@@ -1797,8 +1814,12 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        bundle.observe_read();
-        bundle.prepared_value_decls.get_in(owner, symbol_name)
+        let result = bundle.prepared_value_decls.get_in(owner, symbol_name);
+        match &result {
+            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
+            _ => bundle.observe_read(),
+        }
+        result
     }
 
     /// Route-aware required-import closure.
