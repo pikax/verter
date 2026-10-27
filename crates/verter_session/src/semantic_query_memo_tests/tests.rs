@@ -3443,10 +3443,11 @@ fn cross_thread_joiner_waits_on_winner_publish() {
                 // step EARLIER, when the joiner clones the entry's `Arc`
                 // BEFORE reaching `wait_while`, so it does NOT prove the
                 // joiner is on the condvar. `joiner_on_condvar_count` is
-                // incremented immediately before `wait_while`, so observing
-                // it proves the real invariant. The probe is bounded
-                // (~10 s) and panics on a genuine hang. This is a read-only
-                // counter poll, not a re-entrant `execute_cooperative`
+                // raised once the joiner's waker is registered on the
+                // flight, so observing it proves the real invariant. The
+                // wait is bounded (~10 s) and panics on a genuine hang.
+                // This is a read-only counter wait, not a re-entrant
+                // `execute_cooperative`
                 // call, so the winner does not self-await its own in-flight
                 // entry.
                 wait_for_joiner_on_condvar(&store_owner);
@@ -3994,8 +3995,8 @@ fn wait_for_joiner_admitted(store: &SemanticGraphStore, key: &SemanticQueryKey) 
 /// stated intent is that the joiner is genuinely parked on the condvar
 /// when the winner publishes — admitted-count is insufficient. This
 /// probe instead waits on the store's `joiner_on_condvar_count`, which is
-/// raised (and announced) immediately before `wait_while`, so a return
-/// proves the joiner is committed to the condvar wait.
+/// raised (and announced) once the joiner's waker is registered on the
+/// flight, so a return proves the winner's publish must wake it.
 ///
 /// The wait is bounded at ~10 s and then panics, so a genuine hang fails
 /// loudly rather than blocking the suite forever.

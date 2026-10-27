@@ -199,8 +199,8 @@ impl SemanticGraphStore {
 
     /// Test-only observability accessor: the number of cooperative
     /// joiners that have reached the point of suspending on a per-entry
-    /// `ready` condvar (the increment fires immediately before
-    /// `wait_while` in [`SemanticGraphStore::execute_cooperative`]).
+    /// flight (the increment fires once its waker is registered, under the
+    /// flight's lock).
     ///
     /// A condvar-pairing test polls this to `>= 1` to observe a joiner
     /// genuinely PARKED on the condvar — strictly stronger than
@@ -216,6 +216,16 @@ impl SemanticGraphStore {
     pub fn test_joiner_on_condvar_count(&self) -> usize {
         self.joiner_on_condvar_count
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test-only: record that a subscriber is suspended — its waker is registered on the
+    /// flight while the flight state is held, so a producer publishing afterwards wakes it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn announce_joiner_suspended(&self) {
+        let _announce = self.joiner_suspended.0.lock();
+        self.joiner_on_condvar_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.joiner_suspended.1.notify_all();
     }
 
     /// Test-only: wait until [`Self::test_joiner_on_condvar_count`] reaches `joiners`. Each

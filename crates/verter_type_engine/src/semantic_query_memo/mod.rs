@@ -606,13 +606,13 @@ pub struct SemanticGraphStore {
     /// `debug_assertions`.
     #[cfg(any(test, feature = "test-support"))]
     invalidate_canonical_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-    /// Per-store test-only counter: incremented by one IMMEDIATELY before
-    /// a cooperative joiner blocks on the per-entry `ready` condvar via
-    /// `wait_while` in [`Self::execute_cooperative`]. Unlike the in-flight
-    /// `Arc` strong count (which rises when a joiner merely *clones* the
-    /// entry, one step BEFORE it reaches the condvar), this counter proves
-    /// the joiner is genuinely SUSPENDED on the condvar — the precise
-    /// invariant a condvar-pairing test asserts. Read via
+    /// Per-store test-only counter: incremented by one once a cooperative
+    /// joiner has registered its waker on the flight, under the flight's
+    /// lock, so a producer publishing afterwards must wake it. Unlike the
+    /// in-flight `Arc` strong count (which rises when a joiner merely
+    /// *clones* the entry, before it waits), this counter proves the joiner
+    /// is genuinely SUSPENDED — the precise invariant a condvar-pairing test
+    /// asserts. Read via
     /// [`Self::test_joiner_on_condvar_count`].
     ///
     /// **Per-store scope (test hermeticity).** Like every other gate on
