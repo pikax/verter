@@ -85,7 +85,12 @@ use storage::{chain_entry, PinnedChain};
 /// Resolve-domain facts are NOT populated here — they emit from the
 /// resolver / `RouteDb` producers downstream.
 #[derive(Debug, Default, Clone, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct FileFacts {
+    /// The registry's own charge: readers clone the published `Arc` out of
+    /// its artifact, so the charge travels with the allocation, not with
+    /// the artifact that first published it.
+    storage: verter_retention::pinned_heap::StoragePin,
     registry: fact_registry::FactRegistry,
     /// Lazy body-sensitive fact source: `Export` / `LocalDecl` body
     /// fingerprints are NOT emitted at publish (publishing lowers zero
@@ -96,6 +101,16 @@ pub struct FileFacts {
     /// EXCLUDED from equality — the eager registry is the artifact's
     /// fact identity.
     lazy: Option<crate::fact_emission::LazyBodyFactSource>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for FileFacts {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 impl PartialEq for FileFacts {
@@ -118,6 +133,7 @@ impl FileFacts {
     #[must_use]
     pub fn from_registry(registry: fact_registry::FactRegistry) -> Self {
         Self {
+            storage: Default::default(),
             registry,
             lazy: None,
         }
@@ -131,6 +147,7 @@ impl FileFacts {
         lazy: crate::fact_emission::LazyBodyFactSource,
     ) -> Self {
         Self {
+            storage: Default::default(),
             registry,
             lazy: Some(lazy),
         }
@@ -175,8 +192,11 @@ impl FileFacts {
     }
 
     /// Borrow the registry mutably — used by the parse-time
-    /// producer during construction.
+    /// producer during construction. A mutated registry is new content, so
+    /// any charge sealed over the old content is released and measured
+    /// again at the next publication.
     pub fn registry_mut(&mut self) -> &mut fact_registry::FactRegistry {
+        self.storage.invalidate();
         &mut self.registry
     }
 
@@ -243,7 +263,7 @@ pub(crate) struct AugmenterCandidate {
     pub(crate) parse_stable_hash: Hash16,
     /// The candidate's augmentation facts. Cloned `Arc` — a cheap
     /// refcount bump, not a deep copy.
-    pub(crate) augmentations: Arc<Vec<ModuleAugmentationFact>>,
+    pub(crate) augmentations: verter_session_query::source::augmentation::ArtifactAugmentations,
 }
 
 // ── FileArtifacts ──
@@ -262,7 +282,7 @@ pub struct FileArtifacts {
     pub indexed: Arc<IndexedReady>,
     pub facts: Arc<FileFacts>,
     pub parse_stable_hash: Hash16,
-    pub augmentations: Arc<Vec<ModuleAugmentationFact>>,
+    pub augmentations: verter_session_query::source::augmentation::ArtifactAugmentations,
 }
 
 impl verter_retention::heap_size::HeapSize for FileArtifacts {
@@ -320,7 +340,9 @@ impl FileArtifacts {
             indexed,
             facts: Arc::new(emission.facts),
             parse_stable_hash,
-            augmentations: Arc::new(emission.augmentations),
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+                emission.augmentations,
+            )),
         };
         result.pin_storage();
         result
