@@ -1340,7 +1340,14 @@ jobs:
         with:
           name: wasm-build
           path: packages/wasm
+      # Container jobs set HOME=/github/home, owned by another user than root,
+      # and Firefox refuses to launch under root unless HOME is root's own
+      # (Playwright's documented workaround). Only this step switches it; the
+      # toolchain homes stay where the setup steps installed them.
       - name: Run the browser-host-domain gate
+        env:
+          HOME: /root
+          RUSTUP_HOME: /github/home/.rustup
         run: node scripts/browser-host-gate.mjs --skip-build
 
   # ---------------------------------------------------------------------------
