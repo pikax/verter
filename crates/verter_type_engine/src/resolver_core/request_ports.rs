@@ -67,6 +67,61 @@ pub enum IndexedLoadEnd {
     Shutdown,
 }
 
+/// Owned loads that ended without integrating their file, whose waiting
+/// reader has not yet read the file: each answers that reader's first load
+/// of it ([`take_consumed_load_end`]) with its terminal outcome, so the
+/// reader consumes the wait's outcome instead of loading the file again.
+pub type ConsumedLoadEnds = Vec<(Arc<str>, IndexedLoadEnd)>;
+
+std::thread_local! {
+    static CONSUMED_LOAD_ENDS: std::cell::RefCell<ConsumedLoadEnds> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `body` — a reader that waited on owned loads, reading the files they
+/// loaded — with the loads in `ends` that ended without integrating their
+/// file answering its loads of those files. On return `ends` keeps the
+/// outcomes `body` did not consume, for the reader's next step. Any outcome
+/// installed by an enclosing reader is restored, unwinding included. An
+/// empty `ends` installs nothing.
+pub(crate) fn with_consumed_load_ends<R>(
+    ends: &mut ConsumedLoadEnds,
+    body: impl FnOnce() -> R,
+) -> R {
+    if ends.is_empty() {
+        return body();
+    }
+    struct Restore<'e> {
+        ends: &'e mut ConsumedLoadEnds,
+        outer: ConsumedLoadEnds,
+    }
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let outer = std::mem::take(&mut self.outer);
+            *self.ends = CONSUMED_LOAD_ENDS
+                .with(|installed| std::mem::replace(&mut *installed.borrow_mut(), outer));
+        }
+    }
+    let installed = std::mem::take(ends);
+    let outer =
+        CONSUMED_LOAD_ENDS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), installed));
+    let _restore = Restore { ends, outer };
+    body()
+}
+
+/// The terminal outcome a waiting reader's owned load of a file matching
+/// `is_file` ended with, taken so that it answers only that reader's first
+/// load of the file: the load a host performs for the reader then answers
+/// as after a synchronous load that ended the same way, without being
+/// submitted again. `None` when no installed outcome names the file.
+pub fn take_consumed_load_end(is_file: impl Fn(&str) -> bool) -> Option<IndexedLoadEnd> {
+    CONSUMED_LOAD_ENDS.with(|slot| {
+        let mut ends = slot.borrow_mut();
+        let found = ends.iter().position(|(file, _)| is_file(file))?;
+        Some(ends.remove(found).1)
+    })
+}
+
 /// The load of a file another read would perform, begun instead
 /// ([`IndexedInputs::begin_prepared_bundle_load`]): the file, and its owned
 /// load to wait on.

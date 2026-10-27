@@ -1374,7 +1374,21 @@ impl VerterHost {
     /// via the workspace-backed SourceLoader), waits for Analysis to
     /// commit, then materializes native-side lifecycle state from the
     /// committed scheduler snapshots without re-submitting the source.
+    ///
+    /// A semantic reader that already waited on an owned load of the file
+    /// which ended without integrating it consumes that terminal outcome
+    /// here instead: the load is not submitted again, and the reader answers
+    /// as after a synchronous load that ended the same way.
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        if verter_type_engine::resolver_core::request_ports::take_consumed_load_end(|file| {
+            file == canonical_id
+                || self.normalized_analysis_canonical(file)
+                    == self.normalized_analysis_canonical(canonical_id)
+        })
+        .is_some()
+        {
+            return false;
+        }
         let scope = self.scheduler.enter_execution_scope();
         let mut load = self.begin_load(
             canonical_id,

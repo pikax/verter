@@ -2281,6 +2281,92 @@ mod semantic_poll_contract {
         );
     }
 
+    /// A query off the continuation runtime whose claim waits on another
+    /// task's producer is woken by its request's cancellation with that
+    /// producer still held, on the thread that polls it — no timer and no
+    /// release — and its next poll delivers the terminal cancelled read,
+    /// withdrawing its wait while the producer it waited on is left alone.
+    #[test]
+    fn a_root_off_the_runtime_is_woken_by_its_requests_cancellation_while_the_producer_holds() {
+        let host = chain_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let key = classification_key(&dispatch);
+        let (other, lease) = hold_producer(&host, graph, key.clone());
+        let request = budgeted_request(1);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        let observed = {
+            let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                Arc::clone(&request),
+            );
+            let mut entry = dispatch.poll_query(key.clone());
+            let observed = while_held(lease, || {
+                let first = entry.poll(&waker).is_pending();
+                let before = wakes();
+                let waits = graph.wait_graph_counts_for_tests().1;
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| request.cancel())
+                        .join()
+                        .expect("the request is cancelled on another thread");
+                });
+                let woken = wakes() > before;
+                let next = match entry.poll(&waker) {
+                    Poll::Ready(read) => Some(read),
+                    Poll::Pending => None,
+                };
+                let left = (
+                    graph.wait_graph_counts_for_tests().1,
+                    graph.resident_flight_keys_for_tests(),
+                );
+                (first, before, waits, woken, next, left)
+            });
+            drop(entry);
+            observed
+        };
+        let (first, before, waits, woken, next, left) = observed;
+        assert!(first, "the root yields while another task produces its key");
+        assert_eq!(
+            before, 0,
+            "nothing wakes the root before its request is cancelled"
+        );
+        assert_eq!(waits, 1, "the claim waits on the producer");
+        assert!(
+            woken,
+            "the request's cancellation wakes the root with the producer still held"
+        );
+        let read = next.expect("the woken root reads its cancellation without the producer");
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Cancelled)
+            ),
+            "the cancelled root reads a terminal cancellation: {read:?}"
+        );
+        assert_eq!(
+            left,
+            (0, vec![key.clone()]),
+            "the cancelled root withdraws its wait and leaves only the other producer's flight"
+        );
+        assert_eq!(
+            Arc::strong_count(&counter),
+            2,
+            "a terminal root retains neither readiness nor cancellation wakers"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(key);
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Value(SemanticQueryValue::TruthinessDomain(_))
+            ),
+            "the cancellation published nothing reusable: {read:?}"
+        );
+    }
+
     /// Roots answering outside the type-node domain poll their own value:
     /// a machinery-root flow return on the continuation runtime and a
     /// classification off it deliver what the synchronous full-value entry
@@ -4248,21 +4334,22 @@ mod semantic_poll_contract {
         }
     }
 
-    /// A family whose file's load fails consumes that terminal outcome once:
+    /// A reader whose file's load fails consumes that terminal outcome once:
     /// the polled entry submits the load once, waits on it, and — the load
-    /// failed — resumes the family from its retained stage without the file,
-    /// answering in bounded polls exactly what the synchronous entry, whose
-    /// in-place load fails the same way, reads. It never submits its load
-    /// again and never serves the file in place to rediscover the failure:
-    /// for a macro payload's owner the polled entry submits exactly the one
-    /// load the synchronous entry submits. Both families leave nothing open.
-    /// A class's surface goes on to its instantiation, a reader of its own
-    /// whose frame waits on its own load of the file and then builds as the
-    /// synchronous instantiation builds, so its count is not the family's.
+    /// failed — resumes from its retained stage without the file, answering
+    /// in bounded polls exactly what the synchronous entry, whose in-place
+    /// load fails the same way, reads. It never submits its load again and
+    /// never serves the file in place to rediscover the failure: the polled
+    /// entry submits exactly the loads the synchronous entry submits. That
+    /// holds for a family continuation (a macro payload's owner, a class's
+    /// declaring file), for an instantiation or a `typeof` frame that waited
+    /// on its file before its build began, and for a class's surface whose
+    /// instantiation is such a frame. Every reader leaves nothing open.
     ///
-    /// Restarted from its load stage after the failure instead, the family
-    /// begins the same load again at every resume and never answers; served
-    /// in place after it, it submits a load the synchronous entry does not.
+    /// Restarted from its load stage after the failure instead, a family
+    /// begins the same load again at every resume and never answers; a frame
+    /// whose build served the file in place after its failed wait submits a
+    /// load the synchronous entry does not.
     #[test]
     fn family_load_failure_is_terminal() {
         type Key = fn(
@@ -4274,19 +4361,21 @@ mod semantic_poll_contract {
                 .loads_begun
                 .load(std::sync::atomic::Ordering::SeqCst)
         };
-        let cases: [(&str, Key, bool); 2] = [
-            (
-                "a macro payload's owner",
-                |_, dispatch| owned_props_payload_keys(dispatch, MISSING_OWNER).0,
-                true,
-            ),
-            (
-                "a class's declaring file",
-                |host, dispatch| class_instance_surface_in(host, dispatch, MISSING_OWNER),
-                false,
-            ),
+        let cases: [(&str, Key); 4] = [
+            ("a macro payload's owner", |_, dispatch| {
+                owned_props_payload_keys(dispatch, MISSING_OWNER).0
+            }),
+            ("a class's declaring file", |host, dispatch| {
+                class_instance_surface_in(host, dispatch, MISSING_OWNER)
+            }),
+            ("an instantiation's declaring file", |_, dispatch| {
+                missing_props_key(dispatch)
+            }),
+            ("a typeof's value file", |_, dispatch| {
+                file_typeof_key(dispatch, MISSING_OWNER, "value")
+            }),
         ];
-        for (case, key, only_reader) in cases {
+        for (case, key) in cases {
             let (synchronous, synchronous_loads) = {
                 let host = unloaded_files_host(&[]);
                 let dispatch = ProjectSemanticDispatch::new(&*host);
@@ -4312,14 +4401,33 @@ mod semantic_poll_contract {
             assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
             assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
             assert!(graph.resident_flight_keys_for_tests().is_empty());
-            if only_reader {
-                assert_eq!(
-                    (polled_loads, synchronous_loads),
-                    (1, 1),
-                    "{case}: the failed load is submitted once by either entry"
-                );
-            }
+            assert!(
+                synchronous_loads >= 1,
+                "{case}: premise: the synchronous entry submits the failed load"
+            );
+            assert_eq!(
+                polled_loads, synchronous_loads,
+                "{case}: the polled entry submits exactly the loads the synchronous entry submits"
+            );
         }
+    }
+
+    /// The instantiation of a `Props` the missing file would declare.
+    fn missing_props_key(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                MISSING_OWNER,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Props",
+            ),
+            Arc::from([]),
+            dispatch.instantiate_context_for(
+                MISSING_OWNER,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        ))
     }
 
     /// A macro payload released while its owner loads withdraws only its own

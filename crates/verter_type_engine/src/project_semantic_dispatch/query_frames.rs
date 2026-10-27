@@ -171,18 +171,11 @@ pub(super) enum FrameBuild {
 /// the frame consumes it once, and never begins the same load again.
 pub(super) type LoadEnded = Arc<std::sync::OnceLock<IndexedLoadOutcome>>;
 
-/// The load of a file a frame waits on, and where its outcome goes when the
-/// frame consumes it (`None` for a frame that reads the file whatever the
-/// load's outcome).
+/// The load of a file a frame waits on, and where its terminal outcome goes
+/// for the frame that consumes it.
 pub(super) struct LoadWait<'p> {
     load: Box<dyn IndexedLoad + Send + 'p>,
-    ended: Option<LoadEnded>,
-}
-
-impl<'p> LoadWait<'p> {
-    fn unobserved(load: Box<dyn IndexedLoad + Send + 'p>) -> Self {
-        Self { load, ended: None }
-    }
+    ended: LoadEnded,
 }
 
 /// A function's flow return between its steps: the answers to the reads
@@ -491,8 +484,13 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     /// The edit clocks the frame's build computes under.
     computed_at: super::WorkspaceEdit,
     /// The files the frame waited on before its build began
-    /// ([`ProjectSemanticDispatch::frame_source_load`]).
-    awaited_loads: Vec<Arc<str>>,
+    /// ([`ProjectSemanticDispatch::frame_source_load`]), each with how its
+    /// load ended until the frame took that outcome.
+    awaited_loads: Vec<(Arc<str>, Option<LoadEnded>)>,
+    /// The awaited loads that ended without integrating their file and that
+    /// the frame's build has not yet consumed: each answers the build's first
+    /// load of its file, as the synchronous build's own failed load answers.
+    failed_loads: crate::resolver_core::request_ports::ConsumedLoadEnds,
 }
 
 /// What produces a frame's demand: the family memo's producer lease, or —
@@ -1513,6 +1511,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             recording: false,
             computed_at: self.dispatch.workspace_edit(),
             awaited_loads: Vec::new(),
+            failed_loads: Vec::new(),
         }))
     }
 }
@@ -1761,10 +1760,8 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             // A loaded file is read by the frame that waited on it.
             PendingWait::Load(wait) => {
                 return wait.load.poll(waker).map(|outcome| {
-                    if let Some(ended) = &wait.ended {
-                        let set = ended.set(outcome);
-                        verter_debug_assert!(set.is_ok(), "a load ends once");
-                    }
+                    let set = wait.ended.set(outcome);
+                    verter_debug_assert!(set.is_ok(), "a load ends once");
                     External::Restart
                 })
             }
@@ -2623,10 +2620,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 canonical,
                                 Arc::clone(&ended),
                             ));
-                            return FramePoll::Await(LoadWait {
-                                load,
-                                ended: Some(ended),
-                            });
+                            return FramePoll::Await(LoadWait { load, ended });
                         }
                     }
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
@@ -2661,17 +2655,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// key naming no file, or on the synchronous entry's drive, whose build
     /// performs those loads in place as its external driver.
     ///
-    /// Each file waited on joins `awaited` and is never waited on again: a
-    /// load that failed leaves the build to read the file as a synchronous
-    /// build reads it after its own failed load. What the check reads is
-    /// observed in a scope of its own and dropped; the build observes what
-    /// it reads itself.
+    /// Each file waited on joins `awaited` with the cell its outcome ends
+    /// in, and is never waited on again: a load that failed is consumed by
+    /// the build, whose first load of the file answers with that outcome as
+    /// a synchronous build's own failed load answers. What the check reads
+    /// is observed in a scope of its own and dropped; the build observes
+    /// what it reads itself.
     fn frame_source_load(
         &self,
         key: &SemanticQueryKey,
-        awaited: &mut Vec<Arc<str>>,
+        awaited: &mut Vec<(Arc<str>, Option<LoadEnded>)>,
         suspends_loads: bool,
-    ) -> Option<Box<dyn IndexedLoad + Send + 'a>> {
+    ) -> Option<LoadWait<'a>> {
         if !suspends_loads {
             return None;
         }
@@ -2685,12 +2680,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if crate::semantic_query::is_non_file_base(canonical) {
             return None;
         }
-        if !awaited.iter().any(|file| file.as_ref() == canonical) {
+        if !awaited.iter().any(|(file, _)| file.as_ref() == canonical) {
             if let IndexedReadiness::Loading(load) = self.ctx.begin_indexed_load(canonical) {
-                awaited.push(Arc::from(canonical));
-                return Some(load);
+                let ended = LoadEnded::default();
+                awaited.push((Arc::from(canonical), Some(Arc::clone(&ended))));
+                return Some(LoadWait { load, ended });
             }
         }
+        let files: Vec<Arc<str>> = awaited.iter().map(|(file, _)| Arc::clone(file)).collect();
         let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
             source.live_basis(),
@@ -2698,13 +2695,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let pending = {
             let _tracer = tracer.install();
-            self.observe_read(|| self.ctx.begin_prepared_bundle_load(canonical, awaited))
+            self.observe_read(|| self.ctx.begin_prepared_bundle_load(canonical, &files))
                 .discard()
                 .ok()
                 .flatten()
         }?;
-        awaited.push(pending.canonical);
-        Some(pending.load)
+        let ended = LoadEnded::default();
+        awaited.push((pending.canonical, Some(Arc::clone(&ended))));
+        Some(LoadWait {
+            load: pending.load,
+            ended,
+        })
+    }
+
+    /// Take the outcomes of a frame's awaited loads that ended since its last
+    /// step: each that ended without integrating its file joins `failed`,
+    /// for the build to consume.
+    fn take_awaited_load_ends(
+        awaited: &mut [(Arc<str>, Option<LoadEnded>)],
+        failed: &mut crate::resolver_core::request_ports::ConsumedLoadEnds,
+    ) {
+        for (file, ended) in awaited {
+            let Some(outcome) = ended.as_ref().and_then(|ended| ended.get().copied()) else {
+                continue;
+            };
+            *ended = None;
+            if let IndexedLoadOutcome::NotIntegrated(end) = outcome {
+                failed.push((Arc::clone(file), end));
+            }
+        }
     }
 
     /// One step of an instantiation's frame: its taint frame and tracer
@@ -2723,11 +2742,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A build whose files are still loading waits on each load before
         // it begins: nothing of it has run, so the step the last load
         // restarts begins it once, over loaded files.
+        Self::take_awaited_load_ends(&mut frame.awaited_loads, &mut frame.failed_loads);
         if frame.build.is_none() {
             if let Some(load) =
                 self.frame_source_load(&frame.key, &mut frame.awaited_loads, suspends_loads)
             {
-                return EvalStep::Await(PendingWait::Load(LoadWait::unobserved(load)));
+                return EvalStep::Await(PendingWait::Load(load));
             }
         }
         if !frame.recording {
@@ -2755,78 +2775,94 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Ok(delivery) => delivery,
             Err(()) => unreachable!("a stopped drive delivers nothing"),
         });
-        let poll: FramePoll<'a> = match frame.build.as_mut() {
-            Some(FrameBuild::Instantiate(build)) => self
-                .drain_instantiate(
-                    build,
-                    delivery.map(|delivery| self.consume_delivery(delivery, frame.depth + 1)),
-                )
-                .into(),
-            // A typeof build consumes its delivery where its evaluation
-            // reads it.
-            Some(FrameBuild::Typeof(build)) => self
-                .drain_typeof(
-                    build,
-                    delivery.map(|delivery| FrameDelivery {
-                        delivery,
-                        depth: frame.depth + 1,
-                    }),
-                )
-                .into(),
-            // A decision keeps its deliveries as answers to its reads.
-            Some(FrameBuild::Conditional(build)) => self
-                .drain_conditional(&frame.key, build, delivery, frame.depth + 1)
-                .into(),
-            // So does a call's walk, for its operands.
-            Some(FrameBuild::Call(build)) => {
-                self.drain_call(&frame.key, build, delivery, frame.depth + 1)
-            }
-            // A flow return keeps its deliveries as answers to the reads its
-            // contextual callbacks made.
-            Some(FrameBuild::Flow(build)) => {
-                self.drain_flow(&frame.key, build, delivery, frame.depth + 1)
-            }
-            // A family continuation resumes from the stage it retained with
-            // the read it waited on; no completed stage runs again.
-            Some(FrameBuild::Family(_)) => {
-                let delivery = delivery.expect("a family build resumes with the read it named");
-                self.resume_family_frame(
-                    &frame.key,
-                    &mut frame.build,
-                    frame.depth,
-                    delivery,
-                    suspends_loads,
-                )
-            }
-            // A family build whose file's load ended reads the file from
-            // that terminal outcome, once: an integrated file is served as
-            // loaded, and a load that ended without integrating it leaves
-            // the build no input for it — the input a synchronous serve
-            // answers after the same failed load. The load is never begun
-            // again.
-            Some(FrameBuild::FamilySource(..)) => {
-                let Some(FrameBuild::FamilySource(family, canonical, ended)) = frame.build.take()
-                else {
-                    unreachable!("the build was just matched")
-                };
-                let serve = match ended.get() {
-                    Some(IndexedLoadOutcome::Integrated) => {
-                        self.ctx.ensure_indexed_ready_serve(&canonical)
+        // A load the frame waited on that ended without integrating its file
+        // answers the build's first load of it: the build consumes the
+        // wait's terminal outcome instead of submitting the load again.
+        let mut failed_loads = std::mem::take(&mut frame.failed_loads);
+        let poll: FramePoll<'a> =
+            crate::resolver_core::request_ports::with_consumed_load_ends(&mut failed_loads, || {
+                match frame.build.as_mut() {
+                    Some(FrameBuild::Instantiate(build)) => self
+                        .drain_instantiate(
+                            build,
+                            delivery
+                                .map(|delivery| self.consume_delivery(delivery, frame.depth + 1)),
+                        )
+                        .into(),
+                    // A typeof build consumes its delivery where its evaluation
+                    // reads it.
+                    Some(FrameBuild::Typeof(build)) => self
+                        .drain_typeof(
+                            build,
+                            delivery.map(|delivery| FrameDelivery {
+                                delivery,
+                                depth: frame.depth + 1,
+                            }),
+                        )
+                        .into(),
+                    // A decision keeps its deliveries as answers to its reads.
+                    Some(FrameBuild::Conditional(build)) => self
+                        .drain_conditional(&frame.key, build, delivery, frame.depth + 1)
+                        .into(),
+                    // So does a call's walk, for its operands.
+                    Some(FrameBuild::Call(build)) => {
+                        self.drain_call(&frame.key, build, delivery, frame.depth + 1)
                     }
-                    Some(IndexedLoadOutcome::NotIntegrated(_)) => None,
-                    None => unreachable!("a frame waiting on a load resumes once it ended"),
-                };
-                let step = self.resume_family_source(*family, serve);
-                self.advance_family_frame(&frame.key, &mut frame.build, step, suspends_loads)
-            }
-            None => self.begin_frame_build(
-                &frame.key,
-                frame.depth,
-                &mut frame.active,
-                &mut frame.build,
-                suspends_loads,
-            ),
-        };
+                    // A flow return keeps its deliveries as answers to the reads its
+                    // contextual callbacks made.
+                    Some(FrameBuild::Flow(build)) => {
+                        self.drain_flow(&frame.key, build, delivery, frame.depth + 1)
+                    }
+                    // A family continuation resumes from the stage it retained with
+                    // the read it waited on; no completed stage runs again.
+                    Some(FrameBuild::Family(_)) => {
+                        let delivery =
+                            delivery.expect("a family build resumes with the read it named");
+                        self.resume_family_frame(
+                            &frame.key,
+                            &mut frame.build,
+                            frame.depth,
+                            delivery,
+                            suspends_loads,
+                        )
+                    }
+                    // A family build whose file's load ended reads the file from
+                    // that terminal outcome, once: an integrated file is served as
+                    // loaded, and a load that ended without integrating it leaves
+                    // the build no input for it — the input a synchronous serve
+                    // answers after the same failed load. The load is never begun
+                    // again.
+                    Some(FrameBuild::FamilySource(..)) => {
+                        let Some(FrameBuild::FamilySource(family, canonical, ended)) =
+                            frame.build.take()
+                        else {
+                            unreachable!("the build was just matched")
+                        };
+                        let serve = match ended.get() {
+                            Some(IndexedLoadOutcome::Integrated) => {
+                                self.ctx.ensure_indexed_ready_serve(&canonical)
+                            }
+                            Some(IndexedLoadOutcome::NotIntegrated(_)) => None,
+                            None => unreachable!("a frame waiting on a load resumes once it ended"),
+                        };
+                        let step = self.resume_family_source(*family, serve);
+                        self.advance_family_frame(
+                            &frame.key,
+                            &mut frame.build,
+                            step,
+                            suspends_loads,
+                        )
+                    }
+                    None => self.begin_frame_build(
+                        &frame.key,
+                        frame.depth,
+                        &mut frame.active,
+                        &mut frame.build,
+                        suspends_loads,
+                    ),
+                }
+            });
+        frame.failed_loads = failed_loads;
         let step = crate::request_context::current_cold_compute_completeness();
         if step.is_partial() {
             self.fold_into_top_build_local_taint_with(true, false, step.reasons());
