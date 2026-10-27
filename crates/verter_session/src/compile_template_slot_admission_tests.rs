@@ -38,9 +38,12 @@ const INLINE_SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'hi'\n</scr
 const EXTERNAL_SRC_SOURCE: &str = "<template src=\"./partial.html\"></template>\n<script setup lang=\"ts\">\nconst ok = true\n</script>";
 
 fn make_host() -> Arc<VerterHost> {
-    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
+    make_host_under(verter_session_query::facts::policy::FactPolicy::production())
+}
+
+/// [`make_host`] composed with `policy`.
+fn make_host_under(policy: verter_session_query::facts::policy::FactPolicy) -> Arc<VerterHost> {
+    let workspace = crate::fact_policy_test_support::workspace_under(policy);
     workspace.inject_file(
         "/proj/partial.html".to_string(),
         Arc::from("<div>hello</div>"),
@@ -189,19 +192,26 @@ fn default_profile_inline_compile_still_persists_and_warm_serves() {
     );
 }
 
+/// A compile whose publish evidence is a wide (tree-stored) witness is
+/// admitted with its companions while retention allows, and when retention
+/// refuses the witness the companions are evicted and the same output is
+/// served uncached. The gate runs it on a host whose policy makes a
+/// 67-fact witness wide; the nightly tier runs it at the production width.
 #[test]
 fn evidence_retention_refusal_evicts_compile_companions_and_serves_uncached() {
+    check_evidence_retention_refusal(crate::fact_policy_test_support::narrow_storage(32));
+}
+
+fn check_evidence_retention_refusal(policy: verter_session_query::facts::policy::FactPolicy) {
     use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
     use verter_session_query::retention::{
         RetentionLimits, SemanticRetentionAccount, StoreAccount,
     };
     let profile = CompileProfile::default();
     for refused in [false, true] {
-        let host = make_host();
+        let host = make_host_under(policy);
         upsert(&host, INLINE_SOURCE);
-        let facts: Vec<_> = (0..2 * verter_session_query::facts::policy::FactPolicy::production()
-            .fresh_slice_max()
-            + 3)
+        let facts: Vec<_> = (0..2 * policy.fresh_slice_max() + 3)
             .map(|i| {
                 let canonical_id = format!("/publish-evidence/{i}.ts");
                 let _ = host
@@ -246,9 +256,13 @@ fn evidence_retention_refusal_evicts_compile_companions_and_serves_uncached() {
         let read = || {
             let signature = ReadSetSignature::new(
                 verter_session_query::facts::fact_read_set::seal_canonical_signature(
-                    verter_session_query::facts::policy::FactPolicy::production(),
+                    policy,
                     facts.clone(),
                 ),
+            );
+            assert!(
+                signature.facts.tree_storage().is_some() && signature.facts.tree_node_charges() > 0,
+                "the publish evidence is a wide witness in charged tree storage"
             );
             crate::compile_output_node::with_session_publish_evidence_for_test(
                 signature,
@@ -569,4 +583,17 @@ fn stateless_generated_text_is_pinned_through_its_final_leaf() {
     let before = account.snapshot().pinned_bytes;
     drop(code);
     assert_eq!(account.snapshot().pinned_bytes, before - bytes);
+}
+
+/// Full-size workloads, run by the nightly scale tier
+/// (`.config/nextest.toml`); the gate runs each one's narrow-policy version.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn evidence_retention_refusal_evicts_compile_companions_and_serves_uncached() {
+        check_evidence_retention_refusal(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
 }
