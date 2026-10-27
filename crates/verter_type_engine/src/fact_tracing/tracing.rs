@@ -346,6 +346,20 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
     }
 }
 
+/// [`observe_fan_out`] for a fact whose construction allocates: `make` runs
+/// only while a tracer or recorder is installed, so an unobserved read pays
+/// no allocation for a fact nobody receives.
+#[inline]
+pub(crate) fn observe_fan_out_lazy(make: impl FnOnce() -> FactVersionRef) {
+    let observed = ACTIVE_TRACERS.with(|slot| !slot.borrow().is_empty())
+        || ACTIVE_RECORDERS.with(|slot| !slot.borrow().is_empty());
+    if observed {
+        observe_fan_out(make());
+    } else {
+        verter_audit::attribute_n!(FactObserve, 1);
+    }
+}
+
 /// Fan a borrowed signature into every active tracer that must observe it.
 #[inline]
 pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {

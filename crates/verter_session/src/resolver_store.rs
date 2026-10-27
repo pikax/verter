@@ -2344,6 +2344,17 @@ impl HostStoreView {
         self.snapshot.roots.is_tombstoned(canonical_id)
     }
 
+    /// Whether a session layer of this view replaces or deletes `canonical`,
+    /// so the host's own content is not this view's answer for it.
+    pub(crate) fn session_masks(&self, canonical_id: &str) -> bool {
+        self.snapshot
+            .roots
+            .session_root
+            .as_ref()
+            .is_some_and(|session| session.canonicals.contains_key(canonical_id))
+            || self.is_tombstoned(canonical_id)
+    }
+
     /// Cap the captured workspace's freshness-history retirement at this
     /// view's captured content generation while the returned lease lives.
     ///

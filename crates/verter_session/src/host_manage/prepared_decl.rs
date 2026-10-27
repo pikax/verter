@@ -1026,6 +1026,7 @@ impl VerterHost {
         );
 
         bundle.seal_resolution_facts(
+            self.project_type_store.fact_policy(),
             (state.owner_import_targets.is_empty() || !overlay_route_witness.is_empty())
                 .then_some(overlay_route_witness),
         );
@@ -1309,7 +1310,10 @@ impl VerterHost {
         // and `framework::script_facts` producers do.
         let import_route_witness =
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
-        bundle.seal_resolution_facts(import_route_witness.clone());
+        bundle.seal_resolution_facts(
+            self.project_type_store.fact_policy(),
+            import_route_witness.clone(),
+        );
         let mut facts = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.into(),
@@ -1520,7 +1524,10 @@ impl VerterHost {
         // this rail exists to provide.
         let import_route_witness =
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
-        bundle.seal_resolution_facts(import_route_witness.clone());
+        bundle.seal_resolution_facts(
+            self.project_type_store.fact_policy(),
+            import_route_witness.clone(),
+        );
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {

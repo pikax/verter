@@ -1446,7 +1446,7 @@ pub struct PreparedDeclBundle {
     input_projection: OnceLock<Held<verter_session_query::inputs::prepared::PreparedInputRecord>>,
     /// Immutable producing route witnesses, replayed even on committed
     /// declaration slots and request-memo/shared/follower bundle hits.
-    resolution_facts: OnceLock<verter_session_query::facts::fact_cache::OwnedFactSignature>,
+    resolution_facts: OnceLock<verter_session_query::facts::fact_set::FactSet>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1612,10 +1612,12 @@ fn base_table_heap<'t>(
 impl PreparedDeclBundle {
     pub(crate) fn seal_resolution_facts(
         &self,
+        policy: verter_session_query::facts::policy::FactPolicy,
         witness: Option<Vec<verter_session_query::facts::fact_cache::FactVersionRef>>,
     ) {
+        // A sealed set is replayed as one shared run per read, not fact by fact.
         if let Some(witness) = witness {
-            let _ = self.resolution_facts.set(witness.into());
+            let _ = self.resolution_facts.set(policy.set_of(witness));
         }
     }
 

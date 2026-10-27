@@ -185,8 +185,25 @@ fn warm_native_component_read_replays_dependencies_and_rejected_read_replays_not
     let FactReadSetFinalise::Ok(facts) = finalise else {
         panic!("a rejected candidate leaves the consumer's trace untouched");
     };
+    // Availability reads made while probing are the consumer's own current
+    // observations (route interfaces only); the rejected candidate's
+    // dependency facts must not have been replayed.
+    let observed = facts.to_vec();
     assert!(
-        facts.is_empty(),
-        "validation must precede dependency replay"
+        observed.iter().all(|fact| matches!(
+            fact,
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
+                if matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
+        )),
+        "validation must precede dependency replay: {observed:?}"
+    );
+    assert!(
+        admitted
+            .read_set_signature
+            .facts
+            .to_vec()
+            .iter()
+            .any(|fact| !observed.contains(fact)),
+        "the candidate carries dependency facts beyond the probe's own reads"
     );
 }

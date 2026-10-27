@@ -16,12 +16,12 @@ pub(crate) fn observe_whole_content(
     canonical: &str,
     hash: verter_session_query::analysis::types::Hash16,
 ) {
-    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out_lazy(|| {
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: canonical.into(),
             hash,
-        },
-    );
+        }
+    });
 }
 
 fn observe_source_content(source: &super::ShallowFileState) {

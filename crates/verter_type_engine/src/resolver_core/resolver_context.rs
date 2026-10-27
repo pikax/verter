@@ -430,6 +430,14 @@ pub fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersio
     tracer_stack::observe_fan_out(fact);
 }
 
+/// [`observe_fan_out`] that builds the fact only when an observer is installed.
+#[inline]
+pub fn observe_fan_out_lazy(
+    make: impl FnOnce() -> verter_session_query::facts::fact_cache::FactVersionRef,
+) {
+    tracer_stack::observe_fan_out_lazy(make);
+}
+
 /// Record that the active computation ordered declarations by `order`, so
 /// its result misses once the program lists its files differently. No-op
 /// for a file no program owns.

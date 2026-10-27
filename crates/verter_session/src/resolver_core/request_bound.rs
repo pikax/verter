@@ -1542,6 +1542,17 @@ impl<L> RequestBoundAdapter<L> {
                     let FactVersionRef::Parse(parse) = leaf else {
                         return true;
                     };
+                    // Completing a canonical records the content this context
+                    // serves, which the view's overlay lookups then trust over
+                    // the view's own tracked hash. A canonical a session layer
+                    // replaces with different content is not this context's to
+                    // complete: the fact cannot be certified from the host's content.
+                    if self.0.request_view().base().session_masks(&parse.canonical_id)
+                        && self.0.request_view().base().whole_hash(&parse.canonical_id)
+                            != self.0.authoritative_current_content_hash(&parse.canonical_id)
+                    {
+                        return false;
+                    }
                     if matches!(
                         parse.key,
                         verter_session_query::facts::FactKey::DirectDeclarationExport { .. }
