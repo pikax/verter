@@ -2884,26 +2884,32 @@ impl Engine {
             .len()
     }
 
-    /// Subscribers waiting on the flight of one query slot and domain.
+    /// Wait until the flight for the given query has at least `count` subscribers, with a
+    /// 20-second hang guard.
     #[cfg(test)]
-    pub(crate) fn flight_subscribers_for_test(
+    pub(crate) fn wait_for_flight_subscribers_for_test(
         &self,
         importer_id: &str,
         specifier: &str,
         context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
         overlay_domain: bool,
-    ) -> usize {
-        self.flights.subscribers(&(
-            LazyResolutionCacheKey {
-                importer_id: importer_id.to_owned(),
-                specifier: specifier.to_owned(),
-                phase: context.phase,
-                kind: context.kind,
-                population,
-            },
-            overlay_domain,
-        ))
+        count: usize,
+    ) -> bool {
+        self.flights.wait_for_subscribers(
+            &(
+                LazyResolutionCacheKey {
+                    importer_id: importer_id.to_owned(),
+                    specifier: specifier.to_owned(),
+                    phase: context.phase,
+                    kind: context.kind,
+                    population,
+                },
+                overlay_domain,
+            ),
+            count,
+            std::time::Duration::from_secs(20),
+        )
     }
 
     /// Candidates the overlay lane holds, across every slot.

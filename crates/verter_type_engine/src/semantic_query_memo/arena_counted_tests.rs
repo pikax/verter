@@ -27,14 +27,21 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
         let (parked_tx, parked_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let resume_rx = parking_lot::Mutex::new(resume_rx);
+        let (timing_tx, timing_rx) = mpsc::channel();
         let acquisitions = AtomicUsize::new(0);
-        *arena.race_hook.lock() = Some(Arc::new(move |event| {
-            if event == ArenaRaceEvent::BeforeInnerWrite
-                && acquisitions.fetch_add(1, Ordering::Relaxed) + 1 == acquisition
+        let targeted = std::sync::atomic::AtomicBool::new(false);
+        *arena.race_hook.lock() = Some(Arc::new(move |event| match event {
+            ArenaRaceEvent::BeforeInnerWrite
+                if acquisitions.fetch_add(1, Ordering::Relaxed) + 1 == acquisition =>
             {
+                targeted.store(true, Ordering::Relaxed);
                 parked_tx.send(()).unwrap();
                 resume_rx.lock().recv_timeout(WAIT).unwrap();
             }
+            ArenaRaceEvent::InnerWriteClockStarted if targeted.swap(false, Ordering::Relaxed) => {
+                let _ = timing_tx.send(());
+            }
+            _ => {}
         }));
         std::thread::scope(|threads| {
             // Disconnect a parked worker before joining on assertion failure.
@@ -43,7 +50,14 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             parked_rx.recv_timeout(WAIT).unwrap();
             let held = arena.inner.write();
             resume.send(()).unwrap();
-            std::thread::sleep(HOLD);
+            // The worker reports once its wait clock is running, so the lock is held for HOLD
+            // of that clock's time before it is released. The hold itself is the measured
+            // stimulus, spun on the clock rather than slept.
+            timing_rx.recv_timeout(WAIT).unwrap();
+            let timing_from = std::time::Instant::now();
+            while timing_from.elapsed() < HOLD {
+                std::hint::spin_loop();
+            }
             drop(held);
             let interned = worker.join().unwrap();
             if let Some(seeded) = &seeded {
@@ -55,7 +69,7 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             .node_arena_inner_write_wait_ns
             .load(Ordering::Relaxed)
             - before;
-        assert!(waited >= HOLD.as_nanos() as u64 / 2,
+        assert!(waited >= HOLD.as_nanos() as u64,
             "hit={hit}, acquisition={acquisition}: blocked write acquisition was not counted ({waited}ns)");
     }
 }

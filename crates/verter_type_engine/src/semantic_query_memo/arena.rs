@@ -1738,6 +1738,10 @@ impl Drop for ArenaTeardown {
 pub(super) enum ArenaRaceEvent {
     BeforeDedupLookup,
     BeforeInnerWrite,
+    /// An intern write has started its wait clock and is about to acquire the
+    /// inner write lock.
+    #[cfg(feature = "semantic-observe")]
+    InnerWriteClockStarted,
     BeforeDedupRetain,
     BeforeRootRelease {
         blocked: bool,
@@ -2533,6 +2537,10 @@ impl NodeArena {
         } else {
             None
         };
+        #[cfg(all(test, feature = "semantic-observe"))]
+        if start.is_some() {
+            self.race_event(ArenaRaceEvent::InnerWriteClockStarted);
+        }
         let inner = self.inner.write();
         #[cfg(feature = "semantic-observe")]
         if let Some((prov, start)) = start {
