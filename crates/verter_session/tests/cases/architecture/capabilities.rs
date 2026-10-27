@@ -6499,23 +6499,18 @@ fn production_fact_policy_is_named_only_where_a_host_is_composed() {
         ),
         (
             "crates/verter_session/src/project_type_store.rs",
-            2,
-            "the hostless store constructors used by store-level tests",
+            1,
+            "the hostless test-support store constructor",
         ),
         (
             "crates/verter_type_engine/src/component_meta_caches.rs",
             2,
-            "test-support synthetic entries",
+            "test-support schema-eviction fixtures",
         ),
         (
             "crates/verter_type_engine/src/component_meta_result_db.rs",
             1,
             "a test-support synthetic entry",
-        ),
-        (
-            "crates/verter_type_engine/src/project_semantic_dispatch/semantic_operand.rs",
-            1,
-            "the test-support authored-instantiate key fixture",
         ),
         (
             "crates/verter_session/src/owner_import_surface.rs",

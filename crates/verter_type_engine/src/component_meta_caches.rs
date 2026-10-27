@@ -1380,7 +1380,11 @@ impl ShapeCacheDb {
             crate::semantic_query::DepSignature::default(),
             false,
         );
-        let entry = Arc::new(self.charged_entry(&key, value));
+        let entry = Arc::new(self.charged_entry(
+            &key,
+            value,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ));
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1429,6 +1433,7 @@ impl ShapeCacheDb {
         carrier: &verter_type_expr::SyntheticCarrierKey,
         mode: ProjectionMode,
         deep_type: TypeExpr,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) {
         use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
         let key = ShapeCacheKey::synthetic_binding_whole(
@@ -1441,7 +1446,7 @@ impl ShapeCacheDb {
             crate::semantic_query::DepSignature::default(),
             false,
         );
-        let entry = Arc::new(self.charged_entry(&key, value));
+        let entry = Arc::new(self.charged_entry(&key, value, policy));
         // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`
         // returns `Some(old)` on overwrite, `None` on a fresh insert — an
         // unconditional `fetch_add` over-counts when two same-identity
@@ -1488,11 +1493,12 @@ impl ShapeCacheDb {
         &self,
         key: &ShapeCacheKey,
         value: MaterializedOutputTypeExpr,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) -> CacheEntry<MaterializedOutputTypeExpr> {
         let footprint = verter_session_query::retention::heap_size::footprint(&(key, &value));
         CacheEntry::admit::<ShapeCacheKey>(
             value,
-            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
+            ReadSetSignature::empty(policy),
             Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
             0,
             footprint,
@@ -1662,7 +1668,12 @@ mod retention_tests {
             TypeExpr::Literal(LiteralValue::String("l".repeat(TEXT))),
             TypeExpr::Literal(LiteralValue::String("small".into())),
         ]));
-        db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep);
+        db.insert_synthetic_carrier_deep_for_test(
+            &carrier,
+            ProjectionMode::Shallow,
+            deep,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         let retained = account.snapshot().retained_bytes;
         assert!(
             retained > TEXT,

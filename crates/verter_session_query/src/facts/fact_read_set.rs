@@ -880,11 +880,16 @@ pub enum FactReadSetFinalise {
 /// is `!Send + !Sync` by construction). A trait method that takes
 /// `&self` and forwards into this wrapper does not need to bubble
 /// `&mut self` through every callsite.
-pub struct FactReadSetCell(RefCell<FactReadSet>);
+pub struct FactReadSetCell {
+    /// The tracer's policy, kept beside the cell so reading it borrows
+    /// nothing (a shipped build reads a constant).
+    policy: FactPolicy,
+    inner: RefCell<FactReadSet>,
+}
 
 impl std::fmt::Debug for FactReadSetCell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0.try_borrow() {
+        match self.inner.try_borrow() {
             Ok(b) => f
                 .debug_struct("FactReadSetCell")
                 .field("inner", &*b)
@@ -902,40 +907,45 @@ impl FactReadSetCell {
     #[inline]
     #[must_use]
     pub fn new(policy: FactPolicy) -> Self {
-        Self(RefCell::new(FactReadSet::new(policy)))
+        Self {
+            policy,
+            inner: RefCell::new(FactReadSet::new(policy)),
+        }
     }
 
     /// The policy the cell's tracer seals under.
     #[inline]
     #[must_use]
     pub fn policy(&self) -> FactPolicy {
-        self.0.borrow().policy()
+        self.policy
     }
 
     /// Record one observation through `&self`.
     #[inline]
     pub fn observe(&self, fact: FactVersionRef) {
-        self.0.borrow_mut().observe(fact);
+        self.inner.borrow_mut().observe(fact);
     }
 
     /// Record one borrowed observation through `&self`. See
     /// [`FactReadSet::observe_ref`].
     #[inline]
     pub fn observe_ref(&self, fact: &FactVersionRef) {
-        self.0.borrow_mut().observe_ref(fact);
+        self.inner.borrow_mut().observe_ref(fact);
     }
 
     /// Bulk-record a previously finalised signature through `&self`.
     #[inline]
     pub fn observe_borrowed_signature(&self, sig: &[FactVersionRef]) {
-        self.0.borrow_mut().observe_borrowed_signature(sig);
+        self.inner.borrow_mut().observe_borrowed_signature(sig);
     }
 
     /// Absorb an already-canonical signature through `&self`. See
     /// [`FactReadSet::absorb_canonical_signature`].
     #[inline]
     pub fn absorb_canonical_signature(&self, signature: &FactSet) {
-        self.0.borrow_mut().absorb_canonical_signature(signature);
+        self.inner
+            .borrow_mut()
+            .absorb_canonical_signature(signature);
     }
 
     /// The mark of everything observed so far, through `&self`. See
@@ -943,7 +953,7 @@ impl FactReadSetCell {
     #[inline]
     #[must_use]
     pub fn mark(&self) -> ObservationMark {
-        self.0.borrow().mark()
+        self.inner.borrow().mark()
     }
 
     /// Replace a completed result's observations with its receipt through
@@ -955,7 +965,7 @@ impl FactReadSetCell {
         end: ObservationMark,
         receipt: FactVersionRef,
     ) {
-        self.0
+        self.inner
             .borrow_mut()
             .collapse_into_receipt(start, end, receipt);
     }
@@ -963,7 +973,7 @@ impl FactReadSetCell {
     /// Record a non-cacheable read consumption through `&self`.
     #[inline]
     pub fn note_non_cacheable_read(&self, propagation: NonCacheablePropagation) {
-        self.0.borrow_mut().note_non_cacheable_read(propagation);
+        self.inner.borrow_mut().note_non_cacheable_read(propagation);
     }
 
     /// Record a non-cacheable read consumption and its basis through
@@ -974,7 +984,7 @@ impl FactReadSetCell {
         propagation: NonCacheablePropagation,
         basis: NonCacheableBasis,
     ) {
-        self.0
+        self.inner
             .borrow_mut()
             .note_non_cacheable_read_with_basis(propagation, basis);
     }
@@ -983,7 +993,7 @@ impl FactReadSetCell {
     /// See [`FactReadSet::set_aggregate_basis`].
     #[inline]
     pub fn set_aggregate_basis(&self, basis: AggregateGenerations) {
-        self.0.borrow_mut().set_aggregate_basis(basis);
+        self.inner.borrow_mut().set_aggregate_basis(basis);
     }
 
     /// `true` when this scope's basis names at least one domain, i.e.
@@ -992,49 +1002,49 @@ impl FactReadSetCell {
     #[inline]
     #[must_use]
     pub fn has_aggregate_basis(&self) -> bool {
-        self.0.borrow().aggregate_basis().names_any_domain()
+        self.inner.borrow().aggregate_basis().names_any_domain()
     }
 
     /// Re-read the live generations and record instability through
     /// `&self`. See [`FactReadSet::note_basis_recheck`].
     #[inline]
     pub fn note_basis_recheck(&self, live: &AggregateGenerations) {
-        self.0.borrow_mut().note_basis_recheck(live);
+        self.inner.borrow_mut().note_basis_recheck(live);
     }
 
     /// Whether a domain this scope compacts against has moved.
     #[inline]
     #[must_use]
     pub fn mutation_unstable(&self) -> bool {
-        self.0.borrow().mutation_unstable()
+        self.inner.borrow().mutation_unstable()
     }
 
     /// Whether a non-cacheable read was consumed in this scope.
     #[inline]
     #[must_use]
     pub fn non_cacheable_read_observed(&self) -> bool {
-        self.0.borrow().non_cacheable_read_observed()
+        self.inner.borrow().non_cacheable_read_observed()
     }
 
     /// Number of observations recorded so far (pre-dedup).
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.borrow().len()
+        self.inner.borrow().len()
     }
 
     /// Whether no observations have been recorded.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.borrow().is_empty()
+        self.inner.borrow().is_empty()
     }
 
     /// Consume the cell and return the underlying [`FactReadSet`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> FactReadSet {
-        self.0.into_inner()
+        self.inner.into_inner()
     }
 }
 

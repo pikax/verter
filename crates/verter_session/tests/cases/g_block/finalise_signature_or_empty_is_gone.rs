@@ -1,9 +1,9 @@
 //! Discriminating arch-guard: `finalise_signature_or_empty` (the
 //! helper that collapsed `FactReadSetFinalise::Overflow` into an
 //! empty signature and let the producer publish anyway) has been
-//! deleted, and **no production callsite outside the substrate
-//! helper `verter_session_query::facts::policy::FactPolicy::production().empty_set()` constructs an empty
-//! `Arc<[FactVersionRef]>`** through any covered variant.
+//! deleted, and **no production callsite constructs an empty
+//! `Arc<[FactVersionRef]>`** through any covered variant: an empty
+//! signature is the empty set of a fact policy (`FactPolicy::empty_set`).
 //!
 //! The guard is an AST walk built on `syn::parse_file` +
 //! `syn::visit::Visit`. The walker is structurally type-anchored: a
@@ -45,9 +45,9 @@
 //!     `<empty>.collect()` (method chains that wrap the empty
 //!     receiver in another wrapper)
 //!
-//! Allow-listed: `fact_signature_helpers.rs::verter_session_query::facts::policy::FactPolicy::production().empty_set()`
-//! is the substrate helper itself. No other production callsite may
-//! bypass the helper.
+//! No file is exempt: the empty set is built by the facts substrate
+//! (`FactPolicy::empty_set`), which this walk does not cover, and no
+//! production callsite may bypass it.
 //!
 //! Self-validating fixtures below assert the walker matches every
 //! known bypass variant and rejects every benign look-alike. Adding
@@ -61,8 +61,8 @@ use syn::{Expr, ExprCall, ImplItemFn, ItemFn, Local, ReturnType, Type};
 /// Walk every `.rs` file under `crates/verter_session/src/` and
 /// `crates/verter_type_engine/src/` and assert no file references
 /// `finalise_signature_or_empty` (deleted) and no file syntactically
-/// constructs an empty `Arc<[FactVersionRef]>` outside the substrate
-/// helper `fact_signature_helpers::verter_session_query::facts::policy::FactPolicy::production().empty_set()`.
+/// constructs an empty `Arc<[FactVersionRef]>`: an empty signature is a
+/// policy's empty set (`FactPolicy::empty_set`).
 #[test]
 fn no_call_site_constructs_empty_signature_from_overflow() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -96,11 +96,6 @@ fn no_call_site_constructs_empty_signature_from_overflow() {
     let mut finalise_callers: Vec<String> = Vec::new();
     let mut bypass_findings: Vec<BypassFinding> = Vec::new();
 
-    // The sole allowlisted site: the substrate helper itself
-    // (`empty_fact_signature` in the type engine's
-    // `fact_signature_helpers.rs`). No other production callsite may
-    // bypass the helper. Entries are `<crate>/<path under src>`.
-    let allowed_files = ["verter_type_engine/fact_signature_helpers.rs"];
     let walked_rel = |krate: &str, crate_src: &Path, path: &Path| {
         format!(
             "{krate}/{}",
@@ -108,15 +103,6 @@ fn no_call_site_constructs_empty_signature_from_overflow() {
         )
         .replace('\\', "/")
     };
-    for allowed in allowed_files {
-        assert!(
-            entries
-                .iter()
-                .any(|(krate, crate_src, path)| walked_rel(krate, crate_src, path) == allowed),
-            "the allowlisted substrate helper `{allowed}` must be part of the walked file set"
-        );
-    }
-
     for (krate, crate_src, path) in &entries {
         let src = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -126,11 +112,6 @@ fn no_call_site_constructs_empty_signature_from_overflow() {
         // references in production source.
         if src.contains("finalise_signature_or_empty") {
             finalise_callers.push(rel.clone());
-        }
-
-        let normalized_rel = rel.replace('\\', "/");
-        if allowed_files.iter().any(|a| normalized_rel == *a) {
-            continue;
         }
 
         // Necessary-condition pre-filter: every empty-rail boundary the
@@ -177,10 +158,9 @@ fn no_call_site_constructs_empty_signature_from_overflow() {
     );
     assert!(
         bypass_findings.is_empty(),
-        "no production callsite outside `fact_signature_helpers.rs::empty_fact_signature` \
-         may construct an empty `Arc<[FactVersionRef]>` through any covered variant. \
-         Every such site must route through the substrate helper so the empty rail allocates \
-         in exactly one place. Findings: {:#?}",
+        "no production callsite may construct an empty `Arc<[FactVersionRef]>` through any \
+         covered variant. Every such site must take a fact policy's empty set \
+         (`FactPolicy::empty_set`), the one place the empty rail is built. Findings: {:#?}",
         bypass_findings
     );
 }
@@ -801,7 +781,7 @@ fn ast_walker_flags_known_bypass_variants() {
             !walker.findings.is_empty(),
             "the AST walker MUST flag bypass variant `{label}`. The fixture source is:\n{src}\n\
              A walker that misses this variant lets a future producer bypass \
-             `verter_session_query::facts::policy::FactPolicy::production().empty_set()` through that syntactic path."
+             `FactPolicy::empty_set` through that syntactic path."
         );
     }
 }
@@ -900,7 +880,7 @@ fn ast_walker_does_not_false_positive_on_benign_shapes() {
             "the AST walker MUST NOT false-positive on `{label}`. The fixture source is:\n{src}\n\
              Findings: {:#?}\n\
              Over-eager matching would force unrelated callsites to route through \
-             `verter_session_query::facts::policy::FactPolicy::production().empty_set()`.",
+             `FactPolicy::empty_set`.",
             walker.findings
         );
     }

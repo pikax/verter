@@ -1055,9 +1055,10 @@ fn assert_compile_retention_refusal_suppresses_companions(files: usize) {
             ..RetentionLimits::defaults()
         });
         host.project_type_store = Arc::new(
-            crate::project_type_store::ProjectTypeStore::with_retention_account(Arc::clone(
-                &account,
-            )),
+            crate::project_type_store::ProjectTypeStore::with_retention_account(
+                Arc::clone(&account),
+                host.project_type_store().fact_policy(),
+            ),
         );
         let canonical = "/wide/Owner.vue";
         upsert_vue(

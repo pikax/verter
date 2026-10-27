@@ -1320,6 +1320,7 @@ pub fn authored_instantiate_key_fixture(
     ),
     context: InstantiateContext,
     projection: SemanticOperandForceProjection,
+    policy: verter_session_query::facts::policy::FactPolicy,
 ) -> SemanticQueryKey {
     let (parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash, project_identity) =
         split_env_axes;
@@ -1337,7 +1338,7 @@ pub fn authored_instantiate_key_fixture(
             authority,
         ),
         SemanticOperandEvidence::seal(
-            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
+            ReadSetSignature::empty(policy),
             Arc::from([]),
             Arc::from([]),
             &authority,

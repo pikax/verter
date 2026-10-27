@@ -1217,6 +1217,9 @@ pub(crate) struct EngineGrants {
 }
 
 impl ProjectTypeStore {
+    /// A hostless store under the production fact policy, for store-level
+    /// tests. A host composes its store with its workspace's policy.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new() -> Self {
         Self::build(
@@ -1237,13 +1240,14 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn with_retention_account(
         retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
         Self::build(
             None,
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
-            verter_session_query::facts::policy::FactPolicy::production(),
+            fact_policy,
         )
         .0
     }
@@ -2068,6 +2072,7 @@ impl ProjectTypeStore {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for ProjectTypeStore {
     fn default() -> Self {
         Self::new()

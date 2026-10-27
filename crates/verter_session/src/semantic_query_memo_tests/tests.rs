@@ -7420,7 +7420,7 @@ mod env_scoped_key_identity_guards {
                     empty_args(),
                     split_env_axes,
                     context,
-                    projection,
+                    projection, verter_session_query::facts::policy::FactPolicy::production()
                 )
             };
         let authored_key = |slot: &ResolvedDeclSlotIdentity, locator: &AuthoredBodyLocator| {
@@ -10099,7 +10099,7 @@ mod release_embedded_node_family_tests {
                 h16(0),
                 verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-            SemanticOperandForceProjection::Path(computed_index_path(projection_node)),
+            SemanticOperandForceProjection::Path(computed_index_path(projection_node)), verter_session_query::facts::policy::FactPolicy::production()
         )
     }
 

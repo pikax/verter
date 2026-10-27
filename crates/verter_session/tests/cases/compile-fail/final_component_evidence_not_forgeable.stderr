@@ -3,8 +3,8 @@ error: cannot construct `ComponentMetaEvidence` with struct literal syntax due t
   |
 4 |     ComponentMetaEvidence {
   |     ^^^^^^^^^^^^^^^^^^^^^
-5 |         facts: Default::default(),
-  |         ------------------------- private field
+5 |         facts: todo!(),
+  |         -------------- private field
 6 |         generation: 0,
   |         ------------- private field
 7 |         external_fingerprint: 0,

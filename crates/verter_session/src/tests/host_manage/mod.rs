@@ -305,7 +305,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
 
 impl verter_workspace::WorkspaceAccess for CountingWorkspace {
     fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
-        verter_session_query::facts::policy::FactPolicy::production()
+        verter_workspace::WorkspaceAccess::fact_policy(&*self.inner)
     }
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
         self.inner.record_parsed_edges(canonical_id, edges);

@@ -575,8 +575,10 @@ fn every_project_store_shares_the_one_process_local_account() {
 #[test]
 fn the_project_store_charges_its_interned_identities() {
     let account = account(10_000_000, 10_000_000);
-    let store =
-        crate::project_type_store::ProjectTypeStore::with_retention_account(Arc::clone(&account));
+    let store = crate::project_type_store::ProjectTypeStore::with_retention_account(
+        Arc::clone(&account),
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     let before = account.snapshot().retained_bytes;
     let interned = store
         .identity_interner()
