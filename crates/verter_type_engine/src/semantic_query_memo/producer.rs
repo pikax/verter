@@ -297,6 +297,11 @@ pub struct Subscription<'s> {
     /// observing build, when it began waiting). Dropping the subscription
     /// releases them.
     parked: Option<Parked>,
+    /// The cancellation that stops the subscriber's request, registered with
+    /// the waker of each poll that leaves it pending — before that poll
+    /// checks the flight — so the request's cancellation wakes the waiting
+    /// subscriber with the producer still held, on whatever thread polls it.
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
 }
 
 /// A parked subscriber's registrations.
@@ -787,6 +792,7 @@ impl SemanticGraphStore {
                         inflight,
                         waiter: task.id(),
                         parked: None,
+                        stop: None,
                     });
                 }
                 state.claimed = true;
@@ -867,34 +873,27 @@ impl Subscription<'_> {
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
         // Park until the flight completes, is aborted by a
-        // canonical-invalidation sweep, or this request is cancelled. The
-        // cancellation registers before each poll checks the flight, so a
-        // cancellation landing between the two still wakes the thread. A
-        // cancelled subscriber detaches by returning; it never marks the
-        // shared flight aborted, so it cannot disturb an uncancelled
-        // producer or sibling.
-        let mut stop =
-            crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
-                .map(|token| token.subscribe());
+        // canonical-invalidation sweep, or this request is cancelled: each
+        // poll registers the thread's waker on both. A cancelled subscriber
+        // detaches by returning; it never marks the shared flight aborted,
+        // so it cannot disturb an uncancelled producer or sibling.
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::SemanticFlight,
             None,
-            |waker| {
-                if let Some(stop) = stop.as_mut() {
-                    let _ = stop.poll(waker);
-                }
-                self.poll(ctx, flags, attempt, capture, waker)
-            },
+            |waker| self.poll(ctx, flags, attempt, capture, waker),
         )
     }
 
     /// Poll the producer's completion without blocking: `Ready` once the
-    /// flight resolved, else `Pending` with `waker` registered on the flight.
-    /// The readiness check and the registration happen under the flight's
-    /// lock, and the producer wakes every registered waker after it
+    /// flight resolved, else `Pending` with `waker` registered on the flight
+    /// and on the cancellation that stops the subscriber's request.
+    /// The readiness check and the flight registration happen under the
+    /// flight's lock, and the producer wakes every registered waker after it
     /// resolves the flight under the same lock, so a completion between a
-    /// poll's check and its registration is never lost. A wait that would
-    /// close a cycle of waiting tasks answers at once.
+    /// poll's check and its registration is never lost. The cancellation
+    /// registers before that check, so a cancellation landing after it
+    /// still wakes the subscriber. A wait that would close a cycle of
+    /// waiting tasks answers at once.
     pub fn poll<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -905,6 +904,13 @@ impl Subscription<'_> {
     ) -> std::task::Poll<Joined> {
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
+        if !flight_resolved(&state, flags) {
+            // Still waiting: register the request's cancellation, then check
+            // the flight again under its lock.
+            drop(state);
+            self.register_stop(waker);
+            state = inflight.state.lock();
+        }
         if flight_resolved(&state, flags) {
             // A polled wait is timed only in an observing build, from when
             // its subscriber parked.
@@ -940,6 +946,23 @@ impl Subscription<'_> {
             self.store.announce_joiner_suspended();
         }
         std::task::Poll::Pending
+    }
+
+    /// Register `waker` on the cancellation the request checkpoint selects
+    /// on this thread now, subscribing again when that selection moved to
+    /// another token since the last poll (a job that accepted owners).
+    fn register_stop(&mut self, waker: &std::task::Waker) {
+        let Some(token) =
+            crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+        else {
+            self.stop = None;
+            return;
+        };
+        let stop = match &mut self.stop {
+            Some(stop) if stop.token().same_source(&token) => stop,
+            slot => slot.insert(token.subscribe()),
+        };
+        let _ = stop.poll(waker);
     }
 
     /// Register this subscriber's wait-for edge to the flight's producer.
