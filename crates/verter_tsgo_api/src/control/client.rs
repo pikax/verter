@@ -312,10 +312,23 @@ mod tests {
             "method": METHOD_FATAL,
             "params": { "reason": "relay_death", "detail": "relay stopped pumping" }
         });
+        // A probe answered after the notification: the reader handles frames
+        // in order, so once the answer arrives the notification was handled.
+        let mut probe = Box::pin(ctl.conn.request("probe", serde_json::Value::Null));
+        assert!(std::future::Future::poll(
+            probe.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending());
         sw.write_all(&encode_message(&fatal)).await.unwrap();
+        let answer = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": null });
+        sw.write_all(&encode_message(&answer)).await.unwrap();
         sw.flush().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .expect("the probe answer must arrive")
+            .expect("the probe is answered");
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
             !ctl.is_alive(),
             "a verter/fatal notification must mark the control attach DEAD"
@@ -334,9 +347,21 @@ mod tests {
         let ctl = ControlClient::from_transport(cr, cw);
         assert!(ctl.is_alive(), "a fresh control attach is alive");
 
+        // An in-flight probe: on EOF the reader marks the connection closed
+        // and only then fails every waiter, so the probe failing means the flag
+        // is already set. The timeout is a hang guard only.
+        let mut probe = Box::pin(ctl.conn.request("probe", serde_json::Value::Null));
+        assert!(std::future::Future::poll(
+            probe.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending());
         drop(sr);
         drop(sw);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let probed = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .expect("the reader task must observe EOF");
+        assert!(probed.is_err(), "the peer never answered the probe");
         assert!(
             !ctl.is_alive(),
             "a closed control connection must mark the attach DEAD"

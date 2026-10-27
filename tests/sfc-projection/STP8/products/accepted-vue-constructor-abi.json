@@ -24,7 +24,7 @@
   },
   "engines": [
     { "id": "ts-js", "package": "typescript", "version": "6.0.3", "role": "selected-evidence" },
-    { "id": "ts-native", "package": "typescript", "version": "7.0.2", "role": "selected-evidence" }
+    { "id": "ts-native", "package": "typescript", "version": "7.1.0-beta", "role": "selected-evidence" }
   ],
   "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
   "toyEvidenceAdmitted": false,

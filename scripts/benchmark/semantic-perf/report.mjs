@@ -53,7 +53,8 @@ export function renderMarkdown(run) {
   const o = meta.options;
   const lines = [];
   const push = (...l) => lines.push(...l);
-  push("# Semantic benchmark: Verter vs tsc 7.0.2 on equivalent demands", "");
+  const tsc = `tsc ${meta.typescript?.version ?? "(unrecorded version)"}`;
+  push(`# Semantic benchmark: Verter vs ${tsc} on equivalent demands`, "");
   push(
     `Validation: **${validation?.ok ? "PASSED" : "FAILED"}**${validation?.ok ? "" : ` (${validation.failures.length} failure(s); see the end)`}`,
     "",
@@ -152,7 +153,7 @@ export function renderMarkdown(run) {
 
   push("## Answers (every row)", "");
   push(
-    "| scenario | setting | tsc 7.0.2 (measured) | tsc arm | Verter | detail | Verter cold | tsc cold | tsc round trip | Verter observe | tsc observe |",
+    `| scenario | setting | ${tsc} (measured) | tsc arm | Verter | detail | Verter cold | tsc cold | tsc round trip | Verter observe | tsc observe |`,
     "|---|---|---|---|---|---|---:|---:|---:|---:|---:|",
   );
   for (const c of cells) {

@@ -4,7 +4,7 @@ use super::*;
 
 /// The fenced hover a markdown-capable client receives for the design's
 /// canonical example (the live empty-caps driver receives the unfenced twin
-/// below — every checked-in snapshot generated on TypeScript 7.0.2 records
+/// below — every checked-in snapshot generated on the pinned TypeScript records
 /// that plaintext shape). The nested member `;`s inside the object body must
 /// NOT terminate the RHS.
 #[test]

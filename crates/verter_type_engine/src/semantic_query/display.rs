@@ -371,7 +371,7 @@ pub(crate) fn clip_checker_text(printed: String) -> String {
 
 /// The running length the checker's node builder counts while it prints one
 /// type (`approximateLength`), and whether it has started abbreviating
-/// (`checkTruncationLength`'s latch). TypeScript 7.0.2 counts in UTF-8
+/// (`checkTruncationLength`'s latch). The checker counts in UTF-8
 /// bytes, per node kind, as the node is built rather than as its text
 /// prints; a list or member set past
 /// [`MAXIMUM_TRUNCATION_LENGTH`](super::checker_policy::MAXIMUM_TRUNCATION_LENGTH)
@@ -491,12 +491,13 @@ impl DisplayContext {
         length.truncating
     }
 
-    /// Symbol-keyed properties count the stable leaf spelling plus five
-    /// fixed bytes. The native checker's decimal symbol id depends on
-    /// process history; it cannot control provider-free abbreviation or
-    /// suppress an otherwise printable diagnostic.
-    fn symbol_property_length(&mut self, name: &str) {
-        self.add_length(name.len() + 5);
+    /// A symbol-keyed property's name and colon count its full dotted
+    /// spelling, its leaf again and twenty bytes. Measured on TypeScript
+    /// 7.1.0-beta, which counts it deterministically (independent of the
+    /// checker's process history): `[s0]` 24, `[longname0]` 38, `[ns.q0]`
+    /// 27 and `[deep.er.q0]` 32 bytes, against `k0:`'s 3.
+    fn symbol_property_length(&mut self, spelling: &str, leaf: &str) {
+        self.add_length(spelling.len() + leaf.len() + 20);
     }
 
     /// Record `printed`, the text of a node whose node-builder count is not
@@ -1336,26 +1337,39 @@ fn display_resolved_type_node(
             is_abstract,
             ..
         } => {
-            let new_prefix = match kind {
-                crate::semantic_query::SignatureKind::Call => "",
-                crate::semantic_query::SignatureKind::Construct if *is_abstract => "abstract new ",
-                crate::semantic_query::SignatureKind::Construct => "new ",
-            };
-            // The fewest a signature prints beside its parts
-            // (`signatureToSignatureDeclarationHelper`).
-            visited.add_length(3);
-            let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
-            let rendered_params = render_params(store, params, needs, child_depth, visited);
-            let ret = render_return(
-                store,
-                *return_type,
-                *predicate,
-                params,
-                needs,
-                child_depth,
-                visited,
-            );
-            format!("{new_prefix}{tps}({rendered_params}) => {ret}")
+            // A function or constructor type is the checker's object type with
+            // one signature, so it elides as `...` when it begins past the
+            // truncation length, as [`render_object_surface`] does for one
+            // lowered as an object (TypeScript 7.1.0-beta:
+            // `{ padding: "<155 x>"; fun: () => void }` prints `fun: ...`).
+            if visited.check_truncation() {
+                visited.add_length(3);
+                "...".to_string()
+            } else {
+                let new_prefix = match kind {
+                    crate::semantic_query::SignatureKind::Call => "",
+                    crate::semantic_query::SignatureKind::Construct if *is_abstract => {
+                        "abstract new "
+                    }
+                    crate::semantic_query::SignatureKind::Construct => "new ",
+                };
+                // The fewest a signature prints beside its parts
+                // (`signatureToSignatureDeclarationHelper`).
+                visited.add_length(3);
+                let tps =
+                    render_type_parameters(store, type_parameters, needs, child_depth, visited);
+                let rendered_params = render_params(store, params, needs, child_depth, visited);
+                let ret = render_return(
+                    store,
+                    *return_type,
+                    *predicate,
+                    params,
+                    needs,
+                    child_depth,
+                    visited,
+                );
+                format!("{new_prefix}{tps}({rendered_params}) => {ret}")
+            }
         }
         // Lazy named references: render the NAME (§14.3 — a lazy ref carries no
         // materialised body, and display must not re-resolve, so `ExpandAliases`
@@ -1516,7 +1530,8 @@ fn type_argument_list(
 /// (`createTypeNodesFromResolvedType`): the signatures first, then each
 /// property, and once the count passes the truncation length the remaining
 /// properties elide as `... N more ...` before the last, or the whole
-/// surface as `{ ...; }` when it begins past it.
+/// surface as `...` when it begins past it (TypeScript 7.1.0-beta; the
+/// checker no longer prints an elided type literal as `{ ...; }`).
 fn render_object_surface(
     store: &SemanticGraphStore,
     surface: &crate::semantic_query::SurfaceView,
@@ -1533,6 +1548,12 @@ fn render_object_surface(
         visited.add_length(2);
         return "{}".to_string();
     }
+    // An object type begun past the truncation length elides before it would
+    // print as its sole signature's function type (TypeScript 7.1.0-beta).
+    if visited.check_truncation() {
+        visited.add_length(3);
+        return "...".to_string();
+    }
     if checker {
         if let Some((signature, prefix)) = sole_signature(store, surface) {
             return format!(
@@ -1540,10 +1561,6 @@ fn render_object_surface(
                 display_type_node(store, signature, needs, depth, visited).0
             );
         }
-    }
-    if visited.check_truncation() {
-        visited.add_length(2);
-        return "{ ...; }".to_string();
     }
     let mut signatures: Vec<String> = Vec::new();
     for sig in surface.call_signatures.iter() {
@@ -1562,9 +1579,11 @@ fn render_object_surface(
             s.push_str("readonly ");
         }
         // The node builder builds the key type, then the value type, then
-        // counts the parameter name and seven more; `readonly` counts as on
-        // a property. The checker prints a signature no declaration wrote
-        // with the parameter `x`.
+        // counts the parameter name and four more (TypeScript 7.1.0-beta:
+        // `{ t: { [k: string]: "<141 x>" }; b: Wrapper<string> }` prints
+        // whole, 142 abbreviates `Wrapper<...>`); `readonly` counts as on a
+        // property. The checker prints a signature no declaration wrote with
+        // the parameter `x`.
         let key = display_type_node(store, index.key_type, needs, depth, visited).0;
         let value = display_type_node(store, index.value_type, needs, depth, visited).0;
         let name = match (&index.key_name, checker) {
@@ -1572,7 +1591,7 @@ fn render_object_surface(
             (None, true) => "x",
             (_, false) => "key",
         };
-        visited.add_length(name.len() + 7);
+        visited.add_length(name.len() + 4);
         if index.readonly {
             visited.add_length(9);
         }
@@ -1609,12 +1628,12 @@ fn render_object_surface(
                         .member_path
                         .last()
                         .map_or(identity.symbol.as_ref(), |name| name.as_str());
-                    visited.symbol_property_length(leaf);
                     let mut name = identity.symbol.to_string();
                     for segment in identity.member_path.iter() {
                         name.push('.');
                         name.push_str(segment);
                     }
+                    visited.symbol_property_length(&name, leaf);
                     format!("[{name}]")
                 } else {
                     format!("[unique symbol {}]", identity.symbol)
@@ -1656,14 +1675,15 @@ fn render_object_surface(
                     }
                     Some(data @ SemanticNodeData::TypeOfNominal(_)) if checker => {
                         let (root, path) = data.typeof_head().expect("nominal query head");
-                        visited.symbol_property_length(
-                            path.last().map_or(root.name.as_ref(), |name| name.as_ref()),
-                        );
                         let mut name = root.name.to_string();
                         for segment in path.iter() {
                             name.push('.');
                             name.push_str(segment);
                         }
+                        visited.symbol_property_length(
+                            &name,
+                            path.last().map_or(root.name.as_ref(), |name| name.as_ref()),
+                        );
                         format!("[{name}]")
                     }
                     _ => {

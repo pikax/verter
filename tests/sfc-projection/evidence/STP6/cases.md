@@ -2,7 +2,7 @@
 
 Source revision: `da71a1dfb44208ee8a21af2b4c3c929a288a103d` (captured STP6 implement) on `tama_dag/0.1.0-tama/STP6`.
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.0.2` (`typescript/unstable/sync`). Vue input pin: `vue@3.6.0-rc.5` / `@vue/compiler-sfc@3.6.0-rc.5`.
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.1.0-beta` (`typescript/sync`). Vue input pin: `vue@3.6.0-rc.5` / `@vue/compiler-sfc@3.6.0-rc.5`.
 
 Selected case IDs: `STP6-package-instance`, `STP6-package-generics`, `STP6-hidden-metadata`, `STP6-closure`, `STP6-decl-map`, `STP6-resolution`.
 

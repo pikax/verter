@@ -37,7 +37,7 @@ and peak memory, and each reproduction's retention proof: one engine answering
 `skr-scale-answers`, `skr-mapped-expand`, `rev11-l1-soak`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
-key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
+key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.1.0-beta answer
 is `"b" | "n" | "s"`. Its strict, cold Verter cells require `firstTypeMs` and
 `peakBytes`; the fleet measures those cells on the benchmark worker. The run
 sets `requireAllMatched`, so a Verter answer at any of the three sizes that
@@ -46,7 +46,7 @@ does not match the measured TypeScript answer exactly fails the run.
 `skr-scale-answers` demands the recursive `Names` and `Paths` conditionals over
 an `as const` route tree of 100 and 300 parents (five children each), a repeated
 `infer` pattern over a 100- and a 1,000-member union, and an inference through
-100 and 1,000 distinct aliases of one generic. TypeScript 7.0.2 answers every
+100 and 1,000 distinct aliases of one generic. TypeScript 7.1.0-beta answers every
 one with the full literal union and no diagnostic. Its required cells are the
 largest sizes: cold Verter `coldMs` and `peakBytes` beside whole-program
 `tsc-cli` `wallMs`; the middle sizes run beside them for comparison. The
@@ -63,7 +63,7 @@ concrete sources: the keys of a class built from 10, 25 and 40 mixins, the
 intersection a builder accumulates over 50, 200 and 500 calls, the 100, 1,000
 and 3,000 keys of an imported interface remapped through a recursive template
 conditional, and a generic interface heritage chain 10, 40 and 100 levels
-deep. TypeScript 7.0.2 answers each with the resolved object type. The run sets
+deep. TypeScript 7.1.0-beta answers each with the resolved object type. The run sets
 `requireAllMatched`, so every Verter answer must match the measured reference
 exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 `peakBytes`.

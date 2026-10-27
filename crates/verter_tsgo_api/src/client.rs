@@ -24,8 +24,8 @@ use crate::actor::{spawn_actor, ClientHandle};
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::gate::{self, GateClearance, ObservedEngine};
 use crate::proto::types::{
-    method, Diagnostic, InitializeResponse, OpaqueHandle, SymbolResponse, TypeResponse,
-    UpdateSnapshotParams, UpdateSnapshotResponse,
+    method, Diagnostic, InitializeResponse, OpaqueHandle, SnapshotChanges, SnapshotResponse,
+    SymbolResponse, TypeResponse, UpdateSnapshotParams,
 };
 use crate::snapshot::OverlaySnapshot;
 use crate::transport::pipe::StdioPipeTransport;
@@ -39,14 +39,13 @@ use crate::RequestOptions;
 pub struct TsgoClient {
     handle: ClientHandle,
     clearance: GateClearance,
-    /// Whether a first `updateSnapshot` response has passed the
-    /// integer-handle rail ([`gate::require_integer_snapshot_handle`]).
+    /// Whether a first snapshot response has passed the integer-handle rail ([`gate::require_integer_snapshot_handle`]).
     /// Shared across clones (the clones share one engine), so the validated
     /// raw first-response path runs once per client, not once per clone. This
     /// is the lock-free fast-path check; cold-start serialization rides
     /// [`Self::first_validation_lock`].
     first_snapshot_validated: Arc<AtomicBool>,
-    /// Serializes the cold-start first-`updateSnapshot` validation: exactly one
+    /// Serializes the cold-start first-snapshot validation: exactly one
     /// caller runs the rail while concurrent clones wait, then take the fast
     /// path. Shared across clones (they share one engine).
     first_validation_lock: Arc<tokio::sync::Mutex<()>>,
@@ -158,7 +157,7 @@ impl PreparedEngine {
         let cwd = cwd.to_path_buf();
         let held = Arc::clone(&held_stderr);
         let preparation = runtime.spawn(async move {
-            let validator = crate::toolchain::validation::ProcessValidator::from_env()
+            let validator = crate::toolchain::validation::ProcessValidator::production()
                 .holding_stderr(Arc::clone(&held));
             let provisional =
                 crate::toolchain::discovery::resolve_provisional(&request, &validator)
@@ -360,9 +359,12 @@ impl TsgoClient {
             .await
     }
 
-    /// `updateSnapshot` — open/refresh a project snapshot.
+    /// `createSnapshot` — mint a new, independent snapshot that applies
+    /// `changes` (e.g. opens a project). The returned handle is the caller's
+    /// to [`Self::release`] once no request will read it any more.
     ///
-    /// The FIRST response is decoded raw and run through the version-lie-immune
+    /// The FIRST snapshot response a client receives (from `createSnapshot` or
+    /// `updateSnapshot`) is decoded raw and run through the version-lie-immune
     /// integer-handle rail ([`gate::require_integer_snapshot_handle`]): an
     /// engine whose snapshot handle is not a bare JSON integer speaks a
     /// different opaque-handle wire class and is refused with a typed
@@ -374,21 +376,62 @@ impl TsgoClient {
     /// take the fast path. Steady state is a single atomic load, no lock. The
     /// flag flips ONLY after the rail AND the typed decode both succeed, so a
     /// refused first call never unlocks the typed fast path (fail-closed).
+    pub async fn create_snapshot(
+        &self,
+        changes: &SnapshotChanges,
+    ) -> TsgoApiResult<SnapshotResponse> {
+        self.snapshot_request(method::CREATE_SNAPSHOT, changes)
+            .await
+    }
+
+    /// `updateSnapshot` — derive a NEW snapshot from the ACTIVE `base`, applying
+    /// `changes` (sync/api.js:456-472). The response's `projects` lists only the
+    /// projects added or replaced relative to `base`; an unchanged project
+    /// carries over from it.
+    ///
+    /// `base` must still be active (not released): the engine refuses a
+    /// released handle. The base stays the caller's to release; the returned
+    /// snapshot is a new handle the caller owns. When the engine answers with
+    /// the base handle itself (nothing changed), the extra reference that answer
+    /// carried is released here, exactly as the JS client does
+    /// (sync/api.js:465-468), so the caller keeps holding one reference to
+    /// `base` and must not release it twice.
     pub async fn update_snapshot(
         &self,
-        params: &UpdateSnapshotParams,
-    ) -> TsgoApiResult<UpdateSnapshotResponse> {
+        base: &OpaqueHandle,
+        changes: &SnapshotChanges,
+    ) -> TsgoApiResult<SnapshotResponse> {
+        let params = UpdateSnapshotParams {
+            snapshot: *base,
+            changes: Some(changes.clone()),
+        };
+        let resp = self
+            .snapshot_request(method::UPDATE_SNAPSHOT, &params)
+            .await?;
+        if resp.snapshot == *base {
+            self.release(base).await?;
+        }
+        Ok(resp)
+    }
+
+    /// One snapshot-minting request, with the cold-start integer-handle rail
+    /// on the first response this client receives.
+    async fn snapshot_request<P: serde::Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> TsgoApiResult<SnapshotResponse> {
         // Fast path: the first response already cleared the rail.
         if self.first_snapshot_validated.load(Ordering::Acquire) {
-            return self.typed(method::UPDATE_SNAPSHOT, params).await;
+            return self.typed(method, params).await;
         }
         // Slow path: serialize the cold-start validation.
         let _guard = self.first_validation_lock.lock().await;
         if self.first_snapshot_validated.load(Ordering::Acquire) {
             // Another caller validated while we waited for the lock.
-            return self.typed(method::UPDATE_SNAPSHOT, params).await;
+            return self.typed(method, params).await;
         }
-        let raw = self.typed_value(method::UPDATE_SNAPSHOT, params).await?;
+        let raw = self.typed_value(method, params).await?;
         gate::require_integer_snapshot_handle(&raw["snapshot"], self.observed_version())?;
         let resp = serde_json::from_value(raw)?;
         // Flip the warm flag ONLY after the full first response validated AND decoded.
@@ -397,7 +440,9 @@ impl TsgoClient {
     }
 
     /// `getSemanticDiagnostics` — type-check diagnostics for `file` in the given
-    /// snapshot/project.
+    /// snapshot/project. The file rides as the one-element `files` list
+    /// (sync/api.js:2338-2345); an unknown key such as a scalar `file` is
+    /// ignored by the engine, which then answers for the whole program.
     pub async fn get_semantic_diagnostics(
         &self,
         snapshot: &OpaqueHandle,
@@ -406,12 +451,13 @@ impl TsgoClient {
     ) -> TsgoApiResult<Vec<Diagnostic>> {
         self.typed(
             method::GET_SEMANTIC_DIAGNOSTICS,
-            &serde_json::json!({ "snapshot": snapshot, "project": project, "file": file }),
+            &serde_json::json!({ "snapshot": snapshot, "project": project, "files": [file] }),
         )
         .await
     }
 
-    /// `getSyntacticDiagnostics` — parse diagnostics for `file`.
+    /// `getSyntacticDiagnostics` — parse diagnostics for `file` (as the
+    /// one-element `files` list, sync/api.js:2282-2289).
     pub async fn get_syntactic_diagnostics(
         &self,
         snapshot: &OpaqueHandle,
@@ -420,12 +466,12 @@ impl TsgoClient {
     ) -> TsgoApiResult<Vec<Diagnostic>> {
         self.typed(
             method::GET_SYNTACTIC_DIAGNOSTICS,
-            &serde_json::json!({ "snapshot": snapshot, "project": project, "file": file }),
+            &serde_json::json!({ "snapshot": snapshot, "project": project, "files": [file] }),
         )
         .await
     }
 
-    /// `getSemanticDiagnostics` for the WHOLE PROGRAM — the `file` argument is
+    /// `getSemanticDiagnostics` for the WHOLE PROGRAM — the `files` argument is
     /// OMITTED, which the engine reads as "return diagnostics for every file in
     /// the program" (the standard TS `Program.getSemanticDiagnostics()` with no
     /// argument). This surfaces type errors in NON-root imported files the
@@ -444,9 +490,9 @@ impl TsgoClient {
         .await
     }
 
-    /// `getSyntacticDiagnostics` for the WHOLE PROGRAM — the `file` argument is
-    /// OMITTED (whole-program parse diagnostics). See
-    /// [`Self::get_semantic_diagnostics_for_program`] for the file-omitted
+    /// `getSyntacticDiagnostics` for the WHOLE PROGRAM — the `files` argument
+    /// is OMITTED (whole-program parse diagnostics). See
+    /// [`Self::get_semantic_diagnostics_for_program`] for the files-omitted
     /// contract.
     pub async fn get_syntactic_diagnostics_for_program(
         &self,
@@ -525,8 +571,10 @@ impl TsgoClient {
         .await
     }
 
-    /// `release` — release a snapshot handle. GA reads `{ snapshot: N }`
-    /// (api.js:196); fire-and-forget (the response is ignored).
+    /// `release` — release a snapshot handle (`{ snapshot: N }`,
+    /// sync/api.js:1026). The engine drops the snapshot (and its programs) once
+    /// every reference is released; a released handle must never be sent
+    /// again. The response is ignored.
     pub async fn release(&self, snapshot: &OpaqueHandle) -> TsgoApiResult<()> {
         let payload = serde_json::to_vec(&serde_json::json!({ "snapshot": snapshot }))?;
         self.handle
@@ -599,7 +647,7 @@ impl TsgoClient {
 }
 
 /// Probe `tsgo --version` under a hard END-TO-END bound, returning the bare
-/// version string (e.g. `7.0.0-dev.20260526.1`). The output is `Version <v>`.
+/// version string (e.g. `7.1.0-beta`). The output is `Version <v>`.
 ///
 /// The ENTIRE probe — spawn, `wait`, AND the stdout/stderr drain — runs under
 /// ONE timeout: a candidate whose descendant inherits the pipe handles and
@@ -724,23 +772,26 @@ fn parse_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::toolchain::policy::TYPESCRIPT_PIN;
 
     #[test]
     fn parse_version_handles_prefixed_and_bare() {
         assert_eq!(
-            parse_version("Version 7.0.0-dev.20260526.1\n").as_deref(),
-            Some("7.0.0-dev.20260526.1")
+            parse_version("Version 7.1.0-beta\n").as_deref(),
+            Some("7.1.0-beta")
         );
-        assert_eq!(parse_version("7.0.1-rc").as_deref(), Some("7.0.1-rc"));
+        assert_eq!(parse_version("7.1.0-rc").as_deref(), Some("7.1.0-rc"));
         assert_eq!(parse_version("   ").as_deref(), None);
         assert_eq!(parse_version("Version").as_deref(), None);
     }
 
-    // ── DISCRIMINATING: the whole-program getters OMIT the `file` field on the
-    //    wire (file-omitted == "diagnostics for all files"), while the per-file
-    //    getters INCLUDE it. A regression that reused the per-file param (with a
-    //    `file` key) would fail here. Drives the ACTUAL client methods over a
-    //    mock-engine FrameStream and inspects the captured request payload. ──────
+    // ── DISCRIMINATING: the whole-program getters OMIT the `files` field on
+    //    the wire (files-omitted == "diagnostics for all files"), while the
+    //    per-file getters send the one-element `files` list. The engine IGNORES
+    //    an unknown scalar `file` key and answers for the whole program, so a
+    //    regression that sent `file` would silently widen the result — this
+    //    capture test is the rail. Drives the ACTUAL client methods over a
+    //    mock-engine FrameStream and inspects the captured request payload. ──
     use crate::actor::{spawn_actor, FrameStream};
     use crate::gate::{EngineVersionWitness, GateClearance, WireCapability};
     use crate::proto::frame::{decode_frame, encode_frame, MessageType};
@@ -787,11 +838,48 @@ mod tests {
         })
     }
 
+    /// A mock engine that answers `n` requests: snapshot-minting ops with the
+    /// handle `next_snapshot(method, payload)` returns, everything else with
+    /// `[]`. Records `(method, payload)` for each.
+    fn scripted_engine(
+        n: usize,
+        mut to_engine: mpsc::Receiver<Vec<u8>>,
+        from_engine: mpsc::Sender<Vec<u8>>,
+        next_snapshot: impl Fn(&str, &serde_json::Value) -> serde_json::Value + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<(String, serde_json::Value)>> {
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let raw = to_engine.recv().await.expect("client sends a request");
+                let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
+                let name = String::from_utf8_lossy(req.name).into_owned();
+                let payload: serde_json::Value =
+                    serde_json::from_slice(req.payload).expect("request payload is JSON");
+                let body = match name.as_str() {
+                    "createSnapshot" | "updateSnapshot" => {
+                        let snapshot = next_snapshot(&name, &payload);
+                        serde_json::json!({ "snapshot": snapshot, "projects": [], "operation": {} })
+                    }
+                    "release" => serde_json::json!(true),
+                    _ => serde_json::json!([]),
+                };
+                let resp = encode_frame(
+                    MessageType::Response,
+                    req.name,
+                    &serde_json::to_vec(&body).unwrap(),
+                );
+                from_engine.send(resp).await.expect("engine reply");
+                seen.push((name, payload));
+            }
+            seen
+        })
+    }
+
     #[tokio::test]
-    async fn program_semantic_getter_omits_file_and_per_file_getter_includes_it() {
+    async fn program_semantic_getter_omits_files_and_per_file_getter_sends_the_list() {
         let snap = OpaqueHandle(1);
 
-        // (1) Whole-program semantic getter: the `file` key MUST be absent.
+        // (1) Whole-program semantic getter: no `files` (and no `file`) key.
         {
             let (client, from_engine, to_engine) = test_client();
             let engine = capture_request_payload(to_engine, from_engine).await;
@@ -802,13 +890,13 @@ mod tests {
             let payload = engine.await.unwrap();
             assert_eq!(payload["project"], serde_json::json!("p.x"));
             assert!(
-                payload.get("file").is_none(),
-                "whole-program getSemanticDiagnostics MUST omit `file` (got {payload})"
+                payload.get("files").is_none() && payload.get("file").is_none(),
+                "whole-program getSemanticDiagnostics MUST omit `files` (got {payload})"
             );
         }
 
-        // (2) Per-file semantic getter: the `file` key MUST be present. This is the
-        // discriminating control — the two share a method name but differ on `file`.
+        // (2) Per-file semantic getter: the one-element `files` list, and never
+        // the scalar `file` the engine would ignore.
         {
             let (client, from_engine, to_engine) = test_client();
             let engine = capture_request_payload(to_engine, from_engine).await;
@@ -818,15 +906,16 @@ mod tests {
                 .expect("per-file getter resolves");
             let payload = engine.await.unwrap();
             assert_eq!(
-                payload["file"],
-                serde_json::json!("/proj/A.tsx"),
-                "per-file getSemanticDiagnostics MUST carry `file` (got {payload})"
+                payload["files"],
+                serde_json::json!(["/proj/A.tsx"]),
+                "per-file getSemanticDiagnostics MUST carry `files` (got {payload})"
             );
+            assert!(payload.get("file").is_none(), "no scalar `file`: {payload}");
         }
     }
 
     #[tokio::test]
-    async fn program_syntactic_getter_omits_file() {
+    async fn program_syntactic_getter_omits_files() {
         let snap = OpaqueHandle(2);
         let (client, from_engine, to_engine) = test_client();
         let engine = capture_request_payload(to_engine, from_engine).await;
@@ -837,16 +926,15 @@ mod tests {
         let payload = engine.await.unwrap();
         assert_eq!(payload["project"], serde_json::json!("p.y"));
         assert!(
-            payload.get("file").is_none(),
-            "whole-program getSyntacticDiagnostics MUST omit `file` (got {payload})"
+            payload.get("files").is_none() && payload.get("file").is_none(),
+            "whole-program getSyntacticDiagnostics MUST omit `files` (got {payload})"
         );
     }
 
     #[tokio::test]
-    async fn config_file_parsing_getter_sends_config_method_without_file() {
+    async fn config_file_parsing_getter_sends_config_method_without_files() {
         let snap = OpaqueHandle(3);
         let (client, from_engine, to_engine) = test_client();
-        // Capture BOTH the method name and payload for the config getter.
         let engine = tokio::spawn(async move {
             let mut to_engine = to_engine;
             let raw = to_engine.recv().await.unwrap();
@@ -868,16 +956,14 @@ mod tests {
         );
         assert_eq!(payload["project"], serde_json::json!("p.z"));
         assert!(
-            payload.get("file").is_none(),
-            "getConfigFileParsingDiagnostics is program-wide and carries no `file`"
+            payload.get("files").is_none(),
+            "getConfigFileParsingDiagnostics is program-wide and carries no `files`"
         );
     }
 
-    // ── DISCRIMINATING: `release` sends the GA `{ snapshot: N }` param
-    //    (api.js:196), NOT the pre-GA `{ handle: N }`. GA reads `snapshot`, so a
-    //    `handle` payload silently no-ops (a snapshot leak). Fire-and-forget, so
-    //    the divergence never surfaces through parity/codec_roundtrip — a capture
-    //    test is the only rail. Fails RED against the `{ handle }` payload. ──────
+    // ── DISCRIMINATING: `release` sends `{ snapshot: N }` (sync/api.js:1026),
+    //    never a `{ handle: N }` the engine would ignore (a silent snapshot
+    //    leak). Fire-and-forget, so a capture test is the only rail. ──────────
     #[tokio::test]
     async fn release_sends_snapshot_param_not_handle() {
         let (client, from_engine, to_engine) = test_client();
@@ -890,71 +976,88 @@ mod tests {
         assert_eq!(
             payload["snapshot"],
             serde_json::json!(42),
-            "release must send the GA `snapshot` param (got {payload})"
+            "release must send the `snapshot` param (got {payload})"
         );
         assert!(
             payload["snapshot"].is_number(),
             "the released handle rides the wire as a JSON integer: {payload}"
         );
-        assert!(
-            payload.get("handle").is_none(),
-            "release must NOT send the pre-GA `handle` param: {payload}"
-        );
         let obj = payload.as_object().expect("release params are an object");
         assert_eq!(obj.len(), 1, "release sends `snapshot` ONLY: {payload}");
     }
 
-    // ── DISCRIMINATING: the OWNED first-`updateSnapshot` integer-handle rail.
-    //    An engine whose first snapshot handle is a STRING (the pre-integer
-    //    opaque-handle wire) must be refused with the typed
+    // ── DISCRIMINATING: `updateSnapshot` always names its base and nests the
+    //    changes; a NEW handle comes back to the caller with no release, while
+    //    a same-handle answer (nothing changed) has its extra reference
+    //    released immediately, mirroring sync/api.js:465-468. ─────────────────
+    #[tokio::test]
+    async fn update_snapshot_names_the_base_and_balances_a_same_handle_answer() {
+        // (1) A new handle: exactly one request, no release.
+        {
+            let (client, from_engine, to_engine) = test_client();
+            let engine = scripted_engine(1, to_engine, from_engine, |_, _| serde_json::json!(5));
+            let resp = client
+                .update_snapshot(&OpaqueHandle(4), &SnapshotChanges::default())
+                .await
+                .expect("update resolves");
+            assert_eq!(resp.snapshot, OpaqueHandle(5));
+            let seen = engine.await.unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].0, "updateSnapshot");
+            assert_eq!(
+                seen[0].1,
+                serde_json::json!({ "snapshot": 4, "changes": {} }),
+                "updateSnapshot names the base and nests the changes"
+            );
+        }
+        // (2) The base handle comes back: the extra reference is released.
+        {
+            let (client, from_engine, to_engine) = test_client();
+            let engine = scripted_engine(2, to_engine, from_engine, |_, _| serde_json::json!(4));
+            let resp = client
+                .update_snapshot(&OpaqueHandle(4), &SnapshotChanges::default())
+                .await
+                .expect("update resolves");
+            assert_eq!(resp.snapshot, OpaqueHandle(4));
+            let seen = engine.await.unwrap();
+            assert_eq!(
+                seen.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+                ["updateSnapshot", "release"]
+            );
+            assert_eq!(seen[1].1, serde_json::json!({ "snapshot": 4 }));
+        }
+    }
+
+    // ── DISCRIMINATING: the OWNED first-snapshot integer-handle rail. An engine
+    //    whose first snapshot handle is a STRING must be refused with the typed
     //    `UnsupportedTsgoWire` naming the observed engine version — never
     //    decoded into a product result and never a generic decode error. ──────
     #[tokio::test]
-    async fn first_update_snapshot_with_string_handle_fails_closed() {
+    async fn first_create_snapshot_with_string_handle_fails_closed() {
         let (client, from_engine, to_engine) = test_client();
-        let engine = tokio::spawn(async move {
-            let mut to_engine = to_engine;
-            let raw = to_engine.recv().await.expect("client sends updateSnapshot");
-            let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
-            let body = serde_json::json!({ "snapshot": "n0000000000000003", "projects": [] });
-            let resp = encode_frame(
-                MessageType::Response,
-                req.name,
-                &serde_json::to_vec(&body).unwrap(),
-            );
-            from_engine.send(resp).await.expect("engine reply");
+        let engine = scripted_engine(1, to_engine, from_engine, |_, _| {
+            serde_json::json!("n0000000000000003")
         });
         let err = client
-            .update_snapshot(&UpdateSnapshotParams::default())
+            .create_snapshot(&SnapshotChanges::default())
             .await
             .expect_err("a string first snapshot handle must be refused");
         engine.await.unwrap();
         assert!(
-            matches!(err, TsgoApiError::UnsupportedTsgoWire(ref m) if m.contains("7.0.2")),
+            matches!(err, TsgoApiError::UnsupportedTsgoWire(ref m) if m.contains(TYPESCRIPT_PIN)),
             "the refusal must be the typed UnsupportedTsgoWire naming the observed \
              engine version; got {err:?}"
         );
     }
 
-    /// The genuine integer-handle wire still decodes through the validated
-    /// first-call path (the rail must not break the real engine).
+    /// The genuine integer-handle wire decodes through the validated first-call
+    /// path (the rail must not break the real engine).
     #[tokio::test]
-    async fn first_update_snapshot_with_integer_handle_decodes() {
+    async fn first_create_snapshot_with_integer_handle_decodes() {
         let (client, from_engine, to_engine) = test_client();
-        let engine = tokio::spawn(async move {
-            let mut to_engine = to_engine;
-            let raw = to_engine.recv().await.expect("client sends updateSnapshot");
-            let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
-            let body = serde_json::json!({ "snapshot": 7, "projects": [] });
-            let resp = encode_frame(
-                MessageType::Response,
-                req.name,
-                &serde_json::to_vec(&body).unwrap(),
-            );
-            from_engine.send(resp).await.expect("engine reply");
-        });
+        let engine = scripted_engine(1, to_engine, from_engine, |_, _| serde_json::json!(7));
         let resp = client
-            .update_snapshot(&UpdateSnapshotParams::default())
+            .create_snapshot(&SnapshotChanges::default())
             .await
             .expect("an integer first handle decodes");
         engine.await.unwrap();
@@ -966,14 +1069,11 @@ mod tests {
     //    sends. For every op the codec drives, capture the real serialized request
     //    payload over the mock engine and assert its JSON object key set matches
     //    that op's scheduled row — EQ for the fixed-shape ops, and ⊆ the scheduled
-    //    lease superset for `updateSnapshot` (whose first open sends only
-    //    `openProjects` of the {openProjects,closeProjects,openFiles,closeFiles,
-    //    fileChanges} family). DISCRIMINATING: a schedule row that DROPS a key the
-    //    codec really sends — or GAINS one it never sends — fails this test, so the
-    //    hand-maintained schedule cannot silently drift from the send-sites. The
-    //    op-NAME-only fingerprint was blind to exactly this dimension (it shipped
-    //    the `openProject`→`openProjects` fork), so binding the schedule to the
-    //    real sends is what closes that gap. ──────────────────────────────────────
+    //    superset for `createSnapshot` / `updateSnapshot` (whose payloads carry
+    //    only the changes a call applies). DISCRIMINATING: a schedule row that
+    //    DROPS a key the codec really sends — or GAINS one it never sends — fails
+    //    this test, so the hand-maintained schedule cannot silently drift from
+    //    the send-sites. ──────────────────────────────────────────────────────────
     #[tokio::test]
     async fn pinned_request_fields_match_real_send_sites() {
         use crate::proto::schema_manifest::PINNED_REQUEST_FIELDS;
@@ -983,10 +1083,7 @@ mod tests {
         let recorded: Arc<parking_lot::Mutex<Vec<(String, serde_json::Value)>>> =
             Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-        // The mock engine records each (method, payload) and replies with a per-op
-        // canned body so the client call resolves. It processes exactly the number
-        // of ops the test drives, then returns (deterministic, no hang).
-        const DRIVEN_OPS: usize = 8;
+        const DRIVEN_OPS: usize = 9;
         let rec = Arc::clone(&recorded);
         let engine = tokio::spawn(async move {
             let mut to_engine = to_engine;
@@ -1001,21 +1098,29 @@ mod tests {
                     serde_json::from_slice(req.payload).expect("request payload is JSON");
                 rec.lock().push((name.clone(), payload));
                 let body: Vec<u8> = match name.as_str() {
-                    // Integer handle so the first-open rail passes.
-                    "updateSnapshot" => {
-                        serde_json::to_vec(&serde_json::json!({ "snapshot": 1, "projects": [] }))
-                            .unwrap()
-                    }
-                    "typeToString" => serde_json::to_vec(&serde_json::json!("number")).unwrap(),
-                    "getTypeAtPosition" => {
-                        serde_json::to_vec(&serde_json::json!({ "id": 7, "flags": 1 })).unwrap()
-                    }
-                    "getSymbolAtPosition" => serde_json::to_vec(
-                        &serde_json::json!({ "id": 1, "name": "x", "flags": 0, "checkFlags": 0 }),
+                    // Integer handles so the first-snapshot rail passes; the
+                    // update answers a NEW handle so no release follows it.
+                    "createSnapshot" => serde_json::to_vec(
+                        &serde_json::json!({ "snapshot": 1, "projects": [], "operation": {} }),
                     )
                     .unwrap(),
-                    // The diagnostics getters decode `Vec<Diagnostic>`; `release` is
-                    // fire-and-forget — an empty array resolves them all.
+                    "updateSnapshot" => serde_json::to_vec(
+                        &serde_json::json!({ "snapshot": 2, "projects": [], "operation": {} }),
+                    )
+                    .unwrap(),
+                    "typeToString" => serde_json::to_vec(&serde_json::json!("number")).unwrap(),
+                    "getTypeAtPosition" => serde_json::to_vec(
+                        &serde_json::json!({ "id": 7, "flags": 1, "value": null }),
+                    )
+                    .unwrap(),
+                    "getSymbolAtPosition" => serde_json::to_vec(&serde_json::json!({
+                        "reference": { "kind": 1, "id": 1 },
+                        "name": "x",
+                        "flags": 0,
+                        "checkFlags": 0
+                    }))
+                    .unwrap(),
+                    "release" => b"true".to_vec(),
                     _ => b"[]".to_vec(),
                 };
                 let resp = encode_frame(MessageType::Response, req.name, &body);
@@ -1028,7 +1133,11 @@ mod tests {
         // empty; the schedule tracks object-shaped request payloads.
         let snap = OpaqueHandle(1);
         client
-            .update_snapshot(&UpdateSnapshotParams::single_project("/ws/tsconfig.json"))
+            .create_snapshot(&SnapshotChanges::single_project("/ws/tsconfig.json"))
+            .await
+            .expect("createSnapshot resolves");
+        client
+            .update_snapshot(&snap, &SnapshotChanges::default())
             .await
             .expect("updateSnapshot resolves");
         client
@@ -1059,16 +1168,15 @@ mod tests {
 
         engine.await.expect("mock engine did not panic");
 
-        // Index the schedule for lookup.
         let schedule: BTreeMap<&str, BTreeSet<&str>> = PINNED_REQUEST_FIELDS
             .iter()
             .map(|(op, fields)| (*op, fields.iter().copied().collect()))
             .collect();
 
         let recorded = recorded.lock();
-        // We drove exactly the scheduled send ops (initialize excluded).
         let driven: BTreeSet<&str> = recorded.iter().map(|(m, _)| m.as_str()).collect();
         let expected: BTreeSet<&str> = [
+            "createSnapshot",
             "updateSnapshot",
             "getSemanticDiagnostics",
             "getSyntacticDiagnostics",
@@ -1095,25 +1203,29 @@ mod tests {
             let scheduled = schedule
                 .get(op.as_str())
                 .unwrap_or_else(|| panic!("`{op}` has no PINNED_REQUEST_FIELDS row"));
-            if op == "updateSnapshot" {
-                // The first open sends only `openProjects` of the lease family; the
-                // scheduled row is the full superset, so the sent keys must be ⊆ it.
-                assert!(
-                    keys.is_subset(scheduled),
-                    "`updateSnapshot` first-open keys {keys:?} must be ⊆ the scheduled \
-                     lease superset {scheduled:?}"
-                );
-                assert!(
-                    keys.contains("openProjects"),
-                    "`updateSnapshot` first open must lease openProjects (got {keys:?})"
-                );
-            } else {
-                // Fixed-shape ops: the sent key set must EQUAL the scheduled row, so
-                // a dropped-or-added schedule key fails the test.
-                assert_eq!(
+            match op.as_str() {
+                "createSnapshot" => {
+                    assert!(
+                        keys.is_subset(scheduled),
+                        "`createSnapshot` keys {keys:?} must be ⊆ its schedule {scheduled:?}"
+                    );
+                    assert!(
+                        keys.contains("openProjects"),
+                        "`createSnapshot` here opens a project (got {keys:?})"
+                    );
+                }
+                "updateSnapshot" => {
+                    assert_eq!(
+                        keys,
+                        ["changes", "snapshot"].into_iter().collect(),
+                        "`updateSnapshot` sends its base and its changes"
+                    );
+                    assert!(keys.is_subset(scheduled));
+                }
+                _ => assert_eq!(
                     &keys, scheduled,
                     "the codec's `{op}` send keys must EQUAL its schedule row"
-                );
+                ),
             }
         }
     }

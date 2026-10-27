@@ -251,7 +251,7 @@ retains its construction alternatives: it does not introduce a sibling-widening
 context of its own. Property initializers inside an inline spread source still
 normalize independently, including arrays of object literals. Constructor headers use
 the same parameter normalization as function headers; authored parameter types
-remain unchanged. For nested literals, TypeScript 7.0.2 diagnostic messages can
+remain unchanged. For nested literals, TypeScript diagnostic messages can
 omit inferred optional properties that its native API and `keyof` expose. Use
 the actual checker type and key assertions to distinguish that abbreviated
 diagnostic print from a semantic normalization cutoff.

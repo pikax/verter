@@ -51,7 +51,7 @@ pub fn ts_major_is_native_family(major: u32) -> bool {
 // differ only in the user-facing advisory, so the behaviour and the message
 // cannot drift apart:
 //
-// - tsgo >=7.0.2 <7.1.0  → the native engine (best path; owned by
+// - tsgo (the pinned TypeScript 7 release line) → the native engine (best path; owned by
 //   `verter_tsgo_api::toolchain::policy`, never routed here).
 // - TypeScript >= 6.x    → [`TsserverServingTier::Current`]: served, no
 //   upgrade advisory.
@@ -617,8 +617,8 @@ mod tests {
 
     #[test]
     fn test_detect_ts_major_version_parses_7_rc() {
-        // TypeScript 7 native-preview / release-candidate installs report a
-        // `7.0.1-rc`-style version; the major must parse to Some(7) so auto-mode
+        // TypeScript 7 prerelease installs report a `7.1.0-beta`-style version;
+        // the major must parse to Some(7) so auto-mode
         // provider selection routes them to the tsgo external engine. Uses an
         // isolated temp dir so parallel test runs never collide on a fixed path.
         let tmp = tempfile::tempdir().unwrap();
@@ -629,7 +629,7 @@ mod tests {
         std::fs::write(&tsserver_path, "// tsserver").unwrap();
         std::fs::write(
             tmp.path().join("package.json"),
-            r#"{ "name": "typescript", "version": "7.0.1-rc" }"#,
+            r#"{ "name": "typescript", "version": "7.1.0-beta" }"#,
         )
         .unwrap();
 
@@ -667,8 +667,8 @@ mod tests {
         let matrix: &[(&str, Option<u32>)] = &[
             ("5.9.2", None),
             ("6.0.0-beta.1", None),
-            ("7.0.0", Some(7)),
-            ("7.0.1-rc", Some(7)),
+            ("7.1.0", Some(7)),
+            ("7.1.0-rc", Some(7)),
             ("7.1.0-beta", Some(7)),
             ("8.0.0", Some(8)),
         ];

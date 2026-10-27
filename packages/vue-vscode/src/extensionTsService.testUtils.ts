@@ -105,8 +105,8 @@ export function materializeNativePreviewWorkspaceTypeScript(root: string): strin
   mkdirSync(libDir, { recursive: true });
   writeFileSync(
     join(pkgDir, "package.json"),
-    JSON.stringify({ name: "typescript", version: "7.0.0-native", main: "./lib/version.cjs" }),
+    JSON.stringify({ name: "typescript", version: "7.1.0-beta", main: "./lib/version.cjs" }),
   );
-  writeFileSync(join(libDir, "version.cjs"), 'module.exports = { version: "7.0.0" };\n');
+  writeFileSync(join(libDir, "version.cjs"), 'module.exports = { version: "7.1.0-beta" };\n');
   return libDir;
 }

@@ -121,7 +121,7 @@ pub fn resolve_with(
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        "7.1.1",
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );

@@ -35,7 +35,7 @@ fn ensure(
     let binding = ProjectBinding::new_for_test(
         workspace_root,
         tsconfig_uri,
-        "7.0.1",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         env_dims(),
         Vec::new(),
         verter_session_query::resolution::ProjectId(0),

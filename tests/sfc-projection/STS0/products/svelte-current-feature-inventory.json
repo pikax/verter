@@ -8,7 +8,7 @@
   "inputSnapshot": {
     "svelte": { "package": "svelte", "version": "5.56.10", "source": "package.json devDependencies" },
     "typescriptJs": { "package": "typescript", "version": "6.0.3", "source": "STP1 EngineMatrix" },
-    "typescriptNative": { "package": "typescript", "version": "7.0.2", "source": "STP1 EngineMatrix" }
+    "typescriptNative": { "package": "typescript", "version": "7.1.0-beta", "source": "STP1 EngineMatrix" }
   },
   "populations": [
     {

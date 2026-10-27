@@ -606,7 +606,7 @@ impl ControlServer {
         };
         let channel = self.relay.injection_channel();
         // BOUND the `didChange` send so a wedged writer cannot pin the serial serve loop, THEN
-        // the ordered sync barrier — mirrors did_open_synced so a subsequent updateSnapshot sees
+        // the ordered sync barrier — mirrors did_open_synced so a subsequent getCurrentLanguageServerSnapshot sees
         // the updated overlay. A `didChange` failure/timeout keeps the prior state on the client
         // side; the shim just reports the error and makes no tracking change either way.
         match tokio::time::timeout(

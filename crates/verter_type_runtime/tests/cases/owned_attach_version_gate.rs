@@ -13,9 +13,9 @@
 //! real `--lsp` transport, so the assertion is "what reached the wire", not
 //! "what the source text looks like":
 //!
-//! - REFUSED (`v710` reports `7.1.0`, outside the `>=7.0.2, <7.1.0` window):
-//!   `attach` fails and NOT ONE BYTE reaches the `--lsp` transport.
-//! - ACCEPTED (`ok` reports `7.0.2`): `attach` proceeds and
+//! - REFUSED (`outofrange` reports the next minor, outside the supported
+//!   window): `attach` fails and NOT ONE BYTE reaches the `--lsp` transport.
+//! - ACCEPTED (`ok` reports the TypeScript pin): `attach` proceeds and
 //!   `custom/initializeAPISession` DOES reach the `--lsp` transport.
 //!
 //! The pair is what discriminates. The refused leg alone would also pass for a
@@ -91,7 +91,7 @@ async fn refused_engine_version_opens_no_api_session_on_the_lsp_transport() {
 
     let attached = tokio::time::timeout(
         PROBE_BOUND,
-        TsgoOwnedProvider::attach(lsp, fake_engine("v710")),
+        TsgoOwnedProvider::attach(lsp, fake_engine("outofrange")),
     )
     .await
     .expect("the version probe is bounded — attach must not hang on a refused engine");
@@ -99,8 +99,9 @@ async fn refused_engine_version_opens_no_api_session_on_the_lsp_transport() {
     let err =
         attached.expect_err("an engine outside the supported version window must fail the attach");
     let message = format!("{err:?}");
+    let refused_version = verter_tsgo_api::toolchain::policy::supported_range_ceiling().to_string();
     assert!(
-        message.contains("7.1.0"),
+        message.contains(&refused_version),
         "the refusal must name the observed version it rejected; got: {message}"
     );
 

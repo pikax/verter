@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Validator of a semantic-benchmark run. A run FAILS validation when:
-//   - a binary is not the one named (TypeScript not 7.0.2, a probe not a
+//   - a binary is not the one named (TypeScript not the pin, a probe not a
 //     production release build, any pinned binary changed during the run,
 //     the source tree changed across the build);
 //   - an invocation record is missing, duplicated, out of plan or order, or
@@ -267,7 +267,7 @@ export function validateRun(
       if (method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX))
         fail(`${key}: the measured reference used a different measuring method`);
       // Every cell carries its own immutable provenance: measured by the
-      // scenario's method (or the file default), by a verified tsc 7.0.2 executable, on exactly
+      // scenario's method (or the file default), by a verified pinned tsc executable, on exactly
       // this source (plus the measuring suffix) and this tsconfig.
       const receipt = measured.settings?.[cell.setting]?.receipt;
       if (receipt?.method !== JSON.stringify(method))

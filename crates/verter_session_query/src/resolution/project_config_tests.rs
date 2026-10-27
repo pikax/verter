@@ -68,10 +68,11 @@ fn matches_file_false_for_empty_membership() {
 
 // ── Effective semantic compiler options ──
 
-/// TypeScript 7.0.2 defaults, pinned against the shipped `tsc.exe` (see the
-/// `SemanticCompilerOptions::default` doc for the probe): the whole
-/// `strict` family ON, exact optionality / unchecked indexed access / noLib
-/// OFF, no explicit lib, default target loading `lib.es2025.full.d.ts`.
+/// The pinned TypeScript's defaults, pinned against the shipped `tsc.exe`
+/// (see the `SemanticCompilerOptions::default` doc for the probe,
+/// re-measured on 7.1.0-beta): the whole `strict` family ON, exact
+/// optionality / unchecked indexed access / noLib OFF, no explicit lib,
+/// default target loading `lib.es2026.full.d.ts`.
 #[test]
 fn semantic_compiler_options_default_pins_typescript_defaults() {
     let defaults = SemanticCompilerOptions::default();
@@ -87,10 +88,10 @@ fn semantic_compiler_options_default_pins_typescript_defaults() {
     assert!(!defaults.no_unchecked_indexed_access);
     assert!(!defaults.no_lib);
     assert_eq!(defaults.lib, None);
-    assert_eq!(defaults.target, ScriptTarget::Es2025);
+    assert_eq!(defaults.target, ScriptTarget::Es2026);
     assert_eq!(
         defaults.effective_lib_file_names(),
-        vec!["lib.es2025.full.d.ts"]
+        vec!["lib.es2026.full.d.ts"]
     );
     assert_eq!(
         RawSemanticCompilerOptions::default().effective(),
@@ -168,7 +169,7 @@ fn equivalent_spellings_produce_equal_effective_options() {
     let implicit_default = RawSemanticCompilerOptions::default().effective();
     let explicit_default = RawSemanticCompilerOptions {
         strict: Some(true),
-        target: Some("ES2025".to_string()),
+        target: Some("ES2026".to_string()),
         ..Default::default()
     }
     .effective();
@@ -260,6 +261,14 @@ fn target_selects_the_default_lib_file_only_when_lib_is_unset() {
     );
     assert_eq!(ScriptTarget::Es2015.default_lib_file_name(), "lib.es6.d.ts");
     assert_eq!(ScriptTarget::Es5.default_lib_file_name(), "lib.d.ts");
+    assert_eq!(
+        ScriptTarget::from_config_value("ES2026"),
+        Some(ScriptTarget::Es2026)
+    );
+    assert_eq!(
+        ScriptTarget::Es2026.default_lib_file_name(),
+        "lib.es2026.full.d.ts"
+    );
     assert_eq!(
         ScriptTarget::EsNext.default_lib_file_name(),
         "lib.esnext.full.d.ts"

@@ -761,7 +761,7 @@ fn workspace_probe_reports_native_family_only() {
     let workspace = tempfile::tempdir().unwrap();
     let native = workspace.path().join("packages/native");
     write_tsconfig(&native);
-    link_pnpm_typescript(workspace.path(), &native, "7.0.0");
+    link_pnpm_typescript(workspace.path(), &native, "7.1.0");
 
     let probe = probe_project_dirs(&[native.to_string_lossy().into_owned()], None);
 

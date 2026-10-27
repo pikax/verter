@@ -57,7 +57,7 @@ fn pid(b: u8) -> ProjectIdentity {
 
 fn session(pin: u64) -> EngineSessionFacts {
     EngineSessionFacts {
-        observed_version: Arc::<str>::from("7.0.1"),
+        observed_version: Arc::<str>::from("7.1.1"),
         wire_pin: pin,
         editor_session_generation: 1,
     }

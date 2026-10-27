@@ -1,5 +1,5 @@
 //! The §4 GENERATION SPIKE — empirically validates, against the PINNED engine
-//! (TypeScript 7.0.2 `tsc`), the BLOCKING assumptions the harness's generation
+//! (the pinned TypeScript `tsc`), the BLOCKING assumptions the harness's generation
 //! side rests on (the TS7 oracle contract §4 "Spike").
 //!
 //! FEATURE-GATED (`oracle-gen`) and `#[cfg(test)]`: it drives tsgo via
@@ -89,7 +89,7 @@ async fn spawn_with(
     let tsgo_bin = {
         let request = verter_type_runtime::tsgo::discovery::ResolutionRequest::for_environment(
             verter_type_runtime::tsgo::validation::Capability::Lsp,
-            None,
+            Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
         );
         match verter_type_runtime::tsgo::discovery::resolve(&request).await {
             Ok(resolution) => resolution.path.to_string_lossy().into_owned(),
@@ -336,8 +336,10 @@ struct OptionDeliveryCase {
 /// `spike_nuia_delivery_via_value_probe`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spike_options_delivery_matrix() {
-    // exactOptionalPropertyTypes: an optional member's apparent type carries
-    // `| undefined` only under EOP=false. (Verter's representation matches EOP=true.)
+    // exactOptionalPropertyTypes: an optional member accepts an explicit
+    // `undefined` only under EOP=false. The hover of the object type itself is
+    // `{ a?: number; }` under both settings, so the probe asks the checker the
+    // assignability question the option decides and reads the selected branch.
     const EOP_ON: &str =
         "{ \"compilerOptions\": { \"strict\": true, \"exactOptionalPropertyTypes\": true } }\n";
     const EOP_OFF: &str =
@@ -351,12 +353,14 @@ async fn spike_options_delivery_matrix() {
     let cases = [
         OptionDeliveryCase {
             option: "exactOptionalPropertyTypes",
-            fixture: "type Eop = { a?: number };\n",
-            probe_rhs: "Eop",
-            // The `with`-discriminator config is EOP=OFF (which ADDS `undefined`).
+            fixture: "type Eop = { a?: number };\n\
+                      type EopAcceptsUndefined = { a: undefined } extends Eop \
+                      ? \"accepts-undefined\" : \"exact\";\n",
+            probe_rhs: "EopAcceptsUndefined",
+            // The `with`-discriminator config is EOP=OFF (which accepts `undefined`).
             cfg_with: EOP_OFF,
             cfg_without: EOP_ON,
-            discriminator: "undefined",
+            discriminator: "accepts-undefined",
         },
         OptionDeliveryCase {
             option: "strictNullChecks",
@@ -521,7 +525,7 @@ async fn spike_nolib_forces_off_bundled_libs() {
 // et al., `oracle/normalize/tests.rs`) prove the closed rewrite system drives
 // differently-spelled SYNTHETIC inputs to one form. These spike proofs are the
 // EMPIRICAL complement: they confirm tsgo's ACTUAL hover spellings at the pinned engine
-// (TypeScript 7.0.2) are exactly the spellings the offline rules reconcile —
+// (the pinned TypeScript) are exactly the spellings the offline rules reconcile —
 // so a class is admitted only after its tsgo spelling is observed and proven
 // confluent, never on an assumed spelling. A class whose two spellings are NOT
 // proven to converge stays DEFAULT-REJECTED (mapped / conditional below).

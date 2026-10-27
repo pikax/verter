@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 pub use verter_tsgo_api::client::PreparedEngine;
 use verter_tsgo_api::client::SpawnedEngine;
-use verter_tsgo_api::proto::types::{Diagnostic as ApiDiagnostic, UpdateSnapshotParams};
+use verter_tsgo_api::proto::types::{Diagnostic as ApiDiagnostic, SnapshotChanges};
 use verter_tsgo_api::snapshot::{AccessibleEntries, RealDirSource};
 use verter_tsgo_api::TsgoClient;
 use verter_workspace::native_fs::NativeFs;
@@ -47,7 +47,7 @@ use crate::error_map::map_tsc_position;
 use crate::reporter::{Diagnostic, Severity};
 
 /// The hard deadline on every standalone `--api` request (initialize /
-/// updateSnapshot / diagnostics). On expiry the request fails with a bounded
+/// createSnapshot / diagnostics). On expiry the request fails with a bounded
 /// error and the engine is terminated (process-tree kill), so a hung engine
 /// can never block the one-shot CLI. Matches the declaration invocation bound.
 const API_REQUEST_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
@@ -55,7 +55,7 @@ const API_REQUEST_BOUND: std::time::Duration = std::time::Duration::from_secs(30
 /// A hard failure of the in-memory `--api` typecheck path.
 ///
 /// The `--noEmit` typecheck backend is tsgo-`--api`-only with NO tsc fallback, so
-/// an absent / wire-diverged engine or a connect/init/updateSnapshot/protocol/
+/// an absent / wire-diverged engine or a connect/init/createSnapshot/protocol/
 /// project-not-found failure means the typecheck genuinely could not run. This
 /// error is SURFACED (the caller exits non-zero + prints the message to stderr)
 /// rather than swallowed into an empty diagnostic set — an empty set + exit 0
@@ -207,7 +207,7 @@ pub struct TypecheckInputs<'a> {
 
 /// Run the in-memory `--api` typecheck and return the remapped diagnostics.
 ///
-/// Fail-closed = SURFACE the failure: on any engine/connect/init/updateSnapshot/
+/// Fail-closed = SURFACE the failure: on any engine/connect/init/createSnapshot/
 /// protocol/project-not-found failure this returns [`Err`] (the caller exits
 /// non-zero + prints the message). It NEVER returns an empty `Ok` for a failed
 /// run — that would falsely advertise a clean typecheck. There is no tsc fallback.
@@ -376,15 +376,15 @@ async fn collect_diagnostics(
         )));
     }
 
-    // OWNED one-shot: connect → 1×updateSnapshot → diagnostics → drop. A single
-    // `open_projects: [tsconfig]` is correct (the client is torn down after, so
-    // no lease bookkeeping is required).
-    let params = UpdateSnapshotParams::single_project(tsconfig_path.to_string());
-    let snap = match client.update_snapshot(&params).await {
+    // OWNED one-shot: connect → 1×createSnapshot → diagnostics → drop. A single
+    // `open_projects: [tsconfig]` is correct (the client and its engine are torn
+    // down after, which frees the snapshot, so no lease bookkeeping is required).
+    let params = SnapshotChanges::single_project(tsconfig_path.to_string());
+    let snap = match client.create_snapshot(&params).await {
         Ok(s) => s,
         Err(e) => {
             return Err(TypecheckError::new(format!(
-                "verter-tsc: tsgo --api updateSnapshot failed: {e}"
+                "verter-tsc: tsgo --api createSnapshot failed: {e}"
             )));
         }
     };
@@ -394,7 +394,7 @@ async fn collect_diagnostics(
     let project = match snap
         .projects
         .iter()
-        .find(|p| fs_paths_equal(&p.config_file_name, tsconfig_path))
+        .find(|p| p.config_matches(|config| fs_paths_equal(config, tsconfig_path)))
     {
         Some(p) => p,
         None => {
@@ -405,7 +405,7 @@ async fn collect_diagnostics(
     };
 
     // ONE whole-program semantic call + ONE whole-program syntactic call: the
-    // `file` argument is omitted, so the engine returns diagnostics for EVERY file
+    // `files` argument is omitted, so the engine returns diagnostics for EVERY file
     // in the program (root carriers AND non-root imported sources).
     let semantic = client
         .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)

@@ -20,7 +20,7 @@ fn pid(b: u8) -> ProjectIdentity {
 
 fn shared_facts() -> SharedSessionFacts {
     SharedSessionFacts::new(EngineSessionFacts {
-        observed_version: Arc::<str>::from("7.0.1"),
+        observed_version: Arc::<str>::from("7.1.1"),
         wire_pin: 7,
         editor_session_generation: 3,
     })
@@ -32,7 +32,7 @@ fn shared_facts() -> SharedSessionFacts {
 fn all_positive(bound_to: ProjectIdentity) -> EligibilityFacts {
     EligibilityFacts {
         version_gate: VersionGateFact::Cleared {
-            observed_version: Arc::<str>::from("7.0.1"),
+            observed_version: Arc::<str>::from("7.1.1"),
         },
         attach: AttachFact::Live(shared_facts()),
         binding: BindingFact::Bound(bound_to),
@@ -138,7 +138,7 @@ fn precedence_follows_the_failure_enum_order() {
     // Clear the gate → attach is next.
     let mut f = all_negative.clone();
     f.version_gate = VersionGateFact::Cleared {
-        observed_version: Arc::<str>::from("7.0.1"),
+        observed_version: Arc::<str>::from("7.1.1"),
     };
     assert_eq!(
         compose_eligibility(&f),

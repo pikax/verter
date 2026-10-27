@@ -98,10 +98,10 @@ fn unknown_type_or_out_of_range_modifier_fails_closed() {
 
 // ── name-built provider legends (the tsgo shape) ─────────────────────────────
 
-/// The exact legend the pinned tsgo 7.0.2 advertised in a live `initialize`
-/// probe (22 types — no `modifier` — in a server-owned order that matches
+/// The exact legend the engine advertises in a live `initialize` probe
+/// (re-measured on 7.1.0-beta) (22 types — no `modifier` — in a server-owned order that matches
 /// neither Verter's published order nor the client's advertised order).
-const TSGO_7_0_2_TYPES: [&str; 22] = [
+const TSGO_LEGEND_TYPES: [&str; 22] = [
     "namespace",
     "class",
     "enum",
@@ -126,7 +126,7 @@ const TSGO_7_0_2_TYPES: [&str; 22] = [
     "operator",
 ];
 
-const TSGO_7_0_2_MODIFIERS: [&str; 11] = [
+const TSGO_LEGEND_MODIFIERS: [&str; 11] = [
     "declaration",
     "definition",
     "readonly",
@@ -142,7 +142,7 @@ const TSGO_7_0_2_MODIFIERS: [&str; 11] = [
 
 #[test]
 fn tsgo_advertised_legend_remaps_into_verter_space() {
-    let map = SemanticTokenLegendMap::from_names(&TSGO_7_0_2_TYPES, &TSGO_7_0_2_MODIFIERS);
+    let map = SemanticTokenLegendMap::from_names(&TSGO_LEGEND_TYPES, &TSGO_LEGEND_MODIFIERS);
     // tsgo `interface` = 3, Verter `interface` = 4 — the index shift that made
     // every carrier identifier the wrong color when forwarded raw.
     assert_eq!(map.map_token(3, 0), Some((4, 0)));
@@ -200,14 +200,14 @@ fn initialize_result_extraction_reads_the_server_legend() {
         "capabilities": {
             "semanticTokensProvider": {
                 "legend": {
-                    "tokenTypes": TSGO_7_0_2_TYPES,
-                    "tokenModifiers": TSGO_7_0_2_MODIFIERS,
+                    "tokenTypes": TSGO_LEGEND_TYPES,
+                    "tokenModifiers": TSGO_LEGEND_MODIFIERS,
                 },
                 "range": true,
                 "full": true,
             }
         },
-        "serverInfo": { "name": "typescript-go", "version": "7.0.2" }
+        "serverInfo": { "name": "typescript", "version": verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN }
     });
     let map = SemanticTokenLegendMap::from_initialize_result(&init).expect("legend present");
     assert_eq!(map.map_token(3, 0), Some((4, 0)));

@@ -9,6 +9,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  describeEnginePins,
+  textRecordsEnginePins,
+} from "../../../scripts/sfc-projection/engine-pins.mjs";
 
 const STP6_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKED_DIR = path.join(STP6_DIR, "packed");
@@ -358,12 +362,12 @@ export function validateStp6Products({
       ),
     );
   }
-  if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {
+  if (!textRecordsEnginePins(evidenceText)) {
     errors.push(
       err(
         "STP6-package-instance",
         "missing-engine-pins",
-        "STP6 evidence must record ts-js 6.0.3 and ts-native 7.0.2 engine pins",
+        `STP6 evidence must record ${describeEnginePins()} engine pins`,
       ),
     );
   }

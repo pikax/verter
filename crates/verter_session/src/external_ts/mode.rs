@@ -100,7 +100,7 @@
 //! Provider selection is identity-based: an attested editor-owned Native
 //! Preview rendezvous serves first, then a project-bound editor-tsserver
 //! attestation, then the pinned managed tsgo fallback. A workspace whose
-//! active TypeScript engine is tsgo/native-preview (TypeScript >= 7,
+//! active TypeScript engine is tsgo (TypeScript >= 7,
 //! `verter_workspace::NativeIntrinsicLibrary::active_typescript_is_tsgo`) is
 //! never dragged to a lower bundled/global `tsserver`; even an explicit
 //! tsserver override whose resolved candidate is a TS7+ install reclassifies

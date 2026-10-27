@@ -17,6 +17,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { NODE_MANDATORY_CASES } from "../../../scripts/sfc-projection/node-mandatory-cases.mjs";
+import {
+  describeEnginePins,
+  textRecordsEnginePins,
+} from "../../../scripts/sfc-projection/engine-pins.mjs";
 
 const STP8_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(STP8_DIR, "../../..");
@@ -931,12 +935,12 @@ export function validateStp8Products({
       err("STP8-complete-evidence", "removed-fixture", "missing AC3/AC4 untouched-owner rationale"),
     );
   }
-  if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {
+  if (!textRecordsEnginePins(evidenceText)) {
     errors.push(
       err(
         "STP8-partial-ratify",
         "missing-engine-pins",
-        "STP8 evidence must record ts-js 6.0.3 and ts-native 7.0.2 engine pins",
+        `STP8 evidence must record ${describeEnginePins()} engine pins`,
       ),
     );
   }
