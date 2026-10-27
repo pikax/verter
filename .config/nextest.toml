@@ -79,8 +79,6 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.default.overrides]]
 filter = '''
-  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_strict)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
@@ -109,8 +107,6 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.ci.overrides]]
 filter = '''
-  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_strict)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))

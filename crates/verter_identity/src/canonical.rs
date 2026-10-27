@@ -16,10 +16,20 @@ use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 /// a clone is a reference-count bump rather than a copy of the canonical
 /// bytes. The bytes are immutable once encoded, so sharing them changes no
 /// comparison.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub struct Canonical {
     digest: CanonicalDigest,
+    #[heap_size(with = "shared_bytes_heap")]
     bytes: Arc<[u8]>,
+}
+
+/// The shared canonical bytes are an immutable encoding every clone holds in
+/// place of a copy: one `Arc` block, counted once per measurement.
+fn shared_bytes_heap<'t>(
+    bytes: &'t Arc<[u8]>,
+    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    meter.shared_encoding_bytes(bytes)
 }
 
 impl Canonical {
@@ -160,6 +170,55 @@ mod tests {
         assert_eq!(hash(&clone), hash(&separate));
         assert_eq!(clone.cmp(&separate), core::cmp::Ordering::Equal);
         assert_eq!(original.bytes(), &Pair(5, 8).canonical_bytes()[..]);
+    }
+
+    struct Wide(Vec<u8>);
+    impl CanonicalEncode for Wide {
+        const DOMAIN_TAG: &'static str = "canonical-test.wide.v1";
+        fn encode_fields(&self, e: &mut CanonicalEncoder) {
+            e.field_bytes(1, &self.0);
+        }
+    }
+
+    /// Two independently pinned owners of clones of one identity charge its
+    /// shared bytes once, and the charge lasts until the last owner releases
+    /// it, whichever releases first.
+    #[test]
+    fn pinned_owners_of_clones_share_one_encoding_charge() {
+        use verter_retention::pinned_heap::{PinContext, PinnedHeap};
+        use verter_retention::{RetentionLimits, SemanticRetentionAccount};
+
+        for first_releases_first in [false, true] {
+            let context =
+                PinContext::new(SemanticRetentionAccount::new(RetentionLimits::defaults()));
+            let original = Canonical::from_encodable(&Wide(vec![7; 2 * 1024 * 1024]));
+            let clone = original.clone();
+            assert!(Arc::ptr_eq(original.shared_bytes(), clone.shared_bytes()));
+            let payload = original.bytes().len();
+
+            let first = PinnedHeap::measure(&original, 0, &context);
+            let once = context.account().snapshot().pinned_bytes;
+            assert!(once >= payload, "the first owner charges the encoding");
+            let second = PinnedHeap::measure(&clone, 0, &context);
+            let both = context.account().snapshot().pinned_bytes;
+            assert!(
+                both < once + payload,
+                "a second owner of a clone shares the encoding's charge: {once} then {both}"
+            );
+
+            let (early, late) = if first_releases_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            drop(early);
+            assert!(
+                context.account().snapshot().pinned_bytes >= payload,
+                "the remaining owner keeps the encoding charged"
+            );
+            drop(late);
+            assert_eq!(context.account().snapshot().total_bytes(), 0);
+        }
     }
 
     /// Identities order by digest, then by their bytes as byte strings.

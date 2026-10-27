@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   buildObserveLaneArgs,
   buildObserveLaneBuildArgs,
+  main,
   observeLanePackages,
 } from "./observe-lane.mjs";
 
@@ -70,4 +71,49 @@ test("the fixture-metadata build selection is the run's own package and feature 
 test("an empty selection fails closed instead of running nothing", () => {
   assert.throws(() => buildObserveLaneArgs(metadata([pkg("a")]), "all()"), /no workspace member/);
   assert.throws(() => buildObserveLaneBuildArgs(metadata([pkg("a")])), /no workspace member/);
+});
+
+test("smoke executes the host capture example without listing or preparing the full suite", () => {
+  const calls = [];
+  const status = main(["smoke"], {
+    spawn(command, args) {
+      calls.push({ command, args });
+      return { status: 0 };
+    },
+  });
+  assert.equal(status, 0);
+  assert.deepEqual(calls, [
+    {
+      command: "cargo",
+      args: [
+        "run",
+        "--locked",
+        "-p",
+        "verter_session",
+        "--features",
+        "semantic-observe",
+        "--example",
+        "observe_smoke",
+      ],
+    },
+  ]);
+});
+
+test("smoke cannot turn a failing or interrupted capture example into a pass", () => {
+  assert.equal(main(["smoke"], { spawn: () => ({ status: 101 }) }), 101);
+  assert.equal(main(["smoke"], { spawn: () => ({ status: null, signal: "SIGTERM" }) }), 1);
+});
+
+test("smoke rejects extra arguments instead of allowing an overridden workload", () => {
+  let spawned = false;
+  assert.equal(
+    main(["smoke", "--help"], {
+      spawn() {
+        spawned = true;
+        return { status: 0 };
+      },
+    }),
+    2,
+  );
+  assert.equal(spawned, false);
 });

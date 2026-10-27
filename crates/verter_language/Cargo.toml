@@ -11,6 +11,7 @@ keywords = ["vue", "compiler", "language", "classification"]
 categories = ["compilers"]
 
 [dependencies]
+verter_retention = { path = "../verter_retention" }
 # 0.2, not 0.4: 0.2 reaches Linux entropy through the raw syscall, while 0.4's
 # musl backend takes libc's weakly merged `getrandom` symbol (see
 # `registered_source_authority::fill_random`). `std` supplies

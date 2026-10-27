@@ -60,9 +60,10 @@ fn refuse_unparsed(parse_snapshot: &ParseSnapshot) -> Result<(), StageError> {
 /// file's language row, the authoritative `source_type` computed once at parse
 /// time, the catalog eval-source `Arc<str>` for this source revision, and the
 /// measured parse duration for performance tracking.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 #[allow(dead_code)] // Fields read progressively during 3 migration
 pub struct HostSourceData {
+    storage: verter_retention::pinned_heap::StoragePin,
     pub(crate) parse: ParseSnapshot,
     /// Framework-neutral parse artifact from the carrier producer
     /// (`parse_vue_snapshot` wraps the Vue parse into it). Reused during
@@ -79,10 +80,13 @@ pub struct HostSourceData {
     /// suffices: the other language is the one the file is analysed under
     /// (a runtime script's declaration companion's), one per revision; a
     /// read under yet another language derives without caching.
-    pub(crate) analysis_parse_key:
-        std::sync::OnceLock<(FileLanguage, Option<verter_language::ParseKey>)>,
+    pub(crate) analysis_parse_key: verter_retention::pinned_heap::PinnedOnce<(
+        FileLanguage,
+        Option<verter_language::ParseKey>,
+    )>,
     /// Sole registered envelope owner for carrier sources.
     pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
+    #[heap_size(inline)]
     pub(crate) revision_token: crate::carrier_publication_store::HostSourceRevisionToken,
     /// The file's language row (framework carrier vs. plain script).
     pub(crate) file_language: FileLanguage,
@@ -91,6 +95,7 @@ pub struct HostSourceData {
     /// artifact. Readers must prefer this value over recomputing from raw
     /// source + `framework_parse` (which is unstable when `framework_parse`
     /// is dropped).
+    #[heap_size(inline)]
     pub(crate) source_type: oxc_span::SourceType,
     /// Catalog eval-source for this source revision. Carriers store the
     /// backend `Arc<str>` from the retained source-stage catalog row
@@ -133,6 +138,14 @@ impl SnapshotData for HostSourceData {
 }
 
 impl HostSourceData {
+    fn pin_storage(&self, source: &Arc<str>) {
+        self.storage.ensure(
+            &(self, source),
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            &Default::default(),
+        );
+    }
+
     /// The exact parse identity of this source revision under its runtime
     /// language, without a pass over its bytes: a carrier's is the key its
     /// framework parse recorded, a plain script's the one derived once with
@@ -176,7 +189,7 @@ impl HostSourceData {
 /// Built once during `execute_analysis()` from the parse results. These fields
 /// are never mutated after construction, so Arc sharing across all `get_analysis()`
 /// calls is safe and avoids repeated cloning.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 #[allow(dead_code)] // Fields are part of the get_analysis surface.
 pub struct AnalysisArcs {
     pub(crate) module_references: verter_session_query::analysis::file_analysis::SharedList<
@@ -251,9 +264,10 @@ impl AnalysisArcs {
 ///
 /// Contains real script analysis, export signatures, style analyses, and
 /// pre-computed Arc-wrapped analysis fields for cheap sharing.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 #[allow(dead_code)] // arcs field is part of the get_analysis surface.
 pub struct HostAnalysisData {
+    storage: verter_retention::pinned_heap::StoragePin,
     pub(crate) script_analysis:
         Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
@@ -268,6 +282,17 @@ pub struct HostAnalysisData {
 
 impl SnapshotData for HostAnalysisData {
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl HostAnalysisData {
+    fn charged(self) -> Self {
+        self.storage.ensure(
+            &self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            &Default::default(),
+        );
         self
     }
 }
@@ -297,6 +322,8 @@ impl SnapshotData for HostArtifactData {
 /// Analysis and Artifact stages delegate back to the host facade (the scheduler
 /// provides coordination, the host provides domain logic).
 pub struct HostStageExecutor {
+    #[cfg(any(test, feature = "test-support"))]
+    pin_context: verter_retention::pinned_heap::PinContext,
     pub config: HostConfig,
     pub workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
     /// Host-owned provenance counters. The executor bumps `sfc_parses`
@@ -340,6 +367,8 @@ impl HostStageExecutor {
         >,
     ) -> Self {
         Self {
+            #[cfg(any(test, feature = "test-support"))]
+            pin_context: Default::default(),
             config,
             workspace,
             provenance,
@@ -363,6 +392,8 @@ impl HostStageExecutor {
         generation: u64,
         incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _pin_scope = self.pin_context.enter_for_test();
         // Every ingress names this host's scheduler node object as well as
         // its generation: a removed or reset file's successor restarts its
         // generation sequence, so the generation alone could repeat a
@@ -556,10 +587,11 @@ impl HostStageExecutor {
                 generation,
                 incarnation,
                 data: Arc::new(HostSourceData {
+                    storage: Default::default(),
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
                     script_parse_key: None,
-                    analysis_parse_key: std::sync::OnceLock::new(),
+                    analysis_parse_key: Default::default(),
                     structure: Some(structure),
                     revision_token,
                     file_language,
@@ -593,10 +625,11 @@ impl HostStageExecutor {
                 generation,
                 incarnation,
                 data: Arc::new(HostSourceData {
+                    storage: Default::default(),
                     parse: parse_snapshot,
                     framework_parse: None,
                     script_parse_key,
-                    analysis_parse_key: std::sync::OnceLock::new(),
+                    analysis_parse_key: Default::default(),
                     structure: None,
                     revision_token,
                     file_language,
@@ -606,6 +639,10 @@ impl HostStageExecutor {
                 }),
             }
         };
+
+        if let Some(data) = snapshot.downcast_data::<HostSourceData>() {
+            data.pin_storage(&snapshot.source);
+        }
 
         // Push per-file parse-timing into the active request's
         // accumulator when timing capture is on. The lower-phase is
@@ -748,6 +785,8 @@ impl StageExecutor for HostStageExecutor {
         source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _pin_scope = self.pin_context.enter_for_test();
         // `AnalysisScope::NONE` deliberately carries no analysis payload.
         // Avoid materialising the Arc-wrapped read views for the empty
         // snapshot: bundler/stateless hosts still cross the scheduler's
@@ -763,20 +802,25 @@ impl StageExecutor for HostStageExecutor {
             Ok(AnalysisSnapshot {
                 generation,
                 incarnation: source.incarnation,
-                data: Arc::new(HostAnalysisData {
-                    // `Arc::clone` of the shared snapshot — refcount bump, not
-                    // a deep copy of ~18 owned vectors.
-                    script_analysis: Arc::clone(&host_data.parse.script_analysis),
-                    export_signatures: host_data.parse.export_signatures.clone(),
-                    style_analyses: verter_session_query::analysis::file_analysis::SharedList::new(
-                        host_data.parse.style_analyses.clone(),
-                    ),
-                    markup_class_tokens:
-                        verter_session_query::analysis::file_analysis::SharedList::new(
-                            host_data.parse.markup_class_tokens.clone(),
-                        ),
-                    arcs,
-                }),
+                data: Arc::new(
+                    HostAnalysisData {
+                        storage: Default::default(),
+                        // `Arc::clone` of the shared snapshot — refcount bump, not
+                        // a deep copy of ~18 owned vectors.
+                        script_analysis: Arc::clone(&host_data.parse.script_analysis),
+                        export_signatures: host_data.parse.export_signatures.clone(),
+                        style_analyses:
+                            verter_session_query::analysis::file_analysis::SharedList::new(
+                                host_data.parse.style_analyses.clone(),
+                            ),
+                        markup_class_tokens:
+                            verter_session_query::analysis::file_analysis::SharedList::new(
+                                host_data.parse.markup_class_tokens.clone(),
+                            ),
+                        arcs,
+                    }
+                    .charged(),
+                ),
             })
         } else {
             Ok(AnalysisSnapshot::new_empty(generation))

@@ -35,8 +35,26 @@ struct GoodCarrier {
     count: u32,
 }
 
+// The fact-only pin preserves the structural witness and accepts only a
+// witnessed carrier at its initializer, even though charge metadata erases
+// allocation types internally.
+#[derive(verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+struct PinnedFact {
+    storage: verter_retention::pinned_heap::FactStoragePin,
+    name: String,
+}
+
 fn main() {
     // The fixture only needs to compile; reference the type so it is not
     // dead-code-eliminated before the derive bound is checked.
     let _ = std::mem::size_of::<GoodCarrier>();
+    let fact = PinnedFact {
+        storage: Default::default(),
+        name: "fact".into(),
+    };
+    fact.storage.ensure(
+        &fact,
+        std::mem::size_of::<PinnedFact>(),
+        &Default::default(),
+    );
 }

@@ -436,6 +436,14 @@ test("a script with no lane consumer runs the scripts' self-tests and nothing el
   assert.deepEqual(gatesOn(select(["scripts/perf-breakdown.mjs"]).gates), ["js"]);
 });
 
+test("instrumentation runner changes execute the required Rust smoke as well as script tests", () => {
+  for (const file of ["scripts/observe-lane.mjs", "scripts/observe-lane.test.mjs"]) {
+    const { gates } = select([file]);
+    assert.equal(gates.rust, "true", file);
+    assert.equal(gates.js, "true", file);
+  }
+});
+
 test("ci.yml, the local actions, the classifier and an unclassified path run every lane", () => {
   for (const file of [
     ".github/workflows/ci.yml",

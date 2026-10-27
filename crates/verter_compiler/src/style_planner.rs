@@ -333,9 +333,30 @@ impl<'a> PlainCssInput<'a> {
 ///
 /// Companion carrier — not a field on public `StyleBlockAnalysis`. Clone is
 /// Arc-cheap. Excluded from request/cache identity.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub struct PreparedStyleIr {
+    #[heap_size(with = "style_ir_heap")]
     ir: Arc<StyleSyntaxIr>,
+}
+
+/// The framework-neutral CSS crate describes its parse's storage without
+/// depending on retention; it is measured here, under the shared-allocation
+/// rule: each shared block once, the source text as its own allocation.
+fn style_ir_heap<'t>(
+    ir: &'t Arc<StyleSyntaxIr>,
+    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    use verter_retention::heap_size::HeapSize;
+    meter.shared_arc(ir, |ir, meter| {
+        meter.shared_arc(ir.storage(), |storage, meter| {
+            storage.source_text().heap_size(meter)
+                + storage
+                    .exclusive_allocations()
+                    .into_iter()
+                    .map(verter_retention::allocation::heap_block_bytes)
+                    .sum::<usize>()
+        })
+    })
 }
 
 impl PreparedStyleIr {

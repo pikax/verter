@@ -158,6 +158,13 @@ impl FrozenBump {
     pub(crate) fn freeze(bump: Bump) -> Self {
         Self(bump)
     }
+
+    /// The arena's one aggregate reservation: every chunk with its spare
+    /// capacity and bumpalo's chunk metadata. Bump-backed children own no
+    /// separate heap.
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.0.allocated_bytes_including_metadata()
+    }
 }
 
 // Safety: the inner bump is never allocated into after freeze. Child

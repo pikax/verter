@@ -1219,6 +1219,7 @@ impl Scheduler {
         crate::execution::pool::SchedulerPoolSubmitResult,
         crate::execution::pool::SchedulerPoolSubmitError,
     > {
+        let task = self.stage_tasks.track(task);
         // Record the submit ATTEMPT before doing anything else: a test
         // that parks the single I/O worker asserts the driver reaches
         // every admitted submit attempt while the worker is stuck. The
@@ -1247,6 +1248,7 @@ impl Scheduler {
         crate::execution::pool::SchedulerPoolSubmitResult,
         crate::execution::pool::SchedulerPoolSubmitError,
     > {
+        let task = self.stage_tasks.track(task);
         #[cfg(test)]
         if let Some(err) = self.injected_pool_submit_fault() {
             drop(task);

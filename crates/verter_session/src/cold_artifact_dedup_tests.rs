@@ -966,6 +966,7 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
     // the reuse gate consults.
     let forge = |parse_env_hash: verter_session_query::analysis::types::Hash16| {
         crate::project_type_store::IndexedReady {
+            storage: Default::default(),
             whole_hash: built.whole_hash,
             file_language: built.file_language.clone(),
             shallow_state: Arc::clone(&built.shallow_state),

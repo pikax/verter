@@ -63,7 +63,7 @@ pub use style_ir::{
     ComponentFunction, ComponentToken, ComponentValue, ComponentValueTree, OwnedComponentValueTree,
     StaticClassFact, StyleBlock, StyleBlockKind, StyleCompleteness, StyleDeclaration,
     StyleDirective, StyleMixinOrFunction, StyleRule, StyleStatement, StyleSyntaxIr,
-    UnknownStatement, UnknownStatementKind, ValueInterpolation,
+    StyleSyntaxIrStorage, UnknownStatement, UnknownStatementKind, ValueInterpolation,
 };
 pub use svelte_compat::{
     parse_style_body, svelte_first_significant_value_span, svelte_nth_of_selector_span,

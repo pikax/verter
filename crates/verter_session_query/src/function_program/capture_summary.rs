@@ -41,7 +41,7 @@ const FIRST: u32 = u32::MAX;
 
 /// One capture occurrence: a reference or write of a binding an enclosing
 /// frame declares.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 struct CaptureOccurrence {
     /// The binding, by its position in [`CaptureSummaries::bindings`].
     binding: u32,
@@ -55,7 +55,7 @@ struct CaptureOccurrence {
 
 /// One captured read: a read of a binding an enclosing frame declares,
 /// with its static path.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 struct ReadOccurrence {
     read: FunctionCapturedRead,
     /// As [`CaptureOccurrence::visible_from`].
@@ -66,7 +66,7 @@ struct ReadOccurrence {
 }
 
 /// One function position's place in the arenas.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 struct FrameSummary {
     key: FunctionProgramKey,
     span: verter_span::Span,
@@ -87,7 +87,7 @@ struct FrameSummary {
 /// The frozen capture summary of one file. Owned by the file's
 /// [`FunctionProgramIndex`](super::FunctionProgramIndex) and shared by its
 /// entries; released with the last of them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, verter_retention::heap_size::HeapSize)]
 pub(super) struct CaptureSummaries {
     /// What this summary contributes to the process's resident capture
     /// storage, from its build until the last handle on it drops.
@@ -471,7 +471,7 @@ impl CaptureSummaryCounts {
 }
 
 /// One served function position's handle on its file's capture summary.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub(super) struct FrameCaptureHandle {
     summary: Arc<CaptureSummaries>,
     frame: u32,
