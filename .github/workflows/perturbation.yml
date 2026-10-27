@@ -145,12 +145,11 @@ jobs:
       - name: Fetch locked Cargo dependencies
         run: cargo fetch --locked
       # Built from the pinned release source in the job's own temporary
-      # directory: no package install, no elevation. When it cannot be built
-      # the rerun still varies the time zone and records the clock shift as
-      # not applied.
+      # directory: no package install, no elevation. The wall-clock shift is a
+      # required variation, so a failed build fails the rerun, and the
+      # comparison refuses any rerun whose record does not show the shift.
       - name: Build libfaketime
         id: faketime
-        continue-on-error: true
         env:
           LIBFAKETIME_VERSION: 0.9.12
           LIBFAKETIME_SHA256: 4fc32218697c052adcdc5ee395581f2554ca56d086ac817ced2be0d6f1f8a9fa
@@ -177,10 +176,8 @@ jobs:
           echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
           run_args=(--rerun "$RERUN" --work-dir "$RUNNER_TEMP/perturbation"
             --record "$RUNNER_TEMP/perturbation-record.json"
-            --env-snapshot "$RUNNER_TEMP/nextest-env.json")
-          if [ -n "$FAKETIME_LIB" ]; then
-            run_args+=(--faketime-lib "$FAKETIME_LIB")
-          fi
+            --env-snapshot "$RUNNER_TEMP/nextest-env.json"
+            --faketime-lib "$FAKETIME_LIB")
           node scripts/perturbation.mjs run "${run_args[@]}" -- cargo "${nextest_argv[@]}"
       - name: Nextest JUnit evidence
         if: always()

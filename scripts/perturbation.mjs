@@ -50,7 +50,12 @@ export const COMPARISON_SCHEMA_VERSION = 1;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG_PATH = join(REPO_ROOT, "scripts", "manifests", "perturbation.json");
 
-/** nextest's exit code when tests ran and some failed: a rerun outcome, not a harness failure. */
+/**
+ * nextest's exit code when tests ran and some failed: a rerun outcome, not a
+ * harness failure. Defined as `NextestExitCode::TEST_RUN_FAILED` in the
+ * nextest-metadata crate:
+ * https://docs.rs/nextest-metadata/latest/nextest_metadata/struct.NextestExitCode.html#associatedconstant.TEST_RUN_FAILED
+ */
 const NEXTEST_TESTS_FAILED = 100;
 
 /** A seconds tolerance for reading back a shifted clock. */
@@ -296,7 +301,9 @@ export function runRerun(options, command, env = process.env) {
       clock: {
         timeZone,
         offsetDays,
-        method: libfaketime.applied ? "libfaketime wall-clock offset and TZ" : "TZ only",
+        method: libfaketime.applied
+          ? "libfaketime wall-clock offset and TZ"
+          : "TZ only (not shifted)",
         libfaketime,
         realStart: new Date(realStart * 1000).toISOString(),
         observedStart: observedStart === null ? null : new Date(observedStart * 1000).toISOString(),
@@ -384,12 +391,36 @@ function loadRerun(input, rerun, problems) {
   if (record.exitCode !== 0 && record.exitCode !== NEXTEST_TESTS_FAILED) {
     problems.push(`rerun ${rerun}: the suite did not complete (exit ${record.exitCode})`);
   }
+  const clockProblem = clockShiftProblem(record.variation?.clock);
+  if (clockProblem) problems.push(`rerun ${rerun}: ${clockProblem}`);
   return { rerun, record, metadata, cases: junitTestCases(junit) };
 }
 
-function clockKey(record) {
-  const clock = record.variation?.clock ?? {};
-  return `${clock.timeZone}|${clock.libfaketime?.applied ? clock.offsetDays : 0}`;
+/**
+ * Why a rerun's wall clock does not count as shifted, or null when it does: the
+ * shift must have been applied and the clock read under the suite's wrapper must
+ * be off the real clock by the configured offset. The time zone alone changes
+ * neither Rust's SystemTime nor the UTC date, so a rerun without the shift varied
+ * no clock or date.
+ */
+export function clockShiftProblem(clock) {
+  if (clock?.libfaketime?.applied !== true) {
+    const reason = clock?.libfaketime?.reason ?? "no shift was recorded";
+    return `the wall clock was not shifted (${reason})`;
+  }
+  const real = Date.parse(clock.realStart ?? "");
+  const observed = Date.parse(clock.observedStart ?? "");
+  if (!Number.isInteger(clock.offsetDays) || clock.offsetDays === 0) {
+    return "the wall clock shift records no non-zero whole-day offset";
+  }
+  if (!Number.isFinite(real) || !Number.isFinite(observed)) {
+    return "the shifted wall clock was not read back under the suite's environment";
+  }
+  const shiftSeconds = (observed - real) / 1000;
+  if (Math.abs(shiftSeconds - clock.offsetDays * 86400) > CLOCK_TOLERANCE_SECONDS) {
+    return `the wall clock read under the suite was ${shiftSeconds}s off, not ${clock.offsetDays}d`;
+  }
+  return null;
 }
 
 /** Checks that the reruns tested one tree and fingerprint and each varied every dimension. */
@@ -421,7 +452,8 @@ function checkComparable(loaded, problems) {
         ),
       ),
     host: (r) => r.variation?.host?.hostname,
-    "clock and time zone": clockKey,
+    "wall clock offset": (r) => r.variation?.clock?.offsetDays,
+    "time zone": (r) => r.variation?.clock?.timeZone,
   };
   for (const [name, read] of Object.entries(dimensions)) {
     const values = loaded.map((l) => read(l.record));
@@ -570,7 +602,9 @@ function main() {
       process.stderr.write(`::error::perturbation: ${problem}\n`);
     }
     for (const pattern of comparison.staleExclusions) {
-      process.stderr.write(`::warning::perturbation: exclusion ${pattern} names no test\n`);
+      process.stderr.write(
+        `::warning::perturbation: exclusion ${pattern} names no test of these reruns\n`,
+      );
     }
     const s = comparison.summary;
     process.stdout.write(

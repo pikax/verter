@@ -44,10 +44,14 @@ const LIST = {
   exclusions: [{ reason: "build-time value", patterns: ["^b(::\\S+)? "] }],
 };
 
-test("the committed list is well formed, unapproved and excludes verter_lsp's build date", () => {
+test("the committed list is well formed and excludes verter_lsp's build date", () => {
   const list = readHermeticListDocument();
-  assert.equal(list.approved, false);
-  assert.equal(hermeticTestIds(list).size, 0);
+  const hermetic = hermeticTestIds(list);
+  if (list.approved) {
+    assert.deepEqual([...hermetic], list.candidates);
+  } else {
+    assert.equal(hermetic.size, 0);
+  }
   for (const id of [
     "verter_lsp main_tests::logs_the_version",
     "verter_lsp::bin/verter-lsp main_tests::logs_the_version",
@@ -58,6 +62,23 @@ test("the committed list is well formed, unapproved and excludes verter_lsp's bu
   assert.match(exclusionReason(list, "verter_bench::main cases::x") ?? "", /Build-time value/);
   assert.equal(exclusionReason(list, "verter_lsp_shim cases::x"), null);
   assert.equal(exclusionReason(list, "verter_span tests::offsets"), null);
+});
+
+test("the committed list excludes tests that read the clock for a budget, in nested modules too", () => {
+  const list = readHermeticListDocument();
+  for (const id of [
+    // Samples the clock until a deadline and asserts how many samples it took.
+    "verter_session::main cases::g_audit::audit_request_registration_survives_worker_tls_churn::active_request_registration_survives_worker_tls_install_drop_churn",
+    // recv_timeout bounds.
+    "verter_session::main cases::g_misc0::sampler_thread_joined_at_host_drop::sampler_shuts_down_during_an_active_sample",
+    // wait_timeout_while and recv_timeout bounds.
+    "verter_session::main cases::g_misc2::scheduler_audit_queue_dwell_under_load::at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms",
+    "verter_scheduler scheduler::reset_tests::a_completion_wake_can_reset_its_own_driver_without_leaving_it_running",
+    // A module nested in an excluded module is excluded with it.
+    "verter_scheduler scheduler::reset_tests::nested::a_test",
+  ]) {
+    assert.match(exclusionReason(list, id) ?? "", /^Timing budget:/, id);
+  }
 });
 
 test("only an approved list makes a test hermetic, and never an excluded one", () => {
@@ -192,6 +213,23 @@ function junitFor(rerun) {
   return `<testsuites><testsuite name="s">${cases.join("")}</testsuite></testsuites>`;
 }
 
+const REAL_START = Date.parse("2026-10-27T02:30:00Z");
+
+/** A clock record whose read-back is `observedShiftDays` off the real clock. */
+function shiftedClock(
+  timeZone,
+  offsetDays,
+  { applied = true, observedShiftDays = offsetDays } = {},
+) {
+  return {
+    timeZone,
+    offsetDays,
+    libfaketime: applied ? { applied: true } : { applied: false, reason: "no library" },
+    realStart: new Date(REAL_START).toISOString(),
+    observedStart: new Date(REAL_START + observedShiftDays * 86400000).toISOString(),
+  };
+}
+
 function recordFor(rerun, overrides = {}) {
   return {
     schemaVersion: 1,
@@ -204,7 +242,7 @@ function recordFor(rerun, overrides = {}) {
       temporaryDirectory: `/t/rerun-${rerun}/tmp`,
       runnerSuppliedVariables: { CI: { runner: "true", rerun: `perturbed-${rerun}` } },
       host: { hostname: `host-${rerun}` },
-      clock: { timeZone: `Z${rerun}`, offsetDays: rerun, libfaketime: { applied: true } },
+      clock: shiftedClock(`Z${rerun}`, rerun),
     },
     exitCode: 100,
     ...overrides,
@@ -294,13 +332,47 @@ test("reruns that do not vary every dimension, or differ in fingerprint, propose
         2: {
           variation: {
             ...recordFor(2).variation,
-            clock: { timeZone: "Z1", offsetDays: 1, libfaketime: { applied: true } },
+            clock: shiftedClock("Z1", 1),
           },
         },
       },
-      /clock/,
+      /wall clock offset[^]*time zone/,
     ],
   ];
+  // Reruns whose wall clock was never shifted, or shifted by other than the
+  // configured offset, varied no clock or date, however distinct their time zones.
+  const unshifted = (rerun, options) => ({
+    variation: { ...recordFor(rerun).variation, clock: shiftedClock(`Z${rerun}`, rerun, options) },
+  });
+  cases.push(
+    [
+      {
+        1: unshifted(1, { applied: false, observedShiftDays: 0 }),
+        2: unshifted(2, { applied: false, observedShiftDays: 0 }),
+        3: unshifted(3, { applied: false, observedShiftDays: 0 }),
+      },
+      /rerun 1: the wall clock was not shifted \(no library\)/,
+    ],
+    [
+      { 2: unshifted(2, { applied: false, observedShiftDays: 0 }) },
+      /rerun 2: the wall clock was not shifted/,
+    ],
+    [
+      { 3: unshifted(3, { observedShiftDays: 0 }) },
+      /rerun 3: the wall clock read under the suite was 0s off, not 3d/,
+    ],
+    [
+      {
+        1: {
+          variation: {
+            ...recordFor(1).variation,
+            clock: { ...shiftedClock("Z1", 1), observedStart: null },
+          },
+        },
+      },
+      /rerun 1: the shifted wall clock was not read back/,
+    ],
+  );
   for (const [overrides, expected] of cases) {
     withDir("perturb-cmp-", (dir) => {
       writeReruns(dir, overrides);
