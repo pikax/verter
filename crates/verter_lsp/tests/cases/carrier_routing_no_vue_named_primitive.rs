@@ -77,6 +77,10 @@ const VUE_INTRINSIC_ALLOWLIST: &[&str] = &[
     "vue_kind_label",
     // Vue style-block input (the `<style>` SFC section) + style helpers.
     "VueStyleInput",
+    // The reserved Vue `<style>` projection module and its test sibling (module
+    // names, Vue-SFC style-section semantics).
+    "vue_style_projection",
+    "vue_style_projection_tests",
     // Vue runtime-API classification (lives in `verter_semantic`; referenced
     // here by type/field name only) + the hover surface for a Vue runtime-API
     // binding (`ref()`, `computed()`, the `vue_api` field on a binding).
