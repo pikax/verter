@@ -2955,6 +2955,199 @@ mod semantic_poll_contract {
         assert_eq!(read_summary(&dispatch, &read), synchronous);
     }
 
+    /// A callable object surface and the global `Function` interface its
+    /// apparent type widens to.
+    const APPARENT_CALLEE: &str =
+        "declare global { interface Function { readonly marker: \"fn\"; } }\n\
+                                   declare const o: { (a: string): 1 };\n";
+
+    fn apparent_callee_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CONTEXTUAL_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(APPARENT_CALLEE),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    /// The apparent type of `o`'s object surface, and the call-signature
+    /// list read its anchor walk makes.
+    fn apparent_type_keys(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let callee = dispatch.execute_read(dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    CONTEXTUAL_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: "o".into(),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ));
+        let QueryResult::Value(surface) = callee.value() else {
+            panic!("`o` has a type: {callee:?}");
+        };
+        assert!(
+            matches!(
+                dispatch.graph_arc().node_data(*surface).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "`o`'s type is its object surface"
+        );
+        let apparent = SemanticQueryKey::ApparentType {
+            base: *surface,
+            context: dispatch.apparent_type_context_scoped(
+                CONTEXTUAL_FILE,
+                verter_type_engine::semantic_query::ApparentDemandScope::Anchored,
+            ),
+        };
+        let list = SemanticQueryKey::SignaturesOfType {
+            subject: *surface,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
+            context: verter_type_engine::semantic_query::SemanticContextId::production(),
+        };
+        (apparent, list)
+    }
+
+    /// The apparent type of a callable object surface whose call-signature
+    /// list another task is producing returns `Pending` at the polled entry
+    /// instead of waiting that producer out; its `Send` task stays pending
+    /// on another thread while the producer holds. Once released it resumes
+    /// at its anchor walk — the list read once, then the strict-interface
+    /// lists, the global lookups and the interface's instantiation, each
+    /// once — and reads exactly what the
+    /// synchronous entry, which drives the same continuation in place,
+    /// reads: answer, fact status, diagnostics and receipt, logical work
+    /// included. Released while pending instead, it leaves nothing open and
+    /// the dispatcher answers it afterwards as the synchronous entry does;
+    /// warm, it runs no stage.
+    #[test]
+    fn an_apparent_type_whose_anchor_list_is_held_yields_and_reads_what_the_synchronous_entry_reads(
+    ) {
+        let synchronous = {
+            let host = apparent_callee_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (apparent, _) = apparent_type_keys(&dispatch);
+            let before = continuation_stages(&host);
+            let read = dispatch.execute_via_cold_build_helper(apparent);
+            let after = continuation_stages(&host);
+            assert_eq!(
+                (after.0 - before.0, after.1 - before.1),
+                (1, 6),
+                "the apparent type begins once, then reads its anchor list, its call and construct lists for the strict interface, looks up `CallableFunction` and then `Function`, and reads the interface, each once"
+            );
+            read_summary(&dispatch, &read)
+        };
+        assert!(
+            synchronous.0.contains("marker") && !synchronous.3,
+            "the object surface widens to the global `Function`: {synchronous:?}"
+        );
+
+        let host = apparent_callee_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (apparent, list) = apparent_type_keys(&dispatch);
+        let (tasks, leases): (Vec<_>, Vec<_>) = [
+            hold_producer(&host, graph, list.clone()),
+            hold_producer_with(
+                &host,
+                graph,
+                list.clone(),
+                ReadCapture::expression_for_tests(),
+            ),
+        ]
+        .into_iter()
+        .unzip();
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = continuation_stages(&host);
+        let mut entry = dispatch.poll_query(apparent.clone());
+        let (first, frames, elsewhere) = while_held(leases, || {
+            let first = entry.poll(&waker).is_pending();
+            let task = entry.task();
+            let frames = task.as_ref().map(|task| task.live_frames_for_tests());
+            let elsewhere = task.map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, frames, elsewhere)
+        });
+        assert!(
+            first,
+            "the apparent type yields while its anchor list is held"
+        );
+        assert_eq!(frames, Some(1), "the apparent type's own frame waits");
+        assert_eq!(
+            elsewhere,
+            Some(true),
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken apparent type reads its list itself"),
+        };
+        drop(entry);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (1, 6),
+            "no stage runs again: every list, lookup and the interface are each read once"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+
+        let mut warm = dispatch.poll_query(apparent.clone());
+        let Poll::Ready(warm_read) = warm.poll(&waker) else {
+            panic!("a warm apparent type answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(apparent);
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+        assert_eq!(
+            continuation_stages(&host),
+            after,
+            "a warm apparent type runs no stage"
+        );
+        drop(tasks);
+
+        let host = apparent_callee_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (apparent, list) = apparent_type_keys(&dispatch);
+        let (other, lease) = hold_producer(&host, graph, list);
+        let mut entry = dispatch.poll_query(apparent.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(&waker).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(
+            pending,
+            "the apparent type yields while its anchor list is held"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(apparent);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+    }
+
     /// `defineProps` over two type arguments, owned by the chain's file, and
     /// the payload operation its value is read from: the intersection of its
     /// arguments.

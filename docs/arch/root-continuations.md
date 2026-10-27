@@ -1072,7 +1072,17 @@ emits/slots/model projection), ordered intersection reductions
 explicit type arguments (`ResolveOverloadSet`: the callee's
 `SignaturesOfType` list, then the `ReadSignatureResult` each composite
 candidate's node form applies, one at a time; a list a kernel-epoch
-replacement retired is read once more) are written this way.
+replacement retired is read once more) and apparent types (`ApparentType`:
+the anchor walk's signature lists of an object surface, the base's call and
+construct lists choosing a `strictBindCallApply` interface, the global
+interface lookup with its `Function` fallback, then the interface's
+`Instantiate`) are written this way. The shared signature-list read
+(`SignatureListRead`) is one sub-continuation both overload sets and
+apparent types step, in resolution or declaration order.
+- **Global lookups.** A stage names a global declaration lookup as
+  `FamilyStep::Global`; both drivers make it in place
+  (`first_global_declaration`), so the library and program-contributor
+  files it reads still load synchronously on the polling thread.
 
 - **One implementation, two drivers.** The synchronous producer (the cold
   build every synchronous entry runs) drives the continuation in place,
@@ -1326,10 +1336,10 @@ Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
 
 Family continuations (above) cover macro payloads, intersection
-reductions and overload sets without explicit type arguments. Every other
+reductions, overload sets without explicit type arguments and apparent
+types (whose global interface lookup is still made in place). Every other
 family a frame or cold build reaches still builds in one synchronous step:
-path projection, mapped types, `keyof`, template literals, apparent types,
-overload sets with explicit type arguments (each candidate instantiates
+path projection, mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
 through the substitution engine, whose template-literal fold reads in
 place), class surfaces, signature discovery,
 object-spread projection, locator lowering, relations, flow returns and the

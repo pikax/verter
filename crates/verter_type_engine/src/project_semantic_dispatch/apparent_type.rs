@@ -58,12 +58,12 @@ use super::ProjectSemanticDispatch;
 /// model carries no `strictBindCallApply` input — `type_env_hash` composes a
 /// fixed non-strict type env — so the apparent callable surface is
 /// `Function`.
-const CALLABLE_APPARENT_INTERFACE: &str = "Function";
+pub(super) const CALLABLE_APPARENT_INTERFACE: &str = "Function";
 /// A callable's apparent interface under `strictBindCallApply`.
-const CALLABLE_STRICT_INTERFACE: &str = "CallableFunction";
+pub(super) const CALLABLE_STRICT_INTERFACE: &str = "CallableFunction";
 /// A constructor-only callable's apparent interface under
 /// `strictBindCallApply`.
-const NEWABLE_STRICT_INTERFACE: &str = "NewableFunction";
+pub(super) const NEWABLE_STRICT_INTERFACE: &str = "NewableFunction";
 
 /// The producer's base classification: how (and whether) a callable node
 /// anchors the ambient lookup.
@@ -593,100 +593,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         .with_observed_self_roots(observed_self_roots)
     }
 
-    /// Build the `ApparentType` value for `base`.
+    /// Build the `ApparentType` value for `base`: a family continuation
+    /// whose reads — the anchor walk's and the strict-interface choice's
+    /// signature lists, the global lookup and the interface's instantiation
+    /// — are its stages' transitions, driven here in place.
+    ///
+    /// The classification authority is the NODE; the key's demand-scope
+    /// witness is consulted only for a rootless base. A rootless value is
+    /// transaction-local: `cache_suppress` keeps it (and every enclosing
+    /// projection that read it) out of the shared memo. Under
+    /// `strictBindCallApply` a callable's apparent type is
+    /// `CallableFunction` (`NewableFunction` for a constructor-only one)
+    /// when the library declares it, else `Function` (the checker's
+    /// `globalCallableFunctionType` / `globalNewableFunctionType`).
     pub(super) fn build_apparent_type(
         &self,
         base: SemanticNodeId,
         context: &ApparentTypeContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let fence = self.project_generation_signature();
-        let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            (
-                QueryResult::Error(QueryError::Miss),
-                self.project_generation_signature(),
-            )
-                .into()
-        };
-        // The classification authority is the NODE; the key's demand-scope
-        // witness is consulted only for a rootless base. A rootless value
-        // is transaction-local: `cache_suppress` keeps it (and every
-        // enclosing projection that read it) out of the shared memo.
-        let (canonical, rootless): (Arc<str>, bool) = match self.callable_anchor(base) {
-            CallableAnchor::NotCallable | CallableAnchor::Undecided => return miss(),
-            CallableAnchor::Authored(canonical) => (std::sync::Arc::<str>::from(canonical), false),
-            CallableAnchor::Rootless => match &context.demand_scope {
-                ApparentDemandScope::Rootless { canonical } => {
-                    (std::sync::Arc::<str>::from(canonical.as_str()), true)
-                }
-                // No demand-scope witness — no project to scope the ambient
-                // lookup by. Fail closed.
-                ApparentDemandScope::Anchored => return miss(),
-            },
-        };
-        // The global the project declares, through the one global lookup:
-        // the consumer depends on the library it reads (a re-registration
-        // invalidates it through the standard dependency-fact validators)
-        // and, when the library declares none, on the program's global
-        // contributors. For a rootless base the recorded consumer is the
-        // demand canonical — the demand-project read.
-        // Under `strictBindCallApply` a callable's apparent type is
-        // `CallableFunction` (`NewableFunction` for a constructor-only one)
-        // when the library declares it, else `Function` (the checker's
-        // `globalCallableFunctionType` / `globalNewableFunctionType`).
-        let strict_bind_call_apply = self
-            .ctx
-            .semantic_compiler_options_for(canonical.as_ref())
-            .strict_bind_call_apply;
-        let strict_interface = if strict_bind_call_apply {
-            match self.shared_signature_buckets(base) {
-                Ok((calls, _)) if !calls.is_empty() => Some(CALLABLE_STRICT_INTERFACE),
-                Ok((_, constructs)) if !constructs.is_empty() => Some(NEWABLE_STRICT_INTERFACE),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let Some((name, declaration)) = strict_interface
-            .and_then(|name| {
-                self.first_global_declaration(canonical.as_ref(), name)
-                    .map(|declaration| (name, declaration))
-            })
-            .or_else(|| {
-                self.first_global_declaration(canonical.as_ref(), CALLABLE_APPARENT_INTERFACE)
-                    .map(|declaration| (CALLABLE_APPARENT_INTERFACE, declaration))
-            })
-        else {
-            return miss();
-        };
-
-        let slot = self.type_slot_for(
-            declaration.canonical_id.clone(),
-            declaration.owner,
-            Arc::from(name),
-        );
-        let surface = self.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(Vec::new().into_boxed_slice()),
-                self.instantiate_context_for(
-                    declaration.canonical_id.as_ref(),
-                    ProjectionReductionContext::published(ProjectionMode::Expanded),
-                ),
-            ),
-        ));
-        match surface {
-            QueryResult::Value(SemanticQueryOutput { value, .. }) => {
-                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                    (QueryResult::Value(value), fence).into();
-                // A rootless apparent value never enters the shared memo;
-                // the value still flows to the caller, and the suppress
-                // taint folds through every enclosing member/path/call
-                // query at the universal read boundary.
-                output.cache_suppress |= rootless;
-                output
-            }
-            QueryResult::Recursive(_) | QueryResult::Error(_) => miss(),
-        }
+        self.drive_family_in_place(self.continuation_stage().begin_apparent_type(base, context))
     }
 
     construction_ordinal_seam! {

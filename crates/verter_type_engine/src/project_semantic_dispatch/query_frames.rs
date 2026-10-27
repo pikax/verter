@@ -1918,7 +1918,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // continuation, its reads made where the obligation stands.
             key @ (SemanticQueryKey::ResolveMacroPayload { .. }
             | SemanticQueryKey::ReduceIntersection { .. }
-            | SemanticQueryKey::ResolveOverloadSet { .. }) => {
+            | SemanticQueryKey::ResolveOverloadSet { .. }
+            | SemanticQueryKey::ApparentType { .. }) => {
                 super::family_continuation::builds_as_continuation(key)
                     && self.reads_as_frame_need(key)
                     && self
@@ -2579,6 +2580,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*family, serve);
+                }
+                FamilyStep::Global(read, family) => {
+                    step = self.resume_family_global(*family, read);
                 }
                 FamilyStep::Done(output) => {
                     return FramePoll::Done(Box::new(self.family_value_output(key, *output)))

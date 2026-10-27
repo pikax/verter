@@ -53,11 +53,27 @@ pub(super) struct ReduceIntersectionBuild {
 }
 
 /// An overload set's resolution between its stages: its callee's signature
-/// list of one kind is read first, then the result each composite candidate's
-/// node form applies, one at a time, everything settled before kept.
+/// list of one kind, read first and then settled one composite candidate at
+/// a time.
 pub(super) struct OverloadSetBuild {
     callee: SemanticNodeId,
     kind: crate::semantic_query::SignatureKind,
+    list: SignatureListRead,
+}
+
+/// One shared signature list being read as a continuation: the subject's
+/// `SignaturesOfType` read, then the result each composite candidate's node
+/// form applies, one at a time, everything settled before kept. The read
+/// the in-place reader makes ([`ProjectSemanticDispatch::shared_signature_nodes`]),
+/// its reads made the stages' transitions.
+///
+/// [`ProjectSemanticDispatch::shared_signature_nodes`]: super::ProjectSemanticDispatch::shared_signature_nodes
+pub(super) struct SignatureListRead {
+    subject: SemanticNodeId,
+    kind: crate::semantic_query::SignatureKind,
+    /// Whether the candidates are pinned in the order call resolution tries
+    /// them rather than in declaration order.
+    resolution: bool,
     /// Whether the list is being read again after a kernel-epoch replacement
     /// retired the first read's handles: a second retirement leaves the list
     /// unsettled.
@@ -68,6 +84,88 @@ pub(super) struct OverloadSetBuild {
         crate::signature_kernel::SignatureSetValue,
         super::signature_discovery::PinnedSignatureList,
     )>,
+}
+
+/// Where a [`SignatureListRead`] stands after its latest read.
+pub(super) enum ListProgress {
+    /// The list reads this query next.
+    Read(SemanticQueryKey),
+    /// Every candidate as its node, in the list's order.
+    Nodes(Vec<SemanticNodeId>),
+    /// The list did not settle: never a proven-empty one.
+    Unsettled,
+}
+
+impl SignatureListRead {
+    /// A read of `subject`'s signature list of `kind`, and the query it
+    /// reads first.
+    pub(super) fn begin(
+        subject: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+        resolution: bool,
+    ) -> (Self, SemanticQueryKey) {
+        let list = Self {
+            subject,
+            kind,
+            resolution,
+            reread: false,
+            list: None,
+        };
+        let read = list.list_key();
+        (list, read)
+    }
+
+    /// The subject's `SignaturesOfType` read.
+    fn list_key(&self) -> SemanticQueryKey {
+        SemanticQueryKey::SignaturesOfType {
+            subject: self.subject,
+            kind: self.kind,
+            context: crate::semantic_query::SemanticContextId::production(),
+        }
+    }
+}
+
+/// A callable's apparent type between its stages: the base, the fence its
+/// first stage pinned, and where the widening stands.
+pub(super) struct ApparentTypeBuild {
+    base: SemanticNodeId,
+    demand_scope: crate::semantic_query::ApparentDemandScope,
+    fence: crate::semantic_query::DepSignature,
+    stage: ApparentStage,
+}
+
+/// The step of an apparent-type widening a read resumes.
+enum ApparentStage {
+    /// Classifying the base's anchor: reading the signature list of `kind`
+    /// of the object surface `node` the alias walk reached.
+    Anchor {
+        visited: rustc_hash::FxHashSet<SemanticNodeId>,
+        kind: crate::semantic_query::SignatureKind,
+        list: SignatureListRead,
+    },
+    /// Under `strictBindCallApply`, reading the base's call signatures, then
+    /// its construct signatures, to choose the strict interface.
+    Buckets {
+        scope: ApparentScope,
+        calls: Option<Vec<SemanticNodeId>>,
+        list: SignatureListRead,
+    },
+    /// Looking up the global interface `name`; `fallback` when the
+    /// callable `Function` interface is looked up after it finds none.
+    Global {
+        scope: ApparentScope,
+        name: &'static str,
+        fallback: bool,
+    },
+    /// Reading the interface's instantiation.
+    Surface { rootless: bool },
+}
+
+/// The canonical an apparent lookup is scoped by, and whether it is a
+/// rootless callable's demand canonical.
+struct ApparentScope {
+    canonical: Arc<str>,
+    rootless: bool,
 }
 
 /// What a macro payload's output is rooted on: the owning file at the
@@ -549,29 +647,20 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         kind: crate::semantic_query::SignatureKind,
     ) -> FamilyStep {
         self.graph().record_continuation_begun();
-        Self::read_overload_list(OverloadSetBuild {
-            callee,
-            kind,
-            reread: false,
-            list: None,
-        })
-    }
-
-    /// The read of `build`'s callee signature list.
-    fn read_overload_list(build: OverloadSetBuild) -> FamilyStep {
+        let (list, read) = SignatureListRead::begin(callee, kind, true);
         FamilyStep::Need(
-            SemanticQueryKey::SignaturesOfType {
-                subject: build.callee,
-                kind: build.kind,
-                context: crate::semantic_query::SemanticContextId::production(),
-            },
-            Box::new(FamilyBuild::OverloadSet(build)),
+            read,
+            Box::new(FamilyBuild::OverloadSet(OverloadSetBuild {
+                callee,
+                kind,
+                list,
+            })),
         )
     }
 
     /// Resume an overload set's resolution with the read it waited on: its
     /// callee's signature list, or the result the composite candidate it
-    /// prepared applies.
+    /// prepared applies. Once every candidate is a node the set is built.
     #[inline(never)]
     pub(super) fn resume_resolve_overload_set(
         &self,
@@ -580,74 +669,385 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             QueryResult<crate::semantic_query::SemanticQueryValue>,
         >,
     ) -> FamilyStep {
+        match self.advance_signature_list(&mut build.list, read) {
+            ListProgress::Read(key) => {
+                FamilyStep::Need(key, Box::new(FamilyBuild::OverloadSet(build)))
+            }
+            ListProgress::Nodes(nodes) => FamilyStep::Done(Box::new(self.overload_set_output(
+                build.callee,
+                build.kind,
+                nodes,
+            ))),
+            ListProgress::Unsettled => FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+        }
+    }
+
+    /// Carry a signature list on with the read it waited on: its
+    /// `SignaturesOfType` read, or the result its prepared composite
+    /// candidate applies. The next composite's result is read next, and once
+    /// every candidate is a node the list is done. A list whose handles a
+    /// kernel-epoch replacement retired is read once more, in the current
+    /// epoch; any other failure, or a second retirement, leaves the list
+    /// unsettled.
+    fn advance_signature_list(
+        &self,
+        list: &mut SignatureListRead,
+        read: crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> ListProgress {
         use crate::semantic_query::SemanticQueryValue;
-        let settled = match build.list.as_mut() {
+        let settled = match list.list.as_mut() {
             None => match read.value {
                 QueryResult::Value(SemanticQueryValue::SignatureSet(value))
                     if read.fact_status.is_complete() =>
                 {
-                    self.pin_signature_list(build.kind, &value)
-                        .map(|list| build.list = Some((value, list)))
+                    self.pin_signature_list(list.kind, &value, list.resolution)
+                        .map(|pinned| list.list = Some((value, pinned)))
                 }
-                // An unsettled list is never a proven-empty one.
-                _ => return FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+                _ => return ListProgress::Unsettled,
             },
-            Some((_, list)) => match read.value {
+            Some((_, pinned)) => match read.value {
                 QueryResult::Value(SemanticQueryValue::SignatureResult(result)) => {
-                    self.settle_composite_signature(list, result.result)
+                    self.settle_composite_signature(pinned, result.result)
                 }
-                _ => return FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+                _ => return ListProgress::Unsettled,
             },
         };
-        match settled {
-            Ok(()) => self.advance_resolve_overload_set(build),
-            Err(failure) => self.overload_set_read_failed(build, failure),
-        }
-    }
-
-    /// Settle the overload set's candidates from the next composite on: the
-    /// first composite's result is read next, and once every candidate is a
-    /// node the set is built.
-    fn advance_resolve_overload_set(&self, mut build: OverloadSetBuild) -> FamilyStep {
-        let (_, list) = build
-            .list
-            .as_mut()
-            .expect("an overload set settles its candidates once its list is read");
-        match self.prepare_next_composite(list) {
-            Ok(Some(key)) => FamilyStep::Need(
-                SemanticQueryKey::ReadSignatureResult(key),
-                Box::new(FamilyBuild::OverloadSet(build)),
-            ),
+        let next = settled.and_then(|()| {
+            let (_, pinned) = list
+                .list
+                .as_mut()
+                .expect("a list settles its candidates once it is read");
+            self.prepare_next_composite(pinned)
+        });
+        match next {
+            Ok(Some(key)) => ListProgress::Read(SemanticQueryKey::ReadSignatureResult(key)),
             Ok(None) => {
-                let (_, list) = build.list.take().expect("the list was just read");
-                FamilyStep::Done(Box::new(self.overload_set_output(
-                    build.callee,
-                    build.kind,
-                    list.into_nodes(),
-                )))
+                let (_, pinned) = list.list.take().expect("the list was read");
+                ListProgress::Nodes(pinned.into_nodes())
             }
-            Err(failure) => self.overload_set_read_failed(build, failure),
+            Err(super::signature_discovery::SignatureSetReadFailure::Retired) if !list.reread => {
+                list.reread = true;
+                list.list = None;
+                ListProgress::Read(list.list_key())
+            }
+            Err(_) => ListProgress::Unsettled,
         }
     }
 
-    /// A list whose handles a kernel-epoch replacement retired is read once
-    /// more, in the current epoch; any other failure, or a second
-    /// retirement, leaves the set unsettled.
-    fn overload_set_read_failed(
+    /// The first stage of a callable's apparent type: the walk from `base`
+    /// through alias hops to the callable that anchors the ambient lookup.
+    /// An object surface's first call signature — else its first construct
+    /// signature — anchors it, read from the shared signature list
+    /// ([`Self::resume_apparent_type`]).
+    #[inline(never)]
+    pub(super) fn begin_apparent_type(
         &self,
-        build: OverloadSetBuild,
-        failure: super::signature_discovery::SignatureSetReadFailure,
+        base: SemanticNodeId,
+        context: &crate::semantic_query::ApparentTypeContext,
     ) -> FamilyStep {
-        match failure {
-            super::signature_discovery::SignatureSetReadFailure::Retired if !build.reread => {
-                Self::read_overload_list(OverloadSetBuild {
-                    reread: true,
-                    list: None,
-                    ..build
-                })
-            }
-            _ => FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
+        self.graph().record_continuation_begun();
+        let build = ApparentTypeBuild {
+            base,
+            demand_scope: context.demand_scope.clone(),
+            fence: self.project_generation_signature(),
+            stage: ApparentStage::Surface { rootless: false },
+        };
+        self.walk_apparent_anchor(build, base, rustc_hash::FxHashSet::default())
+    }
+
+    /// Walk from `node` to the callable anchoring the apparent lookup: an
+    /// authored signature or deferred callable anchors it in its declaring
+    /// file, a signature without an authored occurrence is rootless, and an
+    /// object surface's signature list is read next. Anything else — or a
+    /// walk that revisits a node — is not callable.
+    fn walk_apparent_anchor(
+        &self,
+        mut build: ApparentTypeBuild,
+        mut node: SemanticNodeId,
+        mut visited: rustc_hash::FxHashSet<SemanticNodeId>,
+    ) -> FamilyStep {
+        use crate::semantic_query::SemanticNodeData;
+        enum Hop {
+            Next(SemanticNodeId),
+            Authored(Arc<str>),
+            Rootless,
+            Object,
+            NotCallable,
         }
+        let graph = self.graph();
+        loop {
+            if !visited.insert(node) {
+                return FamilyStep::Done(Box::new(self.apparent_miss()));
+            }
+            let hop = match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Alias(target)) => Hop::Next(*target),
+                Some(SemanticNodeData::Signature { occurrence, .. }) => match occurrence {
+                    Some(occurrence) => {
+                        Hop::Authored(Arc::from(occurrence.function.anchor.canonical_id.as_ref()))
+                    }
+                    None => Hop::Rootless,
+                },
+                Some(SemanticNodeData::DeferredCallable(callable)) => {
+                    Hop::Authored(Arc::from(callable.declaring_canonical()))
+                }
+                Some(SemanticNodeData::Object(_)) => Hop::Object,
+                _ => Hop::NotCallable,
+            };
+            match hop {
+                Hop::Next(target) => node = target,
+                Hop::Authored(canonical) => {
+                    return self.apparent_scoped(
+                        build,
+                        ApparentScope {
+                            canonical,
+                            rootless: false,
+                        },
+                    )
+                }
+                Hop::Rootless => {
+                    let crate::semantic_query::ApparentDemandScope::Rootless { canonical } =
+                        &build.demand_scope
+                    else {
+                        // No demand-scope witness: no project to scope the
+                        // ambient lookup by. Fail closed.
+                        return FamilyStep::Done(Box::new(self.apparent_miss()));
+                    };
+                    let canonical = Arc::from(canonical.as_str());
+                    return self.apparent_scoped(
+                        build,
+                        ApparentScope {
+                            canonical,
+                            rootless: true,
+                        },
+                    );
+                }
+                Hop::Object => {
+                    let kind = crate::semantic_query::SignatureKind::Call;
+                    let (list, read) = SignatureListRead::begin(node, kind, false);
+                    build.stage = ApparentStage::Anchor {
+                        visited,
+                        kind,
+                        list,
+                    };
+                    return FamilyStep::Need(read, Box::new(FamilyBuild::ApparentType(build)));
+                }
+                Hop::NotCallable => return FamilyStep::Done(Box::new(self.apparent_miss())),
+            }
+        }
+    }
+
+    /// The apparent lookup once its scope is known: under
+    /// `strictBindCallApply` the base's call signatures are read next, to
+    /// choose between `CallableFunction` and `NewableFunction`; otherwise
+    /// the callable `Function` interface is looked up.
+    fn apparent_scoped(&self, mut build: ApparentTypeBuild, scope: ApparentScope) -> FamilyStep {
+        if self.strict_bind_call_apply(scope.canonical.as_ref()) {
+            let (list, read) = SignatureListRead::begin(
+                build.base,
+                crate::semantic_query::SignatureKind::Call,
+                false,
+            );
+            build.stage = ApparentStage::Buckets {
+                scope,
+                calls: None,
+                list,
+            };
+            return FamilyStep::Need(read, Box::new(FamilyBuild::ApparentType(build)));
+        }
+        Self::look_up_apparent_global(
+            build,
+            scope,
+            super::apparent_type::CALLABLE_APPARENT_INTERFACE,
+            false,
+        )
+    }
+
+    /// Look the global interface `name` up next in `scope`'s project.
+    fn look_up_apparent_global(
+        mut build: ApparentTypeBuild,
+        scope: ApparentScope,
+        name: &'static str,
+        fallback: bool,
+    ) -> FamilyStep {
+        let demand = Arc::clone(&scope.canonical);
+        build.stage = ApparentStage::Global {
+            scope,
+            name,
+            fallback,
+        };
+        FamilyStep::Global(
+            super::family_continuation::GlobalRead { demand, name },
+            Box::new(FamilyBuild::ApparentType(build)),
+        )
+    }
+
+    /// Resume a callable's apparent type with the read it waited on: a
+    /// signature list of its anchor walk or of its strict-interface choice,
+    /// or the instantiation of the interface it widens to.
+    #[inline(never)]
+    pub(super) fn resume_apparent_type(
+        &self,
+        mut build: ApparentTypeBuild,
+        read: crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> FamilyStep {
+        match std::mem::replace(&mut build.stage, ApparentStage::Surface { rootless: false }) {
+            ApparentStage::Anchor {
+                visited,
+                kind,
+                mut list,
+            } => match self.advance_signature_list(&mut list, read) {
+                ListProgress::Read(key) => {
+                    build.stage = ApparentStage::Anchor {
+                        visited,
+                        kind,
+                        list,
+                    };
+                    FamilyStep::Need(key, Box::new(FamilyBuild::ApparentType(build)))
+                }
+                // An unsettled list leaves the anchor undecided.
+                ListProgress::Unsettled => FamilyStep::Done(Box::new(self.apparent_miss())),
+                ListProgress::Nodes(nodes) => match nodes.first() {
+                    Some(first) => self.walk_apparent_anchor(build, *first, visited),
+                    None if kind == crate::semantic_query::SignatureKind::Call => {
+                        let kind = crate::semantic_query::SignatureKind::Construct;
+                        let (list, read) = SignatureListRead::begin(list.subject, kind, false);
+                        build.stage = ApparentStage::Anchor {
+                            visited,
+                            kind,
+                            list,
+                        };
+                        FamilyStep::Need(read, Box::new(FamilyBuild::ApparentType(build)))
+                    }
+                    None => FamilyStep::Done(Box::new(self.apparent_miss())),
+                },
+            },
+            ApparentStage::Buckets {
+                scope,
+                calls,
+                mut list,
+            } => match (self.advance_signature_list(&mut list, read), calls) {
+                (ListProgress::Read(key), calls) => {
+                    build.stage = ApparentStage::Buckets { scope, calls, list };
+                    FamilyStep::Need(key, Box::new(FamilyBuild::ApparentType(build)))
+                }
+                // An unsettled bucket chooses no strict interface.
+                (ListProgress::Unsettled, _) => Self::look_up_apparent_global(
+                    build,
+                    scope,
+                    super::apparent_type::CALLABLE_APPARENT_INTERFACE,
+                    false,
+                ),
+                (ListProgress::Nodes(calls), None) => {
+                    let (list, read) = SignatureListRead::begin(
+                        build.base,
+                        crate::semantic_query::SignatureKind::Construct,
+                        false,
+                    );
+                    build.stage = ApparentStage::Buckets {
+                        scope,
+                        calls: Some(calls),
+                        list,
+                    };
+                    FamilyStep::Need(read, Box::new(FamilyBuild::ApparentType(build)))
+                }
+                (ListProgress::Nodes(constructs), Some(calls)) => {
+                    if !calls.is_empty() {
+                        Self::look_up_apparent_global(
+                            build,
+                            scope,
+                            super::apparent_type::CALLABLE_STRICT_INTERFACE,
+                            true,
+                        )
+                    } else if !constructs.is_empty() {
+                        Self::look_up_apparent_global(
+                            build,
+                            scope,
+                            super::apparent_type::NEWABLE_STRICT_INTERFACE,
+                            true,
+                        )
+                    } else {
+                        Self::look_up_apparent_global(
+                            build,
+                            scope,
+                            super::apparent_type::CALLABLE_APPARENT_INTERFACE,
+                            false,
+                        )
+                    }
+                }
+            },
+            ApparentStage::Surface { rootless } => {
+                match super::narrow_value_cache_read(read).value {
+                    QueryResult::Value(surface) => {
+                        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                            (QueryResult::Value(surface), build.fence).into();
+                        // A rootless apparent value never enters the shared
+                        // memo; the value still flows to the caller, and the
+                        // suppress taint folds through every enclosing
+                        // member/path/call query at the universal read
+                        // boundary.
+                        output.cache_suppress |= rootless;
+                        FamilyStep::Done(Box::new(output))
+                    }
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => {
+                        FamilyStep::Done(Box::new(self.apparent_miss()))
+                    }
+                }
+            }
+            ApparentStage::Global { .. } => {
+                unreachable!("an apparent type's global lookup resumes with its declaration")
+            }
+        }
+    }
+
+    /// Resume a callable's apparent type with the global declaration its
+    /// lookup found: the declaration's instantiation is read next. A strict
+    /// interface the project does not declare falls back to `Function`; a
+    /// project declaring neither gives no apparent surface.
+    #[inline(never)]
+    pub(super) fn resume_apparent_global(
+        &self,
+        mut build: ApparentTypeBuild,
+        found: Option<verter_session_query::type_solver::host::ResolvedRootIdentity>,
+    ) -> FamilyStep {
+        let ApparentStage::Global {
+            scope,
+            name,
+            fallback,
+        } = std::mem::replace(&mut build.stage, ApparentStage::Surface { rootless: false })
+        else {
+            unreachable!("an apparent type resumes its global lookup at that lookup")
+        };
+        match found {
+            Some(declaration) => {
+                build.stage = ApparentStage::Surface {
+                    rootless: scope.rootless,
+                };
+                FamilyStep::Need(
+                    self.apparent_surface_key(&declaration, name),
+                    Box::new(FamilyBuild::ApparentType(build)),
+                )
+            }
+            None if fallback => Self::look_up_apparent_global(
+                build,
+                scope,
+                super::apparent_type::CALLABLE_APPARENT_INTERFACE,
+                false,
+            ),
+            None => FamilyStep::Done(Box::new(self.apparent_miss())),
+        }
+    }
+
+    /// The miss an apparent type without a surface answers.
+    fn apparent_miss(&self) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        (
+            QueryResult::Error(QueryError::Miss),
+            self.project_generation_signature(),
+        )
+            .into()
     }
 
     /// The miss an unsettled candidate list answers: never admitted, so the

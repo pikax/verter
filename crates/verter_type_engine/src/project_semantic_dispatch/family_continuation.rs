@@ -35,7 +35,9 @@ use crate::semantic_query::{
     CacheRead, QueryResult, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
 };
 
-use super::continuation_stages::{MacroPayloadBuild, OverloadSetBuild, ReduceIntersectionBuild};
+use super::continuation_stages::{
+    ApparentTypeBuild, MacroPayloadBuild, OverloadSetBuild, ReduceIntersectionBuild,
+};
 use super::ProjectSemanticDispatch;
 
 /// The capability a family continuation's stage runs with: everything a
@@ -79,6 +81,45 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         self.dispatch.build_normalize_composite(members, composite)
     }
 
+    /// The fence over the current project generation.
+    pub(super) fn project_generation_signature(&self) -> crate::semantic_query::DepSignature {
+        self.dispatch.project_generation_signature()
+    }
+
+    /// Whether `canonical`'s project checks under `strictBindCallApply`.
+    pub(super) fn strict_bind_call_apply(&self, canonical: &str) -> bool {
+        self.dispatch
+            .ctx
+            .semantic_compiler_options_for(canonical)
+            .strict_bind_call_apply
+    }
+
+    /// The instantiation of the global interface `name` that `declaration`
+    /// declares, as an apparent surface reads it.
+    pub(super) fn apparent_surface_key(
+        &self,
+        declaration: &verter_session_query::type_solver::host::ResolvedRootIdentity,
+        name: &'static str,
+    ) -> SemanticQueryKey {
+        let slot = self.dispatch.type_slot_for(
+            declaration.canonical_id.clone(),
+            declaration.owner,
+            Arc::from(name),
+        );
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            slot,
+            Arc::from(Vec::new().into_boxed_slice()),
+            self.dispatch.instantiate_context_for(
+                declaration.canonical_id.as_ref(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            ),
+        ));
+        self.dispatch.record_dispatch_intent_counters(&key);
+        key
+    }
+
     /// The project generation a fence pins.
     pub(super) fn project_generation(&self) -> u64 {
         self.dispatch.snapshot.current_project_generation()
@@ -93,16 +134,18 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
     }
 
     /// The candidates of a dispatched signature set, pinned in the order
-    /// call resolution tries them.
+    /// call resolution tries them, or with `resolution` off in declaration
+    /// order.
     pub(super) fn pin_signature_list(
         &self,
         kind: crate::semantic_query::SignatureKind,
         value: &crate::signature_kernel::SignatureSetValue,
+        resolution: bool,
     ) -> Result<
         super::signature_discovery::PinnedSignatureList,
         super::signature_discovery::SignatureSetReadFailure,
     > {
-        self.dispatch.pin_signature_list(kind, value, true)
+        self.dispatch.pin_signature_list(kind, value, resolution)
     }
 
     /// The result read the node form of `list`'s next composite candidate
@@ -149,6 +192,17 @@ pub(super) enum FamilyBuild {
     MacroPayload(MacroPayloadBuild),
     ReduceIntersection(ReduceIntersectionBuild),
     OverloadSet(OverloadSetBuild),
+    ApparentType(ApparentTypeBuild),
+}
+
+/// A global declaration lookup a stage names: the first declaration of the
+/// global type `name` that `demand`'s project reads — its library's, else
+/// its program's contributors'. The lookup reads the library and the
+/// contributing files where the driver stands: both drivers make it in
+/// place.
+pub(super) struct GlobalRead {
+    pub(super) demand: Arc<str>,
+    pub(super) name: &'static str,
 }
 
 /// Where a family build stands after its latest stage.
@@ -160,6 +214,9 @@ pub(super) enum FamilyStep {
     /// The build reads this file's indexed input next, holding everything
     /// it computed.
     Load(Arc<str>, Box<FamilyBuild>),
+    /// The build looks a global declaration up next, holding everything it
+    /// computed.
+    Global(GlobalRead, Box<FamilyBuild>),
 }
 
 /// Whether `key`'s family builds as a continuation
@@ -167,7 +224,8 @@ pub(super) enum FamilyStep {
 pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
     match key {
         SemanticQueryKey::ResolveMacroPayload { .. }
-        | SemanticQueryKey::ReduceIntersection { .. } => true,
+        | SemanticQueryKey::ReduceIntersection { .. }
+        | SemanticQueryKey::ApparentType { .. } => true,
         // Explicit type arguments instantiate each candidate through the
         // substitution engine, which still reads in place.
         SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
@@ -217,6 +275,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.continuation_stage()
                     .begin_resolve_overload_set(*callee, *kind),
             ),
+            SemanticQueryKey::ApparentType { base, context } => Some(
+                self.continuation_stage()
+                    .begin_apparent_type(*base, context),
+            ),
             _ => None,
         }
     }
@@ -240,6 +302,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::OverloadSet(build) => self
                 .continuation_stage()
                 .resume_resolve_overload_set(build, read),
+            FamilyBuild::ApparentType(build) => {
+                self.continuation_stage().resume_apparent_type(build, read)
+            }
         }
     }
 
@@ -260,6 +325,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 unreachable!("an intersection reduction reads no file")
             }
             FamilyBuild::OverloadSet(_) => unreachable!("an overload set reads no file"),
+            FamilyBuild::ApparentType(_) => {
+                unreachable!("an apparent type reads its files through its global lookup")
+            }
+        }
+    }
+
+    /// The next stage of `build`, given the declaration the global lookup
+    /// it named found.
+    #[inline(never)]
+    pub(super) fn resume_family_global(&self, build: FamilyBuild, read: GlobalRead) -> FamilyStep {
+        self.graph().record_continuation_resumed();
+        let found = self.first_global_declaration(read.demand.as_ref(), read.name);
+        match build {
+            FamilyBuild::ApparentType(build) => self
+                .continuation_stage()
+                .resume_apparent_global(build, found),
+            FamilyBuild::MacroPayload(_)
+            | FamilyBuild::ReduceIntersection(_)
+            | FamilyBuild::OverloadSet(_) => {
+                unreachable!("only an apparent type looks a global declaration up")
+            }
         }
     }
 
@@ -277,6 +363,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 FamilyStep::Load(canonical, build) => {
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*build, serve);
+                }
+                FamilyStep::Global(read, build) => {
+                    step = self.resume_family_global(*build, read);
                 }
             }
         }
