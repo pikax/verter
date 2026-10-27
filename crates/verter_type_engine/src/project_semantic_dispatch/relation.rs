@@ -13010,7 +13010,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(_) => vec![key_type],
             None => return RelationResult::Unknown,
         };
-        let mut required_keys: Vec<Arc<str>> = Vec::new();
+        let mut required_keys: Vec<crate::semantic_query::PropertyKey> = Vec::new();
         let mut index_keys: Vec<SemanticNodeId> = Vec::new();
         for key in keys {
             let Some(key) = self.relation_key_domain(key) else {
@@ -13018,10 +13018,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             match graph.node_data(key).as_deref() {
                 Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
-                    required_keys.push(Arc::from(s.as_str()));
+                    required_keys.push(crate::semantic_query::PropertyKey::string_literal(
+                        s.as_str(),
+                    ));
                 }
                 Some(SemanticNodeData::Literal(LiteralValue::Number(n))) => {
-                    required_keys.push(Arc::from(super::build::js_number_to_string(*n).as_str()));
+                    required_keys.push(crate::semantic_query::PropertyKey::from_js_number(*n));
                 }
                 Some(
                     SemanticNodeData::Primitive(
@@ -13037,7 +13039,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
         for key in required_keys {
-            let member = match source_view.project_string_key(key.as_ref()) {
+            // `{ 1: V }` and `{ "1": V }` are one property: the key matches
+            // whichever spelling the source authored.
+            let member = match source_view.project_known_key(&key) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => member,
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
                     return RelationResult::NotAssignable;

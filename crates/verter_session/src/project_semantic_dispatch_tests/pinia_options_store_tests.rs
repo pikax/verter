@@ -757,9 +757,10 @@ fn a_marked_stores_missing_dependency_is_not_the_recovery_refusal() {
 /// the mapped type resolves to: each index key is an index signature only
 /// the members it applies to relate to (`{ count: number }` takes
 /// `Record<symbol, any>`, `{ [k: number]: string }` and an `a${string}`
-/// pattern, none of whose keys it declares), and an alias key domain
+/// pattern, none of whose keys it declares), an alias key domain
 /// (`PropertyKey`) reads as the union it names — Pinia's `StateTree`, the
-/// constraint of a store's `S`. Measured on TypeScript 7.1.0-beta, all four
+/// constraint of a store's `S` — and a literal key is one property whether
+/// either side spells it as a number or a string. Measured on TypeScript 7.1.0-beta, all four
 /// settings.
 #[test]
 fn a_record_over_index_keys_relates_through_its_index_signatures() {
@@ -796,6 +797,10 @@ fn a_record_over_index_keys_relates_through_its_index_signatures() {
         ),
         ("{ 1: number } extends { [k: number]: string } ? 1 : 0", "0"),
         ("{ abc: 1 } extends { [k: `a${string}`]: 2 } ? 1 : 0", "0"),
+        ("{ 1: number } extends Record<1, number> ? 1 : 0", "1"),
+        ("{ 1: number } extends Record<\"1\", number> ? 1 : 0", "1"),
+        ("{ \"1\": number } extends Record<1, number> ? 1 : 0", "1"),
+        ("{ 1: string } extends Record<1, number> ? 1 : 0", "0"),
         ("typeof treed", "{ count: number; }"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));

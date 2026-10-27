@@ -29047,11 +29047,12 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     )));
     let other_payload = simple_object(&graph, &[("v", other_literal)]);
     let other_source = simple_object(&graph, &[("a", other_payload)]);
-    assert_ne!(
+    assert_eq!(
         relate(other_source),
-        true_branch,
+        false_branch,
         "a program-valued K-dependent mapper is not a generic-key Record — \
-         `{{ a: {{ v: 'b' }} }}` must not borrow the free-`K` Record verdict"
+         `{{ a: {{ v: 'b' }} }}` is refused by its per-key value, never the free-`K` \
+         Record verdict"
     );
 }
 
