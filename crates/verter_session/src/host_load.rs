@@ -181,6 +181,10 @@ impl VerterHost {
     ) -> HostLoadHandoff {
         use std::sync::atomic::Ordering::Relaxed;
         self.provenance.ensure_loaded_calls.fetch_add(1, Relaxed);
+        #[cfg(test)]
+        self.test_force
+            .loads_begun
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let project_generation = self.project_type_store.project_generation();
         let canonical = self.normalized_analysis_canonical(canonical).into_owned();
         let (reload, pre_evict_hash, eviction_revision) = loop {
@@ -365,10 +369,6 @@ impl VerterHost {
         {
             return IndexedReadiness::Settled;
         }
-        #[cfg(test)]
-        self.test_force
-            .indexed_loads_begun
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let scope = self.scheduler.enter_execution_scope();
         let load = self.begin_load(
             &canonical,

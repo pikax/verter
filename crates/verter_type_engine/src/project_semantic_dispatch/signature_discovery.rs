@@ -1811,6 +1811,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         value: &crate::signature_kernel::SignatureSetValue,
         resolution: bool,
     ) -> Result<PinnedSignatureList, SignatureSetReadFailure> {
+        #[cfg(any(test, feature = "test-support"))]
+        signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Pinning);
         let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().store().signature_store();
         let (candidates, order): (Vec<SignatureCandidate>, Vec<usize>) = {
@@ -2783,8 +2785,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 }
 
-/// The two windows of a `SignaturesOfType` build a kernel-epoch replacement
-/// can land in.
+/// The windows of a `SignaturesOfType` list's life a kernel-epoch
+/// replacement can land in: two inside its build, and one after a consumer
+/// was handed the completed list.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignaturesOfTypeBuildPoint {
@@ -2794,6 +2797,9 @@ pub enum SignaturesOfTypeBuildPoint {
     /// The build has settled its value and not yet handed it to the memo: a
     /// replacement here makes the build publish a retired-epoch value.
     Settled,
+    /// A consumer holds a completed list and is about to pin it: a
+    /// replacement here retires a list that was current when it completed.
+    Pinning,
 }
 
 #[cfg(any(test, feature = "test-support"))]

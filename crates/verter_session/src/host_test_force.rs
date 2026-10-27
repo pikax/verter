@@ -60,10 +60,9 @@ pub(crate) struct TestForceKnobs {
     /// The scheduler source-read hold this host's loader passes through.
     #[cfg(test)]
     pub(crate) source_load_gate: std::sync::Arc<SourceLoadGate>,
-    /// Number of owned file loads the semantic runtime began to wait on
-    /// instead of loading in place.
+    /// Number of file loads this host began, owned or in place.
     #[cfg(test)]
-    pub(crate) indexed_loads_begun: std::sync::atomic::AtomicUsize,
+    pub(crate) loads_begun: std::sync::atomic::AtomicUsize,
     /// The engine-owned forcing record, shared with every engine binding and
     /// macro-mirror selector this host attaches.
     pub(crate) engine: std::sync::Arc<verter_type_engine::engine_test_knobs::TestKnobs>,
