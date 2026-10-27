@@ -249,10 +249,10 @@ a continuation or sealing another copy of the proof. Both cold and served
 operands pay their first step to the parent and retain their own cost identity
 and receipt admission. Interned node identity alone cannot validate an evaluated
 `typeof` answer when the declaring source is unchanged and a barrel changes.
-All consumed whole-file facts, including paged augmentation contributors,
+All consumed whole-file facts, every augmentation contributor included,
 join the node roots as strict self roots. A stale read retires only the exact
 candidate it validated; recomputation replaces it under the content-free key.
-Return-only or partial evaluations are not published. Proof pages, signatures,
+Return-only or partial evaluations are not published. Proof receipts, signatures,
 root names and entry storage reserve the shared retention account.
 
 ### Module-resolution keying (split env)
@@ -289,15 +289,14 @@ The direct indexed-serve regression confirms a table hit and the required fact,
 then edits the exported interface and requires the new route fact. Omitting
 the hit's replay must fail the fresh consumer's specific fact assertion.
 
-Canonical fact finalization also returns a sealed order witness. Stepwise
-evaluation and the shared delivering-tracer close keep that witness through
-structural completion, avoiding revalidation of order already established by
-the one canonicalizer. Raw signature absorption still verifies arbitrary
-input and falls back to ordinary canonicalization when it is malformed.
-This certificate says only that facts are ordered: mutation-basis rechecks,
-strict self-root versions, fences, refusal propagation and warm validation
-retain their existing authority. Completed self-root names share the
-corresponding whole-file facts' immutable string allocations.
+Canonical fact finalization returns a `FactSet`, canonical by construction.
+Stepwise evaluation and the shared delivering-tracer close carry that set
+through structural completion and absorb it as one shared run, with no order
+check; a borrowed list of facts is canonicalised by the one sealer. Order is
+all the type proves: mutation-basis rechecks, strict self-root versions,
+fences, refusal propagation and warm validation keep their own authority.
+Completed self-root names share the corresponding whole-file facts'
+immutable string allocations.
 
 A cold deferred completion hands its receipt and completed proof to memo
 admission. The receipt owns the input; the memo separately owns a distinct

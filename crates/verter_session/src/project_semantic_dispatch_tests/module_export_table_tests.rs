@@ -247,7 +247,6 @@ fn large_barrel_chain_retains_every_suffix_proof_and_literal() {
 }
 
 fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize); 4] {
-    use verter_session_query::facts::fact_cache::signature_entries;
     use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
     let owned: Vec<_> = (0..count)
@@ -291,7 +290,7 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
             .module_export_table(&format!("/wb/m{i}.ts"))
             .expect("shared suffix");
         assert_eq!(table.bindings.len(), count - i);
-        proof_entries += signature_entries(&table.facts).count();
+        proof_entries += table.facts.len();
         if i > 0 {
             owned_slots += table.owned_binding_slots;
         }

@@ -323,6 +323,53 @@ mod tests {
     }
 
     #[test]
+    fn repeated_reads_of_one_short_root_set_are_kept_once() {
+        use crate::semantic_query_memo::node_roots::NodeRootScope;
+
+        let harness = GraphFixture::new();
+        let _operation = harness.graph.enter_node_root_scope();
+        // More sets than the owner scans before it indexes its deliveries.
+        let sets: Vec<_> = (0..40)
+            .map(|index| {
+                let node =
+                    harness
+                        .graph
+                        .intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                            "short {index}"
+                        ))));
+                harness.graph.root_nodes([node]).expect("live operand")
+            })
+            .collect();
+        let first = sets[0].operands()[0];
+        let last = sets[sets.len() - 1].operands()[0];
+        for set in &sets {
+            set.retain_for_delivery();
+        }
+        let counted = (
+            harness.graph.arena.owner_count(first),
+            harness.graph.arena.owner_count(last),
+        );
+        for _ in 0..3 {
+            for set in &sets {
+                set.retain_for_delivery();
+            }
+        }
+        assert_eq!(
+            NodeRootScope::retained_deliveries_for_tests(),
+            sets.len(),
+            "repeated reads of one inline set are kept once, not once per read"
+        );
+        assert_eq!(
+            (
+                harness.graph.arena.owner_count(first),
+                harness.graph.arena.owner_count(last),
+            ),
+            counted,
+            "a repeated read releases the counts its clone took"
+        );
+    }
+
+    #[test]
     fn a_dispatcher_lane_keeps_no_delivery_and_its_operation_keeps_each_once() {
         use crate::semantic_query::{QueryResult, SemanticQueryValue};
         use crate::semantic_query_memo::node_roots::{DispatchConstructionLane, NodeRootScope};

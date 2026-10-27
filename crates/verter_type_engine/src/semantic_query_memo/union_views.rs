@@ -101,8 +101,10 @@ impl std::fmt::Debug for UnionViews {
     }
 }
 
-/// The bytes a kept view retains: its members and its entry.
-fn retained_view_bytes(view: &[SemanticNodeId]) -> usize {
+/// The bytes a kept view retains: its members and its entry, whose root
+/// set rides inline. A root set long enough to need a shared block is
+/// charged by that block's own cell, which the view holds.
+pub(super) fn retained_view_bytes(view: &[SemanticNodeId]) -> usize {
     std::mem::size_of_val(view)
         + std::mem::size_of::<SemanticUnionMembersKey>()
         + std::mem::size_of::<(
@@ -118,13 +120,18 @@ impl SemanticGraphStore {
         &self,
         key: &SemanticUnionMembersKey,
     ) -> Option<Arc<[SemanticNodeId]>> {
+        // Under the table's lock the roots are shared without being counted:
+        // counting takes the arena's lock, which is never taken under the
+        // table's ([`Self::keep_union_view`]).
         let (view, roots) = self
             .union_views
             .lock()
             .views
             .get(key)
-            .map(|(view, _, roots)| (Arc::clone(view), roots.clone()))?;
-        roots.capture_in_scope();
+            .map(|(view, _, roots)| (Arc::clone(view), roots.share()))?;
+        // A view whose nodes a release destroyed once the lock was gone is
+        // a miss: the caller rebuilds it.
+        roots.into_set().ok()?.capture_into_scope();
         Some(view)
     }
 
@@ -147,18 +154,26 @@ impl SemanticGraphStore {
         if let Some(kept) = self.union_view(&key) {
             return kept;
         }
-        // Reserve outside the table's lock: the account takes its own.
+        // Acquire arena ownership and reserve before taking the table lock:
+        // the arena and the account take their own, and neither is ever
+        // taken under the table's.
+        let Ok(roots) = self.root_nodes(std::iter::once(key.union()).chain(view.iter().copied()))
+        else {
+            return Arc::clone(view);
+        };
+        // The view holds its root set's shared block, if it has one, charged
+        // by the block's own cell: once, whoever else shares it.
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let unshared = roots.owned_heap_bytes(&mut aliases);
+        let block = aliases.take_handles();
         let charge = match self
             .retention_account()
-            .reserve(ChargeClass::Retained, retained_view_bytes(view))
+            .reserve(ChargeClass::Retained, retained_view_bytes(view) + unshared)
         {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(_) => return Arc::clone(view),
         };
-        // Acquire arena ownership before taking the table lock, matching
-        // charge reservation and avoiding a table-to-arena lock order.
-        let Ok(roots) = self.root_nodes(std::iter::once(key.union()).chain(view.iter().copied()))
-        else {
+        let Ok(charge) = block.retained_with(charge, self.charge_ctx()) else {
             return Arc::clone(view);
         };
         let mut table = self.union_views.lock();

@@ -608,40 +608,30 @@ fn concurrent_publish_and_remove_canonical_never_orphans_content_entry() {
     );
 }
 
-/// A signature wider than one page, sealed into pages none of which a cache
-/// admission has claimed yet.
+/// A signature wider than `WIDE_SIGNATURE_WIDTH`, built by extending another
+/// set, so it is held in shared tree storage no cache admission has claimed
+/// yet.
 fn wide_signature() -> ReadSetSignature {
-    let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
-        .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/wide/{index:05}.ts").into(),
-            hash: [1u8; 16],
-        })
-        .collect();
+    let facts: Vec<FactVersionRef> =
+        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: format!("/wide/{index:05}.ts").into(),
+                hash: [1u8; 16],
+            })
+            .collect();
     ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts[..1].to_vec())
+            .union_with_facts(&facts[1..]),
     )
 }
 
-fn signature_pages(
-    signature: &ReadSetSignature,
-) -> Vec<verter_session_query::facts::receipt::ResultReceipt> {
-    signature
-        .facts
-        .iter()
-        .filter_map(|fact| match fact {
-            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// A published slot owns its wide signature's pages as refusable retained
-/// bytes, drained when the slot goes; an account that refuses that
+/// A published slot owns its wide signature's shared storage as refusable
+/// retained bytes, drained when the slot goes; an account that refuses that
 /// footprint publishes nothing and drops the prior slot.
 #[test]
-fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
+fn session_publish_claims_wide_signature_storage_and_is_refused_for_it() {
     use verter_session_query::retention::{
-        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
     };
     let semantic = [0x12u8; 16];
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
@@ -660,12 +650,13 @@ fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
     let signature = node
         .peek_signature(&state, 42)
         .expect("the slot is published");
-    let pages = signature_pages(&signature);
-    assert!(!pages.is_empty(), "premise: the signature is paged");
-    assert!(pages
-        .iter()
-        .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
-    let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+    let storage = signature.facts.tree_footprint();
+    assert!(
+        storage.nodes > 0,
+        "premise: the signature has shared storage"
+    );
+    assert_eq!(storage.pinned_bytes, 0, "the publication claims every node");
+    let tree_bytes = storage.retained_bytes;
     let slot = state
         .compile_slot_for_node(42)
         .expect("the slot is published");
@@ -673,14 +664,14 @@ fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
     assert!(slot_bytes > 0, "the slot charges its own allocations");
     assert_eq!(
         account.snapshot().retained_bytes,
-        page_bytes + slot_bytes,
-        "the pages, the slot's own allocations and its products are retained"
+        tree_bytes + slot_bytes,
+        "the storage, the slot's own allocations and its products are retained"
     );
-    drop((pages, signature, state));
+    drop((signature, state));
     assert_eq!(
         account.snapshot().retained_bytes,
         0,
-        "dropping the slot drains its pages"
+        "dropping the slot drains its storage"
     );
 
     let tight = SemanticRetentionAccount::new(RetentionLimits {
@@ -717,7 +708,7 @@ fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
 }
 
 #[test]
-fn raw_template_slot_claims_wide_signature_pages() {
+fn raw_template_slot_claims_wide_signature_storage() {
     use crate::types::{DerivedRawState, RawTemplateSlotAdmission};
     use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
     for (limit, admitted, pressure) in [
@@ -735,11 +726,11 @@ fn raw_template_slot_claims_wide_signature_pages() {
             ..RetentionLimits::defaults()
         });
         let signature = wide_signature();
-        let pages = signature_pages(&signature);
-        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+        let held = signature.clone();
+        let tree_bytes = held.facts.tree_footprint().charged_bytes;
         if pressure {
             assert!(
-                page_bytes > account.limits().aggregate_ceiling_bytes,
+                tree_bytes > account.limits().aggregate_ceiling_bytes,
                 "the pressure control can retain an empty slot but not its evidence"
             );
         }
@@ -771,10 +762,15 @@ fn raw_template_slot_claims_wide_signature_pages() {
         } else {
             ChargeClass::Pinned
         };
-        assert!(!pages.is_empty());
-        assert!(pages
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(expected)));
+        let storage = held.facts.tree_footprint();
+        assert!(storage.nodes > 0);
+        assert_eq!(
+            match expected {
+                ChargeClass::Retained => storage.retained_bytes,
+                _ => storage.pinned_bytes,
+            },
+            storage.charged_bytes
+        );
         // The slot retains the template it serves as well as its evidence;
         // a refused slot leaves the template its caller's, uncharged by it.
         let template_charge = template.charge_bytes().unwrap_or(0);
@@ -790,14 +786,14 @@ fn raw_template_slot_claims_wide_signature_pages() {
         assert_eq!(
             account.snapshot().retained_bytes,
             if admitted {
-                page_bytes + template_charge
+                tree_bytes + template_charge
             } else {
                 0
             }
         );
         state.clear_raw_template_analysis();
         assert!(state.raw_template_analysis().is_none());
-        drop((state, pages));
+        drop((state, held));
         assert_eq!(account.snapshot().retained_bytes, 0);
         assert_eq!(
             account.snapshot().pinned_bytes,

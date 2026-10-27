@@ -157,6 +157,16 @@ impl FlowFrameProducts {
         if reaching.is_some_and(ReachingTypeProduct::widening_nullish) {
             e.field_bool(10, true);
         }
+        if reaching.is_some_and(ReachingTypeProduct::reaches_declaration_only) {
+            e.field_bool(11, true);
+        }
+        if let Some(elements) = reaching.and_then(ReachingTypeProduct::evolving_elements) {
+            e.field_bool(12, true);
+            for element in elements {
+                e.field_u64(13, element.node.0);
+                e.field_bool(14, element.widening_nullish);
+            }
+        }
         e.finish()
     }
 

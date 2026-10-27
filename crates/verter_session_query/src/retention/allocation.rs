@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use verter_retention::heap_size::HeapMeter;
 
-use crate::facts::fact_cache::ReadSetSignature;
+use crate::facts::fact_cache::{FactSet, ReadSetSignature};
 use crate::facts::registry::FactKey;
 use crate::facts::version::{FactVersionRef, ProgramAnalysisFactRef, ResolveImportsFactRef};
 
@@ -19,9 +19,28 @@ pub fn fact_signature_bytes(signature: &ReadSetSignature, aliases: &mut AliasSet
     fact_slice_bytes(&signature.facts, aliases)
 }
 
-/// [`fact_signature_bytes`] over a bare fact slice.
+/// [`fact_signature_bytes`] over a bare fact set.
+///
+/// A narrow set is charged inline, as every signature was: its slice block
+/// and every fact's owned heap. A wide set's tree storage carries its own
+/// charge from birth, shared by every set sharing its nodes and claimed by
+/// the first retaining admission
+/// ([`crate::facts::receipt::reserve_retained_with_evidence`]), so the
+/// retaining entry is charged only the set's inline handle here.
 #[must_use]
-pub fn fact_slice_bytes(facts: &Arc<[FactVersionRef]>, aliases: &mut AliasSet) -> usize {
+pub fn fact_slice_bytes(facts: &FactSet, aliases: &mut AliasSet) -> usize {
+    match facts.flat_arc() {
+        Some(flat) => fact_arc_slice_bytes(flat, aliases),
+        None => facts
+            .tree_storage()
+            .filter(|header| aliases.first(header))
+            .map_or(0, |_| FactSet::header_bytes()),
+    }
+}
+
+/// [`fact_slice_bytes`] over a plain shared fact slice.
+#[must_use]
+pub fn fact_arc_slice_bytes(facts: &Arc<[FactVersionRef]>, aliases: &mut AliasSet) -> usize {
     let Some(block) = arc_slice_block_bytes(facts, aliases) else {
         return 0;
     };
@@ -45,7 +64,7 @@ pub fn facts_heap_bytes(facts: &[FactVersionRef], aliases: &mut AliasSet) -> usi
 /// Heap one fact owns beyond its inline slot.
 ///
 /// A [`FactVersionRef::Receipt`] costs nothing here: every receipt — a
-/// result's evidence or a page — carries its own charge from birth, claimed
+/// consumed result's evidence — carries its own charge from birth, claimed
 /// by the first retaining admission
 /// ([`crate::facts::receipt::reserve_retained_with_evidence`]).
 ///
@@ -336,7 +355,15 @@ impl verter_retention::owned::Measured for FactVersionRef {
 impl verter_retention::heap_size::HeapSize for crate::facts::fact_cache::ReadSetSignature {
     /// The fact slice and every fact's own heap, on the tree's raw set.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        self.facts.heap_size(meter)
+        // A tree set's nodes charge themselves; its header is this value's.
+        match self.facts.flat_arc() {
+            Some(flat) => flat.heap_size(meter),
+            None => self
+                .facts
+                .tree_storage()
+                .filter(|header| meter.first(header))
+                .map_or(0, |_| FactSet::header_bytes()),
+        }
     }
 }
 

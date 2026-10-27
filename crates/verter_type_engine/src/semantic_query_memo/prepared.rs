@@ -260,8 +260,8 @@ impl PreparedKeyHandle {
         let Some(identity) = identity else { return };
         visit(&identity._roots);
         match &identity.family {
-            FamilyKey::Relate { key } => visit(key.roots_for_tests()),
-            FamilyKey::ResolveCall { key } => visit(key.roots_for_tests()),
+            FamilyKey::Relate { key } => visit(&key.roots_for_tests()),
+            FamilyKey::ResolveCall { key } => visit(&key.roots_for_tests()),
             _ => {}
         }
     }

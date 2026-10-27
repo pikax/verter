@@ -43,6 +43,16 @@ impl StdioPipeTransport {
     /// callbacks. `cwd` is the path the engine resolves project-relative paths
     /// against (it is also passed as `--cwd`).
     pub fn spawn(exe: &Path, cwd: &Path) -> TsgoApiResult<Self> {
+        Self::spawn_with_stderr(exe, cwd, None)
+    }
+
+    /// [`Self::spawn`], with the child's stderr piped through `held` instead
+    /// of inherited when one is given.
+    pub(crate) fn spawn_with_stderr(
+        exe: &Path,
+        cwd: &Path,
+        held: Option<&std::sync::Arc<crate::process::HeldStderr>>,
+    ) -> TsgoApiResult<Self> {
         let cwd_str = cwd.to_string_lossy();
         let args = build_sync_api_args(&cwd_str, true);
 
@@ -52,13 +62,20 @@ impl StdioPipeTransport {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if held.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .kill_on_drop(true);
         configure_tree_spawn(&mut command);
         let mut child = command.spawn().map_err(|e| {
             TsgoApiError::Spawn(format!("failed to spawn tsgo at {}: {e}", exe.display()))
         })?;
         let tree = TreeKill::arm(child.id().unwrap_or(0));
+        if let (Some(held), Some(stderr)) = (held, child.stderr.take()) {
+            held.drain(stderr);
+        }
 
         let stdin = child
             .stdin

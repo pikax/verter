@@ -89,7 +89,7 @@ impl crate::semantic_query::allocation_footprint::OwnedHeap for SignatureSetValu
 
 impl verter_session_query::retention::owned::Measured for CandidateTable {
     /// The candidate slice, each composite's constituent list and the
-    /// table's root owner.
+    /// table's root attachment.
     fn heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
@@ -103,7 +103,7 @@ impl verter_session_query::retention::owned::Measured for CandidateTable {
             .iter()
             .map(|candidate| candidate.constituents.owned_heap_bytes(aliases))
             .sum::<usize>()
-            + self.roots.0.owned_heap_bytes(aliases)
+            + self.roots.owned_heap_bytes(aliases)
     }
 }
 
@@ -167,7 +167,7 @@ impl SignatureSetValue {
         crate::semantic_query_memo::node_roots::NodeRef<'_>,
         crate::semantic_query::QueryError,
     > {
-        self.nodes.roots.0.node_ref(id)
+        self.nodes.roots.node_ref(id)
     }
 }
 

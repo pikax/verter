@@ -57,7 +57,7 @@ fn cached_fallthrough_substrate_and_consumer_wired() {
 
     let host_manage = read_session_src("host_manage.rs");
     assert!(
-        host_manage.contains("store_view.validates_fact_signature(&cached.fact_versions)"),
+        host_manage.contains("store_view.validates_fact_signature((&cached.fact_versions).into())"),
         "Block 1A: `try_get_cached_fallthrough` (impl FallthroughRequestHost for \
          VerterHost) must dispatch through `StoreView::validates_fact_signature` on \
          the warm-hit path."

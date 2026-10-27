@@ -3,7 +3,7 @@
 
 use verter_session_query::facts::{
     fact_cache::FactVersionRef,
-    fact_read_set::{FactReadSetFinalise, FACT_PAGE_WIDTH},
+    fact_read_set::{FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
 };
 
 #[allow(unused_imports)]
@@ -70,7 +70,7 @@ mod file_source_env_observation_tests {
             }
         };
         assert_eq!(
-            facts.as_ref(),
+            facts.to_vec(),
             &[expected],
             "the observation must land on the active tracer"
         );
@@ -100,7 +100,7 @@ mod file_source_env_observation_tests {
 
 /// The tracer-CACHEABILITY entry ([`install_fact_tracer_cacheability`]) refuses
 /// for a non-cacheable read and never for the NUMBER of facts a compute read: a
-/// wide observation set is paged into a complete signature, so width cannot be
+/// wide observation set is sealed whole into a complete signature, so width cannot be
 /// a refusal reason at any admission boundary.
 mod tracer_cacheability_tests {
     use super::*;
@@ -118,13 +118,13 @@ mod tracer_cacheability_tests {
         }
     }
 
-    /// DISCRIMINATING: a compute that read more facts than one evidence page —
+    /// DISCRIMINATING: a compute that read more facts than `WIDE_SIGNATURE_WIDTH` —
     /// and consumed no non-cacheable read — is CACHEABLE, and its signature
     /// keeps every fact it read.
     #[test]
     fn a_wide_compute_stays_cacheable_and_keeps_every_fact() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let width = FACT_PAGE_WIDTH + 1;
+        let width = WIDE_SIGNATURE_WIDTH + 1;
 
         let (value, finalise) = install_fact_tracer(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),

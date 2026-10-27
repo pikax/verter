@@ -77,8 +77,8 @@ pub enum NonAdmissionReason {
     /// every world and is deliberately never cached as a fact-validated
     /// entry.
     IntrinsicNonCacheable,
-    /// No producer: a fact signature is paged when wide, never refused
-    /// for its width. The variant stays on the audit wire as a schema value
+    /// No producer: a fact signature holds every fact however wide, never
+    /// refused for its width. The variant stays on the audit wire as a schema value
     /// pending a wire-contract retirement.
     SignatureOverflow,
     /// A compaction domain the compute was COMPACTING advanced between
@@ -401,8 +401,8 @@ pub enum StructuredAuditEvent {
         /// Canonical id of the file whose upsert triggered the drain.
         canonical_id: Arc<str>,
     },
-    /// No producer: a fact signature is paged when wide, never refused
-    /// for its width. The event stays on the audit wire as a schema value
+    /// No producer: a fact signature holds every fact however wide, never
+    /// refused for its width. The event stays on the audit wire as a schema value
     /// pending a wire-contract retirement.
     FactSignatureOverflow {
         /// Number of `FactVersionRef` entries the producer

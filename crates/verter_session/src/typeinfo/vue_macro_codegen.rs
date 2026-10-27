@@ -354,13 +354,13 @@ pub(crate) struct VueMacroCodegenOutput {
 /// read, including the transitively reached ones no direct import names.
 #[derive(Debug, Clone)]
 pub(crate) enum MacroFactFootprint {
-    /// The complete observation set (paged when wide), built only from
+    /// The complete observation set (every fact, however wide), built only from
     /// publishable reads.
-    Rooted(Arc<[FactVersionRef]>),
+    Rooted(verter_session_query::facts::fact_set::FactSet),
     /// The complete observation set of a compute that also consumed a read
     /// these facts cannot validate. The facts still bubble into enclosing
     /// scopes; they must never authorize shared-cache admission.
-    RootedNonCacheable(Arc<[FactVersionRef]>),
+    RootedNonCacheable(verter_session_query::facts::fact_set::FactSet),
     /// The producer's aggregate basis moved while its tracer was open.
     /// No fact set can validate that mixed world, so the consumer must
     /// refuse even though the producer did run.
@@ -380,20 +380,25 @@ impl MacroFactFootprint {
             FactReadSetFinalise::NonCacheable(facts) => Self::RootedNonCacheable(facts),
             FactReadSetFinalise::MutationUnstable => Self::MutationUnstable,
         };
-        let canonicals: BTreeSet<String> =
-            verter_session_query::facts::fact_cache::signature_entries(footprint.facts())
-                .filter_map(FactVersionRef::canonical_id)
-                .map(ToOwned::to_owned)
-                .collect();
+        let canonicals: BTreeSet<String> = footprint
+            .facts()
+            .iter()
+            .filter_map(FactVersionRef::canonical_id)
+            .map(ToOwned::to_owned)
+            .collect();
         (canonicals.into_iter().collect(), footprint)
     }
 
     /// The surviving observations. Every factless arm yields an empty slice —
     /// they carry a refusal, never a signature.
-    fn facts(&self) -> &[FactVersionRef] {
+    fn facts(&self) -> verter_session_query::facts::fact_set::FactsRef<'_> {
         match self {
-            Self::Rooted(facts) | Self::RootedNonCacheable(facts) => facts,
-            Self::MutationUnstable | Self::Unobserved => &[],
+            Self::Rooted(facts) | Self::RootedNonCacheable(facts) => {
+                verter_session_query::facts::fact_set::FactsRef::Set(facts)
+            }
+            Self::MutationUnstable | Self::Unobserved => {
+                verter_session_query::facts::fact_set::FactsRef::Slice(&[])
+            }
         }
     }
 

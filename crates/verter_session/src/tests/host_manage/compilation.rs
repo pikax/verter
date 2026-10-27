@@ -1007,8 +1007,18 @@ fn effective_target_vue_only_when_no_script_candidates() {
     );
 }
 
+/// The same refusal over a 40-file consumed result: the gate version of the
+/// 1,025-file test in the nightly scale tier. The consumed result's receipt
+/// carries its own charge at every size, so the admission claims and refuses
+/// its evidence whole either way.
 #[test]
-fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
+fn compile_retention_refusal_over_a_small_receipt_suppresses_companions() {
+    assert_compile_retention_refusal_suppresses_companions(40);
+}
+
+/// A compile consuming a receipt over `files` Vue files is admitted whole or
+/// refused whole for its evidence, with its scheduler and template companions.
+fn assert_compile_retention_refusal_suppresses_companions(files: usize) {
     use verter_session_query::facts::{
         fact_cache::{FactVersionRef, ReadSetSignature},
         fact_read_set::seal_canonical_signature,
@@ -1017,7 +1027,7 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
     use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
     for admitted in [true, false] {
         let mut host = make_host();
-        let facts = (0..1025)
+        let facts = (0..files)
             .map(|index| {
                 let canonical_id = format!("/wide/{index}.vue");
                 upsert_vue(&host, &canonical_id, "<template><div /></template>");
@@ -1028,17 +1038,17 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
             })
             .collect();
         let facts = seal_canonical_signature(facts);
-        let pages: Vec<_> = facts
-            .iter()
-            .filter_map(|fact| match fact {
-                FactVersionRef::Receipt(page) => Some(page.clone()),
-                _ => None,
-            })
-            .collect();
-        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-        assert!(!pages.is_empty());
+        // The wide consumed result's evidence carries its own charge, which
+        // the compile's admission must claim whole.
+        let consumed = ResultReceipt::new(facts.iter().cloned().collect());
+        let evidence_bytes = consumed.retained_charge_bytes();
+        assert!(evidence_bytes > files * std::mem::size_of::<FactVersionRef>());
         let account = SemanticRetentionAccount::new(RetentionLimits {
-            max_entry_bytes: if admitted { usize::MAX } else { page_bytes - 1 },
+            max_entry_bytes: if admitted {
+                usize::MAX
+            } else {
+                evidence_bytes - 1
+            },
             ..RetentionLimits::defaults()
         });
         host.project_type_store = Arc::new(
@@ -1054,8 +1064,8 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
         );
         let profile = CompileProfile::default();
         let profile_hash = crate::hash::compile_profile_hash(&profile);
-        let consumed = ResultReceipt::new(facts.to_vec());
         drop(facts);
+        let held = consumed.clone();
         let facts = Arc::from(vec![FactVersionRef::Receipt(consumed)]);
         let compile = || {
             host.get_virtual_file(VirtualQuery {
@@ -1073,15 +1083,13 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
         } else {
             ChargeClass::Pinned
         };
-        assert!(pages
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(expected)));
+        assert_eq!(held.retained_charge_class(), Some(expected));
         assert_eq!(
             host.compile_cache()
                 .get(canonical)
                 .and_then(|state| state
                     .compile_slot_for_node(profile_hash)
-                    .map(|slot| ReadSetSignature::new(Arc::clone(&slot.fact_dep_signature.facts))))
+                    .map(|slot| ReadSetSignature::new(slot.fact_dep_signature.facts.clone())))
                 .is_some(),
             admitted
         );
@@ -1100,7 +1108,18 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
             let recomputed = compile();
             assert_eq!(recomputed.code, output.code);
         }
-        drop((host, pages));
+        drop((host, held));
         assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
+        assert_compile_retention_refusal_suppresses_companions(1025);
     }
 }

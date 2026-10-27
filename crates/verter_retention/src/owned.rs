@@ -875,6 +875,18 @@ impl<T: Measured> Owned<T> {
             .map(RetentionCharge::class)
     }
 
+    /// The charge's bytes and class, read together in one hold of the
+    /// cell's lock; `None` while no owner has charged it.
+    #[must_use]
+    pub fn charge(&self) -> Option<(usize, ChargeClass)> {
+        self.0
+            .slot
+            .lock()
+            .charge
+            .as_ref()
+            .map(|charge| (charge.bytes(), charge.class()))
+    }
+
     /// Whether two handles share one allocation.
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
@@ -1516,6 +1528,12 @@ impl OwnedStr {
     #[must_use]
     pub fn charge_class(&self) -> Option<ChargeClass> {
         self.0.charge_class()
+    }
+
+    /// Its charge's bytes and class, read together (see [`Owned::charge`]).
+    #[must_use]
+    pub fn charge(&self) -> Option<(usize, ChargeClass)> {
+        self.0.charge()
     }
 
     /// Whether two strings share one allocation.

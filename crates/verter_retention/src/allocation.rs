@@ -24,7 +24,7 @@
 //!   field points at is charged on its own. A value held directly in a
 //!   container slot is charged by the container's slot convention.
 //! * **Self-charged allocations.** An allocation that carries its own
-//!   charge — an evidence page, a cost receipt, a pooled identity string, a
+//!   charge — a fact-tree node, a cost receipt, a pooled identity string, a
 //!   graph node — is never charged again by a holder: holding it costs the
 //!   holder only the handle's inline bytes.
 //! * **Aliases inside one charge.** Within one charge each distinct `Arc`
@@ -384,6 +384,13 @@ impl AliasSet {
         self.first_allocation(arc)
     }
 
+    /// `true` the first time `arc`'s allocation is offered, for an immutable
+    /// shared encoding, which an owned cell's value may reach (see
+    /// [`shared_encoding_bytes`]).
+    pub(crate) fn first_shared_encoding<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        self.first_allocation(arc)
+    }
+
     /// [`Self::first`] for an owned cell's own allocation.
     pub(crate) fn first_allocation<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
         let key = Arc::as_ptr(arc).cast::<()>() as u64;
@@ -469,6 +476,22 @@ pub fn arc_slice_block_bytes<T>(value: &Arc<[T]>, aliases: &mut AliasSet) -> Opt
     aliases
         .first(value)
         .then(|| arc_block_bytes(std::mem::size_of_val::<[T]>(value)))
+}
+
+/// Bytes an immutable shared encoding keeps alive, once per `aliases`: its
+/// `Arc` block the first time it is offered. The encoding is one a value
+/// shares with its clones in place of a copy (an identity's canonical
+/// bytes), so an owned cell's value may reach it: it never changes, and a
+/// clone holding it outside the cell is charged, or not, exactly as the copy
+/// it replaces would be, so counting it once per measurement charges the
+/// cell for exactly what it keeps.
+#[must_use]
+pub fn shared_encoding_bytes(value: &Arc<[u8]>, aliases: &mut AliasSet) -> usize {
+    if aliases.first_shared_encoding(value) {
+        arc_block_bytes(value.len())
+    } else {
+        0
+    }
 }
 
 /// Bytes a list of leaf names keeps alive: the list's block and each

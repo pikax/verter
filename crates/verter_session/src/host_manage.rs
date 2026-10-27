@@ -392,7 +392,7 @@ impl FallthroughRequestHost for VerterHost {
             if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
                 if let Some(ref cached) = cc.cached_fallthrough {
                     if cached.generic_root_propagation == self.config.generic_root_propagation
-                        && store_view.validates_fact_signature(&cached.fact_versions)
+                        && store_view.validates_fact_signature((&cached.fact_versions).into())
                     {
                         return Some((*cached.resolution).clone());
                     }

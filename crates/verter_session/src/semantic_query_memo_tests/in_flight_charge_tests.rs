@@ -279,12 +279,18 @@ fn crossing_a_small_ceiling_cannot_abort_the_admitted_read() {
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// The charge classes a held delivery's witness names: the delivered
-/// allocations' own cells, each once, in the class its settlement chose.
-/// Reused by the reopen proof below through the public host in
-/// `tests/cases/g_session`.
+/// An inline member's flight holds the nodes of its decided value until
+/// its batch ends. A value of more operands than a root set keeps inline is
+/// held through the set's shared block, charged ACTIVE — in flight, never a
+/// pin — for exactly the bytes the block and the record carrying its charge
+/// occupy, shared by every clone of the flight, and released with the
+/// counts it holds when the batch ends.
 #[test]
 fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
+    use verter_type_engine::semantic_query::{
+        DeclarationAnalysisValue, LiteralValue, SemanticNodeData, SemanticQueryValue,
+    };
+    const OPERANDS: usize = 6;
     let account = account(usize::MAX / 2);
     let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let before = account.snapshot().active_bytes;
@@ -297,49 +303,153 @@ fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
             after_flight > before,
             "the member's flight storage charges in flight"
         );
-        // The held VALUE is its own charge, beyond the flight's storage:
-        // the root set the hold keeps for the member's decided value
-        // charges ACTIVE — never a pin, never free. The construction scope
-        // stays open until the hold has rooted the value, so the node is
-        // live for it.
-        let (_scope, held_value) = {
-            let scope = store.enter_node_root_scope();
-            let node = store.intern_node(
-                verter_type_engine::semantic_query::SemanticNodeData::Literal(
-                    verter_type_engine::semantic_query::LiteralValue::String("member value".into()),
-                ),
-            );
-            (
-                scope,
-                QueryResult::Value(
-                    verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(node),
-                ),
-            )
-        };
+        // The construction scope stays open until the hold has rooted the
+        // value, so its nodes are live for it.
+        let scope = store.enter_node_root_scope();
+        let nodes: Vec<_> = (0..OPERANDS)
+            .map(|index| {
+                store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                    "member value {index}"
+                ))))
+            })
+            .collect();
+        let held_value = QueryResult::Value(SemanticQueryValue::DeclarationAnalysis(
+            DeclarationAnalysisValue {
+                contributors: nodes.clone().into(),
+            },
+        ));
+        let counted = store.node_owner_count_for_tests(nodes[0]);
         let pinned_at_hold = account.snapshot().pinned_bytes;
         flight.hold_value_for_tests(store, &held_value);
         let after_hold = account.snapshot();
+        let hold =
+            verter_type_engine::semantic_query_memo::inflight::inline_hold_charge_bytes_for_tests(
+                OPERANDS,
+            );
         assert!(
-            after_hold.active_bytes
-                >= after_flight
-                    + std::mem::size_of::<verter_type_engine::semantic_query::SemanticNodeId>(),
-            "the held value's root set charges ACTIVE beyond the flight's \
-             storage: {after_hold:?} vs {after_flight} charged before the hold"
+            verter_type_engine::semantic_query_memo::node_roots::root_set_charge_bytes_for_tests(
+                OPERANDS
+            ) > 0,
+            "premise: the value's set needs a shared block"
+        );
+        assert_eq!(
+            after_hold.active_bytes - after_flight,
+            hold,
+            "the hold charges its set's shared block and its own record in flight, exactly: {after_hold:?}"
         );
         assert_eq!(
             after_hold.pinned_bytes, pinned_at_hold,
             "the hold is in-flight work, not a pinned settlement"
         );
+        assert_eq!(
+            store.node_owner_count_for_tests(nodes[0]),
+            counted + 1,
+            "the hold counts every operand of the value"
+        );
+        // A clone of the flight shares the block, its counts and its charge.
+        let replay = flight.clone();
+        assert_eq!(account.snapshot().active_bytes, after_hold.active_bytes);
+        assert_eq!(store.node_owner_count_for_tests(nodes[0]), counted + 1);
+        drop(replay);
         // The batch refuses the whole component: the hold ends with the
-        // abort, releasing its in-flight bytes with it.
+        // abort, releasing its in-flight bytes and its counts with it.
         store.abort_inline_member_flight(&flight);
         drop(flight);
+        assert_eq!(
+            store.node_owner_count_for_tests(nodes[0]),
+            counted,
+            "the ended hold released its counts"
+        );
+        drop(scope);
     });
     assert_eq!(
         account.snapshot().active_bytes,
         before,
         "the aborted member's hold released its in-flight charge"
     );
+}
+
+/// An inline member's held set handed to a delivery is charged once: the
+/// delivery adds only its owner's block, because the set's shared block is
+/// already charged through its own cell; when the flight ends, the block's
+/// in-flight charge passes to the delivery as a pin, and the delivery's
+/// drop releases everything.
+#[test]
+fn an_inline_member_hold_shared_with_a_delivery_is_charged_once() {
+    use verter_type_engine::semantic_query::{
+        DeclarationAnalysisValue, LiteralValue, SemanticNodeData, SemanticQueryValue,
+    };
+    const OPERANDS: usize = 6;
+    let account = account(usize::MAX / 2);
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+    let total = || account.snapshot().total_bytes();
+    let idle = account.snapshot().active_bytes;
+    harness.run(|store| {
+        let mut flight = store
+            .begin_inline_member_flight_for_tests(key())
+            .expect("no other producer owns the key");
+        let scope = store.enter_node_root_scope();
+        let nodes: Vec<_> = (0..OPERANDS)
+            .map(|index| {
+                store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                    "shared member value {index}"
+                ))))
+            })
+            .collect();
+        let held_value = QueryResult::Value(SemanticQueryValue::DeclarationAnalysis(
+            DeclarationAnalysisValue {
+                contributors: nodes.clone().into(),
+            },
+        ));
+        let block =
+            verter_type_engine::semantic_query_memo::node_roots::root_set_charge_bytes_for_tests(
+                OPERANDS,
+            );
+        let before_hold = account.snapshot();
+        flight.hold_value_for_tests(store, &held_value);
+        assert_eq!(
+            account.snapshot().active_bytes - before_hold.active_bytes,
+            verter_type_engine::semantic_query_memo::inflight::inline_hold_charge_bytes_for_tests(
+                OPERANDS
+            )
+        );
+
+        // A delivery of one operand costs its owner's block alone.
+        let base = total();
+        let short = store.deliver_roots_for_tests(store.root_nodes([nodes[0]]).expect("live"));
+        let owner_block = total() - base;
+        drop(short);
+        assert_eq!(total(), base);
+
+        let shared = flight.held_roots_for_tests().expect("the value is held");
+        let lease = store.deliver_roots_for_tests(shared);
+        assert_eq!(
+            total() - base,
+            owner_block,
+            "the delivery charges its owner's block; the shared block is charged once, in flight"
+        );
+
+        store.abort_inline_member_flight(&flight);
+        drop(flight);
+        let settled = account.snapshot();
+        assert_eq!(
+            settled.active_bytes, idle,
+            "the ended flight and hold leave nothing in flight"
+        );
+        assert_eq!(
+            settled.pinned_bytes - before_hold.pinned_bytes,
+            owner_block + block,
+            "the delivery keeps the shared block, charged once, pinned"
+        );
+        drop(lease);
+        let released = account.snapshot();
+        assert_eq!(
+            (released.pinned_bytes, released.active_bytes),
+            (before_hold.pinned_bytes, idle),
+            "the delivery's drop releases its block and its own"
+        );
+        drop(scope);
+    });
 }
 
 /// A cold construction's FRESH payload — the heap of the nodes its raw

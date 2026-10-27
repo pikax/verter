@@ -1070,7 +1070,7 @@ pub(crate) async fn generate_relation_snapshot(
             .map(|b| json!({
                 "ordinal": b.ordinal,
                 "name": b.name,
-                "bound": b.bound.to_json_value(),
+                "bound": &b.bound,
             }))
             .collect::<Vec<_>>(),
     });

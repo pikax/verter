@@ -84,6 +84,14 @@ impl CostIdentity {
         }
     }
 
+    /// Whether this identifies a computation keyed by a `K` ([`Self::of_key`]).
+    pub(crate) fn is_keyed_by<K>(&self) -> bool
+    where
+        K: Hash + Eq + Send + Sync + 'static,
+    {
+        self.key.downcast_ref::<KeyedIdentity<K>>().is_some()
+    }
+
     pub(crate) fn with_roots(
         mut self,
         roots: crate::semantic_query_memo::node_roots::NodeRootSet,

@@ -19,10 +19,12 @@ use super::ProjectSemanticDispatch;
 use crate::semantic_query::{NodeRead, SemanticNodeData, SemanticNodeId, TupleElement};
 
 /// A payload a dispatcher's tuple contexts keep, with the retention charge
-/// that covers it while any reader holds it: `None` when the account
-/// declined it, and the payload is then read once and not kept.
+/// that covers it while any reader holds it: a retained charge when the
+/// account admits keeping it, else an in-flight charge for the one read
+/// that uses it, which does not keep it.
 pub(in crate::project_semantic_dispatch) struct Charged<T: ?Sized> {
-    charge: Option<RetentionCharge>,
+    _charge: RetentionCharge,
+    kept: bool,
     payload: Box<T>,
 }
 
@@ -38,16 +40,20 @@ impl<T: ?Sized> Charged<T> {
         let bytes = heap_block_bytes(payload_bytes)
             + arc_block_bytes(std::mem::size_of::<Self>())
             + ENTRY_OVERHEAD_BYTES;
-        let charge = match account.reserve(ChargeClass::Retained, bytes) {
-            RetentionAdmission::Admitted(charge) => Some(charge),
-            RetentionAdmission::Refused(_) => None,
+        let (charge, kept) = match account.reserve(ChargeClass::Retained, bytes) {
+            RetentionAdmission::Admitted(charge) => (charge, true),
+            RetentionAdmission::Refused(_) => (account.reserve_in_flight(bytes), false),
         };
-        Arc::new(Self { charge, payload })
+        Arc::new(Self {
+            _charge: charge,
+            kept,
+            payload,
+        })
     }
 
     /// Whether the account admitted the payload, so it may be kept.
     fn admitted(&self) -> bool {
-        self.charge.is_some()
+        self.kept
     }
 }
 
@@ -146,7 +152,7 @@ impl TupleElementContext {
 }
 
 /// How many contextual tuples, and how many middle ranges, one dispatcher
-/// keeps at most; reading one more starts both afresh.
+/// keeps at most; keeping one more replaces that map with an empty one.
 const TUPLE_CONTEXTS_CAPACITY: usize = 4096;
 
 /// The contextual tuples one dispatcher has read array literal elements
@@ -193,7 +199,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let mut contexts = self.tuple_contexts.borrow_mut();
         if contexts.tuples.len() >= TUPLE_CONTEXTS_CAPACITY {
-            contexts.tuples.clear();
+            contexts.tuples = FxHashMap::default();
         }
         contexts.tuples.insert(node, tuple.clone());
         tuple
@@ -276,7 +282,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let mut known = self.tuple_contexts.borrow_mut();
         if known.middles.len() >= TUPLE_CONTEXTS_CAPACITY {
-            known.middles.clear();
+            known.middles = FxHashMap::default();
         }
         known.middles.insert(key, Arc::clone(&contexts));
         contexts
@@ -290,7 +296,8 @@ mod tests {
 
     /// A kept tuple-context payload is charged while any reader holds it
     /// and released with its last holder; one the account declines is not
-    /// admitted, so the dispatcher reads it once and does not keep it.
+    /// admitted, so the dispatcher reads it once and does not keep it, and
+    /// is charged as in-flight work while it is read.
     #[test]
     fn a_kept_payload_is_charged_until_its_last_holder_drops() {
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
@@ -317,5 +324,11 @@ mod tests {
         let declined = Charged::reserve(&tiny, 64, vec![SemanticNodeId(3)].into_boxed_slice());
         assert!(!declined.admitted());
         assert_eq!(tiny.snapshot().retained_bytes, 0);
+        assert!(
+            tiny.snapshot().active_bytes > 0,
+            "a declined payload is charged as in-flight work while it is read"
+        );
+        drop(declined);
+        assert_eq!(tiny.snapshot().active_bytes, 0);
     }
 }

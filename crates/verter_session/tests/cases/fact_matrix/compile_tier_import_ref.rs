@@ -50,7 +50,7 @@ fn compile_tier_signature_carries_import_ref() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "compile_tier matrix slice: the permissive view MUST accept \
          an `ImportRef` fact in the Arc-stored compile-slot signature \
          so a barrel-retarget edit invalidates the consumer warm hit."

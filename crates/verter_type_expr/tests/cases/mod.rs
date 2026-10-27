@@ -14,4 +14,5 @@ mod referenced_names_walk;
 mod source_self_anchoring;
 mod synthetic_slot_binding_discrimination;
 mod type_expr_display;
+mod type_expr_wire_golden;
 mod unknown_wire_preservation;

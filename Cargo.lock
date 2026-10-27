@@ -468,6 +468,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -636,6 +645,12 @@ name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
+
+[[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
 
 [[package]]
 name = "darling"
@@ -1414,6 +1429,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys2"
+version = "0.1.63"
+dependencies = [
+ "cc",
+ "cmake",
+ "cty",
+ "libc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1500,6 +1525,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mimalloc-safe"
+version = "0.1.67"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f9fd5a18b7a9c72d89d0e906a9d5b93c330c159e9d5072c858e4631f0bd0ada"
+dependencies = [
+ "libmimalloc-sys2",
+]
 
 [[package]]
 name = "mime"
@@ -3396,6 +3430,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_alloc"
+version = "0.0.1-beta.7"
+dependencies = [
+ "libmimalloc-sys2",
+ "mimalloc-safe",
+]
+
+[[package]]
 name = "verter_analysis_inputs"
 version = "0.0.1-beta.7"
 dependencies = [
@@ -3449,6 +3491,7 @@ dependencies = [
  "stacker",
  "tempfile",
  "tokio",
+ "verter_alloc",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
@@ -3696,6 +3739,7 @@ dependencies = [
  "tracing-subscriber",
  "verter-editor-client",
  "verter_actions",
+ "verter_alloc",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
@@ -3747,6 +3791,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "verter_actions",
+ "verter_alloc",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
@@ -3771,6 +3816,7 @@ dependencies = [
  "clap",
  "tokio",
  "tracing-subscriber",
+ "verter_alloc",
  "verter_mcp",
  "verter_test_support",
 ]
@@ -3791,6 +3837,7 @@ dependencies = [
  "tokio",
  "ts-rs",
  "verter_actions",
+ "verter_alloc",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
@@ -3816,6 +3863,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "verter_alloc",
  "verter_napi",
 ]
 
@@ -4244,6 +4292,7 @@ version = "0.0.1-beta.7"
 dependencies = [
  "serde_json",
  "sha2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4258,6 +4307,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "verter_alloc",
  "verter_compiler",
  "verter_debug_assert",
  "verter_macro_dto",
@@ -4335,6 +4385,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "stacker",
  "static_assertions",
  "verter_ecma",
  "verter_no_storedspan",

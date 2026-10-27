@@ -60,8 +60,8 @@ fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
 /// tracer's `finalise()` already sorts; the published rail mirrors
 /// that sorted vector, but we sort defensively so the assertion is
 /// order-independent.
-fn sorted(facts: &[FactVersionRef]) -> Vec<String> {
-    let mut v: Vec<String> = facts.iter().map(|f| format!("{f:?}")).collect();
+fn sorted<'a>(facts: impl IntoIterator<Item = &'a FactVersionRef>) -> Vec<String> {
+    let mut v: Vec<String> = facts.into_iter().map(|f| format!("{f:?}")).collect();
     v.sort();
     v
 }
@@ -164,13 +164,13 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
     // what the tracer accumulated. The sorted vectors would diverge
     // and this `assert_eq!` would FAIL.
     assert_eq!(
-        sorted(&published.facts),
+        sorted(published.facts.iter()),
         sorted(&traced_minus_owner_route),
         "the published `ComponentMetaResultEntry` `facts` \
          rail MUST equal the finalized fact-tracer read set minus the \
          owner's own `DerivedFactHash{{Route}}` fact. \
          published={:#?} traced(minus owner-Route)={:#?}",
-        sorted(&published.facts),
+        sorted(published.facts.iter()),
         sorted(&traced_minus_owner_route),
     );
 

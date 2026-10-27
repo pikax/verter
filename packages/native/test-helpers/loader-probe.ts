@@ -271,7 +271,7 @@ export function probeLoaderForPlatform(
     // the guard here to throw ENOENT for those paths too so the simulation
     // stays hermetic; do NOT let any new path fall through to the real host
     // fs, or the test outcome would again depend on the runner.
-    if (id === "node:fs") {
+    if (id === "fs" || id === "node:fs") {
       const guardedReadFileSync = ((path: string, ...rest: unknown[]): unknown => {
         if (typeof path === "string" && (path.includes("/ldd") || path.includes("ld-musl"))) {
           const err = new Error(`probe: refusing host fs read of ${path}`) as NodeJS.ErrnoException;
@@ -317,10 +317,24 @@ export function probeLoaderForPlatform(
     return moduleNotFound(id);
   };
 
+  // `require.resolve` answers exactly as `require` does: the published
+  // optional-dependency packages (and their package.json) resolve, and every
+  // other id misses with MODULE_NOT_FOUND. The loader preflights its WASI
+  // fallbacks (`./verter-native.wasi.cjs`, `@verter/native-wasm32-wasi`)
+  // through it, and none of those exist in a real install either.
+  const fakeResolve = (id: string): string => {
+    const base = id.endsWith("/package.json") ? id.slice(0, -"/package.json".length) : id;
+    if (base.startsWith("@verter/native-") && published.has(base)) {
+      return join(PACKAGE_DIR, "node_modules", id);
+    }
+    return moduleNotFound(id);
+  };
+  const sandboxRequire = Object.assign(fakeRequire, { resolve: fakeResolve });
+
   const moduleObj = { exports: {} as Record<string, unknown> };
   const sandbox: Record<string, unknown> = {
     process: makeFakeProcess(fake),
-    require: fakeRequire,
+    require: sandboxRequire,
     module: moduleObj,
     exports: moduleObj.exports,
     __dirname: join(PACKAGE_DIR, "dist"),

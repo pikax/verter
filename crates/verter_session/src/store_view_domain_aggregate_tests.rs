@@ -783,7 +783,7 @@ fn request_signature_validation_refuses_a_population_straddle() {
     let quiet_overlay = Arc::new(CanonicalCompletionOverlay::new());
     let quiet = RequestStoreView::new(&base, quiet_overlay);
     assert_eq!(
-        quiet.validate_fact_signature(&signature, &[]),
+        quiet.validate_fact_signature((&signature).into(), &[]),
         Ok(()),
         "control: with no movement, the parent aggregate and optimistic untracked dependency \
          are both valid in one empty-overlay world"
@@ -799,7 +799,9 @@ fn request_signature_validation_refuses_a_population_straddle() {
         }));
 
     assert!(
-        moving.validate_fact_signature(&signature, &[]).is_err(),
+        moving
+            .validate_fact_signature((&signature).into(), &[])
+            .is_err(),
         "a signature assembled across the empty and shadowing populations must be refused even \
          though each fact validates in the state where it was visited"
     );
@@ -903,12 +905,20 @@ fn request_signature_refuses_a_mixed_resolution_and_content_aggregate() {
     let request = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
 
     assert_eq!(
-        request.validate_fact_signature(std::slice::from_ref(&resolution), &[]),
+        request.validate_fact_signature(
+            verter_session_query::facts::fact_set::FactsRef::from(std::slice::from_ref(
+                &resolution
+            )),
+            &[]
+        ),
         Ok(()),
         "control: a Resolution-only aggregate delegates to the durable base world"
     );
     assert_eq!(
-        request.validate_fact_signature(std::slice::from_ref(&content), &[]),
+        request.validate_fact_signature(
+            verter_session_query::facts::fact_set::FactsRef::from(std::slice::from_ref(&content)),
+            &[]
+        ),
         Ok(()),
         "control: a Content-only aggregate validates in the exact empty-completion population"
     );
@@ -918,7 +928,12 @@ fn request_signature_refuses_a_mixed_resolution_and_content_aggregate() {
         ))
     };
     assert_eq!(
-        request.validate_fact_signature(&[receipt(vec![resolution.clone()])], &[]),
+        request.validate_fact_signature(
+            verter_session_query::facts::fact_set::FactsRef::from(&[receipt(vec![
+                resolution.clone()
+            ])]),
+            &[]
+        ),
         Ok(()),
         "control: a consumed result's Resolution-only evidence validates"
     );
@@ -931,14 +946,19 @@ fn request_signature_refuses_a_mixed_resolution_and_content_aggregate() {
     .enumerate()
     {
         assert!(
-            request.validate_fact_signature(&mixed, &[]).is_err(),
+            request
+                .validate_fact_signature((&mixed).into(), &[])
+                .is_err(),
             "case {case}: an aggregate a consumed result's receipt carries mixes like one \
              of the signature's own"
         );
     }
     assert!(
         request
-            .validate_fact_signature(&[resolution, content], &[])
+            .validate_fact_signature(
+                verter_session_query::facts::fact_set::FactsRef::from(&[resolution, content]),
+                &[]
+            )
             .is_err(),
         "one view-derived aggregate makes the whole Resolution-bearing Rail-A signature \
          ineligible for reuse; per-domain validity must not be mistaken for per-signature reuse"
@@ -964,7 +984,7 @@ fn strict_self_root_witness_reuses_only_the_exact_completion_population() {
 
     let same_population_follower = RequestStoreView::new(&base, shared_overlay);
     assert_eq!(
-        same_population_follower.validate_fact_signature(&signature, &[]),
+        same_population_follower.validate_fact_signature((&signature).into(), &[]),
         Ok(()),
         "a follower sharing the exact overlay id and revision can reuse the winner",
     );
@@ -974,7 +994,7 @@ fn strict_self_root_witness_reuses_only_the_exact_completion_population() {
     let different_population_follower = RequestStoreView::new(&base, different_overlay);
     assert!(
         different_population_follower
-            .validate_fact_signature(&signature, &[])
+            .validate_fact_signature((&signature).into(), &[])
             .is_err(),
         "an equal root set in a different completion population must fork",
     );

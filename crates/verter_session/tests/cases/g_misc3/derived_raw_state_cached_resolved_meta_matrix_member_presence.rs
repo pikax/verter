@@ -57,7 +57,7 @@ fn cached_resolved_meta_signature_carries_member_presence() {
     let signature: Arc<[FactVersionRef]> = Arc::from(vec![presence_fact].into_boxed_slice());
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "permissive view must accept the MemberPresence fact in the Arc-stored signature"
     );
 }

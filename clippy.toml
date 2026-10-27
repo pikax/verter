@@ -26,9 +26,10 @@ disallowed-macros = [
 
 # `ignore-interior-mutability` lets a `FactVersionRef` key hash sets and
 # maps. A `ResultReceipt`'s `Eq`/`Ord`/`Hash` read only its immutable
-# evidence (digest, kind, facts); the only interior mutability it reaches is
-# the process retention account behind an evidence page's `RetentionCharge`,
-# which never participates in a receipt's identity. `bytes::Bytes` keeps
+# evidence (digest, facts); the only interior mutability it reaches is the
+# process retention account behind its own `RetentionCharge` and a fact-tree
+# node's charge and claimed flag, which never participate in a receipt's or a
+# `FactSet`'s identity. `bytes::Bytes` keeps
 # clippy's default. Per-crate clippy.toml files carry their own copy (clippy
 # does not merge this file into a crate that has its own).
 # A `RetentionCharge` reaches the retention account's counters solely to

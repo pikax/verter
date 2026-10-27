@@ -726,8 +726,8 @@ fn demanded_key_value_facts_are_traced_and_dead_key_value_facts_are_not() {
          otherwise an absent per-file fact proves nothing. Got {signature:?}"
     );
 
-    let kept_facts = facts_for(&signature, "/w/kept.ts");
-    let dead_facts = facts_for(&signature, "/w/dead.ts");
+    let kept_facts = facts_for(&signature.to_vec(), "/w/kept.ts");
+    let dead_facts = facts_for(&signature.to_vec(), "/w/dead.ts");
 
     // Positive half — both files are reached by an import route, so both
     // contribute the route floor. This is the "demanded import facts

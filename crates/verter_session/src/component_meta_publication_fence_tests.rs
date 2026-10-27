@@ -158,12 +158,12 @@ fn warm_native_component_read_replays_dependencies_and_rejected_read_replays_not
         panic!("a validated warm read must have cacheable evidence");
     };
     assert_eq!(
-        inner_facts.as_ref(),
-        admitted.read_set_signature.facts.as_ref()
+        inner_facts.to_vec(),
+        admitted.read_set_signature.facts.to_vec()
     );
     assert_eq!(
-        facts.as_ref(),
-        admitted.read_set_signature.facts.as_ref(),
+        facts.to_vec(),
+        admitted.read_set_signature.facts.to_vec(),
         "a consumer adopts the warm result's entire dependency signature"
     );
 

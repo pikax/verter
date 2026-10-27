@@ -131,7 +131,7 @@ impl Drop for OperandEvidenceGuard<'_> {
 
 /// The forced candidate's evidence unioned with the evidence of the input
 /// operands the force consumed: every fact of every side, sealed whole
-/// (paged when wide), never a truncated set.
+/// at any width, never a truncated set.
 fn union_operand_evidence(
     inputs: &[SemanticOperandEvidence],
     produced: SemanticOperandEvidence,

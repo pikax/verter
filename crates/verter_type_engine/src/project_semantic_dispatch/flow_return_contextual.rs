@@ -127,7 +127,7 @@ pub(super) struct FunctionArgumentMark {
 
 /// The contextual signature a function value is checked under: the type at
 /// each parameter position and the contextual return type.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ContextualSignature {
     pub(super) receiver: Option<SemanticNodeId>,
     /// The contextual signature's non-rest parameter types, in order.
@@ -139,6 +139,23 @@ pub(super) struct ContextualSignature {
 }
 
 impl ContextualSignature {
+    /// Encode every part a function checked under this signature reads, at
+    /// tags `first` to `first + 3`.
+    pub(super) fn encode_fields(
+        &self,
+        e: &mut verter_identity::encoding::CanonicalEncoder,
+        first: u16,
+    ) {
+        let receiver = self.receiver.map(|node| node.0.to_le_bytes());
+        e.field_option(first, receiver.as_ref().map(|bytes| bytes.as_slice()));
+        for parameter in &self.parameters {
+            e.field_u64(first + 1, parameter.0);
+        }
+        let rest = self.rest_element.map(|node| node.0.to_le_bytes());
+        e.field_option(first + 2, rest.as_ref().map(|bytes| bytes.as_slice()));
+        e.field_u64(first + 3, self.return_type.0);
+    }
+
     /// The contextual type at parameter `position`
     /// (`getTypeAtPosition`): the parameter there, else the rest element;
     /// `None` past the end of a signature without a rest parameter.
