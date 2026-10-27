@@ -1104,6 +1104,19 @@ this way.
 The shared signature-list read
 (`SignatureListRead`) is one sub-continuation both overload sets and
 apparent types step, in resolution or declaration order.
+
+Five of these are certified suspendable at every dependency they name, with
+each seam held under test: macro payloads (owner load; props intersection or
+emits/slots/model projection), intersection reductions (each nested
+subgroup, first or later), overload sets without explicit type arguments
+(the list; each composite's result, including a retirement while it is
+held), apparent types (anchor, call and construct lists; the interface's
+instantiation) and class instance surfaces (the declaring file's load; the
+instantiation). A class's static surface is written the same way but is not
+certified: its declaration reads and a value base's constructor surface are
+still made in place (below). Neither is an apparent type's global lookup,
+nor a need whose entry normalizes its subject first; the children a family
+needs are suspendable only as far as their own families are.
 - **Global lookups.** A stage names a global declaration lookup as
   `FamilyStep::Global`; both drivers make it in place
   (`first_global_declaration`), so the library and program-contributor
@@ -1167,19 +1180,45 @@ apparent types step, in resolution or declaration order.
   completed is therefore forgotten and that one demand started again; the
   family that needed it keeps its stage, and a list retired before it
   completed is never kept.
+- **Reads named from retired handles are never consumed.** A composite
+  candidate's `ReadSignatureResult` is named from the descriptors of the
+  list it was pinned from. When a replacement retires that list while the
+  read waits, no answer to the read is an answer to the list: the build
+  reports it (`FamilyBuild::awaits_retired_read`), and either driver resumes
+  it with a rail-free retired answer instead of the read — the frame drops
+  the delivery unread, the in-place driver does not make the read — so the
+  stale read's incompleteness never taints the family. The list is then read
+  once more in the current epoch, as a retirement found at pinning is; a
+  second retirement leaves it unsettled.
+- **Owned, exclusively advanced state.** `FamilyBuild` and `FamilyStep` are
+  asserted `Send` and neither `Clone` nor `Copy`: a build is moved into each
+  stage and out again, never shared between drivers. A polled root lends its
+  task only through an exclusive borrow of its entry
+  (`semantic_query_poll_consumer`, positive;
+  `semantic_task_exclusive_poll`, negative: the entry cannot be polled while
+  its task is out, and a shared task cannot be polled).
 
-Behaviour, in the session's `semantic_poll_contract` group: a macro payload
-whose payload operation another task produces, an intersection reduction
-whose nested subgroup another task reduces, and a macro payload whose owner's
-scheduler source read is held each return `Pending` at the polled entry,
-stay pending when their `Send` task is polled on another thread, and then
-deliver exactly the synchronous entry's answer, fact status, diagnostics and
-receipt with each stage run once; a released waiting payload leaves nothing
-open. `completed_signature_list_is_revalidated_after_retirement` retires the
+Behaviour, in the session's `semantic_poll_contract` group:
+`every_converted_seam_suspends_and_resumes_elsewhere_to_the_synchronous_read`
+holds each certified seam above with another task's producer and requires
+`Pending` after exactly the stages before the seam, a task that stays
+pending on another thread, and — released — a resume on another thread that
+delivers the synchronous entry's answer, fact status, rails, diagnostics,
+whole receipt tree and dependency signature, with absolute stage counts so
+a stage both entries run again still fails; warm, both entries answer alike
+running no stage. `a_root_released_or_cancelled_at_any_converted_seam_leaves_nothing_open`
+drops the waiting root, or cancels its request, at every seam.
+`a_macro_payload_whose_owner_is_loading_yields_and_reads_it_once_loaded`
+and `a_class_instance_surface_whose_declaring_file_is_loading_resumes_elsewhere_once_loaded`
+hold the scheduler source read of the file the family loads.
+`completed_signature_list_is_revalidated_after_retirement` retires the
 kernel epoch once, as a list's build settles it and, separately, as a
 consumer holds the completed list to pin it, and requires an overload set
 over authored leaves, one over a composite and an apparent type to read
-what the synchronous entry reads with no replacement.
+what the synchronous entry reads with no replacement, each reading the
+retired list exactly once more;
+`an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more`
+retires it while the composite's result is held.
 `family_load_failure_is_terminal` polls a macro payload and a class instance
 surface whose file the workspace does not hold and requires a bounded
 answer equal to the synchronous entry's, with the owner's failed load

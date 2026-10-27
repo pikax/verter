@@ -1,0 +1,21 @@
+error[E0499]: cannot borrow `*entry` as mutable more than once at a time
+  --> tests/cases/compile-fail/semantic_task_exclusive_poll.rs:17:13
+   |
+14 |     let Some(task) = entry.task() else {
+   |                      ----- first mutable borrow occurs here
+...
+17 |     let _ = entry.poll(waker);
+   |             ^^^^^ second mutable borrow occurs here
+18 |     let _ = task.poll(waker);
+   |             ---- first borrow later used here
+
+error[E0596]: cannot borrow `*task` as mutable, as it is behind a `&` reference
+  --> tests/cases/compile-fail/semantic_task_exclusive_poll.rs:22:13
+   |
+22 |     let _ = task.poll(waker);
+   |             ^^^^ `task` is a `&` reference, so it cannot be borrowed as mutable
+   |
+help: consider changing this to be a mutable reference
+   |
+21 | fn shared_task<C: ResolverCapabilities>(task: &mut SemanticTask<'_, '_, C>, waker: &Waker) {
+   |                                                +++
