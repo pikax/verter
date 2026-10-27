@@ -114,7 +114,7 @@ impl TsserverPendingRequests {
 }
 
 impl PendingWorkClock for TsserverPendingRequests {
-    fn pending_since(&self) -> Option<std::time::Instant> {
+    fn pending_since(&self) -> Option<tokio::time::Instant> {
         self.table.pending_since()
     }
 }
@@ -340,7 +340,7 @@ struct TsserverTransport {
     /// Under a hover/diagnostics storm, dozens of concurrent cold-miss retries would
     /// each fire `reloadProjects` (a full all-projects rebuild), saturating tsserver.
     /// The stamp coalesces those to at most one reload per cooldown window.
-    membership_recovery: Mutex<Option<std::time::Instant>>,
+    membership_recovery: Mutex<Option<tokio::time::Instant>>,
     /// Per-request cancellation channel for this session. `None` when the
     /// session could not create its cancellation directory, in which case an
     /// abandoned request still releases its slot but the engine keeps working.
@@ -523,7 +523,7 @@ impl TsserverTransport {
     /// `projectLoadingStart` suspends the charge entirely until the child has
     /// also been silent past [`LOADING_WEDGE_SILENCE_CAP`] — a lost
     /// `projectLoadingFinish` must not disable wedge recovery for the session.
-    fn note_hang_failure(&self, command: &str, issued_at: std::time::Instant) {
+    fn note_hang_failure(&self, command: &str, issued_at: tokio::time::Instant) {
         if !self.liveness.was_silent_during(issued_at) {
             return;
         }
@@ -954,7 +954,7 @@ impl TsserverTransport {
                 // shortened hop expiring is the CALLER running out of patience,
                 // not the engine failing to answer.
                 let full_bound = hop >= configured;
-                let issued_at = std::time::Instant::now();
+                let issued_at = tokio::time::Instant::now();
                 let deadline = tokio::time::Instant::now() + hop;
 
                 // tsserver uses newline-delimited JSON (no Content-Length framing)
@@ -1270,7 +1270,7 @@ impl TsserverTransport {
                 // even when no recovery notifier or caller deadline is installed;
                 // once placed, healthy slow engine work keeps its unbounded wait.
                 let hop = crate::deadline::hop_budget(LOADING_WEDGE_SILENCE_CAP);
-                let issued_at = std::time::Instant::now();
+                let issued_at = tokio::time::Instant::now();
                 let permit = match tokio::time::timeout(hop, self.stdin_tx.reserve()).await {
                     Ok(Ok(permit)) => permit,
                     Ok(Err(_)) => {
@@ -1877,7 +1877,7 @@ async fn recover_companion_membership(transport: &TsserverTransport) -> bool {
                 return false;
             }
         }
-        *last = Some(std::time::Instant::now());
+        *last = Some(tokio::time::Instant::now());
     }
     transport
         .command_no_response("reloadProjects", serde_json::json!({}))

@@ -2482,7 +2482,7 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
     let resolver = WorkspaceProjectResolver::new(
         &snap,
         &ws,
-        "7.0.1",
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         &(test_env_dims as fn(&str) -> EnvDims),
         true,
     );

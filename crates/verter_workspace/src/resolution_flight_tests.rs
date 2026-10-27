@@ -4,7 +4,7 @@
 //! sends its subscribers back to resolve for themselves.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
@@ -42,24 +42,20 @@ fn producer_runs(workspace: &MemoryWorkspace) -> u64 {
         .import_resolution_cache_miss_count
 }
 
-/// Wait (bounded) until `count` subscribers wait on `./dep`'s flight.
+/// Wait until `count` subscribers wait on `./dep`'s flight.
 fn await_subscribers(workspace: &MemoryWorkspace, overlay_domain: bool, count: usize) {
     let population = WorkspaceRead::resolution_population(workspace);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while workspace.engine.flight_subscribers_for_test(
-        MAIN,
-        "./dep",
-        CONTEXT,
-        population,
-        overlay_domain,
-    ) < count
-    {
-        assert!(
-            Instant::now() < deadline,
-            "{count} subscribers never joined the flight"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    assert!(
+        workspace.engine.wait_for_flight_subscribers_for_test(
+            MAIN,
+            "./dep",
+            CONTEXT,
+            population,
+            overlay_domain,
+            count,
+        ),
+        "{count} subscribers never joined the flight"
+    );
 }
 
 type Answers = Arc<Mutex<Vec<(Option<String>, bool)>>>;
@@ -340,6 +336,7 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
     let workspace = workspace(&[("/p/dep.ts", "export const dep = 1\n")]);
     let answers: Answers = Arc::default();
     let cancelled_outcome = Arc::new(Mutex::new(None));
+    let (detached_tx, detached) = std::sync::mpsc::channel::<()>();
     let threads = Arc::new(Mutex::new(Vec::new()));
     let hook_workspace = Arc::clone(&workspace);
     let hook_answers = Arc::clone(&answers);
@@ -353,6 +350,7 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
                 let workspace = Arc::clone(&hook_workspace);
                 let cancel = cancel.clone();
                 let outcome = Arc::clone(&hook_cancelled);
+                let detached_tx = detached_tx.clone();
                 hook_threads
                     .lock()
                     .unwrap()
@@ -372,6 +370,7 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
                                     .cancelled_by(&|| cancel.is_cancelled()),
                             );
                         *outcome.lock().unwrap() = Some(result.non_admission_reason());
+                        let _ = detached_tx.send(());
                     }));
             }
             await_subscribers(&hook_workspace, false, 1);
@@ -391,7 +390,9 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
             await_subscribers(&hook_workspace, false, 2);
             cancel.cancel();
             // The cancelled subscriber detaches while the flight still runs.
-            await_detached(&hook_cancelled);
+            detached
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the cancelled subscriber never detached");
         },
         || workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT),
     );
@@ -412,17 +413,6 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
     // Reads optional audit capture: runs in the instrumentation lane.
     #[cfg(feature = "semantic-observe")]
     assert_eq!(producer_runs(&workspace), 1);
-}
-
-fn await_detached(outcome: &Mutex<Option<Option<verter_audit::NonAdmissionReason>>>) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while outcome.lock().unwrap().is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "the cancelled subscriber never detached"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
 }
 
 #[test]

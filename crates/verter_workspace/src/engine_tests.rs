@@ -206,24 +206,30 @@ use verter_session_query::resolution::{
 /// A witness whose `Resolution` bucket compacted: it carries the terminal
 /// aggregate and nothing else, so it names zero canonicals.
 fn compacted_resolution_witness() -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from([FactVersionRef::DomainGeneration(
-        DomainGenerationFact {
-            domain: CompactionDomain::Resolution,
-            population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
-            stamp: AggregateStamp::ResolutionRoots {
-                base: ResolutionWorldId::from_raw(1),
-                session: None,
-            },
-        },
-    )]))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of([
+            FactVersionRef::DomainGeneration(DomainGenerationFact {
+                domain: CompactionDomain::Resolution,
+                population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
+                stamp: AggregateStamp::ResolutionRoots {
+                    base: ResolutionWorldId::from_raw(1),
+                    session: None,
+                },
+            }),
+        ]),
+    )
 }
 
 /// A precise witness naming exactly `canonical`.
 fn precise_witness(canonical: &str) -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from([FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: [7u8; 16],
-    }]))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of([
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [7u8; 16],
+            },
+        ]),
+    )
 }
 
 /// Resolve through the Engine and return its real derived Decision witness.
@@ -380,7 +386,7 @@ fn an_empty_witness_reobserves_nothing() {
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
         None,
-        &ReadSetSignature::empty(),
+        &ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
     );
 
     assert_eq!(
@@ -434,7 +440,10 @@ fn an_uncovered_backend_refuses_a_compacted_witness_it_cannot_reobserve() {
          reusable under the same backend"
     );
     assert!(
-        !Engine::witness_evidence_is_unenumerable(uncovered, &ReadSetSignature::empty()),
+        !Engine::witness_evidence_is_unenumerable(
+            uncovered,
+            &ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production())
+        ),
         "an empty witness observed no resolution facts, so there is nothing \
          it fails to enumerate"
     );
@@ -1504,13 +1513,19 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             // The witness reaches one consumed result holding every wide
             // fact: its receipt is the unclaimed storage the publication
             // must claim.
-            let facts = seal_canonical_signature(facts);
+            let facts = seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                facts,
+            );
             let consumed = ResultReceipt::new(facts.to_vec());
             drop(facts);
             let evidence = consumed.clone();
             let evidence_bytes = evidence.retained_charge_bytes();
             assert!(evidence_bytes > 0);
-            let witness = ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(consumed)]));
+            let witness = ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of(vec![FactVersionRef::Receipt(consumed)]),
+            );
             assert!(witness.validates(world.as_ref()));
             let captured = witness.clone();
             let account = SemanticRetentionAccount::new(RetentionLimits {

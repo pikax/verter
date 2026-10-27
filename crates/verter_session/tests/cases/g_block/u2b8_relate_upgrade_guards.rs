@@ -306,7 +306,7 @@ pub(crate) fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_war
     let publish = |key: RelateMemoKey| {
         graph.insert_relation_payload_for_tests(
             key,
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
             Arc::from(Vec::<Arc<str>>::new()),
             graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
@@ -507,7 +507,7 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
     let publish = |key: RelateMemoKey| {
         graph.insert_relation_payload_for_tests(
             key,
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
             Arc::from(Vec::<Arc<str>>::new()),
             graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,

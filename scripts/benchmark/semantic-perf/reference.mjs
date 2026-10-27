@@ -1,4 +1,4 @@
-// Interpretation of tsc 7.0.2's measured reference (expected.json): from the
+// Interpretation of the pinned tsc's measured reference (expected.json): from the
 // raw print the measurement recorded to the answer, its canonical digest and
 // whether it is tsc's error-any. Kept apart from the measurement so the
 // interpretation can be re-derived, audited and improved without measuring

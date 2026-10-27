@@ -1,5 +1,5 @@
 // One-command driver for the tsgo --api capability gate.
-// Discovers the user-installed rc `typescript` tsgo binary from the
+// Discovers the installed `typescript` (TS>=7) engine binary from the
 // repo node_modules, sets TSGO_PATH + NM_BASE, and runs all four gate scripts
 // (harness, control, incremental, companion-identity).
 // Exit 0 only if every script passes (GO). Used as the version-bump capability gate.
@@ -16,21 +16,22 @@ const REPO_ROOT = path.resolve(ROOT, "..", "..");
 const require = createRequire(import.meta.url);
 
 // Locate the platform tsgo exe the way Verter's production engine SELECTION will: the
-// TS>=7 distribution declares a per-os/arch optional dependency whose bin/lib/ holds
-// tsgo[.exe]. We discover it portably here rather than hardcoding a platform path.
+// TS>=7 distribution declares a per-os/arch optional dependency whose lib/ holds
+// tsc[.exe]. We discover it portably here rather than hardcoding a platform path.
 //
 // Engine SELECTION rule (mirrored here; full text in README/§2.8 of the design doc):
 //   - The INSTALLED `typescript` package whose MAJOR is >= 7 is the SOLE engine source
 //     (regardless of the exact version/dist-tag), with platform binaries
 //     `@typescript/typescript-<plat>-<arch>` shipping the `--api` surface
-//     (`./unstable/sync` -> dist/api/sync/api.js).
+//     (`./sync` -> dist/api/sync/api.js).
 //   - This gate only DISCOVERS an installed/repo binary. The production NO-TYPESCRIPT
 //     fallback (not exercised here) DOWNLOADS the npm `typescript` package at the
-//     `latest` dist-tag (the TS7 GA channel now that TS7 has shipped stable —
-//     `npm view typescript@latest` = 7.0.2), and fails closed when offline. It is
-//     download-only — never a bundled/forked binary.
-// The published `typescript@7.x` (e.g. 7.0.2) ships the typescript-go binary as
-// `tsc` (renamed from `tsgo`) in `@typescript/typescript-<plat>-<arch>`.
+//     version Verter pins (the workspace `typescript` devDependency), and fails
+//     closed when offline. It is download-only — never a bundled/forked binary.
+// The published `typescript@7.x` ships the typescript-go binary as `tsc` in
+// `@typescript/typescript-<plat>-<arch>`; only the platform package of the
+// installed `typescript` version is accepted (a stale store entry for another
+// version is never picked).
 const TS7_SOURCES = [
   {
     pkg: "typescript",
@@ -56,10 +57,10 @@ function discoverTsgo() {
     }
 
     const candidates = [];
-    // pnpm layout: node_modules/.pnpm/<scope+name>-<plat>-<arch>@<ver>/node_modules/<scope>/<name>-<plat>-<arch>/{lib,bin}/tsgo[.exe]
+    // pnpm layout: node_modules/.pnpm/<scope+name>-<plat>-<arch>@<ver>/node_modules/<scope>/<name>-<plat>-<arch>/lib/tsc[.exe]
     if (fs.existsSync(pnpmDir)) {
       for (const entry of fs.readdirSync(pnpmDir)) {
-        if (!src.binRe.test(entry)) continue;
+        if (!src.binRe.test(entry) || !entry.endsWith(`@${version}`)) continue;
         const inner = path.join(pnpmDir, entry, "node_modules");
         if (!fs.existsSync(inner)) continue;
         for (const scope of fs.readdirSync(inner)) {
@@ -67,7 +68,6 @@ function discoverTsgo() {
           try {
             for (const p of fs.readdirSync(scopeDir)) {
               candidates.push(path.join(scopeDir, p, "lib", exe(src.bin)));
-              candidates.push(path.join(scopeDir, p, "bin", exe(src.bin)));
             }
           } catch {
             /* not a dir */
@@ -80,8 +80,14 @@ function discoverTsgo() {
       const scopeRoot = path.join(REPO_ROOT, "node_modules", "@typescript");
       for (const sibling of fs.readdirSync(scopeRoot)) {
         if (!src.sibRe.test(sibling)) continue;
-        candidates.push(path.join(scopeRoot, sibling, "lib", exe(src.bin)));
-        candidates.push(path.join(scopeRoot, sibling, "bin", exe(src.bin)));
+        const siblingRoot = path.join(scopeRoot, sibling);
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(siblingRoot, "package.json"), "utf8"));
+          if (meta.version !== version) continue;
+        } catch {
+          continue;
+        }
+        candidates.push(path.join(siblingRoot, "lib", exe(src.bin)));
       }
     } catch {
       /* ignore */

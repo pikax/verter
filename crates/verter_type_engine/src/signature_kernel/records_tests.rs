@@ -28,8 +28,11 @@ fn layouts_are_the_measured_64_bit_sizes() {
     let family = crate::semantic_query_memo::family_key_size_for_tests();
     let memo = crate::semantic_query_memo::memo_entry_size_for_tests();
     assert_eq!(family, 128, "hot family key");
+    // The record holds one fact set, its read-set signature, whose policy
+    // occupies no byte in a shipped build.
     assert_eq!(
-        memo, LAYOUT_MEMO_ENTRY,
+        memo,
+        LAYOUT_MEMO_ENTRY + verter_session_query::facts::fact_set::FactSet::POLICY_BYTES,
         "persisted memo record must occupy the measured 64-bit envelope, got {memo}"
     );
     eprintln!(

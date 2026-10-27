@@ -3023,6 +3023,7 @@ pub type ObservedGraphSelfRoot = (
 // `parse_fact_ref(`, `self_root_fact`, and `shallow_file_state` inside
 // this body.
 pub fn semantic_graph_read_set_signature(
+    policy: verter_session_query::facts::policy::FactPolicy,
     view: &dyn verter_session_query::facts::store_view::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
     traced_facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
@@ -3033,7 +3034,7 @@ pub fn semantic_graph_read_set_signature(
     semantic_graph_carrier(
         view,
         observed_self_roots,
-        &verter_session_query::facts::fact_set::FactSet::from_facts(traced_facts.to_vec()),
+        &policy.set_of(traced_facts),
         Vec::new(),
     )
 }

@@ -464,8 +464,10 @@ mod propagation_tests {
 
     #[test]
     fn local_only_refusal_marks_only_the_owning_tracer() {
-        let outer = FactReadSetCell::new();
-        let inner = FactReadSetCell::new();
+        let outer =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
+        let inner =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
         install(&outer);
         install(&inner);
 
@@ -479,8 +481,10 @@ mod propagation_tests {
 
     #[test]
     fn transitive_hazard_marks_every_enclosing_tracer() {
-        let outer = FactReadSetCell::new();
-        let inner = FactReadSetCell::new();
+        let outer =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
+        let inner =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
         install(&outer);
         install(&inner);
 
@@ -501,7 +505,8 @@ mod recorder_tests {
     /// stays the top scope and still owns a local-only mark.
     #[test]
     fn a_recorder_witnesses_fan_out_without_becoming_a_tracer() {
-        let tracer = FactReadSetCell::new();
+        let tracer =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
         install(&tracer);
         let recorder = FactReadRecorder::default();
         {
@@ -544,6 +549,7 @@ mod fan_out_tests {
             seal_canonical_signature, signature_work_for_tests, FactReadSetFinalise,
         };
         let signature = seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
             (0..16)
                 .map(|i| FactVersionRef::FileWholeHash {
                     canonical_id: format!("/fact-{i}.ts").into(),
@@ -556,8 +562,9 @@ mod fan_out_tests {
         let mut repeat_work = 0;
         let (inner, outer) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
             Default::default(),
+            verter_session_query::facts::policy::FactPolicy::production(),
             |_| {
-                crate::resolver_core::resolver_context::with_fact_tracer_cell(Default::default(), |_| {
+                crate::resolver_core::resolver_context::with_fact_tracer_cell(Default::default(), verter_session_query::facts::policy::FactPolicy::production(), |_| {
                     let _scope = install_recorder(&recorder);
                     observe_fan_out_canonical(&signature);
                     let first = signature_work_for_tests();
@@ -604,8 +611,10 @@ mod fan_out_tests {
     /// ones observe clones).
     #[test]
     fn owned_fan_out_reaches_every_active_tracer() {
-        let outer = FactReadSetCell::new();
-        let inner = FactReadSetCell::new();
+        let outer =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
+        let inner =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
         install(&outer);
         install(&inner);
 
@@ -630,9 +639,12 @@ mod fan_out_tests {
             canonical_id: canonical.into(),
             hash: [3u8; 16],
         };
-        let outer = FactReadSetCell::new();
-        let delivering = FactReadSetCell::new();
-        let inner = FactReadSetCell::new();
+        let outer =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
+        let delivering =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
+        let inner =
+            FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
         let recorder = FactReadRecorder::default();
         install(&outer);
         install_delivering(&delivering);
@@ -650,7 +662,8 @@ mod fan_out_tests {
         // The delivering scope completes: its owner hands its set down.
         clear();
         let delivered: verter_session_query::facts::fact_set::FactSet =
-            [fact("/borrowed.ts"), fact("/inner.ts")].into();
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of([fact("/borrowed.ts"), fact("/inner.ts")]);
         observe_fan_out_canonical(&delivered);
         clear();
         assert_eq!(outer.len(), 2, "the delivered set reaches the scope below");

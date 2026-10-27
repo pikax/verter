@@ -89,7 +89,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value_v1),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
@@ -104,7 +104,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value_v2),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         200,
@@ -128,7 +128,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value_v1_again),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
@@ -202,7 +202,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
             &host,
             instantiate_key.clone(),
             QueryResult::Value(value),
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
             Arc::clone(&self_roots_empty),
             empty_dispatch.clone(),
             generation,
@@ -211,7 +211,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
             &host,
             normalize_key.clone(),
             QueryResult::Value(value),
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
             Arc::clone(&self_roots_empty),
             empty_dispatch.clone(),
             generation,
@@ -318,7 +318,10 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value_a_c),
-        ReadSetSignature::new(Arc::clone(&facts_a_c)),
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of_shared(Arc::clone(&facts_a_c)),
+        ),
         Arc::clone(&self_roots_empty),
         empty_dispatch.clone(),
         100,
@@ -328,7 +331,10 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value_b_c),
-        ReadSetSignature::new(Arc::clone(&facts_b_c)),
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of_shared(Arc::clone(&facts_b_c)),
+        ),
         Arc::clone(&self_roots_empty),
         empty_dispatch.clone(),
         200,
@@ -456,9 +462,12 @@ pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
 
     let publish = |generation: u64, facts: &Arc<[FactVersionRef]>| {
         let signature = if facts.is_empty() {
-            ReadSetSignature::empty()
+            ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production())
         } else {
-            ReadSetSignature::new(Arc::clone(facts))
+            ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of_shared(Arc::clone(facts)),
+            )
         };
         graph.publish_with_view_for_tests(
             &host,

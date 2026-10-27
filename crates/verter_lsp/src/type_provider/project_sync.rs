@@ -181,7 +181,7 @@ pub(crate) enum ProviderFileVerb {
 /// tsgo is ALSO project-bound, not a single-file fallback: a tsgo carrier-companion's
 /// CONTENT flows through the shared `--lsp` session (the contentful verbs are NOT
 /// suppressed for tsgo), while the `--api` checker reaches the carrier as a member of
-/// the configured project it OPENS — `update_snapshot_open_project(tsconfig)` selects
+/// the configured project it OPENS — `current_snapshot_for_project(tsconfig)` selects
 /// the configured project for that tsconfig and REQUIRES the carrier in
 /// `project.root_files`, failing closed when it is absent. tsgo therefore routes
 /// carrier membership through `open_project`, never an inferred/single-file Program.

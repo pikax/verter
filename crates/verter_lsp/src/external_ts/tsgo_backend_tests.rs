@@ -8,7 +8,7 @@ use verter_session::file_artifact_store::ProjectIdentity;
 
 use super::*;
 
-const ENGINE_VERSION: &str = "7.0.2";
+const ENGINE_VERSION: &str = verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN;
 
 fn env_dims() -> EnvDims {
     EnvDims {

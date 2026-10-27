@@ -14,7 +14,25 @@ use crate::jsonrpc::framing::{encode_message, MessageFramer};
 use crate::jsonrpc::JsonRpcConnection;
 
 /// Every full JSON-RPC frame a recording peer observed, in arrival order.
-type FrameTrace = Arc<TestMutex<Vec<serde_json::Value>>>;
+type FrameTrace = Arc<RecordedFrames>;
+
+/// The recorded frames, plus a wake fired after each one is recorded.
+#[derive(Default)]
+struct RecordedFrames {
+    frames: TestMutex<Vec<serde_json::Value>>,
+    recorded: tokio::sync::Notify,
+}
+
+impl RecordedFrames {
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Vec<serde_json::Value>>> {
+        self.frames.lock()
+    }
+
+    fn record(&self, frame: serde_json::Value) {
+        self.frames.lock().unwrap().push(frame);
+        self.recorded.notify_waiters();
+    }
+}
 
 fn trace_methods(trace: &FrameTrace) -> Vec<String> {
     trace
@@ -25,20 +43,28 @@ fn trace_methods(trace: &FrameTrace) -> Vec<String> {
         .collect()
 }
 
-/// Wait (bounded, cooperative) until `predicate` holds over the trace.
+/// Wait until `predicate` holds over the trace, re-checking it after each
+/// recorded frame (interest is enabled before each re-check). The timeout is a
+/// hang guard only.
 async fn wait_for_trace(trace: &FrameTrace, predicate: impl Fn(&[serde_json::Value]) -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if predicate(&trace.lock().unwrap()) {
-            return;
+    let held = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let recorded = trace.recorded.notified();
+            tokio::pin!(recorded);
+            recorded.as_mut().enable();
+            if predicate(&trace.lock().unwrap()) {
+                return;
+            }
+            recorded.await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "trace predicate not satisfied within the bounded wait; trace: {:?}",
-            trace.lock().unwrap()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    })
+    .await
+    .is_ok();
+    assert!(
+        held,
+        "trace predicate not satisfied within the bounded wait; trace: {:?}",
+        trace.lock().unwrap()
+    );
 }
 
 /// Spawn a recording fake `tsgo --lsp` server over one end of a duplex: it
@@ -51,7 +77,7 @@ fn spawn_recording_server(
     endpoint: tokio::io::DuplexStream,
 ) -> (FrameTrace, tokio::task::JoinHandle<()>) {
     let (mut read, mut write) = tokio::io::split(endpoint);
-    let trace: FrameTrace = Arc::new(TestMutex::new(Vec::new()));
+    let trace: FrameTrace = Arc::default();
     let trace_task = Arc::clone(&trace);
     let join = tokio::spawn(async move {
         let mut framer = MessageFramer::new();
@@ -63,7 +89,7 @@ fn spawn_recording_server(
             };
             framer.push(&chunk[..n]);
             while let Ok(Some(msg)) = framer.next_message() {
-                trace_task.lock().unwrap().push(msg.clone());
+                trace_task.record(msg.clone());
                 let (Some(id), Some(method)) = (
                     msg.get("id").filter(|v| !v.is_null()).cloned(),
                     msg.get("method").and_then(|m| m.as_str()),
@@ -696,7 +722,7 @@ fn relay_between_editor_and_server() -> (
 fn spawn_editor_collector(
     mut editor_read: tokio::io::ReadHalf<tokio::io::DuplexStream>,
 ) -> FrameTrace {
-    let trace: FrameTrace = Arc::new(TestMutex::new(Vec::new()));
+    let trace: FrameTrace = Arc::default();
     let trace_task = Arc::clone(&trace);
     tokio::spawn(async move {
         let mut framer = MessageFramer::new();
@@ -708,7 +734,7 @@ fn spawn_editor_collector(
             };
             framer.push(&chunk[..n]);
             while let Ok(Some(msg)) = framer.next_message() {
-                trace_task.lock().unwrap().push(msg);
+                trace_task.record(msg);
             }
         }
     });
@@ -1075,7 +1101,7 @@ async fn relay_reemits_api_session_request_and_parses_handle() {
 // ────────────────────────────────────────────────────────────────────────────
 // Ordering: the injected didOpen is observed on the ordered server wire
 // BEFORE the sync-barrier request (the overlay is registered before any
-// `--api` updateSnapshot could enumerate roots).
+// `--api` getCurrentLanguageServerSnapshot could enumerate roots).
 // ────────────────────────────────────────────────────────────────────────────
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2005,7 +2031,10 @@ async fn relay_captures_in_band_initialize_witness_as_handshake_passes() {
     let init_resp = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 7,
-        "result": { "serverInfo": { "name": "tsgo", "version": "7.0.1-rc" }, "capabilities": {} },
+        "result": {
+            "serverInfo": { "name": "tsgo", "version": crate::toolchain::policy::TYPESCRIPT_PIN },
+            "capabilities": {}
+        },
     });
     write_frame(&mut server_write, &init_resp).await;
     let forwarded_resp = read_frame(&mut editor_read).await;
@@ -2020,7 +2049,7 @@ async fn relay_captures_in_band_initialize_witness_as_handshake_passes() {
         .expect("the handshake completed, so a witness must be present");
     assert_eq!(
         witness.server_info_version.as_deref(),
-        Some("7.0.1-rc"),
+        Some(crate::toolchain::policy::TYPESCRIPT_PIN),
         "the in-band serverInfo.version is captured"
     );
     assert_eq!(
@@ -2083,7 +2112,7 @@ async fn relay_witness_carries_the_servers_semantic_token_legend() {
         "jsonrpc": "2.0",
         "id": 3,
         "result": {
-            "serverInfo": { "name": "tsgo", "version": "7.0.2" },
+            "serverInfo": { "name": "tsgo", "version": crate::toolchain::policy::TYPESCRIPT_PIN },
             "capabilities": {
                 "semanticTokensProvider": { "legend": legend, "range": true, "full": true }
             },

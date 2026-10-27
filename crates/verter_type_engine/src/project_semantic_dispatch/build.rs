@@ -7473,19 +7473,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<TransactionFold> {
         let completeness_scope_active =
             crate::request_context::cold_compute_completeness_scope_active();
-        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+        let policy = crate::resolver_core::resolver_context::installed_fact_policy();
+        let recordable = policy.is_some()
             && !self.build_local_taint.borrow().is_empty()
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
-        if !recordable {
+        let Some(policy) = policy.filter(|_| recordable) else {
             return fold().and_then(FoldedAugmentation::into_transaction_fold);
-        }
+        };
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let (folded, reads) = crate::resolver_core::resolver_context::record_fact_reads(fold);
+        let (folded, reads) =
+            crate::resolver_core::resolver_context::record_fact_reads(policy, fold);
         let refused = refusals.observed();
         drop(refusals);
         let observed = frame.finish();
@@ -10118,19 +10120,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // a partial fold (see the flow-member recorder).
         let completeness_scope_active =
             crate::request_context::cold_compute_completeness_scope_active();
-        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+        let policy = crate::resolver_core::resolver_context::installed_fact_policy();
+        let recordable = policy.is_some()
             && !self.build_local_taint.borrow().is_empty()
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
-        if !recordable {
-            return None;
-        }
+        let policy = policy.filter(|_| recordable)?;
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin();
+        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin(policy);
         Some(TransactionReadRecording {
             reads,
             refusals,

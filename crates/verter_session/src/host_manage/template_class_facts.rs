@@ -283,9 +283,11 @@ impl TemplateClassCacheAdmission {
         }
     }
 
-    pub(crate) fn not_applicable() -> Self {
+    pub(crate) fn not_applicable(
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
+    ) -> Self {
         Self {
-            signature: Some(ReadSetSignature::new(Arc::from([]))),
+            signature: Some(ReadSetSignature::empty(fact_policy)),
             owner_only: true,
         }
     }
@@ -1244,9 +1246,10 @@ mod attribution_tests {
     #[test]
     fn an_owner_only_signature_admits_the_pure_content_publish() {
         assert!(
-            owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
-                [owner_whole_hash_fact()]
-            )))),
+            owner_only_publication_safe(&facts_with(ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of([owner_whole_hash_fact()])
+            ))),
             "every fact attributes to the owner, so the owner's content hash \
              IS a complete validity oracle for this signature"
         );
@@ -1255,15 +1258,15 @@ mod attribution_tests {
     #[test]
     fn a_cross_file_signature_declines_the_pure_content_publish() {
         assert!(
-            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
-                [
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production().set_of([
                     owner_whole_hash_fact(),
                     FactVersionRef::FileWholeHash {
                         canonical_id: "/p/Dep.ts".into(),
                         hash: [4u8; 16],
                     },
-                ]
-            )))),
+                ])
+            ))),
             "the pure-content slot is keyed on the owner's hash alone, so a \
              dependency on another file's content cannot be published there"
         );
@@ -1276,18 +1279,20 @@ mod attribution_tests {
         // The owner's content hash therefore cannot decide whether this
         // entry is still valid, and the publish must decline.
         assert!(
-            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
-                [owner_whole_hash_fact(), content_aggregate()]
-            )))),
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of([owner_whole_hash_fact(), content_aggregate()])
+            ))),
             "a terminal `Content` aggregate is UNATTRIBUTABLE: it stands in \
              for facts on files the owner's content hash says nothing about, \
              so the pure-content publish must decline"
         );
         // And an aggregate ALONE is not "no dependencies".
         assert!(
-            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
-                [content_aggregate()]
-            )))),
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of([content_aggregate()])
+            ))),
             "a signature that is nothing BUT an aggregate is maximally \
              cross-file, not dependency-free"
         );
@@ -1296,12 +1301,12 @@ mod attribution_tests {
     #[test]
     fn a_project_scalar_signature_declines_the_pure_content_publish() {
         assert!(
-            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
-                [
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production().set_of([
                     owner_whole_hash_fact(),
                     FactVersionRef::ProjectGeneration { generation: 5 },
-                ]
-            )))),
+                ])
+            ))),
             "a whole-project scalar describes no canonical, so the owner's \
              content hash cannot decide it either"
         );

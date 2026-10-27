@@ -221,12 +221,27 @@ impl MemoryWorkspace {
         )
     }
 
-    /// Construct with a complete tightening-only semantic budget policy.
+    /// Construct with a complete tightening-only semantic budget policy,
+    /// sealing under the production fact policy.
     pub fn new_with_input_resolution_budgets(
         options: MemoryOptions,
         budgets: verter_session_query::resolution::InputResolutionBudgets,
     ) -> Self {
-        let engine = Engine::new_with_input_resolution_budgets(budgets);
+        Self::new_with_fact_policy(
+            options,
+            budgets,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        )
+    }
+
+    /// Construct with a budget policy and the fact policy the workspace,
+    /// and every host bound to it, seals its evidence under.
+    pub fn new_with_fact_policy(
+        options: MemoryOptions,
+        budgets: verter_session_query::resolution::InputResolutionBudgets,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
+    ) -> Self {
+        let engine = Engine::new_with_input_resolution_budgets(budgets, fact_policy);
         if let Some(ref exts) = options.default_resolve_extensions {
             engine.set_default_resolve_extensions(exts.clone());
         }
@@ -901,6 +916,10 @@ progress)
 }
 
 impl crate::traits::WorkspaceAccess for MemoryWorkspace {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.engine.fact_policy
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,

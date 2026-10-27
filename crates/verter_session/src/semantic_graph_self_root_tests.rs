@@ -46,10 +46,11 @@ use verter_session_query::facts::{FactKey, FactLane};
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
-use verter_session_query::facts::{
-    fact_cache::FactVersionRef,
-    fact_read_set::{FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
-};
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
+
+/// The production strict-root threshold these fixtures straddle.
+const WIDE_SIGNATURE_WIDTH: usize =
+    verter_session_query::facts::policy::FactPolicy::production().strict_root_threshold();
 use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
@@ -592,9 +593,13 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
 fn read_set_signature_prepends_observed_self_roots() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
-    let carrier =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[])
-            .expect("a single observed self-root builds a carrier");
+    let carrier = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &[],
+    )
+    .expect("a single observed self-root builds a carrier");
     assert!(
         carrier.0.iter().any(|f| matches!(
             f,
@@ -613,7 +618,12 @@ fn read_set_signature_rejects_conflicting_self_root_hashes() {
         (verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16]),
         (verter_type_expr::OwnedStr::from("/w/a.ts"), [0x22; 16]),
     ];
-    let result = semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[]);
+    let result = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &[],
+    );
     assert!(
         result.is_err(),
         "two observed self-roots for the same canonical with conflicting hashes is a torn \
@@ -632,8 +642,12 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
         canonical_id: "/w/a.ts".into(),
         hash: [0x99; 16],
     }];
-    let result =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced);
+    let result = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced,
+    );
     assert!(
         result.is_err(),
         "a traced FileWholeHash for a self-root canonical that disagrees with the observed \
@@ -651,7 +665,10 @@ fn wide_traced_set(root: FactVersionRef) -> verter_session_query::facts::fact_se
         })
         .collect();
     traced.push(root);
-    let sealed = verter_session_query::facts::fact_read_set::seal_canonical_signature(traced);
+    let sealed = verter_session_query::facts::fact_read_set::seal_canonical_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        traced,
+    );
     assert!(
         sealed.len() > WIDE_SIGNATURE_WIDTH,
         "fixture: the traced set is wide"
@@ -671,6 +688,7 @@ fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_in_a_wide_set() {
     });
     assert_eq!(
         semantic_graph_read_set_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
             &StrictWorldTestView::default(),
             &observed,
             &traced.to_vec()
@@ -694,6 +712,7 @@ fn a_wide_traced_set_keeps_its_agreeing_precise_root() {
         hash: [0x11; 16],
     });
     let (facts, roots) = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &StrictWorldTestView::default(),
         &observed,
         &traced.to_vec(),
@@ -734,9 +753,13 @@ fn read_set_signature_merges_traced_cross_file_facts() {
             expected_hash: [0x44; 16],
         },
     )];
-    let carrier =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("carrier builds");
+    let carrier = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced,
+    )
+    .expect("carrier builds");
     assert!(
         carrier.0.iter().any(|f| matches!(
             f,
@@ -760,9 +783,13 @@ fn read_set_signature_keeps_traced_project_generation_fact() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::ProjectGeneration { generation: 7 }];
-    let carrier =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("carrier builds");
+    let carrier = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced,
+    )
+    .expect("carrier builds");
     assert!(
         carrier.0.iter().any(
             |f| matches!(f, FactVersionRef::ProjectGeneration { generation } if *generation == 7)
@@ -786,9 +813,13 @@ fn oversized_self_root_set_builds_a_bounded_carrier() {
         })
         .collect();
 
-    let carrier =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[])
-            .expect("cardinality alone must not make a self-rooted carrier uncacheable");
+    let carrier = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &[],
+    )
+    .expect("cardinality alone must not make a self-rooted carrier uncacheable");
 
     assert!(
         carrier.0.len() <= WIDE_SIGNATURE_WIDTH,
@@ -828,6 +859,7 @@ fn an_oversized_root_set_strips_a_traced_root_fact_beside_its_witness() {
         hash: [0; 16],
     });
     let (facts, roots) = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
         &StrictWorldTestView::default(),
         &observed,
         &traced.to_vec(),
@@ -867,7 +899,7 @@ fn oversized_self_root_compaction_strictly_checks_every_root() {
     };
 
     assert_eq!(
-        semantic_graph_read_set_signature(&view, &observed, &[]).unwrap_err(),
+        semantic_graph_read_set_signature(verter_session_query::facts::policy::FactPolicy::production(), &view, &observed, &[]).unwrap_err(),
         verter_audit::NonAdmissionReason::UnresolvedProvenance,
         "one rejecting root must prevent a strict-world witness even when every later root validates",
     );
@@ -876,9 +908,10 @@ fn oversized_self_root_compaction_strictly_checks_every_root() {
 #[test]
 fn strict_world_witness_discriminates_without_a_precise_root_list() {
     let view = StrictWorldTestView::default();
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::StrictSelfRootWorld(
-        view.world,
-    )]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![FactVersionRef::StrictSelfRootWorld(view.world)]),
+    );
 
     assert!(carrier.has_view_discriminating_self_root(&[]));
     assert!(view.validates_fact_signature((&carrier.facts).into()));
@@ -901,16 +934,19 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
 
 #[test]
 fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
-    let content_aggregate =
-        ReadSetSignature::new(Arc::from(vec![FactVersionRef::DomainGeneration(
-            verter_session_query::facts::fact_cache::DomainGenerationFact {
-                domain: verter_session_query::facts::fact_cache::CompactionDomain::Content,
-                population: verter_session_query::facts::fact_cache::AggregatePopulation::View(
-                    verter_session_query::facts::fact_cache::ViewPopulation::Base,
-                ),
-                stamp: verter_session_query::facts::fact_cache::AggregateStamp::Generation(1),
-            },
-        )]));
+    let content_aggregate = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::DomainGeneration(
+                verter_session_query::facts::fact_cache::DomainGenerationFact {
+                    domain: verter_session_query::facts::fact_cache::CompactionDomain::Content,
+                    population: verter_session_query::facts::fact_cache::AggregatePopulation::View(
+                        verter_session_query::facts::fact_cache::ViewPopulation::Base,
+                    ),
+                    stamp: verter_session_query::facts::fact_cache::AggregateStamp::Generation(1),
+                },
+            ),
+        ]),
+    );
     assert!(
         !content_aggregate.has_view_discriminating_self_root(&[]),
         "a generic Content aggregate is not a strict self-root witness",
@@ -931,9 +967,13 @@ fn post_finalise_self_root_merge_seals_the_completed_carrier_whole() {
         })
         .collect();
 
-    let (facts, roots) =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("a wide completed carrier is sealed, never refused");
+    let (facts, roots) = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced,
+    )
+    .expect("a wide completed carrier is sealed, never refused");
     assert_eq!(
         facts.len(),
         WIDE_SIGNATURE_WIDTH + 1,
@@ -960,9 +1000,13 @@ fn completed_structural_carrier_at_exactly_the_wide_width_keeps_its_precise_root
         })
         .collect();
 
-    let (facts, roots) =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("a completed carrier exactly the wide width is admitted");
+    let (facts, roots) = semantic_graph_read_set_signature(
+        verter_session_query::facts::policy::FactPolicy::production(),
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced,
+    )
+    .expect("a completed carrier exactly the wide width is admitted");
     assert_eq!(facts.len(), WIDE_SIGNATURE_WIDTH);
     assert_eq!(roots.as_ref(), &[Arc::<str>::from("/w/root.ts")]);
 }
@@ -982,10 +1026,14 @@ fn validate_with_self_roots_rejects_untracked_self_root() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let untracked = "/sg_self_root/never_loaded.ts";
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: untracked.into(),
-        hash: [0xCD; 16],
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: untracked.into(),
+                hash: [0xCD; 16],
+            },
+        ]),
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
     assert!(
         !carrier.validate_with_self_roots(ctx, &self_roots),
@@ -1008,10 +1056,14 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
         .expect("IndexedReady materialises");
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: c.into(),
-        hash: whole_hash,
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: c.into(),
+                hash: whole_hash,
+            },
+        ]),
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(c)]);
     assert!(
         carrier.validate_with_self_roots(ctx, &self_roots),
@@ -1044,7 +1096,10 @@ fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
             .collect()
     };
     let carrier = ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(observe(&host)),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            observe(&host),
+        ),
     );
     assert_eq!(carrier.facts.len(), width, "the carrier holds every fact");
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(paths[0].as_str())]);
@@ -1084,10 +1139,14 @@ fn execute_cooperative_fast_path_validates_self_root() {
     let stale_node = store.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: untracked.into(),
-        hash: [0xAB; 16],
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: untracked.into(),
+                hash: [0xAB; 16],
+            },
+        ]),
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
     store.publish_with_carrier_for_tests(
         key.clone(),
@@ -1156,10 +1215,14 @@ fn relation_memo_warm_read_validates_self_root() {
     // Publish a relation judgement whose carrier self-roots on an
     // untracked canonical.
     let untracked = "/sg_self_root/relation_never_loaded.ts";
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: untracked.into(),
-        hash: [0xEF; 16],
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: untracked.into(),
+                hash: [0xEF; 16],
+            },
+        ]),
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
     let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
         source,
@@ -1208,7 +1271,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
     );
     store.insert_relation_payload_for_tests(
         key.clone(),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(
             verter_type_engine::semantic_query::RelationOutcome::Assignable,
@@ -2291,10 +2354,14 @@ fn session_overlay_warm_validation_matrix() {
         let node = graph.intern_node(SemanticNodeData::Primitive(
             verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
-        let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.into(),
-            hash: root_hash,
-        }]));
+        let carrier = ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.into(),
+                    hash: root_hash,
+                },
+            ]),
+        );
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
         let published = graph.publish_with_carrier_for_tests(
             key.clone(),
@@ -2634,13 +2701,15 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
             let node = graph.intern_node(SemanticNodeData::Primitive(
                 verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
-            let carrier = ReadSetSignature::new(Arc::from(vec![
-                FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.into(),
-                    hash: root_hash,
-                },
-                FactVersionRef::Parse(parse_fact.clone()),
-            ]));
+            let carrier = ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: canonical.into(),
+                        hash: root_hash,
+                    },
+                    FactVersionRef::Parse(parse_fact.clone()),
+                ]),
+            );
             let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
             let published = graph.publish_with_carrier_for_tests(
                 key.clone(),
@@ -2902,7 +2971,9 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
         let node = graph.intern_node(SemanticNodeData::Primitive(
             verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
-        let carrier = ReadSetSignature::new(Arc::from(facts));
+        let carrier = ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(facts),
+        );
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(self_root)]);
         let published = graph.publish_with_carrier_for_tests(
             key.clone(),
@@ -3158,16 +3229,18 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
         let node = graph.intern_node(SemanticNodeData::Primitive(
             verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
-        let carrier = ReadSetSignature::new(Arc::from(vec![
-            FactVersionRef::FileWholeHash {
-                canonical_id: parent_canonical.into(),
-                hash: parent_base_hash,
-            },
-            FactVersionRef::FileWholeHash {
-                canonical_id: child_canonical.into(),
-                hash: child_base_hash,
-            },
-        ]));
+        let carrier = ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: parent_canonical.into(),
+                    hash: parent_base_hash,
+                },
+                FactVersionRef::FileWholeHash {
+                    canonical_id: child_canonical.into(),
+                    hash: child_base_hash,
+                },
+            ]),
+        );
         // Self-root is the PARENT only — the child is a cross-file dep.
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(parent_canonical)]);
         let published = graph.publish_with_carrier_for_tests(

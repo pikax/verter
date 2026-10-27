@@ -110,10 +110,14 @@ fn a_reverse_index_charges_its_canonical_text_until_it_drains() {
     let account = account();
     let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
     let canonical = format!("/ws/{}.ts", "r".repeat(CANONICAL_LEN));
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone().into(),
-        hash: [3; 16],
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.clone().into(),
+                hash: [3; 16],
+            },
+        ]),
+    );
     let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical.as_str())]);
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

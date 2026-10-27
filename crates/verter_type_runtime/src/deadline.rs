@@ -136,10 +136,10 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_exhausted_deadline_still_yields_a_usable_floor() {
         with_deadline(std::time::Duration::from_millis(1), async {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::time::advance(std::time::Duration::from_millis(20)).await;
             let hop = hop_budget(std::time::Duration::from_secs(10));
             assert!(
                 !hop.is_zero(),
@@ -153,11 +153,11 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_scope_survives_an_await_point() {
         with_deadline(std::time::Duration::from_secs(5), async {
             let before = remaining().expect("scope open before the await");
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::time::advance(std::time::Duration::from_millis(20)).await;
             let after = remaining().expect("the scope must survive the await point");
             assert!(
                 after < before,

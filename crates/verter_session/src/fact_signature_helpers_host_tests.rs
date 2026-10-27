@@ -1,10 +1,11 @@
 //! Fact-tracer cacheability and file-source-env observation suites that
 //! drive the tracer through a live session host.
 
-use verter_session_query::facts::{
-    fact_cache::FactVersionRef,
-    fact_read_set::{FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
-};
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
+
+/// The production fresh-slice width these fixtures straddle.
+const WIDE_SIGNATURE_WIDTH: usize =
+    verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max();
 
 #[allow(unused_imports)]
 use verter_type_engine::fact_signature_helpers::*;

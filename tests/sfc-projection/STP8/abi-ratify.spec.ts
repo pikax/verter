@@ -5,6 +5,8 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { describeEnginePins } from "../../../scripts/sfc-projection/engine-pins.mjs";
+
 import {
   DEFAULT_INSTANCE_PRINT,
   DIRTY_ADDED_MANDATORY_CASE,
@@ -398,7 +400,7 @@ test("STP8 products, manifest pin, and reject twins all hold together", () => {
 });
 
 test("evidence checks engine inputs without requiring historical commit references", () => {
-  const enginePins = "Engine pins: ts-js 6.0.3 and ts-native 7.0.2.";
+  const enginePins = `Engine pins: ${describeEnginePins()}.`;
   for (const evidenceText of [
     enginePins,
     enginePins + "\nLanding: Ratify constructor ABI (2026-09-19).",

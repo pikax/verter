@@ -61,7 +61,7 @@
     {
       "id": "engine.typescript-native",
       "class": "ExternalOwner",
-      "note": "tsgo pinned >=7.0.2, <7.1.0 by verter-tsc; provider modes tsgo/shared-tsgo/tsserver/editor-tsserver/extension bind it in editors",
+      "note": "tsgo pinned >=7.1.0-beta, <7.2.0 by verter-tsc; provider modes tsgo/shared-tsgo/tsserver/editor-tsserver/extension bind it in editors",
       "evidence": ["crates/verter_tsc/src/main.rs"]
     }
   ]

@@ -369,7 +369,9 @@ fn post_admission_cancellation_keeps_same_discriminant_replacement_successful() 
         store.publish_with_materialized_set_for_tests(
             query.clone(),
             QueryResult::Value(old),
-            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production()
+            ),
             Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
             empty_signature(),
             generation,
@@ -446,7 +448,9 @@ fn post_admission_cancellation_keeps_cap_lru_eviction_committed() {
             store.publish_with_materialized_set_for_tests(
                 query.clone(),
                 QueryResult::Value(node),
-                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                ),
                 Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
                 empty_signature(),
                 generation,
@@ -525,7 +529,9 @@ fn post_admission_cancellation_keeps_global_fifo_eviction_committed() {
             store.publish_with_carrier_and_dispatch_for_tests(
                 key,
                 QueryResult::Value(node),
-                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                ),
                 Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
                 dep_signature(canonical, hash),
             ),

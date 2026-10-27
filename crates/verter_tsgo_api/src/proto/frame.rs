@@ -2,18 +2,18 @@
 //!
 //! Mirrors `dist/api/syncChannel.js`. Every message on the wire is a
 //! MessagePack 3-element fixarray `[MessageType, name, payload]` where:
-//! - `MessageType` is a `u8` (a positive fixint, or `0xcc` + u8 — syncChannel.js:331-340),
+//! - `MessageType` is a `u8` (a positive fixint, or `0xcc` + u8 — syncChannel.js:369-378),
 //! - `name` is the method/callback name as a `bin` field, and
 //! - `payload` is a `bin` field (UTF-8 JSON for the high-level ops).
 //!
-//! The write side mirrors `writeTuple` (syncChannel.js:264-317): `0x93`, the
+//! The write side mirrors `writeTuple` (syncChannel.js:302-361): `0x93`, the
 //! type byte, then the `name` and `payload` bin fields. The read side mirrors
-//! `readTuple` (syncChannel.js:324-343).
+//! `readTuple` (syncChannel.js:362-381).
 
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::proto::msgpack::{MsgpackReader, MSGPACK_FIXARRAY3};
 
-/// Message type tags mirrored from `syncChannel.js:15-23`.
+/// Message type tags mirrored from `syncChannel.js:16-24`.
 ///
 /// Parent → child: [`Request`](MessageType::Request),
 /// [`CallResponse`](MessageType::CallResponse), [`CallError`](MessageType::CallError).
@@ -43,7 +43,7 @@ impl MessageType {
     }
 
     /// Decode a message type byte. Unknown values are a typed codec error
-    /// (mirrors syncChannel.js:225-226 "Invalid message type from child").
+    /// (mirrors syncChannel.js:264-265 "Invalid message type from child").
     pub fn from_u8(value: u8) -> TsgoApiResult<Self> {
         match value {
             1 => Ok(MessageType::Request),
@@ -73,7 +73,7 @@ pub struct Frame<'a> {
 
 /// Encode a tuple frame `[type, name, payload]` into a fresh byte buffer.
 ///
-/// Mirrors `writeTuple` (syncChannel.js:264-317): the leading `0x93`, the type
+/// Mirrors `writeTuple` (syncChannel.js:302-361): the leading `0x93`, the type
 /// byte written as a bare positive fixint (every [`MessageType`] is ≤ 6, so it
 /// is always a fixint — the reference also accepts a `0xcc`+u8 form on read),
 /// then the `name` and `payload` bin fields.
@@ -95,19 +95,19 @@ pub fn encode_frame(msg_type: MessageType, name: &[u8], payload: &[u8]) -> Vec<u
 
 /// Decode a single tuple frame from `data` starting at `offset`.
 ///
-/// Mirrors `readTuple` (syncChannel.js:324-343): the `0x93` marker, the type
+/// Mirrors `readTuple` (syncChannel.js:362-381): the `0x93` marker, the type
 /// byte (a positive fixint or `0xcc`+u8), then the `name` and `payload` bin
 /// fields. Returns the decoded frame and the number of bytes consumed.
 pub fn decode_frame(data: &[u8], offset: usize) -> TsgoApiResult<(Frame<'_>, usize)> {
     let mut r = MsgpackReader::new(data, offset);
-    // Fixed 3-element array marker (syncChannel.js:326-329).
+    // Fixed 3-element array marker (syncChannel.js:364-367).
     let array_len = r.read_array_header()?;
     if array_len != 3 {
         return Err(TsgoApiError::Codec(format!(
             "expected fixed 3-element array (0x93), got array of length {array_len}"
         )));
     }
-    // Message type — positive fixint or uint8 (syncChannel.js:331-340).
+    // Message type — positive fixint or uint8 (syncChannel.js:369-378).
     let type_byte = read_msg_type_byte(&mut r)?;
     let msg_type = MessageType::from_u8(type_byte)?;
     let name = r.read_bin()?;
@@ -124,7 +124,7 @@ pub fn decode_frame(data: &[u8], offset: usize) -> TsgoApiResult<(Frame<'_>, usi
 }
 
 /// Read the message-type byte: a positive fixint (`<= 0x7f`) read directly, or
-/// `0xcc` + a following u8. Mirrors syncChannel.js:331-340.
+/// `0xcc` + a following u8. Mirrors syncChannel.js:369-378.
 fn read_msg_type_byte(r: &mut MsgpackReader<'_>) -> TsgoApiResult<u8> {
     // Peek the marker by reading a uint, but the reference distinguishes only
     // fixint vs uint8; reuse the msgpack uint reader which accepts both forms
@@ -170,7 +170,7 @@ mod tests {
         ));
     }
 
-    // ── encode mirrors writeTuple (syncChannel.js:264-317) exactly ──────────
+    // ── encode mirrors writeTuple (syncChannel.js:302-361) exactly ──────────
     #[test]
     fn encode_request_frame_matches_reference_layout() {
         // A REQUEST for method "echo" with payload "hi".
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(consumed, bytes.len(), "consumed the whole frame");
     }
 
-    // ── reader accepts the 0xcc+u8 message-type form (syncChannel.js:335) ────
+    // ── reader accepts the 0xcc+u8 message-type form (syncChannel.js:373) ────
     #[test]
     fn decode_accepts_uint8_message_type_form() {
         // Hand-build a frame whose type byte is written as 0xcc 0x06 (uint8 6)

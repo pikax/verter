@@ -45,7 +45,7 @@ describe("validateManifest hard-fails a malformed perf manifest (no silent gate 
   const validRaw = (workloadOver: Record<string, unknown> = {}): Record<string, unknown> => ({
     methodologyVersion: "1.0.0",
     corpusHash: `sha256:${"0".repeat(64)}`,
-    tsgoVersion: "typescript@7.0.1-rc",
+    tsgoVersion: "typescript@7.1.0-beta",
     samplesPerSide: 7,
     workloads: {
       "axis-a-codegen": { axis: "A", title: "t", gated: { m: validMetric() }, ...workloadOver },
@@ -449,7 +449,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     return {
       methodologyVersion: "test",
       corpusHash: `sha256:${"0".repeat(64)}`,
-      tsgoVersion: "typescript@7.0.1-rc",
+      tsgoVersion: "typescript@7.1.0-beta",
       samplesPerSide: 7,
       workloads,
       ...over,
@@ -463,8 +463,8 @@ describe("evaluateGate — discriminating gate evaluation", () => {
       workloads: [],
       smoke: false,
       selfCheck: true,
-      engineResolved: "typescript@7.0.1-rc",
-      baselineEngineResolved: "typescript@7.0.1-rc",
+      engineResolved: "typescript@7.1.0-beta",
+      baselineEngineResolved: "typescript@7.1.0-beta",
       meta: {
         corpusHash: `sha256:${"0".repeat(64)}`,
         candidateBin: "candidate",
@@ -1010,7 +1010,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     const mismatch = evaluateGate(
       gateInput({
         engineResolved: "typescript@6.0.3",
-        manifest: manifestOf({}, { tsgoVersion: "typescript@7.0.1-rc" }),
+        manifest: manifestOf({}, { tsgoVersion: "typescript@7.1.0-beta" }),
       }),
     );
     expect(mismatch.pass).toBe(false);
@@ -1018,8 +1018,8 @@ describe("evaluateGate — discriminating gate evaluation", () => {
 
     const ok = evaluateGate(
       gateInput({
-        engineResolved: "typescript@7.0.1-rc",
-        manifest: manifestOf({}, { tsgoVersion: "typescript@7.0.1-rc" }),
+        engineResolved: "typescript@7.1.0-beta",
+        manifest: manifestOf({}, { tsgoVersion: "typescript@7.1.0-beta" }),
       }),
     );
     expect(ok.pass).toBe(true);
@@ -1415,9 +1415,9 @@ describe("evaluateGate — discriminating gate evaluation", () => {
   it("FAILS when the baseline worktree resolves a DIFFERENT engine than the candidate", () => {
     const mismatch = evaluateGate(
       gateInput({
-        engineResolved: "typescript@7.0.1-rc",
-        baselineEngineResolved: "typescript@7.0.0", // baseline worktree drifted
-        manifest: manifestOf({}, { tsgoVersion: "typescript@7.0.1-rc" }),
+        engineResolved: "typescript@7.1.0-beta",
+        baselineEngineResolved: "typescript@6.0.3", // baseline worktree drifted
+        manifest: manifestOf({}, { tsgoVersion: "typescript@7.1.0-beta" }),
       }),
     );
     expect(mismatch.pass).toBe(false);
@@ -1425,9 +1425,9 @@ describe("evaluateGate — discriminating gate evaluation", () => {
 
     const ok = evaluateGate(
       gateInput({
-        engineResolved: "typescript@7.0.1-rc",
-        baselineEngineResolved: "typescript@7.0.1-rc",
-        manifest: manifestOf({}, { tsgoVersion: "typescript@7.0.1-rc" }),
+        engineResolved: "typescript@7.1.0-beta",
+        baselineEngineResolved: "typescript@7.1.0-beta",
+        manifest: manifestOf({}, { tsgoVersion: "typescript@7.1.0-beta" }),
       }),
     );
     expect(ok.pass).toBe(true);
@@ -2205,8 +2205,8 @@ describe("evaluateGate — discriminating gate evaluation", () => {
         ],
         smoke: false,
         selfCheck: false,
-        engineResolved: "typescript@7.0.1-rc",
-        baselineEngineResolved: "typescript@7.0.1-rc",
+        engineResolved: "typescript@7.1.0-beta",
+        baselineEngineResolved: "typescript@7.1.0-beta",
         meta: {
           corpusHash: `sha256:${"0".repeat(64)}`,
           candidateBin: "cand-bin",

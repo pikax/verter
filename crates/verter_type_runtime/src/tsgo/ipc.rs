@@ -637,7 +637,7 @@ impl LspTransport {
     /// Only the response-timeout arm used to count, so a request parked on a
     /// full lane behind a stalled writer never reached this path, so the wedge
     /// detector never fired for a stdin-side deadlock.
-    fn note_hang_failure(&self, method: &str, issued_at: std::time::Instant) {
+    fn note_hang_failure(&self, method: &str, issued_at: tokio::time::Instant) {
         let Some(count) = self.liveness.charge_strike(issued_at) else {
             return;
         };
@@ -771,7 +771,7 @@ impl LspTransport {
                 // shortened hop expiring is the CALLER running out of patience,
                 // not the engine failing to answer.
                 let full_bound = hop >= configured;
-                let issued_at = std::time::Instant::now();
+                let issued_at = tokio::time::Instant::now();
                 let deadline = tokio::time::Instant::now() + hop;
                 let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
                 match self
@@ -1101,6 +1101,9 @@ impl LspTransport {
         }
     }
 
+    /// Enqueue one document notification. `lead` is a frame the writer puts
+    /// on the wire immediately before it, in the same lane message, so nothing
+    /// can come between the two and the lane spends one slot either way.
     async fn deliver_document(
         &self,
         method: &str,
@@ -1108,10 +1111,14 @@ impl LspTransport {
         priority: ProviderPriority,
         delivery: DocumentDelivery,
         done: oneshot::Receiver<()>,
+        lead: Option<Vec<u8>>,
     ) -> Result<(), TypeProviderError> {
         let body = serde_json::to_string(&jsonrpc_body(None, method, params))
             .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes();
+        let mut frame = lead.unwrap_or_default();
+        frame.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes(),
+        );
         {
             let accepted = Arc::clone(&delivery.accepted);
             let key = delivery.key.clone();
@@ -1239,6 +1246,35 @@ fn forget_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str) {
         .remove(key);
 }
 
+/// The frame that makes TSGO load a document's configured project ahead of the
+/// document's first `didOpen`, sent in front of that `didOpen`.
+///
+/// TSGO puts the file whose `didOpen` creates a configured project out of the
+/// project's own order in the program it builds (TypeScript 7.1.0-beta: with
+/// merged enum blocks in `a.ts` and `b.ts`, opening `a.ts` first moves TS2432
+/// onto `a.ts`, where `tsc` puts it on `b.ts`). A `custom/projectInfo` request for the document, read before the
+/// `didOpen`, loads the project first, so no `didOpen` creates it and every
+/// diagnostic whose placement follows program order is placed as `tsc`
+/// places it, whatever order the editor opens files in.
+///
+/// The request is not awaited: the engine reads it before the `didOpen` that
+/// follows it on the wire, which is all the ordering needs, so an editor
+/// write still never waits on a round trip. Its answer carries an id no
+/// caller registered, which the reader drops. A refusal (a document no
+/// project claims, an engine without the method) changes nothing. A
+/// TypeScript-editor compatibility option that keeps TSGO's open-order
+/// placement would leave this frame out.
+fn project_load_frame(transport: &LspTransport, uri: &str) -> Vec<u8> {
+    let id = transport.next_id.fetch_add(1, Ordering::Relaxed);
+    let body = jsonrpc_body(
+        Some(id),
+        "custom/projectInfo",
+        &serde_json::json!({ "textDocument": { "uri": uri } }),
+    )
+    .to_string();
+    format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
+}
+
 async fn deliver_document_sync(
     transport: &LspTransport,
     versions: &Arc<Mutex<HashMap<String, i32>>>,
@@ -1255,7 +1291,7 @@ async fn deliver_document_sync(
 
     // `Unchanged` returns before a frame exists, so the arms below are exactly the
     // notifications that reach the wire — there is no mode without a frame.
-    let (mode, version, method, params) = match versions_guard.get(&document_key) {
+    let (mode, version, method, params, lead) = match versions_guard.get(&document_key) {
         Some(version) => {
             let unchanged = accepted
                 .lock()
@@ -1278,6 +1314,7 @@ async fn deliver_document_sync(
                     "textDocument": { "uri": uri, "version": version },
                     "contentChanges": [{ "text": content }]
                 }),
+                None,
             )
         }
         None => (
@@ -1292,6 +1329,7 @@ async fn deliver_document_sync(
                     "text": content,
                 }
             }),
+            Some(project_load_frame(transport, &uri)),
         ),
     };
 
@@ -1311,6 +1349,7 @@ async fn deliver_document_sync(
                 diagnostics: None,
             },
             completed,
+            lead,
         )
         .await?;
 
@@ -1391,6 +1430,7 @@ async fn deliver_document_close(
                 diagnostics: Some(Arc::clone(diagnostics_cache)),
             },
             completed,
+            None,
         )
         .await?;
     Ok(())
@@ -1517,9 +1557,9 @@ async fn read_loop(
                                     .and_then(|item| item.get("section"))
                                     .and_then(|s| s.as_str())
                                     .unwrap_or("");
-                                // TSGO 7.0.2 requests the sections `js/ts`,
+                                // The engine requests the sections `js/ts`,
                                 // `typescript`, `javascript`, `editor` (verified
-                                // live) and reads inlay-hint preferences NESTED
+                                // live on 7.1.0-beta) and reads inlay-hint preferences NESTED
                                 // under `typescript.inlayHints` /
                                 // `javascript.inlayHints`. TypeScript inlay
                                 // hints are all preference-gated (off by
@@ -1560,6 +1600,8 @@ async fn read_loop(
             // our stdin, a permanent two-pipe deadlock. An unbounded, non-blocking
             // enqueue keeps stdout reading unconditional and breaks that cycle.
             let _ = control_tx.send(StdinMessage::Frame(frame.into_bytes()));
+            #[cfg(test)]
+            pending.answered_server_requests.record(method_str);
             continue;
         }
 
@@ -3268,7 +3310,7 @@ fn build_client_capabilities() -> serde_json::Value {
             },
             // `get_semantic_tokens` pulls `textDocument/semanticTokens/full`.
             // The engine gates the WHOLE feature on this capability (verified
-            // live on the pinned 7.0.2: without it the initialize result
+            // live on 7.1.0-beta: without it the initialize result
             // advertises an EMPTY legend and every request returns zero data).
             // The advertised names are Verter's PUBLISHED legend — the server
             // intersects them with its own vocabulary and echoes the negotiated

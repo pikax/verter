@@ -43,11 +43,11 @@
       "label": "ts-native",
       "kind": "native",
       "package": "typescript",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "resolveFrom": "node_modules/typescript",
       "platformPackage": "@typescript/typescript-${platform}-${arch}",
       "executableRel": "lib/tsc",
-      "api": "typescript/unstable/sync",
+      "api": "typescript/sync",
       "mapperCapable": true,
       "notes": "Mapper-capable native TypeScript 7 (typescript-go) via the pinned platform optional dependency."
     }

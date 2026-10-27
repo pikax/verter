@@ -495,7 +495,9 @@ mod tests {
             key.clone(),
             StoredSurfaceDto {
                 dto_bundle: Arc::new(7u32),
-                read_set_signature: ReadSetSignature::empty(),
+                read_set_signature: ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                ),
                 validated_at_generation: 5,
             },
         );
@@ -545,7 +547,9 @@ mod tests {
             key.clone(),
             StoredSurfaceDto {
                 dto_bundle: Arc::new(1u32),
-                read_set_signature: ReadSetSignature::empty(),
+                read_set_signature: ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                ),
                 validated_at_generation: 0,
             },
         );
@@ -761,9 +765,10 @@ mod tests {
             key.clone(),
             StoredSurfaceDto {
                 dto_bundle: Arc::new(11u32),
-                read_set_signature: ReadSetSignature::new(Arc::from(
-                    vec![cross_file_fact].into_boxed_slice(),
-                )),
+                read_set_signature: ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![cross_file_fact].into_boxed_slice()),
+                ),
                 validated_at_generation: 5,
             },
         );

@@ -117,7 +117,9 @@ fn counted_sealed_refusal_owns_nonempty_key_value_and_diagnostic_operands() {
             profile,
             store.refusal_entry_for_tests(&host),
             read,
-            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([]))
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production().set_of([])
+            )
         ));
     });
     assert_eq!(
@@ -387,12 +389,14 @@ fn keyed_output_of(
     data: SemanticNodeData,
 ) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
     let node = store.intern_node(data);
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: KEYED.into(),
-            hash,
-        },
-    ]));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: KEYED.into(),
+                hash,
+            },
+        ]),
+    );
     let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
         SemanticNodeId,
     > = (QueryResult::Value(node), empty_signature()).into();

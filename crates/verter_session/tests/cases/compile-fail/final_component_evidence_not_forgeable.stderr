@@ -1,13 +1,13 @@
 error: cannot construct `ComponentMetaEvidence` with struct literal syntax due to private fields
- --> tests/cases/compile-fail/final_component_evidence_not_forgeable.rs:4:5
-  |
-4 |     ComponentMetaEvidence {
-  |     ^^^^^^^^^^^^^^^^^^^^^
-5 |         facts: Default::default(),
-  |         ------------------------- private field
-6 |         generation: 0,
-  |         ------------- private field
-7 |         external_fingerprint: 0,
-  |         ----------------------- private field
-  |
-  = note: ...and other private fields `effects`, `spent_alone` and `schedule_cut` that were not provided
+  --> tests/cases/compile-fail/final_component_evidence_not_forgeable.rs:9:5
+   |
+ 9 |     ComponentMetaEvidence {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+10 |         facts: some_facts(),
+   |         ------------------- private field
+11 |         generation: 0,
+   |         ------------- private field
+12 |         external_fingerprint: 0,
+   |         ----------------------- private field
+   |
+   = note: ...and other private fields `effects`, `spent_alone` and `schedule_cut` that were not provided

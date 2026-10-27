@@ -456,6 +456,9 @@ impl verter_workspace::WorkspaceRead for LspProjectResolverReader<'_> {
 }
 
 impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.documents.host().project_type_store().fact_policy()
+    }
     // ── Reader-only stub overrides for reverse-graph methods (R6/R7) ──
     //
     // Rationale (§2.16b): `LspProjectResolverReader` is a thin file-read

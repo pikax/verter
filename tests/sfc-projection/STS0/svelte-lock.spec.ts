@@ -473,13 +473,18 @@ SKIP STS0 backend projection clean check: a pinned STS0 engine launcher was not 
   const missingNative = assertProfileGateRun({
     status: 0,
     error: null,
-    stdout: greenReceipt.replace("STS0-ENGINE ts-native 7.0.2", ""),
+    stdout: greenReceipt.replace(
+      `STS0-ENGINE ts-native ${STS0_PROFILE_GATE_ENGINES.find((engine) => engine.label === "ts-native")?.version}`,
+      "",
+    ),
   });
   assert.ok(
     missingNative.some(
       (error) =>
         error.code === "profile-gate-missing" &&
-        /did not execute on the pinned ts-native 7\.0\.2 engine/.test(error.message),
+        error.message.includes(
+          `did not execute on the pinned ts-native ${STS0_PROFILE_GATE_ENGINES.find((engine) => engine.label === "ts-native")?.version} engine`,
+        ),
     ),
     "a green receipt missing the ts-native manifest line was not rejected",
   );

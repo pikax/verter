@@ -20,7 +20,7 @@ import { test } from "node:test";
 import { classifyVerterAnswer, compactProbeRecord, parseCli, verdict } from "./analyze.mjs";
 import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
-import { buildProblems, sha256Text, toolchainPin } from "./provenance.mjs";
+import { buildProblems, sha256Text, toolchainPin, TYPESCRIPT_VERSION } from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
 import { renderMarkdown } from "./report.mjs";
 import {
@@ -693,7 +693,7 @@ const METHOD = {
   measuringSuffixSha256: sha256Text(MEASURING_SUFFIX),
   libSha256: "lib-digest",
   tscExeSha256: "t",
-  tscVersion: "Version 7.0.2",
+  tscVersion: `Version ${TYPESCRIPT_VERSION}`,
   memMb: 8192,
   timeoutMs: 300000,
 };
@@ -953,9 +953,9 @@ function syntheticRun({ verterText = "1", tscText = "1", arms = ["verter", "tsc-
       harness: { "scripts/benchmark/semantic-perf.mjs": "x" },
       harnessAfter: { "scripts/benchmark/semantic-perf.mjs": "x" },
       typescript: {
-        version: "7.0.2",
-        platformVersion: "7.0.2",
-        versionText: "Version 7.0.2",
+        version: TYPESCRIPT_VERSION,
+        platformVersion: TYPESCRIPT_VERSION,
+        versionText: `Version ${TYPESCRIPT_VERSION}`,
         exe: "/tsc/tsc",
         exeSha256: "t",
         platformPackage: "@typescript/typescript-test-x64",
@@ -1436,9 +1436,9 @@ test("a changed binary, build input or harness fails validation", () => {
   failsWith(d, /tsc API client/);
 });
 
-test("TypeScript other than 7.0.2, or a non-production probe, fails validation", () => {
+test("TypeScript other than the pin, or a non-production probe, fails validation", () => {
   const run = syntheticRun();
-  run.meta.typescript.version = "7.0.1";
+  run.meta.typescript.version = "6.0.3";
   failsWith(run, /wrong binary: TypeScript/);
   const run2 = syntheticRun();
   run2.meta.build.packages.verter_session.features = ["test-support"];

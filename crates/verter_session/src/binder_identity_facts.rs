@@ -1155,15 +1155,17 @@ pub(crate) mod tests {
             parse_env_hash: [2; 16],
         };
         let entry = || {
-            let facts: Vec<FactVersionRef> =
-                (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
-                    .map(|index| FactVersionRef::FileWholeHash {
-                        canonical_id: format!("/wide/{index:05}.ts").into(),
-                        hash: [1u8; 16],
-                    })
-                    .collect();
+            let facts: Vec<FactVersionRef> = (0..2
+                * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+                + 3)
+                .map(|index| FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/wide/{index:05}.ts").into(),
+                    hash: [1u8; 16],
+                })
+                .collect();
             // A set extended from another is held in shared tree storage.
             let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
                 facts[..1].to_vec(),
             )
             .union_with_facts(&facts[1..]);

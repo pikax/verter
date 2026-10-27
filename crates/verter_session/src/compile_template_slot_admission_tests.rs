@@ -199,31 +199,32 @@ fn evidence_retention_refusal_evicts_compile_companions_and_serves_uncached() {
     for refused in [false, true] {
         let host = make_host();
         upsert(&host, INLINE_SOURCE);
-        let facts: Vec<_> =
-            (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
-                .map(|i| {
-                    let canonical_id = format!("/publish-evidence/{i}.ts");
-                    let _ = host
-                        .upsert(UpsertRequest {
-                            canonical_id: Some(canonical_id.clone()),
-                            input_id: canonical_id.clone(),
-                            source: Arc::from("export const value = 1;"),
-                            file_language: verter_language::FileLanguage::script_ts(),
-                            aliases: Vec::new(),
-                        })
-                        .unwrap();
-                    let source = host.scheduler.try_get_source(&canonical_id).unwrap();
-                    let hash = source
-                        .downcast_data::<crate::host_executor::HostSourceData>()
-                        .unwrap()
-                        .parse
-                        .whole_hash;
-                    FactVersionRef::FileWholeHash {
-                        canonical_id: canonical_id.into(),
-                        hash,
-                    }
-                })
-                .collect();
+        let facts: Vec<_> = (0..2 * verter_session_query::facts::policy::FactPolicy::production()
+            .fresh_slice_max()
+            + 3)
+            .map(|i| {
+                let canonical_id = format!("/publish-evidence/{i}.ts");
+                let _ = host
+                    .upsert(UpsertRequest {
+                        canonical_id: Some(canonical_id.clone()),
+                        input_id: canonical_id.clone(),
+                        source: Arc::from("export const value = 1;"),
+                        file_language: verter_language::FileLanguage::script_ts(),
+                        aliases: Vec::new(),
+                    })
+                    .unwrap();
+                let source = host.scheduler.try_get_source(&canonical_id).unwrap();
+                let hash = source
+                    .downcast_data::<crate::host_executor::HostSourceData>()
+                    .unwrap()
+                    .parse
+                    .whole_hash;
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical_id.into(),
+                    hash,
+                }
+            })
+            .collect();
         let first = compile_with(&host, profile.clone()).unwrap();
         assert!(template_slot(&host).is_some());
         let profile_hash = compile_profile_hash(&profile);
@@ -244,7 +245,10 @@ fn evidence_retention_refusal_evicts_compile_companions_and_serves_uncached() {
         });
         let read = || {
             let signature = ReadSetSignature::new(
-                verter_session_query::facts::fact_read_set::seal_canonical_signature(facts.clone()),
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                    facts.clone(),
+                ),
             );
             crate::compile_output_node::with_session_publish_evidence_for_test(
                 signature,
@@ -326,7 +330,10 @@ fn refused_ide_admission_still_serves_the_compiled_artifact() {
         });
         let ide = crate::compile_output_node::with_session_publish_evidence_for_test(
             ReadSetSignature::new(
-                verter_session_query::facts::fact_read_set::seal_canonical_signature(Vec::new()),
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                    Vec::new(),
+                ),
             ),
             StoreAccount::new(Arc::clone(&account)),
             || host.compile_ide(OWNER, &profile),
@@ -389,7 +396,10 @@ fn a_refused_ide_output_is_still_delivered_complete_to_the_reader() {
     });
     let delivered = crate::compile_output_node::with_session_publish_evidence_for_test(
         ReadSetSignature::new(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(Vec::new()),
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                Vec::new(),
+            ),
         ),
         StoreAccount::new(Arc::clone(&account)),
         || {

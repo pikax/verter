@@ -803,7 +803,22 @@ async fn cancellation_and_shutdown_run_while_responses_wait_for_a_stalled_client
         ErrorCode::RequestCancelled.code()
     );
     assert_eq!(responses[&shutdown_id]["result"], Value::Null);
-    assert_eq!(busy.outbound.load().response.retained(), Load::default());
+    // The writer accounts a response written only once its write returns,
+    // which can be after the client has already read it: wait for the last
+    // completion rather than reading the account the instant the final
+    // response arrives.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while busy.outbound.load().response.retained() != Load::default() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "every written response releases its account: {:?}",
+            busy.outbound.load().response
+        )
+    });
 
     editor
         .send(json!({"jsonrpc": "2.0", "method": "exit"}))

@@ -67,7 +67,8 @@ fn fixtures_pin_the_expected_engine_version() {
     // re-verified) — this assertion surfaces a stale-fixture mismatch.
     let fx = load_fixtures();
     assert_eq!(
-        fx.engine_version, "7.0.2",
+        fx.engine_version,
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         "fixture engine version drifted; re-capture fixtures and re-verify the codec"
     );
     assert!(
@@ -94,11 +95,12 @@ fn rust_encode_matches_recorded_request_frames_byte_for_byte() {
         );
         checked += 1;
     }
-    // Must cover each op the codec hand-writes (initialize, updateSnapshot x2,
-    // semantic diags, type/symbol at position, typeToString, echo).
+    // Must cover each op the codec hand-writes (initialize, createSnapshot,
+    // updateSnapshot, getCurrentLanguageServerSnapshot, semantic diags,
+    // type/symbol at position, typeToString, release, echo).
     assert!(
-        checked >= 8,
-        "expected at least 8 request-frame fixtures, checked {checked}"
+        checked >= 10,
+        "expected at least 10 request-frame fixtures, checked {checked}"
     );
 }
 
