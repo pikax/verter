@@ -1007,8 +1007,18 @@ fn effective_target_vue_only_when_no_script_candidates() {
     );
 }
 
+/// The same refusal over a 40-file consumed result: the gate version of the
+/// 1,025-file test in the nightly scale tier. The consumed result's receipt
+/// carries its own charge at every size, so the admission claims and refuses
+/// its evidence whole either way.
 #[test]
-fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
+fn compile_retention_refusal_over_a_small_receipt_suppresses_companions() {
+    assert_compile_retention_refusal_suppresses_companions(40);
+}
+
+/// A compile consuming a receipt over `files` Vue files is admitted whole or
+/// refused whole for its evidence, with its scheduler and template companions.
+fn assert_compile_retention_refusal_suppresses_companions(files: usize) {
     use verter_session_query::facts::{
         fact_cache::{FactVersionRef, ReadSetSignature},
         fact_read_set::seal_canonical_signature,
@@ -1017,7 +1027,7 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
     use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
     for admitted in [true, false] {
         let mut host = make_host();
-        let facts = (0..1025)
+        let facts = (0..files)
             .map(|index| {
                 let canonical_id = format!("/wide/{index}.vue");
                 upsert_vue(&host, &canonical_id, "<template><div /></template>");
@@ -1032,7 +1042,7 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
         // the compile's admission must claim whole.
         let consumed = ResultReceipt::new(facts.iter().cloned().collect());
         let evidence_bytes = consumed.retained_charge_bytes();
-        assert!(evidence_bytes > 1025 * std::mem::size_of::<FactVersionRef>());
+        assert!(evidence_bytes > files * std::mem::size_of::<FactVersionRef>());
         let account = SemanticRetentionAccount::new(RetentionLimits {
             max_entry_bytes: if admitted {
                 usize::MAX
@@ -1100,5 +1110,16 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
         }
         drop((host, held));
         assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
+        assert_compile_retention_refusal_suppresses_companions(1025);
     }
 }

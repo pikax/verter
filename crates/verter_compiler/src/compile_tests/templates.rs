@@ -3329,16 +3329,24 @@ const opts = ref({})
     }
 }
 
-/// A template nested 10,000 deep compiles on a 1 MiB thread, to the
-/// runtime render function and to TSX with its template data: the
-/// handler-cache and array-group-cache reservations and the template data
-/// walk run from explicit stacks.
+/// A template nested 1,000 deep compiles on a 160 KiB thread: the gate version
+/// of the 10,000-deep, 1 MiB test in the nightly scale tier. The compile needs
+/// 64 to 128 KiB of fixed stack (measured at ten levels), so 160 KiB leaves at
+/// most 96 bytes a level over 1,000 levels, no more than the 89.6 to 96 bytes
+/// 1 MiB leaves over 10,000: a level that recursed natively overflows here
+/// whenever it overflows there.
 #[test]
-fn a_template_nested_10000_deep_compiles_on_a_small_stack() {
-    const DEPTH: usize = 10_000;
+fn a_template_nested_1000_deep_compiles_on_a_smaller_stack() {
+    assert_a_deep_template_compiles(1_000, 160 << 10);
+}
+
+/// A template `DEPTH` elements deep compiles for the runtime and to TSX with
+/// template data, without an error, on a thread of `stack` bytes.
+#[allow(non_snake_case)]
+fn assert_a_deep_template_compiles(DEPTH: usize, stack: usize) {
     let compiled = std::thread::Builder::new()
-        .stack_size(1 << 20)
-        .spawn(|| {
+        .stack_size(stack)
+        .spawn(move || {
             let source = format!(
                 "<template>{}x{}</template>
 ",
@@ -3359,4 +3367,19 @@ fn a_template_nested_10000_deep_compiles_on_a_small_stack() {
         .join()
         .expect("the compile returns");
     assert_eq!(compiled, (0, 0, DEPTH, DEPTH as u16));
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// A template nested 10,000 deep compiles on a 1 MiB thread, to the
+    /// runtime render function and to TSX with its template data: the
+    /// handler-cache and array-group-cache reservations and the template data
+    /// walk run from explicit stacks.
+    #[test]
+    fn a_template_nested_10000_deep_compiles_on_a_small_stack() {
+        assert_a_deep_template_compiles(10_000, 1 << 20);
+    }
 }

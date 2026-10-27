@@ -1613,16 +1613,12 @@ async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
 
     // The store's first head is an empty generation: wait for the retried
     // publication itself.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the retried publication must fill the durable store");
+    await_after_drain_passes(
+        server,
+        || carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig),
+        "the retried publication must fill the durable store",
+    )
+    .await;
     let manifest = carrier_manifest_strict(&workspace_root).unwrap();
     assert!(
         manifest
@@ -1806,20 +1802,17 @@ async fn recovered_successor_publication_pings_the_editor_owned_client_after_set
     // successor chain's first pass is one backoff delay (>=500ms) away — so
     // repairing from here on is strictly after the compare window closed and
     // strictly before any successor can publish.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if !server.sync_coordinator.workspace_scan_in_progress()
+    await_scan_settlement(
+        server,
+        || {
+            !server.sync_coordinator.workspace_scan_in_progress()
                 && server
                     .pending_snapshot_provider_sync
                     .contains(&app_canonical_id)
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the scan must settle with the carrier still queued for its successor");
+        },
+        "the scan must settle with the carrier still queued for its successor",
+    )
+    .await;
     assert!(
         !methods
             .lock()
@@ -1831,16 +1824,12 @@ async fn recovered_successor_publication_pings_the_editor_owned_client_after_set
     // Repair the store and let the detached successor pass publish durably.
     std::fs::remove_file(&store_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the successor publication must fill the durable store");
+    await_after_drain_passes(
+        server,
+        || carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig),
+        "the successor publication must fill the durable store",
+    )
+    .await;
     let manifest = carrier_manifest_strict(&workspace_root).unwrap();
     assert!(
         manifest
@@ -1994,20 +1983,17 @@ async fn recovered_publication_while_the_completion_gate_is_open_pings_the_store
     // the carrier still queued, so the post-init drain fails too and the
     // completion gate parks open — level 2 stays suppressed while any
     // provider work remains pending.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if !server.sync_coordinator.workspace_scan_in_progress()
+    await_scan_settlement(
+        server,
+        || {
+            !server.sync_coordinator.workspace_scan_in_progress()
                 && server
                     .pending_snapshot_provider_sync
                     .contains(&app_canonical_id)
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the demanded scan must settle with the carrier still queued");
+        },
+        "the demanded scan must settle with the carrier still queued",
+    )
+    .await;
     assert!(
         !methods
             .lock()
@@ -2027,16 +2013,12 @@ async fn recovered_publication_while_the_completion_gate_is_open_pings_the_store
     // while the completion gate is still parked.
     std::fs::remove_file(&store_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the successor publication must fill the durable store");
+    await_after_drain_passes(
+        server,
+        || carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig),
+        "the successor publication must fill the durable store",
+    )
+    .await;
 
     // The queue empties, so the gate closes and level 2 is announced...
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
@@ -2248,16 +2230,12 @@ async fn recovered_publication_during_the_post_init_drain_pings_the_store_fill_c
     std::fs::remove_file(&store_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
     release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if carrier_manifest_strict(&workspace_root).is_some() {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the parked post-init drain must fill the durable store once repaired");
+    await_after_drain_passes(
+        server,
+        || carrier_manifest_strict(&workspace_root).is_some(),
+        "the parked post-init drain must fill the durable store once repaired",
+    )
+    .await;
 
     // The queue emptied, so the gate closes and level 2 is announced...
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
@@ -2480,25 +2458,21 @@ async fn recovered_publication_with_an_unrelated_carrier_still_pending_pings_the
     std::fs::remove_file(&store_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
     release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let Some(manifest) = carrier_manifest_strict(&workspace_root) else {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                continue;
-            };
-            if manifest.projects.get(&tsconfig).is_some_and(|project| {
-                project
-                    .ready_files
-                    .keys()
-                    .any(|provider| provider.ends_with("App.vue.tsx"))
-            }) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the released post-init drain must publish the App carrier");
+    await_after_drain_passes(
+        server,
+        || {
+            carrier_manifest_strict(&workspace_root).is_some_and(|manifest| {
+                manifest.projects.get(&tsconfig).is_some_and(|project| {
+                    project
+                        .ready_files
+                        .keys()
+                        .any(|provider| provider.ends_with("App.vue.tsx"))
+                })
+            })
+        },
+        "the released post-init drain must publish the App carrier",
+    )
+    .await;
     assert!(
         server
             .pending_snapshot_provider_sync
@@ -2699,20 +2673,17 @@ async fn recovered_publication_while_the_completion_waiter_is_delayed_pings_the_
     // and quiescent, exactly what a late baseline would absorb.
     std::fs::remove_file(&store_dir).unwrap();
     std::fs::create_dir_all(&store_dir).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if !server
+    await_after_drain_passes(
+        server,
+        || {
+            !server
                 .pending_snapshot_provider_sync
                 .contains(&app_canonical_id)
                 && carrier_manifest_strict(&workspace_root).is_some()
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the successor publication must commit and settle the carrier");
+        },
+        "the successor publication must commit and settle the carrier",
+    )
+    .await;
     assert!(
         !methods
             .lock()
@@ -2865,30 +2836,9 @@ async fn subscribed_store_fill_demand_scans_and_pings_the_editor_owned_client() 
     .expect("the server announces readiness");
 
     // No inventory request is issued anywhere in this test: the negotiated
-    // subscription alone must fill the store. The store's first head is an
-    // empty generation, so wait for the scan's own publication.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the subscribed store-fill demand must publish the configured project's carriers");
-    let manifest = carrier_manifest_strict(&workspace_root).unwrap();
-    assert!(
-        manifest
-            .projects
-            .get(&tsconfig)
-            .expect("the configured project owns the carrier")
-            .ready_files
-            .keys()
-            .any(|provider| provider.ends_with(".vue.tsx")),
-        "the store must advertise the App.vue IDE companion for the editor plugin"
-    );
-
+    // subscription alone must fill the store. The ping is sent only after a
+    // publication has committed both durable halves, so once it arrives the
+    // store holds App.vue's carrier (the only one in the workspace).
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let notified = methods_changed.notified();
@@ -2906,6 +2856,18 @@ async fn subscribed_store_fill_demand_scans_and_pings_the_editor_owned_client() 
     })
     .await
     .expect("the subscription-driven scan's publications must ping the subscribed client");
+    let manifest = carrier_manifest_strict(&workspace_root)
+        .expect("the subscribed store-fill demand must run the inventory scan");
+    assert!(
+        manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the configured project owns the carrier")
+            .ready_files
+            .keys()
+            .any(|provider| provider.ends_with(".vue.tsx")),
+        "the store must advertise the App.vue IDE companion for the editor plugin"
+    );
 }
 
 /// The store-fill subscription is inert without a carrier publisher: a

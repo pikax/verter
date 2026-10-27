@@ -533,3 +533,154 @@ async fn resolve_end_to_end_over_the_real_worktree() {
         }
     }
 }
+
+// ── the prepared engine: a session on a provisional candidate is decided by
+//    its capability cross-check, and dropping the preparation leaves no
+//    engine process behind. ─────────────────────────────────────────────────
+
+/// The explicit-engine request `verter-tsc` builds for `--tsgo-bin`.
+fn explicit_request(engine: &std::path::Path) -> ResolutionRequest {
+    let mut request = ResolutionRequest::for_environment(Capability::Api, None);
+    request.env_override = Some(engine.to_path_buf());
+    request.path_entries = Vec::new();
+    request.cache_root = None;
+    request.host_exe = None;
+    request
+}
+
+/// Run one `initialize` round-trip on a prepared engine and report whether
+/// the session itself succeeded, alongside the preparation's verdict.
+fn prepared_session_on(engine: &std::path::Path) -> Option<bool> {
+    use verter_tsgo_api::client::PreparedEngine;
+    use verter_tsgo_api::snapshot::OverlaySnapshot;
+    use verter_tsgo_api::TsgoClient;
+
+    let cwd = std::env::temp_dir();
+    PreparedEngine::start(Some(explicit_request(engine)), &cwd).run(
+        |spawned, probed_version| async move {
+            let Ok(client) = TsgoClient::connect_spawned(
+                spawned,
+                &probed_version,
+                OverlaySnapshot::builder().build(),
+                8,
+            ) else {
+                return false;
+            };
+            let initialized = client.initialize().await.is_ok();
+            let _ = client.close().await;
+            initialized
+        },
+    )
+}
+
+// ── DISCRIMINATING: an engine whose cross-check passes hands the session's
+//    result through. ─────────────────────────────────────────────────────────
+#[test]
+fn a_prepared_engine_hands_through_a_session_its_cross_check_confirms() {
+    assert_eq!(
+        prepared_session_on(&fake_engine("apiok")),
+        Some(true),
+        "a working engine's session result must be handed through"
+    );
+}
+
+// ── DISCRIMINATING: an engine whose `--version` agrees with the policy but
+//    whose in-band serverInfo disagrees FAILS CLOSED, even though its
+//    session engine answered: the session's result is discarded. Without
+//    the cross-check gate this returns `Some(true)`. ─────────────────────────
+#[test]
+fn a_prepared_engine_discards_a_session_its_cross_check_rejects() {
+    assert_eq!(
+        prepared_session_on(&fake_engine("apimismatch+api")),
+        None,
+        "a session on an engine whose two version reports disagree must be discarded"
+    );
+}
+
+// ── DISCRIMINATING: dropping a preparation while its session engine and
+//    its cross-check engine are both running kills both, and the
+//    cross-check engine's descendant with them. The `hold-lsp+api` fake's
+//    cross-check spawns a pipe-holding child and never answers, and its
+//    session engine waits on stdin, so all three stay alive until something
+//    kills them. ─────────────────────────────────────────────────────────────
+#[test]
+fn dropping_a_prepared_engine_kills_every_engine_it_spawned() {
+    use verter_tsgo_api::client::PreparedEngine;
+
+    let engine = fake_engine("hold-lsp+api");
+    let child_pid_file = hold_pipe_pid_file(&engine);
+    let _ = std::fs::remove_file(&child_pid_file);
+    let descendant = || -> Option<u32> {
+        std::fs::read_to_string(&child_pid_file)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let pid_dir = {
+        let mut name = engine.as_os_str().to_owned();
+        name.push(".pids");
+        PathBuf::from(name)
+    };
+    let _ = std::fs::remove_dir_all(&pid_dir);
+    std::fs::create_dir_all(&pid_dir).expect("create the pid directory");
+    let pids = |mode: &str| -> Vec<u32> {
+        std::fs::read_dir(&pid_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.strip_prefix(&format!("{mode}-"))?
+                    .strip_suffix(".pid")?
+                    .parse()
+                    .ok()
+            })
+            .collect()
+    };
+
+    let prepared = PreparedEngine::start(Some(explicit_request(&engine)), &std::env::temp_dir());
+
+    // Both engines record their pid on start; waiting for an external process
+    // to start has no receipt to wait on, so this polls under one watchdog.
+    let watchdog = std::time::Instant::now() + Duration::from_secs(15);
+    while pids("api").is_empty() || pids("lsp").is_empty() || descendant().is_none() {
+        assert!(
+            std::time::Instant::now() < watchdog,
+            "the preparation must start its session engine and its cross-check, and \
+             the cross-check its descendant (api pids {:?}, lsp pids {:?}, descendant \
+             {:?})",
+            pids("api"),
+            pids("lsp"),
+            descendant()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let spawned: Vec<u32> = pids("api")
+        .into_iter()
+        .chain(pids("lsp"))
+        .chain(descendant())
+        .collect();
+    assert!(
+        spawned.iter().all(|pid| process_alive(*pid)),
+        "both engines and the descendant are running before the drop"
+    );
+
+    drop(prepared);
+
+    // Reaping is the OS's business with no receipt to wait on: poll liveness
+    // under one watchdog whose expiry is the failure.
+    let watchdog = std::time::Instant::now() + Duration::from_secs(5);
+    while spawned.iter().any(|pid| process_alive(*pid)) {
+        assert!(
+            std::time::Instant::now() < watchdog,
+            "no engine may outlive the dropped preparation: {:?} still alive",
+            spawned
+                .iter()
+                .filter(|pid| process_alive(**pid))
+                .collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_dir_all(&pid_dir);
+}
