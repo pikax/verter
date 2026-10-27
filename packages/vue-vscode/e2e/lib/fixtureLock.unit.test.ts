@@ -82,6 +82,20 @@ function plantLock(subject: string, owner: Record<string, unknown>): string {
   return lockPath;
 }
 
+function childReady(child: ChildProcess, timeoutMs: number, message: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const guard = setTimeout(() => {
+      child.off("message", ready);
+      reject(new Error(message));
+    }, timeoutMs);
+    const ready = () => {
+      clearTimeout(guard);
+      resolve();
+    };
+    child.once("message", ready);
+  });
+}
+
 /**
  * A real child process that takes the lock file for `subject`, holds it for
  * `holdMs`, then releases and exits. Resolves once the lock is actually on disk,
@@ -99,21 +113,16 @@ function childHoldingLock(subject: string, holdMs: number): Promise<ChildProcess
       token: "child-token", pid: process.pid, host: os.hostname(),
       startedAt: new Date().toISOString(), subject: ${JSON.stringify(subject)},
     }));
+    process.send("ready");
+    // Timed release exercises synchronous lock polling and its asserted wait duration.
     setTimeout(() => { try { fs.unlinkSync(${JSON.stringify(lockPath)}); } catch {} }, ${holdMs});
-    setTimeout(() => {}, ${holdMs + 5000});
   `;
-  const child = spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+  const child = spawn(process.execPath, ["-e", script], {
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
   children.push(child);
 
-  return new Promise((resolve, reject) => {
-    const started = Date.now();
-    const poll = (): void => {
-      if (fs.existsSync(lockPath)) return resolve(child);
-      if (Date.now() - started > 10_000) return reject(new Error("child never took the lock"));
-      setTimeout(poll, 10);
-    };
-    poll();
-  });
+  return childReady(child, 10_000, "child never took the lock").then(() => child);
 }
 
 /**
@@ -221,24 +230,19 @@ const RACER_SOURCE = `
 import * as fs from "node:fs";
 import { acquireFixtureLock, releaseFixtureLock } from "./fixtureLock.mts";
 
-const [subject, critical, ready, go, holdMs, staggerMs, index, report] = process.argv.slice(2);
+const [subject, critical, holdMs, staggerMs, index, report] = process.argv.slice(2);
 
 function sleep(ms) {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-fs.writeFileSync(ready, "ready");
-let goAt = 0;
-for (;;) {
-  try {
-    goAt = Number(fs.readFileSync(go, "utf-8"));
-  } catch {}
-  if (goAt > 0) break;
-  sleep(1);
-}
+process.send("ready");
+const goAt = await new Promise((resolve) => process.once("message", resolve));
+process.disconnect();
 // Sleeping rather than spinning: four processes spinning would take CPU from
 // the very read this schedule is built around.
 const startAt = goAt + Number(index) * Number(staggerMs);
+// This timed stagger is the race stimulus; the parent verifies it hit the read window.
 sleep(startAt - Date.now() - 2);
 while (Date.now() < startAt) {}
 
@@ -773,21 +777,16 @@ describe("acquireFixtureLock", () => {
           token: "${token}", pid: process.pid, host: os.hostname(),
           startedAt: new Date().toISOString(), subject: ${JSON.stringify(theirs)},
         }));
-      setTimeout(() => {}, 60000);
+      process.on("message", () => {});
+      process.send("ready");
     `;
-    const child = spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+    const child = spawn(process.execPath, ["-e", script], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
     children.push(child);
     const theirPending = `${theirLock}.pending-${child.pid}-${token}`;
     dirs.push(theirPending);
-    await new Promise<void>((resolve, reject) => {
-      const started = Date.now();
-      const poll = (): void => {
-        if (fs.existsSync(theirPending)) return resolve();
-        if (Date.now() - started > 10_000) return reject(new Error("child never wrote a payload"));
-        setTimeout(poll, 10);
-      };
-      poll();
-    });
+    await childReady(child, 10_000, "child never wrote a payload");
 
     // Positive controls: the payload really is on disk, in the very directory
     // this acquire is about to sweep, and its owner really is running.
@@ -1020,48 +1019,29 @@ describe("two real acquirers racing for one fixture", () => {
       const hold = Math.max(150, (RACERS - 1) * stagger + readMs + 50);
 
       const critical = path.join(workspace, `critical-${round}`);
-      const go = path.join(workspace, `go-${round}`);
       const reports = Array.from({ length: RACERS }, (_, i) =>
         path.join(workspace, `report-${round}-${i}`),
       );
-      const readies = Array.from({ length: RACERS }, (_, i) =>
-        path.join(workspace, `ready-${round}-${i}`),
-      );
+      const racers: ChildProcess[] = [];
+      const readies: Promise<void>[] = [];
 
       const running = reports.map((report, i) => {
         const child = spawn(
           process.execPath,
-          [
-            racerPath,
-            dir,
-            critical,
-            readies[i],
-            go,
-            String(hold),
-            String(stagger),
-            String(i),
-            report,
-          ],
-          { stdio: "ignore" },
+          [racerPath, dir, critical, String(hold), String(stagger), String(i), report],
+          { stdio: ["ignore", "ignore", "ignore", "ipc"] },
         );
         children.push(child);
+        racers.push(child);
+        readies.push(childReady(child, 20_000, "racers never reported ready"));
         return new Promise<number | null>((resolve) => child.on("exit", resolve));
       });
 
-      await new Promise<void>((resolve, reject) => {
-        const started = Date.now();
-        const poll = (): void => {
-          if (readies.every((file) => fs.existsSync(file))) return resolve();
-          if (Date.now() - started > 20_000) {
-            return reject(new Error("racers never reported ready"));
-          }
-          setTimeout(poll, 5);
-        };
-        poll();
-      });
+      await Promise.all(readies);
       // An absolute instant in the near future, so no racer starts before the
       // slowest one has read the barrier.
-      fs.writeFileSync(go, String(Date.now() + 150));
+      const goAt = Date.now() + 150;
+      for (const racer of racers) racer.send(goAt);
       await Promise.all(running);
 
       const outcomes = reports.map(

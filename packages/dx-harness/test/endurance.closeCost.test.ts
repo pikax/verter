@@ -143,6 +143,7 @@ async function settleClose(
 ): Promise<{ reading: RetentionReading | null; settleMs: number }> {
   const started = performance.now();
   if (appliedBefore === null) {
+    // Older servers expose no close-completion receipt or notification to await.
     await new Promise((resolve) => setTimeout(resolve, BLIND_SETTLE_MS));
     return { reading: await readRetention(rig), settleMs: performance.now() - started };
   }
@@ -156,7 +157,6 @@ async function settleClose(
         `the close did not land within ${deadlineMs}ms: ` + `${describeRetentionReading(reading)}`,
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
 

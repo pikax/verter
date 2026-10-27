@@ -70,7 +70,24 @@ describe("WSP1-AC1 stalled client reader", () => {
       .then(() => {
         markerSeen = true;
       });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    const stdout = client.process.stdout!;
+    let readable: () => void;
+    try {
+      // The request and marker already reject on hangs; readiness comes from stdout.
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          readable = () => {
+            if (client.pausedTransportByteLength > 0) resolve();
+          };
+          stdout.on("readable", readable);
+          readable();
+        }),
+        pending,
+        marker,
+      ]);
+    } finally {
+      stdout.off("readable", readable!);
+    }
     expect(client.unreadByteLength).toBeGreaterThan(0);
     expect(markerSeen).toBe(false);
     client.resumeReads();
@@ -89,6 +106,8 @@ describe("WSP1-AC1 stalled client reader", () => {
       env: { ...process.env, FAKE_STAY_ALIVE: "1", FAKE_QUERY_DELAY_MS: "200" },
     });
     const responses: Array<{ id: number; error?: { code: number }; result?: unknown }> = [];
+    // Waits re-checked by the data handler each time it records a response.
+    const responseWaiters: Array<() => void> = [];
     let buffered = Buffer.alloc(0);
     child.stdout.on("data", (chunk: Buffer) => {
       buffered = Buffer.concat([buffered, chunk]);
@@ -101,7 +120,10 @@ describe("WSP1-AC1 stalled client reader", () => {
         if (buffered.length < bodyStart + length) break;
         const message = JSON.parse(buffered.subarray(bodyStart, bodyStart + length).toString());
         buffered = buffered.subarray(bodyStart + length);
-        if (message.id !== undefined && message.method === undefined) responses.push(message);
+        if (message.id !== undefined && message.method === undefined) {
+          responses.push(message);
+          for (const waiter of responseWaiters.splice(0)) waiter();
+        }
       }
     });
     const send = (payload: unknown) => {
@@ -109,15 +131,22 @@ describe("WSP1-AC1 stalled client reader", () => {
       const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`);
       child.stdin.write(Buffer.concat([header, body]));
     };
+    // Resolves once `count` responses are recorded; the timer is a hang guard only.
     const responseCount = (count: number) =>
       new Promise<void>((resolve, reject) => {
-        const deadline = Date.now() + 8_000;
-        const tick = () => {
-          if (responses.length >= count) resolve();
-          else if (Date.now() > deadline) reject(new Error("timed out waiting for responses"));
-          else setTimeout(tick, 10);
+        const guard = setTimeout(
+          () => reject(new Error("timed out waiting for responses")),
+          8_000,
+        );
+        const check = () => {
+          if (responses.length >= count) {
+            clearTimeout(guard);
+            resolve();
+          } else {
+            responseWaiters.push(check);
+          }
         };
-        tick();
+        check();
       });
     try {
       send({ jsonrpc: "2.0", id: 1, method: "echo/method", params: { n: 1 } });
