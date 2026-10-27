@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::{oneshot, Notify};
 
@@ -33,6 +34,38 @@ struct PendingRequestState {
 #[derive(Default)]
 pub(crate) struct PendingRequestTable {
     state: StdMutex<PendingRequestState>,
+    /// TEST-ONLY: the methods of the engine-to-client requests the read loop
+    /// has answered, recorded once each reply is queued for the engine.
+    #[cfg(test)]
+    pub(crate) answered_server_requests: AnsweredServerRequests,
+}
+
+/// TEST-ONLY: a log of answered engine-to-client requests that a test can
+/// wait on.
+#[cfg(test)]
+pub(crate) struct AnsweredServerRequests(tokio::sync::watch::Sender<Vec<String>>);
+
+#[cfg(test)]
+impl Default for AnsweredServerRequests {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(Vec::new()).0)
+    }
+}
+
+#[cfg(test)]
+impl AnsweredServerRequests {
+    pub(crate) fn record(&self, method: &str) {
+        self.0
+            .send_modify(|methods| methods.push(method.to_string()));
+    }
+
+    /// Wait until a request named `method` has been answered.
+    pub(crate) async fn wait_for(&self, method: &str) {
+        let mut answered = self.0.subscribe();
+        let _ = answered
+            .wait_for(|methods| methods.iter().any(|seen| seen == method))
+            .await;
+    }
 }
 
 impl PendingRequestTable {

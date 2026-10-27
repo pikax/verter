@@ -6217,8 +6217,8 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
 /// dropped), the listener must stop with it. RED-before: the listener leaked
 /// past shutdown holding the pending-redrive context (and through it the
 /// document registry and sync owners), so a late pulse armed a drain chain on
-/// the retired coordinator — observable here as provider file ops starting
-/// after the loop exited.
+/// the retired coordinator. The listener's own drop receipt is the
+/// discriminating check; a late pulse then finds nobody parked on it.
 #[tokio::test(flavor = "multi_thread")]
 async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -6234,13 +6234,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let provider = Arc::new(MockTypeProvider::new());
     let pulse = Arc::new(tokio::sync::Notify::new());
     provider.set_restart_pulse(Some(Arc::clone(&pulse)));
-    // The pending queue stays EMPTY while the loop lives: the loop's own
-    // plain arm would drain a queued entry (the provider is healthy) and the
-    // post-shutdown pulse would have nothing left to discriminate on. The
-    // entry is queued only after the loop has exited.
     let pending_snapshot_provider_sync: Arc<DashSet<String>> = Arc::new(DashSet::new());
-    let carrier_transaction_coordinator =
-        Arc::new(crate::external_ts::CarrierTransactionCoordinator::new());
     let deps = Arc::new(SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
@@ -6262,7 +6256,9 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         )),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
-        carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+        carrier_transaction_coordinator: Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     });
 
     let (wake_tx, wake_rx) = mpsc::channel(1);
@@ -6317,23 +6313,14 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         "the restart-pulse listener must stop with the coordinator loop"
     );
 
-    // A late engine-start pulse must not start drain passes on the retired
-    // coordinator. With the listener gone nothing else waits on the pulse, so
-    // no chain is started and no provider file op follows.
-    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
-    let calls_before = provider.file_sync_calls().len();
-    let chains = carrier_transaction_coordinator.subscribe_pending_redrive_chains();
-    let chains_before = *chains.borrow();
+    // A late engine-start pulse finds nobody parked on it: with no waiter,
+    // `notify_one` stores its permit, which is still there to take. A leaked
+    // listener parked on the pulse would have been woken directly instead,
+    // leaving no permit behind.
     pulse.notify_one();
-    assert_eq!(
-        *chains.borrow(),
-        chains_before,
-        "a restart pulse after coordinator shutdown must not start a redrive chain"
-    );
-    assert_eq!(
-        provider.file_sync_calls().len(),
-        calls_before,
-        "a restart pulse after coordinator shutdown must not start drain passes"
+    assert!(
+        futures_util::FutureExt::now_or_never(pulse.notified()).is_some(),
+        "a restart pulse after coordinator shutdown must find no listener"
     );
 }
 
