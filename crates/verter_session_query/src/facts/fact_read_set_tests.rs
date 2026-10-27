@@ -2011,3 +2011,39 @@ fn a_tracer_refuses_a_run_of_another_policy() {
     let mut read_set = FactReadSet::new(narrow_policy());
     read_set.absorb_canonical_signature(&run);
 }
+
+/// Placing a few appended facts into a canonical prefix in place gives the
+/// same set, in the same order, as sorting and deduplicating the whole
+/// collection — whether an appended fact is new, repeats a prefix fact or
+/// repeats another appended fact, and wherever it falls.
+#[test]
+fn appended_facts_are_placed_into_the_canonical_prefix_exactly() {
+    let fact = |index: usize| FactVersionRef::FileWholeHash {
+        canonical_id: format!("/sorted/{index:03}.ts").into(),
+        hash: hash16(0),
+    };
+    let mut seed = 0x9E37_79B9_u64;
+    let mut next = |bound: usize| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((seed >> 33) as usize) % bound
+    };
+    for _ in 0..500 {
+        let prefix_len = next(12);
+        let mut prefix: Vec<usize> = (0..prefix_len).map(|_| next(40)).collect();
+        prefix.sort_unstable();
+        prefix.dedup();
+        let tail: Vec<usize> = (0..=next(8)).map(|_| next(40)).collect();
+        let mut facts: Vec<FactVersionRef> = prefix
+            .iter()
+            .chain(tail.iter())
+            .map(|&index| fact(index))
+            .collect();
+        let mut expected = facts.clone();
+        expected.sort();
+        expected.dedup();
+        super::sort_dedup_facts(&mut facts);
+        assert_eq!(facts, expected, "prefix {prefix:?} tail {tail:?}");
+    }
+}

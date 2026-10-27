@@ -1226,18 +1226,24 @@ fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
         facts.dedup();
         return;
     }
-    let tail = facts.split_off(prefix);
-    for fact in tail {
+    // Place each appended fact into the canonical prefix in place: the
+    // prefix grows at `end`, and a duplicate is left behind it, past `end`,
+    // to be cut off at the end — no second vector.
+    let mut end = prefix;
+    for next in prefix..facts.len() {
         let mut compared = 0;
-        let found = facts.binary_search_by(|held| {
+        let found = facts[..end].binary_search_by(|held| {
             compared += 1;
-            compare_fact_refs(held, &fact)
+            compare_fact_refs(held, &facts[next])
         });
         record_signature_work(compared);
         if let Err(at) = found {
-            facts.insert(at, fact);
+            facts.swap(end, next);
+            facts[at..=end].rotate_right(1);
+            end += 1;
         }
     }
+    facts.truncate(end);
 }
 
 /// Canonical ordering for [`FactVersionRef`] values. Used by

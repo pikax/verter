@@ -867,8 +867,7 @@ pub fn drop_subsumed_receipts(facts: &mut Vec<FactVersionRef>) {
     if receipts.next().is_none() || receipts.next().is_none() {
         return;
     }
-    let mut consumed: rustc_hash::FxHashSet<*const ResultEvidence> =
-        rustc_hash::FxHashSet::default();
+    let mut consumed = ConsumedReceipts::default();
     for fact in facts.iter() {
         if let FactVersionRef::Receipt(receipt) = fact {
             for inner in receipt.0.facts.iter() {
@@ -882,9 +881,47 @@ pub fn drop_subsumed_receipts(facts: &mut Vec<FactVersionRef>) {
         return;
     }
     facts.retain(|fact| match fact {
-        FactVersionRef::Receipt(receipt) => !consumed.contains(&Arc::as_ptr(&receipt.0)),
+        FactVersionRef::Receipt(receipt) => !consumed.contains(Arc::as_ptr(&receipt.0)),
         _ => true,
     });
+}
+
+/// The receipts a set's receipts consumed: held inline, compared linearly,
+/// while few — a set usually holds a handful of receipts — and hashed once
+/// many, so dropping them allocates nothing in the common case.
+#[derive(Default)]
+struct ConsumedReceipts {
+    few: smallvec::SmallVec<[*const ResultEvidence; 8]>,
+    many: Option<rustc_hash::FxHashSet<*const ResultEvidence>>,
+}
+
+impl ConsumedReceipts {
+    const LINEAR: usize = 16;
+
+    fn insert(&mut self, evidence: *const ResultEvidence) {
+        if let Some(many) = &mut self.many {
+            many.insert(evidence);
+            return;
+        }
+        if self.few.contains(&evidence) {
+            return;
+        }
+        self.few.push(evidence);
+        if self.few.len() > Self::LINEAR {
+            self.many = Some(self.few.drain(..).collect());
+        }
+    }
+
+    fn contains(&self, evidence: *const ResultEvidence) -> bool {
+        match &self.many {
+            Some(many) => many.contains(&evidence),
+            None => self.few.contains(&evidence),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.few.is_empty() && self.many.is_none()
+    }
 }
 
 impl std::fmt::Debug for ResultReceipt {
