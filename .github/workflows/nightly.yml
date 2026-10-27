@@ -129,6 +129,70 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Full capture-enabled correctness and observation coverage. Pull requests
+  # keep a small host-backed smoke; this nightly retains the full core selection.
+  rust-observe:
+    name: Rust Test (instrumentation)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: rust-observe
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Fetch locked Cargo dependencies
+        run: cargo fetch --locked
+      - name: Run the instrumentation lane
+        timeout-minutes: 80
+        id: nextest
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node scripts/observe-lane.mjs args)"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/observe-lane.mjs run
+      - name: Locate nextest JUnit report
+        if: always()
+        id: junit
+        run: |
+          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+          if [ -z "$found" ]; then
+            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
+            exit 1
+          fi
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          junit-path: ${{ steps.junit.outputs.path }}
+          name: nextest-evidence-rust-observe
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+      - name: Retain instrumentation test results
+        if: always() && steps.junit.outputs.path != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: rust-instrumentation-test-results
+          path: ${{ steps.junit.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+
   # ---------------------------------------------------------------------------
   # The nightly scale tier: every test under a `nightly_scale` module, at full
   # size, on the debug build, with the `nightly` nextest profile's own deadline

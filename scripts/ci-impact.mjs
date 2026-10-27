@@ -242,6 +242,7 @@ export const PATH_FILTERS = Object.freeze({
     // it silently narrows what that lane runs.
     "scripts/compile-contracts.mjs",
     "scripts/provider-ci*.mjs",
+    "scripts/observe-lane*.mjs",
     "packages/framework-conformance-harness/**",
     "packages/language-shared/**",
     "packages/svelte-jsx/**",

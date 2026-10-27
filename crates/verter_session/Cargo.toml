@@ -409,6 +409,10 @@ required-features = ["oracle-lift"]
 name = "host_bench"
 harness = false
 
+[[example]]
+name = "observe_smoke"
+required-features = ["semantic-observe"]
+
 [[bench]]
 name = "projection_safety_bench"
 harness = false
