@@ -13,7 +13,7 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 
     const WAIT: Duration = Duration::from_secs(30);
     const HOLD: Duration = Duration::from_millis(20);
-    let base = std::time::Instant::now();
+    let base = crate::instant::Instant::now();
     for (hit, acquisition) in [(true, 1), (false, 1), (false, 2)] {
         let mut arena = NodeArena::default();
         let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
