@@ -752,6 +752,19 @@
             ]
           },
           {
+            "item": "test_wait_until_job_queue_depth",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_wait_until_job_queue_depth",
+              ".test_wait_until_job_queue_depth("
+            ]
+          },
+          {
             "item": "test_release_dispatch_pause",
             "kind": "fn",
             "to": "test-configuration",
