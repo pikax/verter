@@ -33,10 +33,11 @@ fn audit_builder_clears_legacy_materializer_fields_from_reused_payloads() {
 
 #[test]
 fn audit_builder_captures_total_timing() {
-    let builder = AuditBuilder::new(1, "test.vue".into());
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut builder = AuditBuilder::new(1, "test.vue".into());
+    // The request started 5 ms ago: backdated rather than waited out.
+    builder.request_start -= std::time::Duration::from_millis(5);
     let record = builder.finish();
-    assert!(record.timings.total_ms >= 4.0);
+    assert!(record.timings.total_ms >= 5.0);
     assert_eq!(record.request_id, 1);
     assert_eq!(record.canonical_id, "test.vue");
     assert!(record.footprint.is_none());
@@ -58,13 +59,14 @@ fn audit_builder_records_solver_steps() {
 #[test]
 fn audit_builder_captures_phase_timings() {
     let mut builder = AuditBuilder::new(3, "phased.vue".into());
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    // Each phase started 2 ms before it ends: backdated rather than waited out.
+    builder.phase_start -= std::time::Duration::from_millis(2);
     builder.end_phase(AuditPhase::CaptureInputs);
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    builder.phase_start -= std::time::Duration::from_millis(2);
     builder.end_phase(AuditPhase::Solver);
     let record = builder.finish();
-    assert!(record.timings.capture_inputs_ms >= 1.0);
-    assert!(record.timings.solver_ms >= 1.0);
+    assert!(record.timings.capture_inputs_ms >= 2.0);
+    assert!(record.timings.solver_ms >= 2.0);
     assert_eq!(record.timings.store_read_ms, 0.0);
 }
 
