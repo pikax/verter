@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { LANE_GATES } from "./ci-impact.mjs";
+import { CONTRACT_GROUPS, compileContractPlan, runCompileContracts } from "./compile-contracts.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -28,9 +30,11 @@ test("compile-contract cache belongs to the required standalone runner job", () 
   // Gated on the compile-contract owners' dependency closure, not on any
   // Rust change: an LSP-only or tooling-crate change does not re-run them.
   assert.match(compilerJob, /needs\.detect-changes\.outputs\.compiler_contracts\s*==\s*'true'/);
-  assert.match(compilerJob, /target\/tests\/trybuild/);
-  assert.match(compilerJob, /node scripts\/compile-contracts\.mjs/);
+  assert.match(compilerJob, /target\/compiler-contracts/);
+  assert.match(compilerJob, /node scripts\/compile-contracts\.mjs --group/);
   assert.match(compilerJob, /generated_svelte_artifacts_match_their_authoritative_inputs/);
+  // Test targets activate the dev-dependency self-edge's test-support feature;
+  // they cannot replace the production feature-off build.
   assert.match(compilerJob, /cargo build -p verter_compiler/);
   assert.match(compilerJob, /cargo test -p verter_compiler --lib/);
   assert.doesNotMatch(compilerJob, /cargo nextest|install-action@nextest/);
@@ -39,14 +43,111 @@ test("compile-contract cache belongs to the required standalone runner job", () 
   assert.match(successJob, /^\s*- compiler-contracts\s*$/m);
 });
 
-test("compile-contract runner fetches the locked workspace before trybuild goes offline", () => {
-  const runner = readFileSync(join(REPO_ROOT, "scripts", "compile-contracts.mjs"), "utf8");
-  const fetch = runner.indexOf('["fetch", "--locked"]');
-  const firstOwner = runner.indexOf("for (const owner of OWNERS)");
+test("the matrix partitions all owners and feature variants without feature unification", () => {
+  const all = compileContractPlan();
+  const split = Object.keys(CONTRACT_GROUPS).flatMap((group) => compileContractPlan(group));
+  assert.deepEqual(split, all);
+  assert.equal(new Set(all.map(({ name }) => name)).size, 14);
+  const owners = spawnSync(
+    process.execPath,
+    [join(SCRIPT_DIR, "compile-contracts.mjs"), "--list-owners"],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(owners.status, 0, owners.stderr);
+  for (const owner of owners.stdout.trim().split(/\r?\n/)) {
+    assert.deepEqual(all.find(({ name }) => name === owner)?.args, [
+      "run",
+      "--locked",
+      "-p",
+      "verter_compile_contracts",
+      "--no-default-features",
+      "--features",
+      owner,
+    ]);
+  }
+  for (const [name, pkg] of Object.entries({
+    "compiler-bench": "verter_compile_contracts_bench",
+    "session-feature-variants": "verter_compile_contracts_session_variants",
+    "session-soak": "verter_compile_contracts_session_soak",
+  })) {
+    assert.deepEqual(all.find((task) => task.name === name)?.args, ["run", "--locked", "-p", pkg]);
+  }
+  assert.deepEqual(all.find(({ name }) => name === "session-observe")?.args, [
+    "run",
+    "--locked",
+    "--manifest-path",
+    "crates/verter_compile_contracts_session_observe/Cargo.toml",
+  ]);
+  assert.throws(() => compileContractPlan("typo"), /unknown compile-contract group/);
+});
 
-  assert.notEqual(fetch, -1, "the runner must fetch the locked dependency graph");
-  assert.notEqual(firstOwner, -1, "the runner must execute every compile-contract owner");
-  assert.ok(fetch < firstOwner, "the fetch must finish before trybuild starts any owner");
+test("each group fetches its locks first and shares one absolute target for all its commands", () => {
+  for (const group of Object.keys(CONTRACT_GROUPS)) {
+    const calls = [];
+    const status = runCompileContracts({
+      group,
+      env: { CARGO_TARGET_DIR: "target/custom-contracts" },
+      log() {},
+      run(command, args, options) {
+        calls.push({ command, args, options });
+        return { status: 0 };
+      },
+    });
+    assert.equal(status, 0);
+    assert.deepEqual(calls[0].args, ["fetch", "--locked"]);
+    const fetchCount = group === "session-observe" ? 2 : 1;
+    if (fetchCount === 2) {
+      assert.deepEqual(calls[1].args, [
+        "fetch",
+        "--locked",
+        "--manifest-path",
+        "crates/verter_compile_contracts_session_observe/Cargo.toml",
+      ]);
+    }
+    assert.deepEqual(
+      calls.slice(fetchCount).map(({ args }) => args),
+      compileContractPlan(group).map(({ args }) => args),
+    );
+    for (const call of calls) {
+      assert.equal(call.command, "cargo");
+      assert.equal(call.options.cwd, REPO_ROOT);
+      assert.equal(
+        call.options.env.CARGO_TARGET_DIR,
+        resolve(REPO_ROOT, "target/custom-contracts"),
+      );
+    }
+  }
+});
+
+test("a failed prerequisite stops the group; contract failures still run the remaining configurations", () => {
+  for (const failure of [
+    { status: 17 },
+    { status: null, signal: "SIGTERM" },
+    { error: new Error("spawn failed") },
+  ]) {
+    const calls = [];
+    const run = (_command, args) => {
+      calls.push(args);
+      return calls.length === 1 ? failure : { status: 0 };
+    };
+    assert.equal(runCompileContracts({ group: "session", run, log() {} }), 1);
+    assert.equal(calls.length, 1);
+  }
+  const calls = [];
+  assert.equal(
+    runCompileContracts({
+      group: "compiler",
+      log() {},
+      run(_command, args) {
+        calls.push(args);
+        return { status: calls.length === 2 ? 1 : 0 };
+      },
+    }),
+    1,
+  );
+  assert.equal(calls.length, 4, "bench and soak still execute after the default contract fails");
 });
 
 test("compile-contract cache uses immutable restore and save without target pruning", () => {
@@ -62,11 +163,44 @@ test("compile-contract cache uses immutable restore and save without target prun
   assert.doesNotMatch(job, /Swatinem\/rust-cache|continue-on-error/);
   assert.match(job, /github\.ref == 'refs\/heads\/main'.*cache-hit != 'true'/);
   assert.match(job, /steps\.compiler-contract-cache\.outputs\.cache-primary-key/);
-  assert.equal((job.match(/target\/tests\/trybuild/g) ?? []).length, 2);
+  assert.equal((job.match(/^\s+target\/compiler-contracts\s*$/gm) ?? []).length, 2);
   assert.ok(
     job.indexOf("uses: actions/cache/save@") > job.indexOf("cargo test -p verter_compiler --lib"),
     "cache saving follows every required compiler check",
   );
+});
+
+test("PR and nightly matrices run every group with isolated caches and an active compiler cache", () => {
+  for (const file of ["ci.yml", "nightly.yml"]) {
+    const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
+    const job = yamlJob(workflow, "compiler-contracts");
+    const matrix = job
+      .match(/group: \[([^\]]+)\]/)?.[1]
+      .split(",")
+      .map((value) => value.trim());
+    assert.deepEqual(matrix, Object.keys(CONTRACT_GROUPS), file);
+    assert.match(job, /fail-fast: false/);
+    assert.match(job, /cargo build -p verter_compiler/);
+    assert.match(job, /RUSTC_WRAPPER: sccache/);
+    assert.match(job, /CARGO_INCREMENTAL: "0"/);
+    assert.match(job, /CARGO_PROFILE_DEV_DEBUG: "0"/);
+    assert.match(job, /CARGO_PROFILE_TEST_DEBUG: "0"/);
+    assert.match(job, /SCCACHE_BASEDIRS: \$\{\{ github\.workspace \}\}/);
+    assert.match(job, /SCCACHE_GHA_VERSION: "verter-compiler-contracts-v2"/);
+    assert.match(job, /key:.*matrix\.group.*rust-toolchain\.toml.*Cargo\.lock.*github\.sha/);
+    assert.match(
+      job,
+      /if: matrix\.group == 'compiler'[\s\S]*generated_svelte_artifacts_match_their_authoritative_inputs/,
+    );
+    assert.match(job, /if: matrix\.group == 'compiler'[\s\S]*cargo test -p verter_compiler --lib/);
+    assert.match(job, /if: always\(\)[\s\S]*actions\/upload-artifact/);
+    assert.match(job, /shell: bash\s+run: node scripts\/compile-contracts\.mjs --group/);
+    if (file === "nightly.yml") {
+      assert.match(workflow, /schedule:[\s\S]*cron:/);
+      assert.doesNotMatch(job, /detect-changes|outputs\.compiler_contracts/);
+      assert.match(job, /permissions:\s*contents: read/);
+    }
+  }
 });
 
 // @ai-generated - Guards workflow prerequisites for generated Svelte conformance artifacts.
