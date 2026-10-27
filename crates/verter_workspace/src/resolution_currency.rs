@@ -3058,6 +3058,8 @@ pub(crate) struct ResolutionTransaction {
     /// Per-domain generations this transaction compacts against. Only the
     /// resolution domain is populated — see [`Self::new`].
     aggregate_basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    /// The policy the transaction's witness is sealed under: its engine's.
+    fact_policy: verter_session_query::facts::policy::FactPolicy,
 }
 
 /// Resolver-facing reader that makes every filesystem/config observation enter
@@ -3654,13 +3656,17 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 }
 
 impl ResolutionTransaction {
-    pub(crate) fn new(root: Arc<CapturedResolutionWorld>) -> Self {
+    pub(crate) fn new(
+        root: Arc<CapturedResolutionWorld>,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
+    ) -> Self {
         // A resolution transaction observes exactly one compaction domain,
         // and its captured world is that domain's producer AND validator —
         // so the basis is derivable here, with no plumbing from the
         // caller. Every other domain is left absent and stays precise.
         let resolution = root.resolution_stamp(root.population);
         Self {
+            fact_policy,
             aggregate_basis: verter_session_query::facts::fact_cache::AggregateGenerations {
                 resolution,
                 ..Default::default()
@@ -3934,7 +3940,7 @@ impl ResolutionTransaction {
             return SignatureAdmission::NonCacheable(reason);
         }
         verter_session_query::probe_tally!(OBS_PRE_DEDUP, self.observations.len());
-        let mut facts = FactReadSet::new();
+        let mut facts = FactReadSet::new(self.fact_policy);
         facts.set_aggregate_basis(self.aggregate_basis);
         {
             verter_session_query::probe_scope!(FINISH_COLLECT);
@@ -4047,7 +4053,10 @@ mod transaction_contract_tests {
         let canonical_scope = verter_session_query::resolution::normalize_canonical_id(raw_scope);
         let fingerprint = Some([0xA5; 16]);
 
-        let mut raw = ResolutionTransaction::new(captured_world());
+        let mut raw = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         raw.observe_path(raw_path, PathProbe::File);
         raw.observe_realpath(raw_path, Some(raw_realpath));
         raw.observe_manifest(raw_manifest, fingerprint);
@@ -4056,7 +4065,10 @@ mod transaction_contract_tests {
             population: raw.population(),
         });
 
-        let mut replay = ResolutionTransaction::new(captured_world());
+        let mut replay = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         replay.observe_canonical_path(&canonical_path, PathProbe::File);
         replay.observe_canonical_realpath(&canonical_path, Some(&canonical_realpath));
         replay.observe_canonical_manifest(&canonical_manifest, fingerprint);
@@ -4069,7 +4081,10 @@ mod transaction_contract_tests {
         assert_eq!(replay_values.realpaths, raw_values.realpaths);
         assert_eq!(replay_values.manifests, raw_values.manifests);
 
-        let mut provenance_control = ResolutionTransaction::new(captured_world());
+        let mut provenance_control = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         provenance_control.observe_canonical_path("/repo/./trusted.ts", PathProbe::Absent);
         assert_eq!(
             provenance_control.take_observed_values().path_probes[0].0,
@@ -4085,7 +4100,11 @@ mod transaction_contract_tests {
 
     #[test]
     fn missing_or_duplicate_query_provenance_fails_closed() {
-        let missing = ResolutionTransaction::new(captured_world()).finish();
+        let missing = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        )
+        .finish();
         assert!(matches!(
             missing,
             SignatureAdmission::NonCacheable(
@@ -4093,7 +4112,10 @@ mod transaction_contract_tests {
             )
         ));
 
-        let mut duplicate = ResolutionTransaction::new(captured_world());
+        let mut duplicate = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         duplicate.set_query(query());
         duplicate.set_query(query());
         assert!(matches!(
@@ -4115,9 +4137,14 @@ mod transaction_contract_tests {
     /// admits.
     #[test]
     fn resolution_over_cap_single_domain_admits_instead_of_refusing() {
-        let mut transaction = ResolutionTransaction::new(captured_world());
+        let mut transaction = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         transaction.set_query(query());
-        for index in 0..=verter_session_query::facts::fact_read_set::FACT_DOMAIN_PRECISE_MAX {
+        for index in
+            0..=verter_session_query::facts::policy::FactPolicy::production().precise_domain_max()
+        {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -4143,9 +4170,14 @@ mod transaction_contract_tests {
     /// unrelated precise fact disappears and the last assertion fails.
     #[test]
     fn resolution_over_cap_lifts_only_its_own_domain() {
-        let mut transaction = ResolutionTransaction::new(captured_world());
+        let mut transaction = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         transaction.set_query(query());
-        for index in 0..=verter_session_query::facts::fact_read_set::FACT_DOMAIN_PRECISE_MAX {
+        for index in
+            0..=verter_session_query::facts::policy::FactPolicy::production().precise_domain_max()
+        {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -4209,9 +4241,14 @@ mod transaction_contract_tests {
     /// then sits beside reintroduced precise facts and this fails.
     #[test]
     fn a_lifted_resolution_domain_does_not_regrow() {
-        let mut first = ResolutionTransaction::new(captured_world());
+        let mut first = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         first.set_query(query());
-        for index in 0..=verter_session_query::facts::fact_read_set::FACT_DOMAIN_PRECISE_MAX {
+        for index in
+            0..=verter_session_query::facts::policy::FactPolicy::production().precise_domain_max()
+        {
             first.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -4224,7 +4261,10 @@ mod transaction_contract_tests {
 
         // A later attempt carries that already-lifted aggregate AND
         // observes a handful of its own precise resolution facts.
-        let mut second = ResolutionTransaction::new(captured_world());
+        let mut second = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         second.set_query(query());
         for fact in lifted.facts.iter() {
             second.observe_foreign_fact_for_test(fact.clone());
@@ -4380,7 +4420,10 @@ mod transaction_contract_tests {
         let child_leaves = ["/p/b.ts", "/p/d.ts", "/p/f.ts"];
         let child = query();
 
-        let mut attempt = ResolutionTransaction::new(captured_world());
+        let mut attempt = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         attempt.set_query(query());
         attempt.observe(path_probe("/p/a.ts"));
         attempt.observe(path_probe("/p/e.ts"));
@@ -4437,13 +4480,19 @@ mod transaction_contract_tests {
     fn a_child_decision_witness_is_independent_of_observation_order() {
         let child = query();
 
-        let mut decision_first = ResolutionTransaction::new(captured_world());
+        let mut decision_first = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         decision_first.set_query(query());
         decision_first.observe(ResolutionFactKey::decision(child.clone()));
         decision_first.observe(path_probe("/p/c.ts"));
         decision_first.observe(path_probe("/p/a.ts"));
 
-        let mut decision_last = ResolutionTransaction::new(captured_world());
+        let mut decision_last = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         decision_last.set_query(query());
         decision_last.observe(path_probe("/p/a.ts"));
         decision_last.observe(path_probe("/p/c.ts"));
@@ -4467,7 +4516,10 @@ mod transaction_contract_tests {
     /// this test panics.
     #[test]
     fn observation_classification_decides_every_recorded_fact_exactly_once() {
-        let mut attempt = ResolutionTransaction::new(captured_world());
+        let mut attempt = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         attempt.set_query(query());
         attempt.observe(path_probe("/p/a.ts"));
         attempt.observe(ResolutionFactKey::decision(query()));
@@ -4575,7 +4627,10 @@ mod transaction_contract_tests {
         let keys = distinguishing_keys();
 
         // Every key observed once, in order.
-        let mut once = ResolutionTransaction::new(captured_world());
+        let mut once = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         once.set_query(query());
         for key in &keys {
             once.observe(key.clone());
@@ -4589,7 +4644,10 @@ mod transaction_contract_tests {
 
         // The same keys, each observed several times, interleaved and in a
         // different order — the shape a recovery-chain walk produces.
-        let mut repeated = ResolutionTransaction::new(captured_world());
+        let mut repeated = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         repeated.set_query(query());
         for round in 0..4 {
             for key in keys.iter().rev().skip(round % 3).chain(keys.iter()) {
@@ -4621,7 +4679,10 @@ mod transaction_contract_tests {
     fn repeat_observations_do_not_disturb_the_direct_edge_set() {
         let keys = distinguishing_keys();
 
-        let mut attempt = ResolutionTransaction::new(captured_world());
+        let mut attempt = ResolutionTransaction::new(
+            captured_world(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         attempt.set_query(query());
         for round in 0..4 {
             for key in keys.iter().rev().skip(round % 3).chain(keys.iter()) {

@@ -1158,6 +1158,7 @@ fn settle_output(
     key: &SemanticQueryKey,
     output: BuildOutput,
     priced: bool,
+    policy: verter_session_query::facts::policy::FactPolicy,
 ) -> SettledOutput {
     let BuildOutput {
         result,
@@ -1198,9 +1199,7 @@ fn settle_output(
     // the result is admitted.
     let carrier = match graph_carrier {
         Some(boxed) => *boxed,
-        None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
-            crate::fact_signature_helpers::empty_fact_signature(),
-        ),
+        None => verter_session_query::facts::fact_cache::ReadSetSignature::empty(policy),
     };
     // §2 admission invariant: a partial result is never admissible, so
     // it must already be non-cacheable (`finalise_traced_build_output`
@@ -1315,7 +1314,13 @@ impl SemanticGraphStore {
         if flags.is_cancelled() {
             return (cancelled_cache_read(), None);
         }
-        let settled = settle_output(self, attempt.prepared.key(), output, cost_receipt.is_some());
+        let settled = settle_output(
+            self,
+            attempt.prepared.key(),
+            output,
+            cost_receipt.is_some(),
+            flags.fact_policy(),
+        );
         capture.deliver_carrier(&settled.carrier);
         let read = CacheRead {
             lease: self
@@ -1472,7 +1477,13 @@ impl<'s> ProducerLease<'s> {
             cache_suppress,
             fact_status,
             admissible,
-        } = settle_output(store, prepared.key(), output, cost_receipt.is_some());
+        } = settle_output(
+            store,
+            prepared.key(),
+            output,
+            cost_receipt.is_some(),
+            flags.fact_policy(),
+        );
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
         // …) records no path-walk hops, so its satisfied projection defaults
         // to the single terminal point the slot's mode denotes at the key's

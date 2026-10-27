@@ -191,14 +191,29 @@ impl FilesystemWorkspace {
         )
     }
 
-    /// Construct with a complete tightening-only semantic budget policy.
+    /// Construct with a complete tightening-only semantic budget policy,
+    /// sealing under the production fact policy.
     pub fn new_with_input_resolution_budgets(
         options: FilesystemOptions,
         budgets: verter_session_query::resolution::InputResolutionBudgets,
     ) -> Self {
+        Self::new_with_fact_policy(
+            options,
+            budgets,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        )
+    }
+
+    /// Construct with a budget policy and the fact policy the workspace,
+    /// and every host bound to it, seals its evidence under.
+    pub fn new_with_fact_policy(
+        options: FilesystemOptions,
+        budgets: verter_session_query::resolution::InputResolutionBudgets,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
+    ) -> Self {
         Self {
             options,
-            engine: Engine::new_with_input_resolution_budgets(budgets),
+            engine: Engine::new_with_input_resolution_budgets(budgets, fact_policy),
             #[cfg(not(target_arch = "wasm32"))]
             native_fs: crate::native_fs::NativeFs::new(),
             sinks: crate::audit_sink::VfsAuditSinks::default(),
@@ -2674,6 +2689,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 }
 
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.engine.fact_policy
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,

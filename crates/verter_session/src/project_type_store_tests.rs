@@ -657,7 +657,9 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 diagnostics: Default::default(),
                 last_access_tick: 0,
                 fact_dep_signature:
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                        verter_session_query::facts::policy::FactPolicy::production(),
+                    ),
             }
             .into_slot(),
         );

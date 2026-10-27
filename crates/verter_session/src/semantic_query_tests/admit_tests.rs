@@ -11,7 +11,10 @@ use verter_type_engine::semantic_query::admit::{admit_decision, Admission};
 use verter_type_engine::semantic_query::{BrokenInputClass, ResultTaint};
 
 fn sig_from(facts: Vec<FactVersionRef>) -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from(facts.into_boxed_slice()))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(facts.into_boxed_slice()),
+    )
 }
 
 fn import_route_fact() -> FactVersionRef {

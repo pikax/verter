@@ -20,7 +20,6 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
-use verter_type_engine::fact_signature_helpers::empty_fact_signature;
 
 fn k(canonical: &str, content: Hash16) -> CompileOutputPureContentKey {
     CompileOutputPureContentKey {
@@ -81,7 +80,9 @@ fn session_lookup_misses_when_css_hash_override_differs() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     node.publish(
         &mut state,
         42,
@@ -141,7 +142,12 @@ fn pure_content_node_starts_empty_and_peek_misses() {
 fn pure_content_publish_admits_value_addressable_by_full_key() {
     let node = CompileOutputNodePureContent::new();
     let key = k("/a.vue", [1u8; 16]);
-    node.publish_content(key.clone(), value([0xAA; 16]), 7);
+    node.publish_content(
+        key.clone(),
+        value([0xAA; 16]),
+        7,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     let hit = node.peek(&key).expect("warm hit after publish");
     assert_eq!(hit.semantic_hash, [0xAA; 16]);
 
@@ -159,7 +165,12 @@ fn pure_content_publish_admits_value_addressable_by_full_key() {
 fn pure_content_remove_drops_entry() {
     let node = CompileOutputNodePureContent::new();
     let key = k("/a.vue", [3u8; 16]);
-    node.publish_content(key.clone(), value([0xBB; 16]), 9);
+    node.publish_content(
+        key.clone(),
+        value([0xBB; 16]),
+        9,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     assert_eq!(node.entry_count(), 1);
     node.remove(&key);
     assert_eq!(node.entry_count(), 0);
@@ -180,7 +191,9 @@ fn session_publish_then_lookup_round_trips_under_matching_hashes() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     let outcome = node.publish(&mut state, 42, admission, value(semantic), 0);
     assert_eq!(outcome, SessionPublishOutcome::Admitted);
     let hit = node.lookup(&state, 42, &semantic, 0, None, || Some(()), |_, _| true);
@@ -192,7 +205,9 @@ fn session_lookup_misses_when_semantic_hash_differs() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     node.publish(&mut state, 42, admission, value(semantic), 0);
     // Live semantic_hash differs → miss.
     let other = [0xFF; 16];
@@ -212,7 +227,9 @@ fn session_lookup_misses_when_validate_facts_returns_false() {
         canonical_id: "/dep.ts".into(),
         hash: [0xAB; 16],
     }]);
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of_shared(facts),
+    ));
     node.publish(&mut state, 42, admission, value(semantic), 0);
 
     let hit = node.lookup(&state, 42, &semantic, 0, None, || Some(()), |_, _sig| false);
@@ -268,7 +285,9 @@ fn session_lookup_skips_acquire_view_until_cheap_predicates_pass() {
     // 2. Slot present but the live semantic_hash mismatches → acquire_view
     //    must NOT run (the cheap hash check rejects first).
     let mut state = ProfileState::default();
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     node.publish(&mut state, 42, admission, value(semantic), 0);
     let other = [0xFFu8; 16];
     let acquired = Cell::new(0u32);
@@ -347,7 +366,9 @@ fn session_publish_non_cacheable_removes_prior_slot() {
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
     // First publish: cacheable.
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     node.publish(&mut state, 42, admission, value(semantic), 0);
     assert!(node
         .lookup(&state, 42, &semantic, 0, None, || Some(()), |_, _| true)
@@ -378,7 +399,9 @@ fn session_peek_signature_round_trips_admitted_signature() {
         canonical_id: "/dep.ts".into(),
         hash: [0xCD; 16],
     }]);
-    let signature = ReadSetSignature::new(facts);
+    let signature = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of_shared(facts),
+    );
     let admission = SignatureAdmission::Cacheable(signature.clone());
     node.publish(&mut state, 42, admission, value([0u8; 16]), 0);
     let observed = node.peek_signature(&state, 42).expect("admitted signature");
@@ -398,7 +421,9 @@ fn session_peek_last_good_misses_when_validate_facts_returns_false() {
         canonical_id: "/dep.ts".into(),
         hash: [0xAB; 16],
     }]);
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of_shared(facts),
+    ));
     let mut v = value([0x12u8; 16]);
     let mut products = crate::types::CompileProducts::clone(&v.products);
     if let crate::types::CompileProducts::Produced {
@@ -430,7 +455,9 @@ fn session_peek_last_good_misses_when_validate_facts_returns_false() {
 fn session_peek_last_good_serves_on_empty_fact_rail_without_validator_call() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     let mut v = value([0x34u8; 16]);
     let mut products = crate::types::CompileProducts::clone(&v.products);
     if let crate::types::CompileProducts::Produced {
@@ -475,7 +502,9 @@ fn session_peek_output_returns_per_kind_pair() {
         },
         DiagnosticsSnapshot::default(),
     );
-    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+    ));
     node.publish(&mut state, 42, admission, value, 0);
     let (got, _diag) = node
         .peek_output(&state, 42, &VirtualNodeKind::Main)
@@ -510,8 +539,18 @@ fn publish_orders_entry_before_reverse_index_so_remove_canonical_always_evicts()
     // Two distinct content versions of the same canonical.
     let key_a = k("/a.vue", [1u8; 16]);
     let key_b = k("/a.vue", [2u8; 16]);
-    node.publish_content(key_a.clone(), value([0xA1; 16]), 1);
-    node.publish_content(key_b.clone(), value([0xB2; 16]), 1);
+    node.publish_content(
+        key_a.clone(),
+        value([0xA1; 16]),
+        1,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
+    node.publish_content(
+        key_b.clone(),
+        value([0xB2; 16]),
+        1,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
 
     // Both are warm BEFORE invalidation.
     assert_eq!(node.entry_count(), 2, "both content versions published");
@@ -576,7 +615,12 @@ fn concurrent_publish_and_remove_canonical_never_orphans_content_entry() {
             for i in 0..CYCLES {
                 let mut content = [0u8; 16];
                 content[0..4].copy_from_slice(&i.to_le_bytes());
-                node.publish_content(k(canonical, content), value([0xCC; 16]), 1);
+                node.publish_content(
+                    k(canonical, content),
+                    value([0xCC; 16]),
+                    1,
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                );
             }
         })
     };
@@ -612,16 +656,20 @@ fn concurrent_publish_and_remove_canonical_never_orphans_content_entry() {
 /// set, so it is held in shared tree storage no cache admission has claimed
 /// yet.
 fn wide_signature() -> ReadSetSignature {
-    let facts: Vec<FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
-            .map(|index| FactVersionRef::FileWholeHash {
-                canonical_id: format!("/wide/{index:05}.ts").into(),
-                hash: [1u8; 16],
-            })
-            .collect();
+    let facts: Vec<FactVersionRef> = (0..2
+        * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+        + 3)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/wide/{index:05}.ts").into(),
+            hash: [1u8; 16],
+        })
+        .collect();
     ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts[..1].to_vec())
-            .union_with_facts(&facts[1..]),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            facts[..1].to_vec(),
+        )
+        .union_with_facts(&facts[1..]),
     )
 }
 
@@ -685,7 +733,9 @@ fn session_publish_claims_wide_signature_storage_and_is_refused_for_it() {
     node.publish(
         &mut state,
         42,
-        SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature())),
+        SignatureAdmission::Cacheable(ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+        )),
         value(semantic),
         0,
     );
@@ -859,7 +909,12 @@ fn a_pure_content_entry_charges_its_products_and_a_peek_keeps_them_past_eviction
             Arc::clone(&account),
         ));
         let key = k("/a.vue", [7u8; 16]);
-        node.publish_content(key.clone(), value_with_code([1; 16], CODE), 0);
+        node.publish_content(
+            key.clone(),
+            value_with_code([1; 16], CODE),
+            0,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         let peek = node.peek(&key).expect("published");
         // The value, its products and the generated code are three owned
         // allocations, each charged by its own cell.
@@ -899,7 +954,12 @@ fn a_pure_content_entry_charges_its_products_and_a_peek_keeps_them_past_eviction
     });
     let node =
         CompileOutputNodePureContent::with_retention_account(StoreAccount::new(Arc::clone(&tight)));
-    node.publish_content(k("/a.vue", [8u8; 16]), value_with_code([1; 16], CODE), 0);
+    node.publish_content(
+        k("/a.vue", [8u8; 16]),
+        value_with_code([1; 16], CODE),
+        0,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    );
     assert_eq!(node.entry_count(), 0, "a refused entry is not published");
     assert_eq!(tight.snapshot().total_bytes(), 0);
 }
@@ -923,7 +983,9 @@ fn a_session_slot_charges_its_products_and_a_warm_hit_keeps_them_past_removal() 
         node.publish(
             &mut state,
             42,
-            SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature())),
+            SignatureAdmission::Cacheable(ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production().empty_set()
+            )),
             value_with_code(semantic, CODE),
             0,
         ),

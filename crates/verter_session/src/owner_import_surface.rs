@@ -307,7 +307,9 @@ impl OwnerImportSurfaceDb {
             owner_canonical: Arc::clone(&canonical),
             owner_whole_hash: [0u8; 16],
             bindings: Arc::new(FxHashMap::default()),
-            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             validated_at_generation: 0,
         });
         self.insert(canonical, surface);
@@ -373,6 +375,7 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical for OwnerI
 /// `validated_at_generation` is the project-shape counterpart of the
 /// carrier and is checked on every warm read.
 pub fn build_owner_import_surface<I>(
+    fact_policy: verter_session_query::facts::policy::FactPolicy,
     owner_canonical: Arc<str>,
     owner_whole_hash: Hash16,
     resolved_imports: I,
@@ -429,6 +432,7 @@ where
     // an unrooted `OwnerImportSurface` cache entry that warm validation
     // could never invalidate.
     let base_facts = verter_type_engine::fact_signature_helpers::fact_signature_from_fence(
+        fact_policy,
         owner_target_fence.as_ref(),
     )
     .expect(
@@ -445,15 +449,13 @@ where
             combined.push(fact);
         }
     }
-    let fact_dep_signature: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
-        Arc::from(combined);
 
     Arc::new(OwnerImportSurface {
         owner_canonical,
         owner_whole_hash,
         bindings: Arc::new(bindings),
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-            fact_dep_signature,
+            fact_policy.set_of(combined),
         ),
         validated_at_generation,
     })
@@ -488,6 +490,7 @@ mod tests {
                     );
                     verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                         build_owner_import_surface(
+                            verter_session_query::facts::policy::FactPolicy::production(),
                             Arc::from("/w/owner.ts"),
                             owner_hash,
                             Vec::new(),
@@ -521,6 +524,7 @@ mod tests {
                     );
                     verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                         build_owner_import_surface(
+                            verter_session_query::facts::policy::FactPolicy::production(),
                             Arc::from("/w/refused.ts"),
                             refused_hash,
                             Vec::new(),
@@ -579,6 +583,7 @@ mod tests {
                     );
                     verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                         build_owner_import_surface(
+                            verter_session_query::facts::policy::FactPolicy::production(),
                             Arc::from("/w/owner.ts"),
                             owner_hash,
                             Vec::new(),
@@ -635,6 +640,7 @@ mod tests {
 
     fn mk_surface(hash: Hash16) -> Arc<OwnerImportSurface> {
         build_owner_import_surface(
+            verter_session_query::facts::policy::FactPolicy::production(),
             Arc::from("/w/owner.ts"),
             hash,
             vec![
@@ -709,8 +715,14 @@ mod tests {
     #[test]
     fn empty_imports_produces_owner_only_signature() {
         use verter_session_query::facts::fact_cache::FactVersionRef;
-        let surface =
-            build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new(), 0);
+        let surface = build_owner_import_surface(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            Arc::from("/w/o.ts"),
+            [1u8; 16],
+            vec![],
+            Vec::new(),
+            0,
+        );
         assert_eq!(surface.bindings.len(), 0);
         let owner_target_facts: Vec<&FactVersionRef> = surface
             .read_set_signature

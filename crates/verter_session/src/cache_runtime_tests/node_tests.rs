@@ -60,7 +60,9 @@ impl ArtifactNode for CountingArtifactNode {
             value: format!("v{key}"),
             // Empty signature with no self-roots validates vacuously, so
             // the generation gate alone decides validity here.
-            signature: ReadSetSignature::empty(),
+            signature: ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             validated_at_generation: cx.generation(),
         }
@@ -159,7 +161,9 @@ impl QueryNode for StaleGenerationQueryNode {
     fn compute(&self, key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
         CacheAdmission::Cacheable {
             value: format!("stale{key}"),
-            signature: ReadSetSignature::empty(),
+            signature: ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             // SUPERSEDED: one generation behind the live generation. The
             // publish gate `validated_at_generation == generation` fails.
@@ -228,7 +232,7 @@ impl SkewedDiscriminantQueryNode {
     /// differ between candidates.
     fn fixed_signature() -> ReadSetSignature {
         let facts: verter_session_query::facts::fact_set::FactSet =
-            verter_session_query::facts::fact_set::FactSet::from(vec![
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                 FactVersionRef::FileWholeHash {
                     canonical_id: "/skew.ts".into(),
                     hash: [7u8; 16],
@@ -504,13 +508,17 @@ struct WideArtifactNode {
 /// shared tree storage no admission has claimed yet.
 fn extended_signature(facts: Vec<FactVersionRef>) -> ReadSetSignature {
     ReadSetSignature::new(
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts[..1].to_vec())
-            .union_with_facts(&facts[1..]),
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            facts[..1].to_vec(),
+        )
+        .union_with_facts(&facts[1..]),
     )
 }
 
 /// The fact count the full-size wide-signature tests use.
-const WIDE_FACTS: usize = 2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3;
+const WIDE_FACTS: usize =
+    2 * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max() + 3;
 
 /// The fact count their gate versions use. An extension wider than
 /// `FACT_SET_INLINE_WIDTH` is already tree storage, and 300 facts fill more
@@ -829,7 +837,10 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
             ..RetentionLimits::defaults()
         }));
         artifact.signature = ReadSetSignature::new(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts.clone()),
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                facts.clone(),
+            ),
         );
         if stale {
             let host = Arc::clone(&host);
@@ -919,7 +930,9 @@ impl ArtifactNode for TreeArtifactNode {
         }
         CacheAdmission::Cacheable {
             value,
-            signature: ReadSetSignature::empty(),
+            signature: ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             validated_at_generation: cx.generation(),
         }

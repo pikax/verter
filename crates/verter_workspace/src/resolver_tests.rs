@@ -137,6 +137,9 @@ impl crate::traits::WorkspaceRead for TestReader {
 }
 
 impl crate::traits::WorkspaceAccess for TestReader {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     // Reader-only stub overrides (R6/R7). Rationale: `TestReader` is
     // constructed only by resolver unit tests that exercise resolver-side
     // concerns (file reads, realpath); they don't touch dep-flow.
@@ -327,6 +330,9 @@ impl crate::traits::WorkspaceRead for CountingReader {
 }
 
 impl crate::traits::WorkspaceAccess for CountingReader {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     // Reader-only stub overrides (R6/R7). Rationale: `CountingReader` is a
     // resolver unit-test fixture for read_file/file_exists call counting;
     // it never participates in dep-flow.

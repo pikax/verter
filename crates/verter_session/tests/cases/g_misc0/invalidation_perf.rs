@@ -47,7 +47,8 @@ fn invalidate_canonical_touches_only_indexed_entries() {
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
-            fact_dep_signature: Default::default(),
+            fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                .empty_set(),
             validated_at_generation: 0,
         });
         db.insert_for_test(key, entry);
@@ -64,7 +65,8 @@ fn invalidate_canonical_touches_only_indexed_entries() {
             );
             let entry = Arc::new(ImportedRegistryEntry {
                 value: None,
-                fact_dep_signature: Default::default(),
+                fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                    .empty_set(),
                 validated_at_generation: 0,
             });
             db.insert_for_test(key, entry);

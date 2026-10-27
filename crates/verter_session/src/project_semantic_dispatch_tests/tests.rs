@@ -1709,9 +1709,10 @@ fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
             .collect::<Vec<_>>()
             .into_boxed_slice(),
     );
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
-        facts.into_boxed_slice(),
-    ));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(facts.into_boxed_slice()),
+    );
     let generation = host.project_type_store().current_project_generation();
     for key in [&root_key, &member_key] {
         graph.insert_relation_payload_for_tests(
@@ -1775,7 +1776,9 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_publication() 
         let sibling_generation = exact_root.validated_at_generation.saturating_add(1);
         graph.insert_relation_payload_for_tests(
             root_key.clone(),
-            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
             graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             sibling_generation,
@@ -1918,11 +1921,13 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         // relation carriers always fold the dispatch ProjectGeneration
         // fence, so the empty-signature form is unrepresentative. The
         // sibling entry validates only in the warm reader's generation.
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
-            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
-                generation: sibling_generation,
-            },
-        ])),
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of([
+                verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                    generation: sibling_generation,
+                },
+            ]),
+        ),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
         sibling_generation,
@@ -3126,7 +3131,7 @@ fn semantic_publication_seals_a_post_finalise_wide_carrier_whole() {
         &host,
         output,
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-            verter_session_query::facts::fact_set::FactSet::from(traced.clone()),
+            verter_session_query::facts::policy::FactPolicy::production().set_of(traced.clone()),
         ),
         &CarrierNormalizationPrelude::none(),
     );
@@ -3139,7 +3144,8 @@ fn semantic_publication_seals_a_post_finalise_wide_carrier_whole() {
         .graph_carrier
         .expect("the wide carrier is published");
     assert!(
-        carrier.facts.len() > verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH,
+        carrier.facts.len()
+            > verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max(),
         "the published carrier is one set as wide as what it read"
     );
     assert!(
@@ -3162,14 +3168,15 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
         .ensure_indexed_ready(canonical)
         .expect("the root is indexed")
         .whole_hash;
-    let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 1)
-            .map(|generation| {
-                verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
-                    generation: generation as u64,
-                }
-            })
-            .collect();
+    let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = (0..2
+        * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+        + 1)
+        .map(|generation| {
+            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                generation: generation as u64,
+            }
+        })
+        .collect();
     let refused = || {
         let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
             QueryResult::Error(QueryError::Miss),
@@ -3185,7 +3192,10 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
     };
     let finalise = || {
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(traced.clone()),
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                traced.clone(),
+            ),
         )
     };
 
@@ -3245,7 +3255,7 @@ fn a_torn_self_root_never_certifies_a_refusal() {
     };
     let traced = || {
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-            verter_session_query::facts::fact_set::FactSet::from(Vec::new()),
+            verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
         )
     };
 

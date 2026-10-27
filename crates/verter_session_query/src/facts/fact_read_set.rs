@@ -89,19 +89,8 @@ use crate::facts::fact_cache::{
     DomainGenerationFact, FactVersionRef, ViewPopulation,
 };
 use crate::facts::fact_set::{FactSet, FactSetEdit};
+use crate::facts::policy::FactPolicy;
 use crate::resolution::ResolutionPopulation;
-
-/// The logical width above which a signature counts as WIDE: a completed
-/// structural carrier wider than this takes the strict-root rewrite when
-/// its completion is what made it wide. Never a refusal threshold: a
-/// canonical set of any width is sealed whole (see
-/// [`seal_canonical_signature`]), never truncated or refused.
-pub const WIDE_SIGNATURE_WIDTH: usize = 1_024;
-
-/// Per-domain precision threshold: a compaction domain stays PRECISE while
-/// its deduplicated bucket holds at most this many facts, and lifts to its
-/// terminal aggregate at the first fact beyond it.
-pub const FACT_DOMAIN_PRECISE_MAX: usize = 1_024;
 
 /// The population `fact`'s bucket is keyed by, and that an aggregate
 /// minted for that bucket speaks for. `None` when nothing in scope can
@@ -190,7 +179,8 @@ fn resolution_population_of(fact: &FactVersionRef) -> Option<ResolutionPopulatio
 /// A domain lifts for one of two reasons, and BOTH must hold the "no
 /// regrow" property:
 ///
-/// * its precise bucket outgrew [`FACT_DOMAIN_PRECISE_MAX`] and the basis
+/// * its precise bucket outgrew the policy's
+///   [`FactPolicy::precise_domain_max`] and the basis
 ///   can name a generation for it, or
 /// * an aggregate for it is ALREADY present — absorbed from a reused warm
 ///   candidate that lifted it earlier. Its precise facts collapse into
@@ -201,13 +191,18 @@ fn resolution_population_of(fact: &FactVersionRef) -> Option<ResolutionPopulatio
 ///   lifting existed to remove.
 ///
 /// Returns `true` when at least one domain was lifted.
-fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations) -> bool {
+fn compact_domains(
+    facts: &mut Vec<FactVersionRef>,
+    basis: &AggregateGenerations,
+    policy: FactPolicy,
+) -> bool {
     /// A bucket whose population is `None` is a real bucket — its facts
     /// still group and still survive together — it simply can never mint.
     type BucketKey = (CompactionDomain, Option<AggregatePopulation>);
+    let precise_max = policy.precise_domain_max();
     // No bucket can cross the threshold in a set no wider than it, and only
     // an aggregate already present is lifted otherwise.
-    if facts.len() <= FACT_DOMAIN_PRECISE_MAX
+    if facts.len() <= precise_max
         && !facts
             .iter()
             .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
@@ -239,7 +234,7 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
     // producer, no aggregate; no population, no aggregate.
     let mint: rustc_hash::FxHashSet<(CompactionDomain, AggregatePopulation)> = precise
         .iter()
-        .filter(|(_, count)| **count > FACT_DOMAIN_PRECISE_MAX)
+        .filter(|(_, count)| **count > precise_max)
         .filter(|(key, _)| !already_lifted.contains(*key))
         .filter_map(|((domain, population), _)| Some((*domain, (*population)?)))
         .filter(|(domain, _)| basis.stamp_for(*domain).is_some())
@@ -321,7 +316,8 @@ pub enum NonCacheableBasis {
 
 /// Push-style accumulator for cold-compute fact reads.
 ///
-/// Construct via [`FactReadSet::new`], record observations via
+/// Construct via [`FactReadSet::new`] under the host's [`FactPolicy`],
+/// which every set it seals carries; record observations via
 /// [`FactReadSet::observe`] / [`FactReadSet::observe_borrowed_signature`],
 /// and seal via [`FactReadSet::finalise`].
 ///
@@ -334,6 +330,9 @@ pub enum NonCacheableBasis {
 /// there for that step alone. The `PhantomData<Cell<()>>` marker enforces
 /// this at compile time.
 pub struct FactReadSet {
+    /// The policy every set this tracer seals is built under; every run it
+    /// absorbs must have been built under it too.
+    policy: FactPolicy,
     observations: SmallVec<[FactVersionRef; INLINE_CAPACITY]>,
     /// Already-canonical signatures absorbed wholesale from a completed
     /// compute (see [`FactReadSet::absorb_canonical_signature`]). Kept as
@@ -390,13 +389,6 @@ pub struct ObservationMark {
     rewrites: u32,
 }
 
-impl Default for FactReadSet {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl std::fmt::Debug for FactReadSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FactReadSet")
@@ -407,11 +399,12 @@ impl std::fmt::Debug for FactReadSet {
 }
 
 impl FactReadSet {
-    /// Construct an empty tracer.
+    /// Construct an empty tracer sealing under `policy`.
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(policy: FactPolicy) -> Self {
         Self {
+            policy,
             observations: SmallVec::new(),
             canonical_runs: Vec::new(),
             non_cacheable_propagation: None,
@@ -421,6 +414,13 @@ impl FactReadSet {
             rewrites: 0,
             _not_sync: PhantomData,
         }
+    }
+
+    /// The policy every set this tracer seals is built under.
+    #[inline]
+    #[must_use]
+    pub fn policy(&self) -> FactPolicy {
+        self.policy
     }
 
     /// Supply the live per-domain generations — and the view population —
@@ -610,6 +610,7 @@ impl FactReadSet {
     /// exactly one canonicaliser.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &FactSet) {
+        self.policy.assert_compatible(signature.policy());
         if signature.is_empty() || self.recently_absorbed(signature) {
             return;
         }
@@ -758,9 +759,9 @@ impl FactReadSet {
             sort_fact_refs(&mut local);
             local.dedup();
             if local.spilled() {
-                FactSet::from_canonical_vec(local.into_vec()).edit()
+                FactSet::from_canonical_vec(self.policy, local.into_vec()).edit()
             } else {
-                FactSet::from_canonical_slice(&local).edit()
+                FactSet::from_canonical_slice(self.policy, &local).edit()
             }
         } else {
             // The widest absorbed run is the base, shared; every other run
@@ -879,18 +880,16 @@ pub enum FactReadSetFinalise {
 /// is `!Send + !Sync` by construction). A trait method that takes
 /// `&self` and forwards into this wrapper does not need to bubble
 /// `&mut self` through every callsite.
-pub struct FactReadSetCell(RefCell<FactReadSet>);
-
-impl Default for FactReadSetCell {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct FactReadSetCell {
+    /// The tracer's policy, kept beside the cell so reading it borrows
+    /// nothing (a shipped build reads a constant).
+    policy: FactPolicy,
+    inner: RefCell<FactReadSet>,
 }
 
 impl std::fmt::Debug for FactReadSetCell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0.try_borrow() {
+        match self.inner.try_borrow() {
             Ok(b) => f
                 .debug_struct("FactReadSetCell")
                 .field("inner", &*b)
@@ -904,37 +903,49 @@ impl std::fmt::Debug for FactReadSetCell {
 }
 
 impl FactReadSetCell {
-    /// Construct an empty cell.
+    /// Construct an empty cell sealing under `policy`.
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
-        Self(RefCell::new(FactReadSet::new()))
+    pub fn new(policy: FactPolicy) -> Self {
+        Self {
+            policy,
+            inner: RefCell::new(FactReadSet::new(policy)),
+        }
+    }
+
+    /// The policy the cell's tracer seals under.
+    #[inline]
+    #[must_use]
+    pub fn policy(&self) -> FactPolicy {
+        self.policy
     }
 
     /// Record one observation through `&self`.
     #[inline]
     pub fn observe(&self, fact: FactVersionRef) {
-        self.0.borrow_mut().observe(fact);
+        self.inner.borrow_mut().observe(fact);
     }
 
     /// Record one borrowed observation through `&self`. See
     /// [`FactReadSet::observe_ref`].
     #[inline]
     pub fn observe_ref(&self, fact: &FactVersionRef) {
-        self.0.borrow_mut().observe_ref(fact);
+        self.inner.borrow_mut().observe_ref(fact);
     }
 
     /// Bulk-record a previously finalised signature through `&self`.
     #[inline]
     pub fn observe_borrowed_signature(&self, sig: &[FactVersionRef]) {
-        self.0.borrow_mut().observe_borrowed_signature(sig);
+        self.inner.borrow_mut().observe_borrowed_signature(sig);
     }
 
     /// Absorb an already-canonical signature through `&self`. See
     /// [`FactReadSet::absorb_canonical_signature`].
     #[inline]
     pub fn absorb_canonical_signature(&self, signature: &FactSet) {
-        self.0.borrow_mut().absorb_canonical_signature(signature);
+        self.inner
+            .borrow_mut()
+            .absorb_canonical_signature(signature);
     }
 
     /// The mark of everything observed so far, through `&self`. See
@@ -942,7 +953,7 @@ impl FactReadSetCell {
     #[inline]
     #[must_use]
     pub fn mark(&self) -> ObservationMark {
-        self.0.borrow().mark()
+        self.inner.borrow().mark()
     }
 
     /// Replace a completed result's observations with its receipt through
@@ -954,7 +965,7 @@ impl FactReadSetCell {
         end: ObservationMark,
         receipt: FactVersionRef,
     ) {
-        self.0
+        self.inner
             .borrow_mut()
             .collapse_into_receipt(start, end, receipt);
     }
@@ -962,7 +973,7 @@ impl FactReadSetCell {
     /// Record a non-cacheable read consumption through `&self`.
     #[inline]
     pub fn note_non_cacheable_read(&self, propagation: NonCacheablePropagation) {
-        self.0.borrow_mut().note_non_cacheable_read(propagation);
+        self.inner.borrow_mut().note_non_cacheable_read(propagation);
     }
 
     /// Record a non-cacheable read consumption and its basis through
@@ -973,7 +984,7 @@ impl FactReadSetCell {
         propagation: NonCacheablePropagation,
         basis: NonCacheableBasis,
     ) {
-        self.0
+        self.inner
             .borrow_mut()
             .note_non_cacheable_read_with_basis(propagation, basis);
     }
@@ -982,7 +993,7 @@ impl FactReadSetCell {
     /// See [`FactReadSet::set_aggregate_basis`].
     #[inline]
     pub fn set_aggregate_basis(&self, basis: AggregateGenerations) {
-        self.0.borrow_mut().set_aggregate_basis(basis);
+        self.inner.borrow_mut().set_aggregate_basis(basis);
     }
 
     /// `true` when this scope's basis names at least one domain, i.e.
@@ -991,57 +1002,58 @@ impl FactReadSetCell {
     #[inline]
     #[must_use]
     pub fn has_aggregate_basis(&self) -> bool {
-        self.0.borrow().aggregate_basis().names_any_domain()
+        self.inner.borrow().aggregate_basis().names_any_domain()
     }
 
     /// Re-read the live generations and record instability through
     /// `&self`. See [`FactReadSet::note_basis_recheck`].
     #[inline]
     pub fn note_basis_recheck(&self, live: &AggregateGenerations) {
-        self.0.borrow_mut().note_basis_recheck(live);
+        self.inner.borrow_mut().note_basis_recheck(live);
     }
 
     /// Whether a domain this scope compacts against has moved.
     #[inline]
     #[must_use]
     pub fn mutation_unstable(&self) -> bool {
-        self.0.borrow().mutation_unstable()
+        self.inner.borrow().mutation_unstable()
     }
 
     /// Whether a non-cacheable read was consumed in this scope.
     #[inline]
     #[must_use]
     pub fn non_cacheable_read_observed(&self) -> bool {
-        self.0.borrow().non_cacheable_read_observed()
+        self.inner.borrow().non_cacheable_read_observed()
     }
 
     /// Number of observations recorded so far (pre-dedup).
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.borrow().len()
+        self.inner.borrow().len()
     }
 
     /// Whether no observations have been recorded.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.borrow().is_empty()
+        self.inner.borrow().is_empty()
     }
 
     /// Consume the cell and return the underlying [`FactReadSet`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> FactReadSet {
-        self.0.into_inner()
+        self.inner.into_inner()
     }
 }
 
 /// Whether sealing the canonical `run` alone reproduces it: no receipt in
 /// it can consume another, and no domain can lift (the run is no wider
-/// than [`FACT_DOMAIN_PRECISE_MAX`]) or already holds an aggregate.
+/// than its policy's [`FactPolicy::precise_domain_max`]) or already holds
+/// an aggregate.
 fn seals_unchanged(run: &FactSet) -> bool {
-    if run.len() > FACT_DOMAIN_PRECISE_MAX {
+    if run.len() > run.policy().precise_domain_max() {
         return false;
     }
     let (receipts, aggregate) = terminal_tail(run.iter());
@@ -1107,12 +1119,13 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
 /// it is without being read; otherwise the lifted facts are removed and the
 /// aggregates inserted, every untouched node staying shared.
 fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) {
-    if edit.len() <= FACT_DOMAIN_PRECISE_MAX && !terminal_tail(edit.iter()).1 {
+    let policy = edit.policy();
+    if edit.len() <= policy.precise_domain_max() && !terminal_tail(edit.iter()).1 {
         return;
     }
     let before: Vec<FactVersionRef> = edit.iter().cloned().collect();
     let mut after = before.clone();
-    if !compact_domains(&mut after, basis) {
+    if !compact_domains(&mut after, basis, policy) {
         return;
     }
     let (mut i, mut j) = (0, 0);
@@ -1161,10 +1174,19 @@ fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) {
 /// of operand evidence, a self-root rewrite) rather than through a
 /// tracer. It never compacts: compaction needs a tracer's live basis.
 #[must_use]
-pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> FactSet {
+pub fn seal_canonical_signature(policy: FactPolicy, facts: Vec<FactVersionRef>) -> FactSet {
+    FactSet::from_canonical_vec(policy, canonical_signature_facts(facts))
+}
+
+/// The facts [`seal_canonical_signature`] seals, as a plain canonical run:
+/// sorted, deduplicated, and without the receipts another receipt of the
+/// run consumed. For a carrier that holds its facts as its own owned slice
+/// rather than as a set, so no set storage is built only to be read back.
+#[must_use]
+pub fn canonical_signature_facts(mut facts: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
     sort_dedup_facts(&mut facts);
     crate::facts::fact_cache::drop_subsumed_receipts(&mut facts);
-    FactSet::from_canonical_vec(facts)
+    facts
 }
 
 /// Seal `base` together with `extra`: the sealed set shares `base`'s
@@ -1214,18 +1236,24 @@ fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
         facts.dedup();
         return;
     }
-    let tail = facts.split_off(prefix);
-    for fact in tail {
+    // Place each appended fact into the canonical prefix in place: the
+    // prefix grows at `end`, and a duplicate is left behind it, past `end`,
+    // to be cut off at the end — no second vector.
+    let mut end = prefix;
+    for next in prefix..facts.len() {
         let mut compared = 0;
-        let found = facts.binary_search_by(|held| {
+        let found = facts[..end].binary_search_by(|held| {
             compared += 1;
-            compare_fact_refs(held, &fact)
+            compare_fact_refs(held, &facts[next])
         });
         record_signature_work(compared);
         if let Err(at) = found {
-            facts.insert(at, fact);
+            facts.swap(end, next);
+            facts[at..=end].rotate_right(1);
+            end += 1;
         }
     }
+    facts.truncate(end);
 }
 
 /// Canonical ordering for [`FactVersionRef`] values. Used by
@@ -1310,8 +1338,9 @@ mod finalise_tests {
     #[test]
     fn repeated_small_signatures_keep_bounded_live_observations() {
         for canonical in [false, true] {
-            let mut read_set = FactReadSet::new();
-            let signature: FactSet = FactSet::from([fact(1), fact(2), fact(3)]);
+            let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
+            let signature: FactSet =
+                crate::facts::policy::FactPolicy::production().set_of([fact(1), fact(2), fact(3)]);
             for _ in 0..10_000 {
                 if canonical {
                     read_set.absorb_canonical_signature(&signature);
@@ -1338,9 +1367,11 @@ mod finalise_tests {
     fn canonical_run_batches_keep_proof_work_proportional() {
         let [small, large] = [128, 512].map(|count| {
             let before = signature_work_for_tests();
-            let mut read_set = FactReadSet::new();
+            let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
             for index in 0..count {
-                read_set.absorb_canonical_signature(&FactSet::from([fact(index)]));
+                read_set.absorb_canonical_signature(
+                    &crate::facts::policy::FactPolicy::production().set_of([fact(index)]),
+                );
             }
             let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
                 panic!("stable canonical runs must remain cacheable");
@@ -1363,9 +1394,10 @@ mod finalise_tests {
     #[test]
     fn consumed_receipt_replaces_canonical_runs_and_keeps_outside_facts() {
         let before = fact(0);
-        let child: FactSet = FactSet::from([fact(1), fact(2)]);
+        let child: FactSet =
+            crate::facts::policy::FactPolicy::production().set_of([fact(1), fact(2)]);
         let after = fact(3);
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         read_set.observe(before.clone());
         let start = read_set.mark();
         read_set.absorb_canonical_signature(&child);
@@ -1379,7 +1411,10 @@ mod finalise_tests {
         };
         assert_eq!(
             signature,
-            seal_canonical_signature(vec![before, receipt, after])
+            seal_canonical_signature(
+                crate::facts::policy::FactPolicy::production(),
+                vec![before, receipt, after]
+            )
         );
         let mut leaves = std::collections::BTreeSet::new();
         let mut walk = crate::facts::receipt::ReceiptWalk::default();
@@ -1398,7 +1433,7 @@ mod finalise_tests {
 
     #[test]
     fn finalise_encodes_non_cacheability_in_the_evidence() {
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         read_set.observe(fact(1));
         read_set.note_non_cacheable_read(NonCacheablePropagation::Transitive);
 
@@ -1421,7 +1456,7 @@ mod finalise_tests {
                 NonCacheableBasis::RetentionDeclined,
             );
         };
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         assert!(!read_set.non_cacheable_only_declined_retention());
         declined(&mut read_set);
         declined(&mut read_set);
@@ -1438,7 +1473,7 @@ mod finalise_tests {
             FactReadSetFinalise::NonCacheable(_)
         ));
 
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         read_set.note_non_cacheable_read_with_basis(
             NonCacheablePropagation::Transitive,
             NonCacheableBasis::Untrusted,
@@ -1449,9 +1484,9 @@ mod finalise_tests {
 
     #[test]
     fn a_wide_non_cacheable_set_keeps_every_fact() {
-        let mut read_set = FactReadSet::new();
+        let mut read_set = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         read_set.note_non_cacheable_read(NonCacheablePropagation::Transitive);
-        for index in 0..=WIDE_SIGNATURE_WIDTH {
+        for index in 0..=crate::facts::policy::FactPolicy::production().fresh_slice_max() {
             read_set.observe(fact(index));
         }
 
@@ -1464,7 +1499,10 @@ mod finalise_tests {
             leaves += 1;
             true
         }));
-        assert_eq!(leaves, WIDE_SIGNATURE_WIDTH + 1);
+        assert_eq!(
+            leaves,
+            crate::facts::policy::FactPolicy::production().fresh_slice_max() + 1
+        );
     }
 }
 
@@ -1485,7 +1523,7 @@ mod canonical_signature_tests {
 
     #[test]
     fn absorbing_a_sealed_signature_does_no_order_work_and_keeps_its_storage() {
-        let mut producer = FactReadSet::new();
+        let mut producer = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         for index in (0..64).rev() {
             producer.observe(fact(index));
         }
@@ -1493,7 +1531,7 @@ mod canonical_signature_tests {
             panic!("the producer is complete and stable");
         };
         let before = signature_work_for_tests();
-        let mut consumer = FactReadSet::new();
+        let mut consumer = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         consumer.absorb_canonical_signature(&signature);
         let FactReadSetFinalise::Ok(sealed) = consumer.finalise() else {
             panic!("sealed consumption remains cacheable");
@@ -1509,24 +1547,27 @@ mod canonical_signature_tests {
     #[test]
     fn an_unordered_borrowed_signature_is_canonicalised_by_the_one_sealer() {
         let malformed = [fact(7), fact(2), fact(7)];
-        let mut consumer = FactReadSet::new();
+        let mut consumer = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         consumer.observe_borrowed_signature(&malformed);
         let FactReadSetFinalise::Ok(facts) = consumer.finalise() else {
             panic!("ordering alone cannot refuse a raw observation set");
         };
-        assert_eq!(facts, FactSet::from([fact(2), fact(7)]));
+        assert_eq!(
+            facts,
+            crate::facts::policy::FactPolicy::production().set_of([fact(2), fact(7)])
+        );
     }
 
     #[test]
     fn finalisation_preserves_non_cacheable_and_mutation_verdicts() {
-        let mut declined = FactReadSet::new();
+        let mut declined = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         declined.observe(fact(1));
         declined.note_non_cacheable_read(NonCacheablePropagation::Transitive);
         assert!(matches!(
             declined.finalise(),
             FactReadSetFinalise::NonCacheable(_)
         ));
-        let mut moved = FactReadSet::new();
+        let mut moved = FactReadSet::new(crate::facts::policy::FactPolicy::production());
         moved.set_aggregate_basis(AggregateGenerations {
             content: Some(crate::facts::fact_cache::AggregateStamp::Generation(1)),
             view_population: Some(crate::facts::fact_cache::ViewPopulation::Base),

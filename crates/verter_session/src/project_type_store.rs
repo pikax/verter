@@ -1074,6 +1074,11 @@ pub struct ProjectTypeStoreCounterSnapshot {
 /// **not** bump the project generation — they bump the per-canonical
 /// `whole_hash` and invalidate keys by identity.
 pub struct ProjectTypeStore {
+    /// The fact policy every fact set this host builds is built under: the
+    /// authoritative copy, chosen at the composition root before any store
+    /// exists and never changed. Request snapshots, caches and suspended
+    /// computations carry copies.
+    fact_policy: verter_session_query::facts::policy::FactPolicy,
     project_generation: Arc<AtomicU64>,
     /// Canonical [`IndexedReady`] cache.
     indexed: FileArtifactStore,
@@ -1273,6 +1278,9 @@ pub(crate) struct EngineGrants {
 }
 
 impl ProjectTypeStore {
+    /// A hostless store under the production fact policy, for store-level
+    /// tests. A host composes its store with its workspace's policy.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new() -> Self {
         Self::build(
@@ -1280,6 +1288,7 @@ impl ProjectTypeStore {
             verter_session_query::retention::StoreAccount::default(),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            verter_session_query::facts::policy::FactPolicy::production(),
         )
         .0
     }
@@ -1292,14 +1301,23 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn with_retention_account(
         retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
         Self::build(
             None,
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            fact_policy,
         )
         .0
+    }
+
+    /// The fact policy this host builds every fact set under.
+    #[inline]
+    #[must_use]
+    pub fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.fact_policy
     }
 
     /// The aggregate retained-byte account this store's caches charge.
@@ -1335,12 +1353,14 @@ impl ProjectTypeStore {
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
             task_registry,
             memo_family_bound,
+            fact_policy,
         )
     }
 
@@ -1349,6 +1369,7 @@ impl ProjectTypeStore {
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
@@ -1405,6 +1426,7 @@ impl ProjectTypeStore {
                 counters.component_meta_cache_live.clone(),
             );
         let store = Self {
+            fact_policy,
             project_generation: Arc::new(AtomicU64::new(0)),
             indexed,
             analysis,
@@ -2111,6 +2133,7 @@ impl ProjectTypeStore {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for ProjectTypeStore {
     fn default() -> Self {
         Self::new()
@@ -2522,7 +2545,9 @@ mod tests {
                 owner_whole_hash: hash,
                 bindings: Arc::new(rustc_hash::FxHashMap::default()),
                 read_set_signature:
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                        verter_session_query::facts::policy::FactPolicy::production(),
+                    ),
                 validated_at_generation: 0,
             }),
         );
@@ -2563,7 +2588,7 @@ mod tests {
                     },
                 ),
                 read_set_signature:
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
                 validated_at_generation: 0,
             },
         );

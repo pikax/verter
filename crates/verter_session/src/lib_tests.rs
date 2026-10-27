@@ -769,7 +769,9 @@ fn invalidate_nodes_removes_last_good() {
             },
             diagnostics: DiagnosticsSnapshot::default(),
             last_access_tick: 1,
-            fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
         }
         .into_slot(),
     );
@@ -3624,7 +3626,9 @@ mod upsert_compile_cache_tests {
                     diagnostics: Default::default(),
                     last_access_tick: 0,
                     fact_dep_signature:
-                        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                            verter_session_query::facts::policy::FactPolicy::production(),
+                        ),
                 }
                 .into_slot(),
             );
