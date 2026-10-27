@@ -5677,6 +5677,19 @@ async fn tsgo_inlay_hints_appear_for_inferred_types() {
     let file_path = ts_path.to_str().unwrap().replace('\\', "/");
     // The engine handles the open before the request that follows it.
     provider.open_file(&file_path, content).await.unwrap();
+    // Inlay hints are preference-gated, and the preferences arrive in our
+    // workspace/configuration reply: wait until that reply is queued, so the
+    // request below is written after it. The timeout is a liveness watchdog only.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider
+            .transport
+            .pending
+            .answered_server_requests
+            .wait_for("workspace/configuration"),
+    )
+    .await
+    .expect("tsgo must ask for workspace/configuration after initialization");
 
     let hints = provider
         .get_inlay_hints(
