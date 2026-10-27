@@ -745,7 +745,7 @@ pub struct LspRelay {
     /// [`LspRelay::wait_stopped`]).
     stopped_rx: watch::Receiver<bool>,
     /// The three pump/writer tasks; aborted on shutdown/drop.
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl LspRelay {
@@ -817,7 +817,7 @@ impl LspRelay {
             suppressed_egress,
             witness_rx,
             stopped_rx,
-            tasks,
+            tasks: std::sync::Mutex::new(tasks),
         }
     }
 
@@ -927,16 +927,27 @@ impl LspRelay {
     /// relay does not own the server engine, so this never sends `exit` (or
     /// any other write) — it only stops pumping.
     pub async fn shutdown(&self) {
-        for task in &self.tasks {
+        for task in self.tasks.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             task.abort();
         }
         self.port.verter_pending.lock().clear();
+    }
+
+    /// TEST-ONLY: wait until every pump/writer task has ended. After
+    /// [`Self::shutdown`] each aborted task ends at its next await, dropping
+    /// its channel ends, so the wire is down once this returns.
+    #[cfg(test)]
+    pub(crate) async fn join_tasks_for_test(&self) {
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(|e| e.into_inner()));
+        for task in tasks {
+            let _ = task.await;
+        }
     }
 }
 
 impl Drop for LspRelay {
     fn drop(&mut self) {
-        for task in &self.tasks {
+        for task in self.tasks.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             task.abort();
         }
     }

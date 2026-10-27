@@ -51,6 +51,9 @@ thread_local! {
 /// The registry of in-flight cold queries.
 pub(crate) struct ResolutionFlights<K, T> {
     flights: Mutex<FxHashMap<K, Arc<Flight<T>>>>,
+    /// TEST-ONLY: notified, under the flights lock, whenever a subscriber joins a flight.
+    #[cfg(test)]
+    joined: parking_lot::Condvar,
 }
 
 pub(crate) struct Flight<T> {
@@ -114,6 +117,8 @@ impl<K: Hash + Eq + Clone, T> Default for ResolutionFlights<K, T> {
     fn default() -> Self {
         Self {
             flights: Mutex::new(FxHashMap::default()),
+            #[cfg(test)]
+            joined: parking_lot::Condvar::new(),
         }
     }
 }
@@ -127,6 +132,8 @@ impl<K: Hash + Eq + Clone, T> ResolutionFlights<K, T> {
         let mut flights = self.flights.lock();
         if let Some(flight) = flights.get(key) {
             flight.subscribers.fetch_add(1, Ordering::AcqRel);
+            #[cfg(test)]
+            self.joined.notify_all();
             return FlightClaim::Join(FlightSubscription {
                 flight: Arc::clone(flight),
                 attached: true,
@@ -154,6 +161,31 @@ impl<K: Hash + Eq + Clone, T> ResolutionFlights<K, T> {
     /// Flights currently running.
     pub(crate) fn len(&self) -> usize {
         self.flights.lock().len()
+    }
+
+    /// Wait until `key`'s running flight has at least `count` subscribers. Joins are counted
+    /// under the flights lock and notified there, so none is missed. The budget is a hang guard
+    /// only.
+    #[cfg(test)]
+    pub(crate) fn wait_for_subscribers(
+        &self,
+        key: &K,
+        count: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let attached = |flights: &FxHashMap<K, Arc<Flight<T>>>| {
+            flights
+                .get(key)
+                .map_or(0, |flight| flight.subscribers.load(Ordering::Acquire))
+        };
+        let mut flights = self.flights.lock();
+        while attached(&flights) < count {
+            if self.joined.wait_until(&mut flights, deadline).timed_out() {
+                return attached(&flights) >= count;
+            }
+        }
+        true
     }
 
     /// Subscribers attached to `key`'s running flight.
