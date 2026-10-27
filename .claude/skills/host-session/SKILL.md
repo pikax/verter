@@ -118,7 +118,10 @@ back into the host for a service it was not given.
 
 Resolver request flights expose owned polling and producer transfer over the
 host's shared registry. Their synchronous compatibility entries drive the same
-core. See [root continuations](../../../docs/arch/root-continuations.md#resolver-request-flights)
+core. Standalone default groups reuse ambient task authority or lazily initialize
+their existing registry at the synchronous boundary; cross-thread wait cycles
+therefore use the same inline computation escape as composed groups.
+See [root continuations](../../../docs/arch/root-continuations.md#resolver-request-flights)
 for errors, cancellation, lifetime and the higher-caller conversion inventory.
 Base capture similarly exposes `VerterHost::begin_store_view`; its owned
 producer transfers snapshot or pending root-release reclamation work outside

@@ -791,7 +791,10 @@ computation retains its polling root's task as the lane owner across suspension.
 
 - **Ownership:** host composition binds every resolver flight family to the
   host's existing registry. Production compatibility entries install that
-  authority; a transferred producer installs its actual distinct task and
+  authority. Standalone synchronous default groups reuse ambient task authority
+  when available, otherwise lazily establish their group's registry so
+  cross-thread wait cycles retain the inline computation escape.
+  A transferred producer installs its actual distinct task and
   installs a live aggregate cancellation owner while running. A cancelled waiter
   whose thread executes the producer cannot stop shared work through either
   its job or request token. Other request accounting stays installed.

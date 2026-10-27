@@ -290,7 +290,7 @@ impl OwnedPublication {
                     .delivery
                     .clone()
                     .or_else(|| terminal.outcome())
-                    .unwrap_or(PublicationOutcome::RetryExhausted)),
+                    .expect("live subscriber retains completed publication delivery")),
                 Err(error) => Err(*error),
             };
             drop(state);
