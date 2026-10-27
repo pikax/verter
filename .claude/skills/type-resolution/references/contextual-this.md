@@ -27,6 +27,11 @@ A similarly named local declaration is
 not a marker, even in the module whose own `declare global` block contributes
 the marker every other module reads; with no declaration of the name the
 receiver recovers without the marker, never through it.
+Without the marker, a generic call inferring from a method whose return reads
+that receiver (the checker's TS2339 / TS7023 recovery, which the flow rail does
+not model) is refused with its own typed cause,
+`FlowReturnDegradation::ContextSensitiveInference`, never collapsed into
+`UnrepresentableCallee` and never answered through the marker.
 Structural readers still instantiate the empty interface normally.
 
 Top-level contextual literals and calls containing context-sensitive object

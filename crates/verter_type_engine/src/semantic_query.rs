@@ -1953,6 +1953,17 @@ pub enum FlowReturnDegradation {
     /// A symbolic call carrier whose callee could not be represented or
     /// resolved to a signature evaluated to `any`.
     UnrepresentableCallee,
+    /// A generic call whose type argument is inferred from the return of
+    /// a context-sensitive argument the call resolver could not continue
+    /// ([`ResolveCallFailure::ContextSensitiveInference`]): a method whose
+    /// return reads a `this` no marker types — the object literal being
+    /// inferred, whose own member read the checker recovers as TS2339 and
+    /// whose circular return as TS7023. The call position carries the
+    /// typed unresolved marker. Distinct from
+    /// [`Self::UnrepresentableCallee`], so a consumer tells this inference
+    /// refusal from a callee that is not callable, accepts no overload, or
+    /// whose applicability went undecided.
+    ContextSensitiveInference,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,

@@ -222,6 +222,7 @@ pub(crate) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialR
         FlowReturnDegradation::UnmodeledPosition
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
+        | FlowReturnDegradation::ContextSensitiveInference
         | FlowReturnDegradation::FailedBindingInitializer => PartialReason::FlowReturnUninferred,
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
@@ -28299,9 +28300,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// downstream gate: an overloaded callee published `flag: any` warm
     /// and clean where the checker says `boolean`.
     fn degraded_unrepresentable_callee(&mut self) -> Positional<CallValue> {
-        self.record_degradation(
-            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
-        );
+        self.degraded_call(crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee)
+    }
+
+    /// A refused call's DEGRADATION `degradation` with the typed unresolved
+    /// MARKER at its position, as [`Self::degraded_unrepresentable_callee`]
+    /// for a refusal whose own typed cause names it.
+    fn degraded_call(
+        &mut self,
+        degradation: crate::semantic_query::FlowReturnDegradation,
+    ) -> Positional<CallValue> {
+        self.record_degradation(degradation);
         Positional::Value(CallValue::unmodeled_position(self.dispatch))
     }
 
@@ -30195,16 +30204,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already
             // defines; the executor never widens it to `any`, and
-            // neither does this rail. So is a call whose type parameter
-            // the checker infers from a context-sensitive argument's
-            // return: this rail's own read would answer that parameter's
-            // fallback.
+            // neither does this rail.
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
-                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
+                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
             ) => (!self.callee_is_lone_declared(callee))
                 .then(|| self.degraded_unrepresentable_callee()),
+            // So is a call whose type parameter the checker infers from a
+            // context-sensitive argument's return: this rail's own read
+            // would answer that parameter's fallback. The refusal keeps
+            // its own typed cause.
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
+            ) => (!self.callee_is_lone_declared(callee)).then(|| {
+                self.degraded_call(
+                    crate::semantic_query::FlowReturnDegradation::ContextSensitiveInference,
+                )
+            }),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
             // falls back to this rail's own read of the same call. That

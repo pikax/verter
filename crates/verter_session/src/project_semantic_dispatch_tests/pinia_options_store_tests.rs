@@ -20,7 +20,12 @@
 //! module-scope namesake is an ordinary interface, in its own module even
 //! where that module also contributes the global declaration, which every
 //! other module still reads as the marker; and with no declaration at all
-//! the checker reports the name and recovers without the marker.
+//! the checker reports the name and recovers without the marker. Where no
+//! marker types the actions, the named demand refuses the store with a
+//! typed cause — its `defineStore` call's context-sensitive-inference
+//! refusal, read off the shared flow result of the store's initializer —
+//! that every member then propagates; an unrelated refusal of the same
+//! call, though its members print the same unknown leaf, is told apart.
 //!
 //! The rules the store reaches are pinned on their smallest shapes too:
 //! an object relating to a `Record` over index keys, inference through
@@ -32,6 +37,7 @@
 
 use std::sync::Arc;
 
+use verter_type_engine::semantic_query::{FlowReturnDegradation, QueryError, SemanticNodeData};
 use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
 use super::differential_harness_tests::{canonical_text, ALL};
@@ -102,6 +108,15 @@ impl<'a> Project<'a> {
     /// Each probe resolved by name under `options` — the alias `__P{i}`
     /// beside the scenario in one project — as its wire answer.
     fn answers(&self, options: &str, probes: &[&str]) -> Vec<TypeExpr> {
+        let host = self.host(options, probes);
+        (0..probes.len())
+            .map(|index| wire_answer(&host, &named_answer(&host, index)))
+            .collect()
+    }
+
+    /// The host checking the scenario under `options`, each probe the
+    /// alias `__P{i}` beside it.
+    fn host(&self, options: &str, probes: &[&str]) -> crate::VerterHost {
         let mut options: serde_json::Value =
             serde_json::from_str(options).expect("the setting's options are JSON");
         options["noLib"] = serde_json::Value::Bool(true);
@@ -115,7 +130,6 @@ impl<'a> Project<'a> {
             crate::HostConfig::default(),
             &[("/pinia", tsconfig.as_str())],
         );
-        let scenario = "/pinia/scenario.ts";
         let library = |name: &str| format!("/pinia/{name}");
         for (canonical, text) in std::iter::once((library("lib.bench.d.ts"), BENCHMARK_LIBRARY))
             .chain(
@@ -136,26 +150,11 @@ impl<'a> Project<'a> {
             .collect();
         upsert(
             &host,
-            scenario,
+            SCENARIO,
             format!("type __BenchInit = 0;\n{}\n{aliases}", self.scenario),
             crate::FileLanguage::script_ts(),
         );
-        (0..probes.len())
-            .map(|index| {
-                let (outcome, _) = host
-                    .resolve_named_symbol_with_audit(scenario, &format!("__P{index}"), None)
-                    .into_parts();
-                let node = outcome
-                    .expect("the named demand completes")
-                    .expect("the probe exists");
-                let wire = host
-                    .project_node_to_type_expr_json_bytes(&node)
-                    .expect("the answer projects");
-                let value: serde_json::Value =
-                    serde_json::from_slice(&wire).expect("the wire answer is JSON");
-                verter_type_expr::type_expr_from_json(&value).expect("a wire TypeExpr")
-            })
-            .collect()
+        host
     }
 
     /// Every `(probe, checker print)` row whose named answer, under any of
@@ -194,6 +193,103 @@ fn answer_mismatch(answer: &TypeExpr, checker: &str) -> Option<String> {
     }
     unresolved_leaf(answer, !checker.contains("any"), &[])
         .map(|leaf| format!("holds `{}`: `{printed}`", display(leaf)))
+}
+
+/// The scenario module's path.
+const SCENARIO: &str = "/pinia/scenario.ts";
+
+/// The named demand of the probe alias `__P{index}`.
+fn named_answer(
+    host: &crate::VerterHost,
+    index: usize,
+) -> verter_type_engine::semantic_query_memo::node_roots::NodeRoot {
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(SCENARIO, &format!("__P{index}"), None)
+        .into_parts();
+    outcome
+        .expect("the named demand completes")
+        .expect("the probe exists")
+}
+
+/// `node` projected to its wire answer.
+fn wire_answer(
+    host: &crate::VerterHost,
+    node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+) -> TypeExpr {
+    let wire = host
+        .project_node_to_type_expr_json_bytes(node)
+        .expect("the answer projects");
+    let value: serde_json::Value = serde_json::from_slice(&wire).expect("the wire answer is JSON");
+    verter_type_expr::type_expr_from_json(&value).expect("a wire TypeExpr")
+}
+
+/// Why the leased node is not the store's propagated refusal, if it is not: the
+/// typed semantic miss, or an access or a tuple composed only over it or
+/// deferred on the store type `St` (whose own answer is that miss).
+fn lease_mismatch(
+    lease: &verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease,
+) -> Option<String> {
+    let child = |id| {
+        let child = lease
+            .child(id)
+            .and_then(|child| child.read())
+            .expect("a retained child is live");
+        lease_mismatch(&child)
+    };
+    match &**lease {
+        SemanticNodeData::Opaque(QueryError::Miss) => None,
+        SemanticNodeData::Opaque(other) => Some(format!("the refusal {other:?}")),
+        SemanticNodeData::IndexedAccess { object, .. } => child(*object),
+        SemanticNodeData::DeclRef { identity }
+            if identity.canonical_id.as_ref() == SCENARIO
+                && identity.decl_name.as_ref() == "St" =>
+        {
+            None
+        }
+        SemanticNodeData::Tuple { elements, .. } => {
+            elements.iter().find_map(|element| child(element.value))
+        }
+        _ => Some("a value".to_owned()),
+    }
+}
+
+/// The typed refusal `node` is, if it is one.
+fn refusal(
+    node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+) -> Option<QueryError> {
+    let data = node
+        .node_ref()
+        .and_then(|node| node.read())
+        .expect("the delivered answer is live");
+    match &*data {
+        SemanticNodeData::Opaque(error) => Some(error.clone()),
+        _ => None,
+    }
+}
+
+/// The typed degradation of the flow result of the store's initializer,
+/// `defineStore("counter", { … })` — the shared result every member of
+/// the store reads — or why it has no value.
+fn store_degradation(host: &crate::VerterHost) -> Result<Option<FlowReturnDegradation>, String> {
+    let initializer = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: verter_type_expr::OwnedStr::from(SCENARIO),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: verter_type_expr::OwnedStr::from("useCounterStore"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::Initializer,
+        overload_ordinal: 0,
+    };
+    let (result, _) = host
+        .get_flow_return_type_with_audit(
+            &initializer,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        )
+        .into_parts();
+    result
+        .map(|result| result.degradation())
+        .map_err(|error| format!("{error:?}"))
 }
 
 fn upsert(
@@ -316,7 +412,17 @@ fn marked_store_mismatches(project: &Project<'_>) -> Vec<String> {
         .collect();
     let mut failures = Vec::new();
     for setting in ALL {
-        let answers = project.answers(setting.options, &probes);
+        let host = project.host(setting.options, &probes);
+        let answers: Vec<TypeExpr> = (0..probes.len())
+            .map(|index| wire_answer(&host, &named_answer(&host, index)))
+            .collect();
+        let store = store_degradation(&host);
+        if store != Ok(None) {
+            failures.push(format!(
+                "{}: the store's initializer is {store:?}, not a complete value",
+                setting.label
+            ));
+        }
         let mut report = |probe: &str, failure: Option<String>| {
             failures
                 .extend(failure.map(|failure| format!("{}: `{probe}`: {failure}", setting.label)));
@@ -396,76 +502,144 @@ fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Every probe of `rows` — `(probe, marker-typed print)` — that, under any
-/// of the four settings, answers as a store typed through the marker would,
-/// or answers a value at all: the checker recovers these reads through an
-/// error (TS2339 / TS7023, the error type `any`), which the named demand
-/// does not model, so its answer must be the typed refusal it publishes
-/// for an unmodelled read — a degraded leaf — never a value.
-fn non_refused_answers(project: &Project<'_>, rows: &[(&str, &str)]) -> Vec<String> {
-    let probes: Vec<&str> = rows.iter().map(|(probe, _)| *probe).collect();
+/// Every failure of a store no marker types to show the named demand's
+/// permitted recovery refusal, under each of `settings`: the store's
+/// `defineStore` call is refused for inferring its actions from methods
+/// whose `this` no marker types — the typed
+/// [`FlowReturnDegradation::ContextSensitiveInference`] of the store
+/// initializer's shared flow result, the checker's TS2339 / TS7023
+/// recovery — and every member of the whole store, each element of
+/// `WHOLE_STORE` beside the checker's print of it in `checker`, is the
+/// typed semantic miss that refusal propagates: the miss itself, or the
+/// member's access deferred on `St`, whose own answer is that miss. Never
+/// a value. With the marker the same call completes, so this refusal is
+/// also the proof the marker typed nothing. Any other cause — an
+/// inapplicable or undecided call, a budget, a missing dependency, an
+/// unmodelled position, a checker recovery — fails, whatever wire leaf
+/// its members print.
+///
+/// A refused answer is never kept, so every demand recomputes the store:
+/// the members are read as the whole store's elements, one demand per
+/// setting, and `St` under the first setting alone.
+fn recovery_mismatches(
+    project: &Project<'_>,
+    settings: &[super::differential_harness_tests::Setting],
+    checker: &[&str; 8],
+) -> Vec<String> {
+    let members: Vec<&str> = MEMBERS
+        .iter()
+        .map(|(probe, _)| *probe)
+        .chain(["St['$state']"])
+        .collect();
     let mut failures = Vec::new();
-    for setting in ALL {
-        let answers = project.answers(setting.options, &probes);
-        for ((probe, marked), answer) in rows.iter().zip(&answers) {
-            if answer_mismatch(answer, marked).is_none() {
+    for (ordinal, setting) in settings.iter().enumerate() {
+        let probes: &[&str] = if ordinal == 0 {
+            &[WHOLE_STORE, "St"]
+        } else {
+            &[WHOLE_STORE]
+        };
+        let host = project.host(setting.options, probes);
+        let store = store_degradation(&host);
+        if store != Ok(Some(FlowReturnDegradation::ContextSensitiveInference)) {
+            failures.push(format!(
+                "{}: the store's `defineStore` call is {store:?}, not the \
+                 context-sensitive-inference refusal",
+                setting.label
+            ));
+        }
+        if ordinal == 0 {
+            let store_type = refusal(&named_answer(&host, 1));
+            if store_type != Some(QueryError::Miss) {
                 failures.push(format!(
-                    "{}: `{probe}` answers the marker-typed `{marked}`",
+                    "{}: `St` is {store_type:?}, not the typed semantic miss",
                     setting.label
                 ));
-            } else if !holds_refusal(answer) {
-                failures.push(format!(
-                    "{}: `{probe}` answers `{}`, not a typed refusal",
-                    setting.label,
-                    display(answer)
-                ));
             }
+        }
+        let whole = named_answer(&host, 0);
+        match element_mismatches(&whole) {
+            Some(elements) if elements.len() == members.len() => {
+                for ((member, checker), found) in members.iter().zip(checker).zip(elements) {
+                    failures.extend(found.map(|found| {
+                        format!(
+                            "{}: `{member}` (the checker's `{checker}`) holds {found}, not the \
+                             store's propagated miss",
+                            setting.label
+                        )
+                    }));
+                }
+            }
+            _ => failures.push(format!(
+                "{}: the whole store is `{}`, not a tuple of its members",
+                setting.label,
+                display(&wire_answer(&host, &whole))
+            )),
         }
     }
     failures
 }
 
-/// Whether `answer` holds the degraded leaf of a typed refusal, itself or
-/// as the object an access left unread reads.
-fn holds_refusal(answer: &TypeExpr) -> bool {
-    match unresolved_leaf(answer, false, &[]) {
-        Some(TypeExpr::Unknown(_)) => true,
-        Some(TypeExpr::IndexedAccess { object, .. }) => holds_refusal(object),
-        _ => false,
-    }
+/// For a tuple answer, why each element is not the store's propagated
+/// refusal, if it is not.
+fn element_mismatches(
+    node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+) -> Option<Vec<Option<String>>> {
+    let lease = node
+        .node_ref()
+        .and_then(|node| node.read())
+        .expect("the delivered answer is live");
+    let SemanticNodeData::Tuple { elements, .. } = &*lease else {
+        return None;
+    };
+    Some(
+        elements
+            .iter()
+            .map(|element| {
+                let child = lease
+                    .child(element.value)
+                    .and_then(|child| child.read())
+                    .expect("a retained element is live");
+                lease_mismatch(&child)
+            })
+            .collect(),
+    )
 }
 
-/// The checker's store over a module-scope `ThisType`, and the
-/// marker-typed answers it must not give. The checker (TypeScript 7.0.2,
-/// all four settings) answers `increment`, which reads `this.count`, with
-/// its error recovery — `any` (TS7023 under `noImplicitAny`; TS2339 on
-/// each `this` read) — while `double`, `first` and `add`, which read no
-/// `this`, it answers completely: `number`, `{ id: number; }` and
-/// `{ id: number; }`.
-const NAMESAKE_ROWS: [(&str, &str); 4] = [
-    ("St['double']", "number"),
-    ("St['first']", "{ id: number; }"),
-    ("ReturnType<St['increment']>", "number"),
-    ("ReturnType<St['add']>", "{ id: number; }"),
+/// The checker's store over a module-scope `ThisType` (TypeScript 7.0.2,
+/// all four settings alike), member by member as [`WHOLE_STORE`] lists
+/// them: every member as the marker-typed store's but `increment`, which
+/// reads `this.count` off its own object literal and recovers as `any` —
+/// TS2339 at each `this.count` and `this.items` read of the actions in
+/// every setting, and TS7023 on `increment` under `noImplicitAny`. No
+/// other diagnostic.
+const NAMESAKE_STORE: [&str; 8] = [
+    "number",
+    "{ id: number; }[]",
+    "number",
+    "{ id: number; }",
+    "any",
+    "{ id: number; }",
+    "\"counter\"",
+    "{ count: number; items: { id: number; }[]; name: string; } & \
+     PiniaCustomStateProperties<{ count: number; items: { id: number; }[]; name: string; }>",
 ];
 
 /// A module-scope `ThisType` is an ordinary interface: the store's actions
 /// read `this` as their own object literal, so `increment`, which returns
 /// `this.count`, is not the marker-typed `number` — the checker answers
-/// `any` (TS7023 under `noImplicitAny`; TS2339 on each `this` read).
-/// Measured on TypeScript 7.0.2, all four settings. The checker's recovery
-/// is error-type `any`; the named demand refuses the unmodelled read with a
-/// typed degraded leaf, never the marker's answer. The refusal propagates
-/// to `double`, `first` and `add` too, which the checker answers
-/// independently through the getters' contextual `state` and `add`'s own
-/// parameter: that propagated refusal of independently answerable members
-/// is the recorded recovery divergence the error-recovery successor owns,
-/// upgrading these rows to the checker's answers.
+/// `any` ([`NAMESAKE_STORE`]). The named demand does not model that
+/// error recovery: it refuses the store's call at its context-sensitive
+/// inference and every member propagates the refusal, `double`, `first`,
+/// `add`, the state members, `$id` and `$state` included, which the
+/// checker answers independently. That propagated refusal is the recorded
+/// recovery divergence the error-recovery successor owns, upgrading these
+/// members to the checker's answers.
 #[test]
 fn a_module_scope_namesake_is_not_the_marker() {
-    let failures = non_refused_answers(
+    let failures = recovery_mismatches(
         &Project::store("interface ThisType<T> {}\n", &[]),
-        &NAMESAKE_ROWS,
+        &ALL,
+        &NAMESAKE_STORE,
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -473,37 +647,69 @@ fn a_module_scope_namesake_is_not_the_marker() {
 /// A module that also contributes the global marker still reads its own
 /// module-scope `ThisType` there: the namesake shadows the global
 /// declaration in its own module, so the store it declares answers as with
-/// a namesake alone. Measured on TypeScript 7.0.2, all four settings, with
-/// the same complete `double`, `first` and `add` and error-recovered
-/// `increment` as a namesake alone.
+/// a namesake alone — the checker's [`NAMESAKE_STORE`] with the same
+/// diagnostics (TypeScript 7.0.2, all four settings), and the named
+/// demand's same refusal.
 #[test]
 fn a_namesake_shadows_its_own_modules_global_contribution() {
-    let failures = non_refused_answers(
+    let failures = recovery_mismatches(
         &Project::store(
             "interface ThisType<T> {}\ndeclare global { interface ThisType<T> {} }\n",
             &[],
         ),
-        &NAMESAKE_ROWS,
+        &ALL,
+        &NAMESAKE_STORE,
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// With no `ThisType` declared, the checker reports the name (TS2304 at
-/// both `ThisType` references, TS7006 on each getter's `state` under
-/// `noImplicitAny`) and recovers with `getters` and `actions` inferring
-/// nothing: every getter and action read is TS2339, the error type `any`,
-/// never the marker-typed member. Measured on TypeScript 7.0.2, all four
-/// settings. The named demand answers no value for them either.
+/// both `ThisType` references of the options declaration, and TS7006 on
+/// each getter's `state` under `noImplicitAny`) and recovers with
+/// `getters` and `actions` inferring nothing: the state members, `$id`
+/// and `$state` answer as the marker-typed store's, and every getter and
+/// action is absent from the store (TS2339 at each probe reading one), the
+/// error type `any`, never the marker-typed member. Measured on
+/// TypeScript 7.0.2, all four settings. The named demand refuses the
+/// store's call at its context-sensitive inference, as with a namesake.
 #[test]
 fn an_undeclared_marker_recovers_without_inferring_through_it() {
-    let rows = [
-        ("St['double']", "number"),
-        ("St['first']", "{ id: number; }"),
-        ("ReturnType<St['increment']>", "number"),
-        ("ReturnType<St['add']>", "{ id: number; }"),
-    ];
-    let failures = non_refused_answers(&Project::store("", &[]), &rows);
+    let failures = recovery_mismatches(
+        &Project::store("", &[]),
+        &ALL,
+        &[
+            "number",
+            "{ id: number; }[]",
+            "any",
+            "any",
+            "any",
+            "any",
+            "\"counter\"",
+            NAMESAKE_STORE[7],
+        ],
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The refusal evidence discriminates: a store built by a callee that is
+/// not callable — an unrelated refusal, with the global marker declared —
+/// has members holding the same propagated miss as a namesake store's,
+/// and the evidence rejects it on the store's own typed cause alone.
+#[test]
+fn an_unrelated_store_refusal_is_not_the_recovery_refusal() {
+    let project = Project {
+        declarations: MARKED,
+        scenario: format!(
+            "declare const notAStore: {{ id: 1 }};\n{}",
+            STORE.replacen("defineStore(\"counter\"", "notAStore(\"counter\"", 1)
+        ),
+    };
+    let failures = recovery_mismatches(&project, &ALL[..1], &NAMESAKE_STORE);
+    assert!(
+        matches!(&failures[..], [store] if store.contains("not the context-sensitive-inference refusal")),
+        "the unrelated refusal's members hold the propagated miss and only the store's \
+         typed cause tells it apart: {failures:?}"
+    );
 }
 
 /// An object type relates to a `Record` over index keys as to the object

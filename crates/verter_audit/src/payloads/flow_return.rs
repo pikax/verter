@@ -75,6 +75,10 @@ pub enum FlowDegradationTag {
     /// A symbolic call carrier whose callee could not be represented or
     /// resolved to a signature evaluated to `any`.
     UnrepresentableCallee,
+    /// A generic call whose type argument is inferred from a
+    /// context-sensitive argument's return the call resolver could not
+    /// continue.
+    ContextSensitiveInference,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,
