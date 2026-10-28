@@ -42,7 +42,6 @@ export async function waitForDiagnosticReceipt<T>(
   readDiagnostics: () => T,
   timeoutMs: number,
   stableMs: number,
-  intervalMs = 50,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let answers = 0;
@@ -84,7 +83,7 @@ export async function waitForDiagnosticReceipt<T>(
       ) {
         return readDiagnostics();
       }
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
     throw failure();
   };

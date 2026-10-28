@@ -13,12 +13,7 @@ import {
   typeProviderSyncCompleteSince,
   type TypeProviderSyncProgress,
 } from "./lib/typeProviderSyncLog";
-import {
-  DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS,
-  pollBudget,
-  REFERENCES_POLL_INTERVAL_MS,
-  sequenceParent,
-} from "./lib/timeouts";
+import { pollBudget, REFERENCES_POLL_INTERVAL_MS, sequenceParent } from "./lib/timeouts";
 
 export { pollBudget, sequenceParent } from "./lib/timeouts";
 import {
@@ -538,10 +533,6 @@ export async function waitForNoDiagnosticsMatching(
  * A native-only batch or a deadline cannot prove that a document is clean.
  * Use for "I want to see what diagnostics look like after processing"
  * without requiring any specific predicate.
- *
- * The poll cadence is `DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS`, deliberately
- * slower than this file's other loops: each poll is server demand, and a
- * fast settle poll starves the frontier it settles on.
  */
 export async function waitForDiagnosticsSettled(
   uri: vscode.Uri,
@@ -549,14 +540,12 @@ export async function waitForDiagnosticsSettled(
     source?: string;
     timeoutMs?: number;
     stableMs?: number;
-    pollIntervalMs?: number;
   },
 ): Promise<vscode.Diagnostic[]> {
   const {
     source,
     timeoutMs = pollBudget("waitForDiagnosticsSettled"),
     stableMs = 500,
-    pollIntervalMs = DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS,
   } = options ?? {};
 
   const getFiltered = () => {
@@ -589,7 +578,6 @@ export async function waitForDiagnosticsSettled(
       getFiltered,
       timeoutMs,
       stableMs,
-      pollIntervalMs,
     );
   } finally {
     sub.dispose();

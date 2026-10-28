@@ -160,31 +160,3 @@ it("names a document the server holds no diagnostics state for", async () => {
   await vi.advanceTimersByTimeAsync(500);
   await rejected;
 });
-
-it("holds the poll cadence an explicit interval asks for", async () => {
-  vi.useFakeTimers();
-  let polls = 0;
-  let ready = false;
-  const result = waitForDiagnosticReceipt(
-    async () => {
-      polls += 1;
-      return { version: 1, ready };
-    },
-    () => 1,
-    () => 0,
-    () => [],
-    2500,
-    100,
-    1000,
-  );
-  await vi.advanceTimersByTimeAsync(900);
-  // Only the t=0 poll has run: the next demand waits out the interval, so a
-  // settle poll cannot re-signal the scanner at the raw 50 ms cadence.
-  expect(polls).toBe(1);
-  ready = true;
-  await vi.advanceTimersByTimeAsync(1100);
-  // Poll 2 (t=1000) sees readiness; poll 3 (t=2000) confirms the quiet window
-  // and settles — three demands in 2000ms, not the forty a 50ms cadence sends.
-  expect(polls).toBe(3);
-  expect(await result).toEqual([]);
-});
