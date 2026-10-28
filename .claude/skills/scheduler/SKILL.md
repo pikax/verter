@@ -73,6 +73,10 @@ subscribers therefore follow the task that actually executes the producer.
 Late sibling admissions preserve that elected task. The provisional task lives
 in the flight's locked lifecycle state and releases on election or terminalization;
 queued envelopes for a terminal flight retain no execution task.
+Native and inline dispatch release the dequeued job's temporary task handle
+before publishing readiness. A consumer can therefore elect, finish and release
+its producer while the dispatcher is still delivering that readiness wake;
+the DAG's reservation continues to cover the admitted work until settlement.
 Pending scoped handoffs subscribe to their request's cancellation. Scheduler
 `CompletionSubscription::owned` binds completion waits to explicit producer
 and waiter tasks plus a stop token, and `begin_owned_request` follows the

@@ -831,11 +831,17 @@ impl Scheduler {
                 .get(&job.identity)
                 .map(|entry| Arc::clone(entry.value()))
             {
-                if flight.mark_dispatched(job.cancellation.clone()) {
+                let identity = job.identity.clone();
+                let aggregate = job.cancellation.clone();
+                // A consumer can finish inside the readiness wake. Release the
+                // dispatch frame's provisional task before exposing that wake;
+                // the DAG still owns the admitted task and capacity reservation.
+                drop(job);
+                if flight.mark_dispatched(aggregate) {
                     return DispatchOutcome::DeferredScoped;
                 }
                 self.terminalize_scoped_cache_flight(
-                    &job.identity,
+                    &identity,
                     &flight,
                     ScopedCacheTerminal::Cancelled,
                     false,
@@ -1454,9 +1460,14 @@ impl Scheduler {
                 .get(&job.identity)
                 .map(|entry| Arc::clone(entry.value()))
             {
-                if !flight.mark_dispatched(job.cancellation.clone()) {
+                let identity = job.identity.clone();
+                let aggregate = job.cancellation.clone();
+                // Match native dispatch: readiness cannot retain a task in
+                // this frame after the consumer elects its actual producer.
+                drop(job);
+                if !flight.mark_dispatched(aggregate) {
                     self.terminalize_scoped_cache_flight(
-                        &job.identity,
+                        &identity,
                         &flight,
                         ScopedCacheTerminal::Cancelled,
                         false,
