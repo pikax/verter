@@ -797,15 +797,33 @@ impl FactReadSet {
             }
             let base = &runs[widest];
             let mut edit = base.edit();
+            // Whether the edit is still exactly the base: while no run has
+            // added a fact yet, a run the scan found wholly held was wholly
+            // held by the BASE, which is what the subset memo records.
+            let mut edit_still_base = true;
             for (index, run) in runs.iter().enumerate() {
                 if index == widest || run.ptr_eq(base) {
                     continue;
                 }
+                // The same retained runs reach scope after scope: a run a
+                // held seal already covers contributes nothing here, and
+                // re-merging its facts is exactly the repeated transitive
+                // expansion the growth contracts bound.
+                if crate::facts::fact_set::subset_memo::known_subset(run, base) {
+                    continue;
+                }
+                let mut held_all = true;
                 for fact in run.iter() {
                     record_signature_work(1);
-                    if !edit.contains(fact) {
-                        edit.insert(fact.clone());
+                    if edit.contains(fact) {
+                        continue;
                     }
+                    held_all = false;
+                    edit.insert_new(fact.clone());
+                    edit_still_base = false;
+                }
+                if held_all && edit_still_base {
+                    crate::facts::fact_set::subset_memo::record_subset(run, base);
                 }
             }
             for fact in std::mem::take(&mut self.observations) {
