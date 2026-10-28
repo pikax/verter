@@ -178,24 +178,44 @@ impl VerterHost {
             memoised_resolve(augmenter_canonical, specifier).target
         };
         let any_non_empty = |target: AugmentationTargetKind| {
-            !crate::host_manage::source_augmentation::AugmentationRequestDriver::new(store)
-                .ensure_populated(&make_key(target), memoised_resolve, None, Some(&|canonical| {
-                    let serve = self.ensure_indexed_ready_serve(canonical)?;
-                    if !serve.store_published {
-                        // A fenced serve is a VALID complete read: the
-                        // contributor keeps its exact-content identity and
-                        // the fenced note keeps derived values
-                        // non-cacheable; only an unavailable source or
-                        // superseded served content (the identity mismatch
-                        // below) drops the contributor.
-                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
-                    }
-                    let identity = self.authoritative_current_artifact_key(canonical)?;
-                    (identity.content_hash == serve.indexed.whole_hash).then_some(identity)
-                }))
-                .entries
-                .is_empty()
+            // A contributor the identity callback could not verify (an
+            // unavailable source, superserved content or a fenced serve)
+            // makes "no augmenters" unprovable for this target: the probe
+            // then answers as if the dependency exists, so a Content
+            // compile never proceeds without its contributor fingerprint.
+            let contributor_unverified = std::cell::Cell::new(false);
+            let entries_empty =
+                crate::host_manage::source_augmentation::AugmentationRequestDriver::new(store)
+                    .ensure_populated(
+                        &make_key(target),
+                        memoised_resolve,
+                        None,
+                        Some(&|canonical| {
+                            let serve = self.ensure_indexed_ready_serve(canonical)?;
+                            if !serve.store_published {
+                                // A fenced serve is a VALID complete read: the
+                                // contributor keeps its exact-content identity and
+                                // the fenced note keeps derived values
+                                // non-cacheable; only an unavailable source or
+                                // superseded served content (the identity mismatch
+                                // below) drops the contributor.
+                                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
+                                contributor_unverified.set(true);
+                            }
+                            let identity =
+                                self.authoritative_current_artifact_key(canonical).filter(
+                                    |identity| identity.content_hash == serve.indexed.whole_hash,
+                                );
+                            if identity.is_none() {
+                                contributor_unverified.set(true);
+                            }
+                            identity
+                        }),
+                    )
+                    .entries
+                    .is_empty();
+            !entries_empty || contributor_unverified.get()
         };
 
         // Collect the per-import probe targets from the owner's own import

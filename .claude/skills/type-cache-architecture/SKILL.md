@@ -1009,6 +1009,16 @@ display facts is **physically split** at the cache layer
 keyed on `content_hash`) so a cosmetic edit hits only the display store and
 does not recompute semantic facts.
 
+**Selected class-member display evidence.** The existing fact has two real
+lanes: `DeclBodyMemo::class_member_read_hashes_in` hashes both from one retained
+selection and binder frame. Both use the same bounded facts walker; its Display
+lane includes graph-preserved parameter/type-parameter/index names and tuple
+labels, omitting source coordinates and method bodies. Semantic bytes remain
+alpha-normalized under R16. The narrow class-member port observes both lanes,
+so cosmetic names refresh display-bearing graph answers without making
+unrelated members or annotated implementation bodies dependencies.
+
+
 **R14 (path-precise).** `Export(name).semantic_hash` is computed over the
 **export's body alone**, with every cross-decl reference (same-file local decl,
 same-file member, imported binding) recorded as a **reference-shape edge** by
@@ -2157,23 +2167,43 @@ reachability.
 augmenter_set_fingerprint }` — the SOLE `RouteSurface` fact; that domain is
 one-arm — is observed by the augmentation-stitch consumers.
 `augmenter_set_fingerprint = stable_hash(sorted([(augmenter_canonical,
-augmenter_parse_stable_hash)]))`. Adding / removing an augmenter changes the
-fingerprint → every stitched candidate that observed it invalidates.
+matching_binding_population_hash)]))`. The per-slot digest includes exact owners,
+specifiers, binding names, symbol spaces and declaring-file kind; it excludes
+member headers and all authored content versions. Add/remove/owner/binding changes
+invalidate the population. Actual program source order has its own fact below.
 
 **Stitching pipeline.** `ProjectSemanticDispatch::stitch_module_augmentations`
 (through the shared `collect_augmentation_contributions` folder) is the cold
 path. It calls
 `FileArtifactStore::ensure_augmentation_index_populated(target_key)` on first
 miss — the scan walks every loaded `FileArtifacts.augmentations`, sorts matched
-augmenters by `(canonical, parse_stable_hash)`, computes the fingerprint,
+augmenters by canonical, computes the content-free population fingerprint,
 inserts into `augmentation_index`, and emits a typed
 `ModuleAugmentationIndexShape` audit event recording the install (or refresh on
 re-population). Each `AugmenterSet` entry is an `AugmenterEntry` carrying the
 **exact** `FileArtifactKey` of the scanned augmenter artifact (plus its
-`parse_stable_hash`) — the stitcher re-fetches each augmenter's `.augmentations`
-via `FileArtifactStore::get_artifacts(&key)` keyed by that exact key, never a
-content-agnostic canonical-only scan, so the stitch reads precisely the
-augmenter version the fingerprint was computed over. The stitcher then folds
+`parse_stable_hash` as content metadata). The owned lowering port re-fetches each
+augmenter's `.augmentations` through its current exact artifact identity, requires
+the hash of the actual indexed serve, and observes that content before exposing
+any facts, including negative named-contributor reads. A warm population first
+reacquires its known contributors through source authority. Upsert queues old
+OR new contributor classifications, including declaration-file retractions, so
+removing the last contribution is lazily indexed even when the new source no
+longer classifies as ambient. A changed identity triggers the same authoritative
+cold scan; an unavailable known identity keeps the answer return-only, even if
+its artifact disappears during scanning. Unrelated noncontributors remain
+untouched.
+Cold population scans hold an existing fully-applied artifact-root lease.
+Callbacks run without storage guards. Publication reserves its own membership
+epoch, then holds the existing root-registry state lock through admission and
+row insertion: the scan root must immediately precede that epoch, with no other
+in-flight mutation and no exhaustion. This prevents a new canonical's
+invalidation from observing an empty index between the check and publication.
+A raced or unsettled scan answers return-only and leaves no shared row; the
+next stable scan discovers the full population.
+
+A stale captured key may be refreshed without moving the population fingerprint; parse identities include
+content and must be reacquired with the exact current key. The stitcher then folds
 each augmenter's `(owner, augmented_name, space)` contributions, together with
 the base declaration's own contributors, into ONE `SemanticNodeData::MergedDecl`
 carrier. The result's `ReadSetSignature.facts` records the

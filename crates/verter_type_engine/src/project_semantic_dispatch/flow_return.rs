@@ -6048,6 +6048,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // (the usable value still flows to the caller).
                     match &verdict {
                         Some(FlowSolveOutcome::Complete(proof)) => {
+                            // The batched publish copies the root carrier's
+                            // read-set signature, so every version each
+                            // embedded reference interns must be observed
+                            // into that carrier HERE, before the member
+                            // leaves this frame — the shared cold-build
+                            // close only observes the enclosing build's own
+                            // value, not a queued member's.
+                            let value = crate::semantic_query::SemanticQueryValue::FlowReturn(
+                                verter_session_query::retention::owned::Owned::new(
+                                    proof.value().clone(),
+                                ),
+                            );
+                            self.observe_retained_reference_versions(&value);
                             let member = CompletedFlowReturnMember {
                                 key: root_key,
                                 result: proof.clone(),
