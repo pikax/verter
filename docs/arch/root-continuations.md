@@ -1250,8 +1250,11 @@ loads that build would perform first and waits on each as an outside input
 Nothing of the build has run while the frame waits, so the step the last
 load restarts begins the build once, over loaded files. Every file waited on
 joins the frame's `awaited_loads` and is never waited on again: a load that
-failed leaves the build to read the file as a synchronous build reads it
-after its own failed load. What the check itself reads is observed in a fact
+failed supplies its terminal outcome to every read of that file by the
+frame. The frame owns that outcome across steps and installs it only while
+its build runs; repeated indexed or scope reads cannot submit a synchronous
+retry. An independent reader can load the file again after the frame ends.
+What the check itself reads is observed in a fact
 tracer and observation scope of its own and dropped; the build observes
 what it reads. On the synchronous entry's drive the frame waits on nothing,
 and its build performs the same loads in place as their external driver.
@@ -1450,10 +1453,9 @@ inside the step. Frame entry loads (above) cover only the loads an
 instantiation or `typeof` build performs before anything else: a file a
 build reaches later — a re-export chain's hop resolved at demand time, a
 heritage or member declaration of another file, a declaration body lowered
-on its owner shard — still loads or is lowered in place. A frame entry load
-that fails also leaves its build to serve the file in place, as the
-synchronous build does after its own failed load; only a family frame
-consumes its load's terminal outcome. A flow frame still drops and re-runs
+on its owner shard — still loads or is lowered in place. Failed frame entry
+loads supply their terminal outcome to the frame's repeated reads without
+synchronous retries. A flow frame still drops and re-runs
 its evaluation when its body meets an unanswered read.
 
 An ignored acceptance test in the session's `semantic_poll_contract` group

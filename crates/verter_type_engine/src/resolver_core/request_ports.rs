@@ -67,10 +67,11 @@ pub enum IndexedLoadEnd {
     Shutdown,
 }
 
-/// Owned loads that ended without integrating their file, whose waiting
-/// reader has not yet read the file: each answers that reader's first load
-/// of it ([`take_consumed_load_end`]) with its terminal outcome, so the
-/// reader consumes the wait's outcome instead of loading the file again.
+/// Owned loads that ended without integrating their file. Each outcome
+/// answers every load of that file by the waiting reader
+/// ([`consumed_load_end`]), including later scope or prepared-declaration
+/// reads. The reader owns these outcomes until it finishes; they are not
+/// a host-wide negative cache.
 pub type ConsumedLoadEnds = Vec<(Arc<str>, IndexedLoadEnd)>;
 
 std::thread_local! {
@@ -80,8 +81,8 @@ std::thread_local! {
 
 /// Run `body` — a reader that waited on owned loads, reading the files they
 /// loaded — with the loads in `ends` that ended without integrating their
-/// file answering its loads of those files. On return `ends` keeps the
-/// outcomes `body` did not consume, for the reader's next step. Any outcome
+/// file answering all its loads of those files. On return `ends` keeps the
+/// outcomes for the reader's next step. Any outcome
 /// installed by an enclosing reader is restored, unwinding included. An
 /// empty `ends` installs nothing.
 pub(crate) fn with_consumed_load_ends<R>(
@@ -110,15 +111,16 @@ pub(crate) fn with_consumed_load_ends<R>(
 }
 
 /// The terminal outcome a waiting reader's owned load of a file matching
-/// `is_file` ended with, taken so that it answers only that reader's first
-/// load of the file: the load a host performs for the reader then answers
-/// as after a synchronous load that ended the same way, without being
-/// submitted again. `None` when no installed outcome names the file.
-pub fn take_consumed_load_end(is_file: impl Fn(&str) -> bool) -> Option<IndexedLoadEnd> {
+/// `is_file` ended with. It remains installed for repeated reads by this
+/// reader, so a later scope or prepared-declaration read cannot retry the
+/// failed load synchronously. `None` when no installed outcome names the
+/// file. Independent readers outside this scope may load the file again.
+pub fn consumed_load_end(is_file: impl Fn(&str) -> bool) -> Option<IndexedLoadEnd> {
     CONSUMED_LOAD_ENDS.with(|slot| {
-        let mut ends = slot.borrow_mut();
-        let found = ends.iter().position(|(file, _)| is_file(file))?;
-        Some(ends.remove(found).1)
+        let ends = slot.borrow();
+        ends.iter()
+            .find(|(file, _)| is_file(file))
+            .map(|(_, end)| *end)
     })
 }
 

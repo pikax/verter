@@ -1380,7 +1380,7 @@ impl VerterHost {
     /// here instead: the load is not submitted again, and the reader answers
     /// as after a synchronous load that ended the same way.
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
-        if verter_type_engine::resolver_core::request_ports::take_consumed_load_end(|file| {
+        if verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
             file == canonical_id
                 || self.normalized_analysis_canonical(file)
                     == self.normalized_analysis_canonical(canonical_id)
@@ -1389,6 +1389,10 @@ impl VerterHost {
         {
             return false;
         }
+        #[cfg(test)]
+        self.test_force
+            .blocking_loads_begun
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let scope = self.scheduler.enter_execution_scope();
         let mut load = self.begin_load(
             canonical_id,

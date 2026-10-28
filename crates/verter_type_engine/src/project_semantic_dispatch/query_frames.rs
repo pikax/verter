@@ -487,9 +487,9 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     /// ([`ProjectSemanticDispatch::frame_source_load`]), each with how its
     /// load ended until the frame took that outcome.
     awaited_loads: Vec<(Arc<str>, Option<LoadEnded>)>,
-    /// The awaited loads that ended without integrating their file and that
-    /// the frame's build has not yet consumed: each answers the build's first
-    /// load of its file, as the synchronous build's own failed load answers.
+    /// The awaited loads that ended without integrating their file. Each
+    /// answers every read of its file by this frame's build, across steps,
+    /// without letting later scope reads synchronously retry the load.
     failed_loads: crate::resolver_core::request_ports::ConsumedLoadEnds,
 }
 
@@ -2657,7 +2657,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// Each file waited on joins `awaited` with the cell its outcome ends
     /// in, and is never waited on again: a load that failed is consumed by
-    /// the build, whose first load of the file answers with that outcome as
+    /// the build, whose loads of the file answer with that outcome as
     /// a synchronous build's own failed load answers. What the check reads
     /// is observed in a scope of its own and dropped; the build observes
     /// what it reads itself.
@@ -2776,8 +2776,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Err(()) => unreachable!("a stopped drive delivers nothing"),
         });
         // A load the frame waited on that ended without integrating its file
-        // answers the build's first load of it: the build consumes the
-        // wait's terminal outcome instead of submitting the load again.
+        // answers every load of it by this build, including later scope reads:
+        // the terminal outcome stays with the frame until it finishes.
         let mut failed_loads = std::mem::take(&mut frame.failed_loads);
         let poll: FramePoll<'a> =
             crate::resolver_core::request_ports::with_consumed_load_ends(&mut failed_loads, || {

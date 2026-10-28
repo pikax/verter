@@ -4334,22 +4334,22 @@ mod semantic_poll_contract {
         }
     }
 
-    /// A reader whose file's load fails consumes that terminal outcome once:
+    /// A reader whose file's load fails retains that terminal outcome:
     /// the polled entry submits the load once, waits on it, and — the load
     /// failed — resumes from its retained stage without the file, answering
     /// in bounded polls exactly what the synchronous entry, whose in-place
-    /// load fails the same way, reads. It never submits its load again and
-    /// never serves the file in place to rediscover the failure: the polled
-    /// entry submits exactly the loads the synchronous entry submits. That
+    /// load fails the same way, reads. Repeated reads of the missing file
+    /// never fall back to the synchronous loader. That
     /// holds for a family continuation (a macro payload's owner, a class's
     /// declaring file), for an instantiation or a `typeof` frame that waited
     /// on its file before its build began, and for a class's surface whose
     /// instantiation is such a frame. Every reader leaves nothing open.
     ///
     /// Restarted from its load stage after the failure instead, a family
-    /// begins the same load again at every resume and never answers; a frame
-    /// whose build served the file in place after its failed wait submits a
-    /// load the synchronous entry does not.
+    /// begins the same load again at every resume and never answers. Consuming
+    /// the failure only once lets a later scope read retry synchronously;
+    /// total submissions can still match the synchronous entry, so count
+    /// synchronous starts separately from owned loads.
     #[test]
     fn family_load_failure_is_terminal() {
         type Key = fn(
@@ -4361,27 +4361,37 @@ mod semantic_poll_contract {
                 .loads_begun
                 .load(std::sync::atomic::Ordering::SeqCst)
         };
-        let cases: [(&str, Key); 4] = [
-            ("a macro payload's owner", |_, dispatch| {
-                owned_props_payload_keys(dispatch, MISSING_OWNER).0
-            }),
-            ("a class's declaring file", |host, dispatch| {
-                class_instance_surface_in(host, dispatch, MISSING_OWNER)
-            }),
-            ("an instantiation's declaring file", |_, dispatch| {
+        let blocking = |host: &crate::VerterHost| {
+            host.test_force
+                .blocking_loads_begun
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        let cases: [(&str, usize, Key); 4] = [
+            ("an instantiation's declaring file", 1, |_, dispatch| {
                 missing_props_key(dispatch)
             }),
-            ("a typeof's value file", |_, dispatch| {
+            ("a typeof's value file", 1, |_, dispatch| {
                 file_typeof_key(dispatch, MISSING_OWNER, "value")
             }),
+            ("a macro payload's owner", 1, |_, dispatch| {
+                owned_props_payload_keys(dispatch, MISSING_OWNER).0
+            }),
+            // The class and its Instantiate child each own a source read.
+            ("a class's declaring file", 2, |host, dispatch| {
+                class_instance_surface_in(host, dispatch, MISSING_OWNER)
+            }),
         ];
-        for (case, key) in cases {
+        for (case, expected_loads, key) in cases {
             let (synchronous, synchronous_loads) = {
                 let host = unloaded_files_host(&[]);
                 let dispatch = ProjectSemanticDispatch::new(&*host);
                 let key = key(&host, &dispatch);
                 let before = submitted(&host);
                 let read = dispatch.execute_via_cold_build_helper(key);
+                assert!(
+                    blocking(&host) > 0,
+                    "{case}: the synchronous control loads in place"
+                );
                 (read_summary(&dispatch, &read), submitted(&host) - before)
             };
             let host = unloaded_files_host(&[]);
@@ -4389,7 +4399,18 @@ mod semantic_poll_contract {
             let graph = host.project_type_store().semantic_graph();
             let key = key(&host, &dispatch);
             let before = submitted(&host);
+            let gate = Arc::clone(&host.test_force.source_load_gate);
+            gate.hold(MISSING_OWNER);
+            let held = HeldSource(&gate);
             let mut entry = dispatch.poll_query(key);
+            let counter = CountingThreadWaker::for_current_thread();
+            let waker = Waker::from(Arc::clone(&counter));
+            let (first, held_loads) = while_held(held, || {
+                (entry.poll(&waker).is_pending(), submitted(&host) - before)
+            });
+            assert!(first, "{case}: a held missing source yields before release");
+            assert_eq!(held_loads, 1, "{case}: the poll reached the held source");
+            counter.wait_for_wake("the failed load wakes its reader");
             let read = poll_until_ready(|waker| entry.poll(waker));
             drop(entry);
             assert!(
@@ -4397,6 +4418,11 @@ mod semantic_poll_contract {
                 "{case}: premise: the load failed"
             );
             let polled_loads = submitted(&host) - before;
+            assert_eq!(
+                blocking(&host),
+                0,
+                "{case}: no synchronous retry after the failed preload"
+            );
             assert_eq!(read_summary(&dispatch, &read), synchronous, "{case}");
             assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
             assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
@@ -4405,9 +4431,22 @@ mod semantic_poll_contract {
                 synchronous_loads >= 1,
                 "{case}: premise: the synchronous entry submits the failed load"
             );
+            assert!(
+                synchronous_loads >= polled_loads,
+                "{case}: the polled entry submits no extra loads: {polled_loads} vs {synchronous_loads}"
+            );
             assert_eq!(
-                polled_loads, synchronous_loads,
-                "{case}: the polled entry submits exactly the loads the synchronous entry submits"
+                polled_loads, expected_loads,
+                "{case}: one owned load per reader"
+            );
+            // The retained failure belongs to the finished frame, not the host:
+            // an independent request may try loading the missing file again.
+            let before = submitted(&host);
+            assert!(!host.ensure_loaded(MISSING_OWNER));
+            assert_eq!(
+                submitted(&host) - before,
+                1,
+                "{case}: no failure leaks out of the frame"
             );
         }
     }

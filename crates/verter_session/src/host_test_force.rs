@@ -63,6 +63,10 @@ pub(crate) struct TestForceKnobs {
     /// Number of file loads this host began, owned or in place.
     #[cfg(test)]
     pub(crate) loads_begun: std::sync::atomic::AtomicUsize,
+    /// File loads begun by the synchronous driver, excluding reads answered
+    /// by a semantic frame's retained terminal outcome.
+    #[cfg(test)]
+    pub(crate) blocking_loads_begun: std::sync::atomic::AtomicUsize,
     /// The engine-owned forcing record, shared with every engine binding and
     /// macro-mirror selector this host attaches.
     pub(crate) engine: std::sync::Arc<verter_type_engine::engine_test_knobs::TestKnobs>,
