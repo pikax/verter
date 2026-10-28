@@ -4308,6 +4308,63 @@ mod semantic_poll_contract {
         assert!(graph.resident_flight_keys_for_tests().is_empty());
     }
 
+    fn declaration_key(file: &str) -> SemanticQueryKey {
+        use verter_type_engine::semantic_query::{BinderScopeId, ResolveDeclKey, ScopeId};
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: file.into(),
+                owner,
+                local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(owner),
+            },
+            name: "Props".into(),
+        })
+    }
+
+    #[test]
+    fn a_declaration_whose_source_is_loading_yields_and_releases_its_retained_load() {
+        let synchronous = {
+            let host = unloaded_owner_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(UNLOADED_OWNER));
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = unloaded_owner_host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let gate = Arc::clone(&host.test_force.source_load_gate);
+            gate.hold(UNLOADED_OWNER);
+            let held = HeldSource(&gate);
+            let mut entry = Some(dispatch.poll_query(declaration_key(UNLOADED_OWNER)));
+            let counter = CountingThreadWaker::for_current_thread();
+            let waker = Waker::from(Arc::clone(&counter));
+            let first = while_held(held, || {
+                let first = entry.as_mut().unwrap().poll(&waker).is_pending();
+                if abandon {
+                    drop(entry.take());
+                }
+                first
+            });
+            assert!(
+                first,
+                "the declaration yields before its source is released"
+            );
+            let read = entry.take().map(|mut entry| {
+                counter.wait_for_wake("the source wakes the declaration reader");
+                poll_until_ready(|waker| entry.poll(waker))
+            });
+            drop(entry);
+            if let Some(read) = read {
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+        }
+    }
+
     /// A file the workspace does not hold: its load fails.
     const MISSING_OWNER: &str = "/semantic-task/missing.ts";
 
@@ -4366,7 +4423,10 @@ mod semantic_poll_contract {
                 .blocking_loads_begun
                 .load(std::sync::atomic::Ordering::SeqCst)
         };
-        let cases: [(&str, usize, Key); 4] = [
+        let cases: [(&str, usize, Key); 5] = [
+            ("a declaration's source", 1, |_, _| {
+                declaration_key(MISSING_OWNER)
+            }),
             ("an instantiation's declaring file", 1, |_, dispatch| {
                 missing_props_key(dispatch)
             }),

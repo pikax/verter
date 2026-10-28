@@ -1942,7 +1942,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// frame's first step.
     pub(super) fn drives_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
         let family = match key {
-            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. } => true,
+            SemanticQueryKey::Instantiate(_)
+            | SemanticQueryKey::TypeOf { .. }
+            | SemanticQueryKey::ResolveDecl(_) => true,
             // A family built as a continuation drives from an entry outside
             // every open checker obligation, as a machinery root does; read
             // inside one, it is built in place through the same
@@ -2671,6 +2673,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let canonical: &str = match key {
+            SemanticQueryKey::ResolveDecl(key) => key.scope.canonical_id.as_ref(),
             SemanticQueryKey::Instantiate(key) => key.base().defining_canonical.as_ref(),
             SemanticQueryKey::TypeOf { value_root, .. } => {
                 value_root.root.scope.canonical_id.as_ref()
@@ -2686,6 +2689,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 awaited.push((Arc::from(canonical), Some(Arc::clone(&ended))));
                 return Some(LoadWait { load, ended });
             }
+        }
+        // A declaration's local presence is answered from indexed headers.
+        // Preparing its import bundle here would load dependencies even when
+        // the lookup never needs to follow a route.
+        if matches!(key, SemanticQueryKey::ResolveDecl(_)) {
+            return None;
         }
         let files: Vec<Arc<str>> = awaited.iter().map(|(file, _)| Arc::clone(file)).collect();
         let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);

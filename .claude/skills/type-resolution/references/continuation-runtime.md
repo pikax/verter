@@ -181,3 +181,9 @@ site (`QueryDemand`): a result completed at one site never answers a need at
 the other, and a need closes a cycle only through an open demand at its own
 site. A request-local completion is held open together with its site, so the
 same holds for it at both the frame and the synchronous entry.
+
+A root declaration lookup (`ResolveDecl`) uses the same owned indexed-load
+handoff as an instantiation before its builder starts. A local header lookup
+does not preflight preparation or import bundles: those are needed only if
+the lookup follows a route. The frame retains a terminal load failure so its
+builder cannot retry the missing source through the synchronous loader.
