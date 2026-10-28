@@ -23,10 +23,11 @@ import { arch, platform, release } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { hermeticTestIds, readHermeticListDocument } from "./lib/hermetic-list.mjs";
+
 export const SCHEMA_VERSION = 1;
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const HERMETIC_LIST = join(REPO_ROOT, "scripts", "manifests", "ci-hermetic-tests.json");
 
 // Only these variables enter the fingerprint: names are always recorded, a value
 // only when set. Anything not named here (tokens, secrets) is never read.
@@ -121,25 +122,38 @@ function xmlUnescape(text) {
     .replace(/&amp;/g, "&");
 }
 
-/** Test ids (`<binary id> <test name>`) of every testcase in a nextest junit.xml. */
-export function junitTestIds(xml) {
-  const ids = [];
-  for (const tag of xml.matchAll(/<testcase\b([^>]*)>/g)) {
+/** Outcome of one nextest testcase body: retries that ended in a pass are `flaky`. */
+function testcaseOutcome(body) {
+  const own = body.replace(/<system-(out|err)\b[\s\S]*?<\/system-\1>/g, "");
+  if (/<(failure|error)\b/.test(own)) return /<failure\b/.test(own) ? "failed" : "error";
+  if (/<(flakyFailure|flakyError|rerunFailure|rerunError)\b/.test(own)) return "flaky";
+  if (/<skipped\b/.test(own)) return "skipped";
+  return "passed";
+}
+
+/** Every testcase of a nextest junit.xml: its id (`<binary id> <test name>`) and outcome. */
+export function junitTestCases(xml) {
+  const cases = [];
+  for (const tag of xml.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g)) {
     const attr = (name) => {
       const m = new RegExp(`\\b${name}="([^"]*)"`).exec(tag[1]);
       return m ? xmlUnescape(m[1]) : "";
     };
-    ids.push(`${attr("classname")} ${attr("name")}`);
+    cases.push({
+      id: `${attr("classname")} ${attr("name")}`,
+      outcome: testcaseOutcome(tag[3] ?? ""),
+    });
   }
-  return ids;
+  return cases;
+}
+
+/** Test ids (`<binary id> <test name>`) of every testcase in a nextest junit.xml. */
+export function junitTestIds(xml) {
+  return junitTestCases(xml).map((c) => c.id);
 }
 
 function readHermeticList() {
-  const doc = JSON.parse(readFileSync(HERMETIC_LIST, "utf8"));
-  if (doc.schemaVersion !== SCHEMA_VERSION || !Array.isArray(doc.hermetic)) {
-    throw new Error(`${HERMETIC_LIST}: expected {schemaVersion: 1, hermetic: [...]}`);
-  }
-  return new Set(doc.hermetic);
+  return hermeticTestIds(readHermeticListDocument());
 }
 
 /** The checked-out commit's tree and parents, read from the raw commit object so a shallow clone still reports them. */
@@ -164,7 +178,7 @@ function readToolVersions(names) {
   return versions;
 }
 
-function readToolchainPins() {
+export function readToolchainPins() {
   const rustToolchain = readFileSync(join(REPO_ROOT, "rust-toolchain.toml"), "utf8");
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   return {
