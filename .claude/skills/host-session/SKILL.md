@@ -139,6 +139,9 @@ and stop after transfer detaches only the subscriber.
 Compatibility index materializers consume `LoweringStep` too: on WASM they run
 transferred work between polls before awaiting its retained reply. Raw readiness
 polling alone cannot advance an inline lease or index operation.
+Upsert retains the source-admission fence through host and workspace publication,
+then releases it before program discovery joins indexed-file flights. A flight
+producer may itself need that fence to integrate its scheduler snapshot.
 
 Carrier publication also shares that registry. `CarrierPublicationStore` is a
 cheap cloned handle over its existing publication/stable-parse tables, stable

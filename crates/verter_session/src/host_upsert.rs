@@ -89,7 +89,7 @@ impl UpsertBatchTxn {
         self,
         host: &VerterHost,
         result_demand: UpsertResultDemand,
-    ) -> Vec<UpsertBatchOutcome> {
+    ) -> (Vec<UpsertBatchOutcome>, Vec<String>) {
         let UpsertBatchTxn { prepared, batch } = self;
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
@@ -107,8 +107,8 @@ impl UpsertBatchTxn {
             .iter_mut()
             .filter_map(|outcome| outcome.workspace_commit.take())
             .collect();
-        host.finish_workspace_batch(workspace_commits);
-        outcomes
+        let changed = host.finish_workspace_batch(workspace_commits);
+        (outcomes, changed)
     }
 
     /// The completion-state → [`UpsertBatchOutcome`] mapper: zip each
@@ -381,14 +381,23 @@ impl VerterHost {
         // one fence. The lock covers scheduler commit plus host publication,
         // so no owner revision can land between an override's current-stamp
         // validation and its atomic admission.
-        let _block_content_fence = self.block_content.admission_fence.lock();
         verter_session_query::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
         //      `submit_batch_atomic`).
         // 6:   drive it (ONE `wait_batch`, then per-index post-commit).
-        self.submit_upsert_batch(requests, priority)
-            .finish(self, result_demand)
+        let (outcomes, changed) = {
+            let _block_content_fence = self.block_content.admission_fence.lock();
+            self.submit_upsert_batch(requests, priority)
+                .finish(self, result_demand)
+        };
+        // Discovery can join an index producer whose source integration
+        // needs the admission fence. Source and workspace publication above
+        // are complete before any such dependency is awaited.
+        if !changed.is_empty() {
+            self.ingest_changed_program_files(changed);
+        }
+        outcomes
     }
 
     /// Build the in-flight upsert transaction: resolve and uniqueness-
@@ -1122,9 +1131,9 @@ impl VerterHost {
         Ok((result, workspace_commit))
     }
 
-    fn finish_workspace_batch(&self, commits: Vec<WorkspaceParsedCommit>) {
+    fn finish_workspace_batch(&self, commits: Vec<WorkspaceParsedCommit>) -> Vec<String> {
         if commits.is_empty() {
-            return;
+            return Vec::new();
         }
 
         // Publish every admitted source into the overlay before resolving
@@ -1143,7 +1152,10 @@ impl VerterHost {
             .collect::<Vec<_>>();
         self.ws().record_parsed_edges_many(&records);
         self.ingest_injected_ambient_roots(None);
-        self.ingest_changed_program_files(records.into_iter().map(|(canonical, _)| canonical));
+        records
+            .into_iter()
+            .map(|(canonical, _)| canonical)
+            .collect()
     }
 
     fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {
