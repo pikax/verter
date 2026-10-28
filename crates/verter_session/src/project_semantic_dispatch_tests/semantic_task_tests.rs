@@ -4365,6 +4365,79 @@ mod semantic_poll_contract {
         }
     }
 
+    #[test]
+    fn an_imported_declaration_yields_while_its_defining_source_loads() {
+        const IMPORTER: &str = "/semantic-task/decl-importer.ts";
+        let host = || {
+            let host = unloaded_files_host(&[
+                (UNLOADED_OWNER, "export interface Props { a: string }\n"),
+                (
+                    IMPORTER,
+                    "import { Props } from './owner'; export { Props };",
+                ),
+            ]);
+            assert!(host.ensure_loaded(IMPORTER));
+            host
+        };
+        let synchronous = {
+            let host = host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(IMPORTER));
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let gate = Arc::clone(&host.test_force.source_load_gate);
+            gate.hold(UNLOADED_OWNER);
+            let mut entry = Some(dispatch.poll_query(declaration_key(IMPORTER)));
+            let pending = while_held(HeldSource(&gate), || {
+                let pending = entry.as_mut().unwrap().poll(Waker::noop()).is_pending();
+                if abandon {
+                    drop(entry.take());
+                }
+                pending
+            });
+            assert!(
+                pending,
+                "a routed declaration yields before its source is released"
+            );
+            let read = entry
+                .take()
+                .map(|mut entry| poll_until_ready(|waker| entry.poll(waker)));
+            drop(entry);
+            if let Some(read) = read {
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_local_declaration_does_not_load_its_unrelated_imports() {
+        const LOCAL: &str = "/semantic-task/local-decl.ts";
+        let host = unloaded_files_host(&[
+            (UNLOADED_OWNER, "export interface Imported { a: string }"),
+            (
+                LOCAL,
+                "import { Imported } from './owner'; export interface Props { b: number }",
+            ),
+        ]);
+        assert!(host.ensure_loaded(LOCAL));
+        let gate = Arc::clone(&host.test_force.source_load_gate);
+        gate.hold(UNLOADED_OWNER);
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(LOCAL));
+        let ready = while_held(HeldSource(&gate), || entry.poll(Waker::noop()).is_ready());
+        drop(entry);
+        assert!(ready, "local headers answer without preparing imports");
+        assert!(host.scheduler.try_get_source(UNLOADED_OWNER).is_none());
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    }
+
     /// A file the workspace does not hold: its load fails.
     const MISSING_OWNER: &str = "/semantic-task/missing.ts";
 

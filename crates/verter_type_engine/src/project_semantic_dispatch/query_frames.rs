@@ -2690,12 +2690,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(LoadWait { load, ended });
             }
         }
-        // A declaration's local presence is answered from indexed headers.
-        // Preparing its import bundle here would load dependencies even when
-        // the lookup never needs to follow a route.
-        if matches!(key, SemanticQueryKey::ResolveDecl(_)) {
-            return None;
-        }
         let files: Vec<Arc<str>> = awaited.iter().map(|(file, _)| Arc::clone(file)).collect();
         let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
@@ -2704,10 +2698,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let pending = {
             let _tracer = tracer.install();
-            self.observe_read(|| self.ctx.begin_prepared_bundle_load(canonical, &files))
-                .discard()
-                .ok()
-                .flatten()
+            self.observe_read(|| {
+                if let SemanticQueryKey::ResolveDecl(declaration) = key {
+                    // A terminal preload failure is consumed by the builder;
+                    // probing it here must not start a synchronous retry.
+                    self.ctx.authoritative_current_content_hash(canonical)?;
+                    let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
+                    if !Self::resolve_decl_needs_route(declaration, &serve.indexed.shallow_state) {
+                        return None;
+                    }
+                }
+                self.ctx.begin_prepared_bundle_load(canonical, &files)
+            })
+            .discard()
+            .ok()
+            .flatten()
         }?;
         let ended = LoadEnded::default();
         awaited.push((pending.canonical, Some(Arc::clone(&ended))));

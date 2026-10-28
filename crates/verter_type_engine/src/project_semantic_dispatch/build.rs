@@ -847,6 +847,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(roots)
     }
 
+    /// Whether a declaration lookup can answer from its own indexed headers,
+    /// without preparing or following an import/export route. Both the source
+    /// handoff and the builder use this predicate, including framework and
+    /// augmentation declarations.
+    pub(super) fn resolve_decl_is_local(
+        key: &ResolveDeclKey,
+        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    ) -> bool {
+        shallow.effective_type_header_present_in(key.scope.owner, key.name.as_ref())
+            || shallow.effective_value_header_present_in(key.scope.owner, key.name.as_ref())
+            || if key.scope.owner.is_global_augmentation() {
+                shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
+            } else {
+                key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && shallow
+                        .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
+                        .is_some()
+            }
+    }
+
+    /// Whether this lookup follows a route rather than answering locally or
+    /// missing without touching its imports.
+    pub(super) fn resolve_decl_needs_route(
+        key: &ResolveDeclKey,
+        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    ) -> bool {
+        !Self::resolve_decl_is_local(key, shallow)
+            && (shallow
+                .import_target_in(key.scope.owner, key.name.as_ref())
+                .is_some()
+                || (key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && (shallow.exports.contains_key(key.name.as_ref())
+                        || shallow.has_wildcard_reexports())))
+    }
+
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
     /// Declaration identity is carried by the `Instantiate` key's
@@ -883,43 +918,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
 
-        // Local PRESENCE through the CENTRALIZED effective header lookup — a
-        // user/synthesized declaration first, then (rune-module-gated) the
-        // ambient rune inventory, so a Svelte rune module's `$state`/`$derived`/
-        // `$effect`/`$inspect` is treated as locally declared and resolves at
-        // this dispatch surface. A plain `.ts` is unaffected (the effective
-        // lookup is rune-module-gated, so it reduces to the header-index probe).
-        // No per-site rune branch — the single authority lives on
-        // `ShallowFileState`.
-        let has_type_symbol =
-            shallow.effective_type_header_present_in(key.scope.owner, key.name.as_ref());
-        let has_value_symbol =
-            shallow.effective_value_header_present_in(key.scope.owner, key.name.as_ref());
         let is_ordinary = key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file();
         let has_export = is_ordinary && shallow.exports.contains_key(key.name.as_ref());
         let has_import_local = shallow
             .import_target_in(key.scope.owner, key.name.as_ref())
             .is_some();
-        // A `declare global { ... }` declaration is not on the file surface but
-        // IS resolvable as the merged global declaration (the prepared-decl
-        // builder falls back to the global augmentation inventory), and so is
-        // the type of the one `declare module "…"` block declaring the name.
-        // An owner's global-augmentation scope declares exactly its own
-        // `declare global` members.
-        let has_global_augmentation = if key.scope.owner.is_global_augmentation() {
-            shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
-        } else {
-            is_ordinary
-                && shallow
-                    .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
-                    .is_some()
-        };
-
-        // A name DECLARED in this file (type / value symbol, or a
-        // `declare global` contribution) resolves here. A name that is
-        // only re-exported / imported through this file resolves at its
-        // DEFINING file instead — see the fall-through below.
-        let has_local_declaration = has_type_symbol || has_value_symbol || has_global_augmentation;
+        let has_local_declaration = Self::resolve_decl_is_local(key, shallow);
 
         if !has_local_declaration {
             // Re-export fall-through. A barrel reaches the declaration via
@@ -932,7 +936,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the declaration's scope — and every member's
             // `declaration_origin`, which anchors typeinfo JSDoc enrichment
             // — labels the file the author wrote it in, not the barrel hop.
-            if has_export || has_import_local || (is_ordinary && shallow.has_wildcard_reexports()) {
+            if Self::resolve_decl_needs_route(key, shallow) {
                 let scope_payload = self
                     .ctx
                     .prepared_decl_bundle(key.scope.canonical_id.as_ref())
