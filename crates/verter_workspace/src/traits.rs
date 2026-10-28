@@ -396,6 +396,32 @@ pub trait WorkspaceRead: Send + Sync {
         self.resolve_import_outcome(importer_id, specifier, ctx)
     }
 
+    /// Begin an owned, cancellable resolution. Poll only observes readiness;
+    /// transferred work runs on the caller's existing owner execution service.
+    /// Engine-backed implementations retain the captured world and input ledger
+    /// across flight, publication and input-loading suspension.
+    fn begin_resolution(
+        self: Arc<Self>,
+        request: crate::resolution_handoff::ResolutionRequest,
+        waiter: verter_execution::tasks::ExecutionTask,
+        stop: verter_execution::cancellation::CancellationToken,
+    ) -> crate::resolution_handoff::WorkspaceResolution {
+        let _ = (self, request);
+        crate::resolution_handoff::WorkspaceResolution::unsupported(waiter, stop)
+    }
+
+    /// Owned counterpart of a project-only lookup; the project retains its
+    /// native resolver frame and the same bounded input-loading protocol.
+    fn begin_project_resolution(
+        self: Arc<Self>,
+        request: crate::resolution_handoff::ProjectResolutionRequest,
+        waiter: verter_execution::tasks::ExecutionTask,
+        stop: verter_execution::cancellation::CancellationToken,
+    ) -> crate::resolution_handoff::WorkspaceResolution {
+        let _ = (self, request);
+        crate::resolution_handoff::WorkspaceResolution::unsupported(waiter, stop)
+    }
+
     /// Resolve against one explicitly captured published root.
     ///
     /// Engine-backed workspaces admit only if this root is still the root
@@ -905,6 +931,10 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Replace owner's transitive-semantic dep set. Always fires regardless
     /// of `cc.dependencies` union equality.
     fn replace_semantic_transitive(&self, canonical_id: &str, deps: BTreeSet<String>);
+
+    /// Compose the host's task authority with workspace dependency ownership.
+    /// Adapter workspaces with no engine retain their own ordinary read API.
+    fn bind_execution_registry(&self, _registry: verter_execution::tasks::TaskRegistry) {}
 
     /// Set the workspace's reverse-dep-stripping extension list. Merges
     /// with `probe_extensions()` and sorts longest-first at set-time.

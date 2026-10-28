@@ -1,0 +1,10 @@
+error[E0596]: cannot borrow `*handoff` as mutable, as it is behind a `&` reference
+ --> tests/compile-fail/owned_workspace_exclusive_poll.rs:4:13
+  |
+4 |     let _ = handoff.poll(waker);
+  |             ^^^^^^^ `handoff` is a `&` reference, so it cannot be borrowed as mutable
+  |
+help: consider changing this to be a mutable reference
+  |
+3 | fn poll(handoff: &mut WorkspaceResolution, waker: &Waker) {
+  |                   +++

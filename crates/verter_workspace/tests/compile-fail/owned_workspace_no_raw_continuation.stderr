@@ -1,0 +1,5 @@
+error[E0616]: field `core` of struct `WorkspaceResolution` is private
+ --> tests/compile-fail/owned_workspace_no_raw_continuation.rs:3:21
+  |
+3 |     let _ = handoff.core;
+  |                     ^^^^ private field

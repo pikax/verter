@@ -139,15 +139,15 @@ impl HostResolverState {
     fn new(
         routes: Arc<crate::resolver_core::RouteDb>,
         imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
-        tasks: verter_execution::tasks::TaskRegistry,
+        registry: verter_execution::tasks::TaskRegistry,
     ) -> Self {
-        Self {
-            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
-                routes,
-                imported_roots,
-                tasks,
-            ),
-        }
+        let runtime = crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
+            routes,
+            imported_roots,
+            registry.clone(),
+        );
+        runtime.bind_task_registry(registry);
+        Self { runtime }
     }
 
     pub(crate) fn reset_all(&self) {
@@ -156,7 +156,7 @@ impl HostResolverState {
 }
 
 /// The workspace-scoped services every workspace attached to a host
-/// receives: the host's resolve-extension policy.
+/// receives: the host's resolve-extension policy and shared execution registry.
 ///
 /// Built once by the composition root. [`Self::attach`] is the single
 /// route through which a workspace receives them — at construction and on
@@ -166,18 +166,21 @@ impl HostResolverState {
 /// retention account from its own construction.
 pub(crate) struct WorkspaceServices {
     resolve_extensions: Vec<String>,
+    registry: verter_execution::tasks::TaskRegistry,
 }
 
 impl WorkspaceServices {
-    fn new(config: &HostConfig) -> Self {
+    fn new(config: &HostConfig, registry: verter_execution::tasks::TaskRegistry) -> Self {
         Self {
             resolve_extensions: config.resolve_extensions.clone(),
+            registry,
         }
     }
 
     /// Hand `workspace` this host's workspace-scoped services.
     pub(crate) fn attach(&self, workspace: &dyn verter_workspace::WorkspaceAccess) {
         // Reverse-dep stem stripping honours the host policy from the start.
+        workspace.bind_execution_registry(self.registry.clone());
         workspace.set_default_resolve_extensions(self.resolve_extensions.clone());
     }
 }
@@ -442,7 +445,8 @@ impl VerterHost {
 
         // The workspace-scoped services, attached to the initial workspace
         // through the same route every later swap uses.
-        let workspace_services = WorkspaceServices::new(&config);
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
+        let workspace_services = WorkspaceServices::new(&config, task_registry.clone());
         workspace_services.attach(workspace.as_ref());
         let engine_policy = engine_policy_for(&config);
 
@@ -484,6 +488,7 @@ impl VerterHost {
                 Arc::clone(&registered_source_authority),
                 Arc::clone(&carrier_grammar_authority),
                 Arc::clone(&provenance),
+                task_registry.clone(),
             ),
         );
         let registered_envelope_ingest = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
@@ -524,8 +529,6 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
-        // Scoped cache producers and semantic producers share one cycle authority.
-        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -749,7 +752,7 @@ impl VerterHost {
             tick: std::sync::atomic::AtomicU64::new(1),
             store_view_epoch: std::sync::atomic::AtomicU64::new(1),
             load_generation: std::sync::atomic::AtomicU64::new(0),
-            store_view_manager: crate::resolver_store::StoreViewManager::new(),
+            store_view_manager: crate::resolver_store::StoreViewManager::with_registry(task_registry.clone()),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             metrics: HostMetrics::default(),
             scheduler,
@@ -1344,10 +1347,16 @@ impl VerterHost {
     /// IndexedReady before population lookup; ordinary scripts remain pending
     /// until that lookup. The cursor is scoped to the attached workspace.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
+        // Upsert already owns admission when it reaches this cursor. Match
+        // that order for standalone ingestion, whose loads also integrate
+        // under admission, so neither path can wait on the other's lock.
+        let _admission = self.block_content.admission_fence.lock();
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
+        #[cfg(test)]
+        self.test_force.ambient_ingestion_cursor_hook.fire_once();
         let mut cursor = index.snapshot_ingestion_cursor();
         let workspace = self.workspace();
         let (revision, members) = if let Some(changes) = workspace.snapshot_changes_since(*cursor) {
@@ -1596,7 +1605,7 @@ impl VerterHost {
     /// canonical id; call sites access source-derived caches
     /// (`cached_tsc_extract`, `cached_resolved_meta`, `cached_meta_payload`,
     /// `raw_template_analysis`, `cached_fallthrough`, `import_routes`,
-    /// `evicted`, `evicted_whole_hash`).
+    /// `evicted`, `eviction_revision`, `evicted_whole_hash`).
     #[must_use]
     pub(crate) fn derived_raw_cache(
         &self,

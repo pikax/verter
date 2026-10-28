@@ -131,6 +131,8 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use verter_execution::wake::{TakenWakers, WakeRegistration, WakerSet};
 
+use super::owned_admission::{drive, AdmissionCore, AdmissionPolicy};
+pub use super::owned_admission::{OwnedAdmission, OwnedAdmissionError, OwnedAdmissionStep};
 use super::singleflight_publish::{
     publish_entry_insert_then_post_publish, publish_entry_linearized_per_map_key,
     remove_published_entry_with_cleanup,
@@ -217,6 +219,7 @@ pub(super) enum InflightFailureKind {
 
 #[derive(Default)]
 pub(super) struct InflightSlotState {
+    pub(super) producer: Option<verter_execution::tasks::ExecutionTask>,
     /// `true` once a thread has claimed ownership of the cold build.
     /// Subsequent threads see `claimed == true` and join the flight.
     pub(super) claimed: bool,
@@ -271,6 +274,13 @@ pub(super) struct SlotJoin {
     registration: WakeRegistration,
 }
 
+impl verter_execution::dependency::DependencyPoll for SlotJoin {
+    type Output = ();
+    fn poll_dependency(&mut self, waker: &std::task::Waker) -> std::task::Poll<()> {
+        self.poll(waker)
+    }
+}
+
 impl SlotJoin {
     pub(super) fn new(slot: &Arc<InflightSlot>) -> Self {
         Self {
@@ -288,16 +298,6 @@ impl SlotJoin {
         }
         state.wakers.register(&mut self.registration, waker);
         std::task::Poll::Pending
-    }
-
-    /// Wait for the slot to complete: [`Self::poll`] driven by the
-    /// external blocking driver, for the synchronous admission entries.
-    pub(super) fn wait(mut self) {
-        verter_execution::blocking::block_on(
-            verter_execution::blocking::WaitFamily::CacheFlight,
-            None,
-            |waker| self.poll(waker),
-        );
     }
 }
 
@@ -319,14 +319,14 @@ pub struct InflightTable<K>
 where
     K: Hash + Eq + Clone,
 {
-    pub(super) table: Mutex<HashMap<K, Arc<InflightSlot>>>,
+    pub(super) table: Arc<Mutex<HashMap<K, Arc<InflightSlot>>>>,
     /// TEST-ONLY: each joiner sends once immediately before it waits for
     /// the slot, so a test can wait for an exact joining waiter instead
     /// of polling `slot_strong_count`. UNBOUNDED: the send happens with
     /// the slot state mutex held, so a bounded channel could block a
     /// joiner under that lock.
     #[cfg(any(test, feature = "test-support"))]
-    joiner_park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    pub(super) joiner_park_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
 
 impl<K> Default for InflightTable<K>
@@ -335,9 +335,9 @@ where
 {
     fn default() -> Self {
         Self {
-            table: Mutex::new(HashMap::new()),
+            table: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(any(test, feature = "test-support"))]
-            joiner_park_tx: Mutex::new(None),
+            joiner_park_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -367,85 +367,10 @@ where
         *self.joiner_park_tx.lock() = Some(tx);
         rx
     }
-
-    /// TEST-ONLY: fire the armed joiner-park witness, if any.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn notify_joiner_park(&self) {
-        if let Some(tx) = self.joiner_park_tx.lock().clone() {
-            let _ = tx.send(());
-        }
-    }
 }
 
-/// RAII guard that fails the in-flight slot if the cold build panics or
-/// returns early. Without this, a panic inside `compute()` would leave
-/// `claimed = true, completed = false` forever — joiners would wait on a
-/// slot no publish can ever complete.
-pub(super) struct InflightPanicGuard<'a, K>
-where
-    K: Hash + Eq + Clone,
-{
-    slot: Arc<InflightSlot>,
-    table: &'a Mutex<HashMap<K, Arc<InflightSlot>>>,
-    key: K,
-    finished: bool,
-}
-
-impl<'a, K> InflightPanicGuard<'a, K>
-where
-    K: Hash + Eq + Clone,
-{
-    pub(super) fn new(
-        slot: Arc<InflightSlot>,
-        table: &'a Mutex<HashMap<K, Arc<InflightSlot>>>,
-        key: K,
-    ) -> Self {
-        Self {
-            slot,
-            table,
-            key,
-            finished: false,
-        }
-    }
-
-    pub(super) fn mark_finished(&mut self) {
-        self.finished = true;
-    }
-}
-
-impl<'a, K> Drop for InflightPanicGuard<'a, K>
-where
-    K: Hash + Eq + Clone,
-{
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        // Panic / early-return path — mark the slot failed so joiners
-        // wake and retry rather than waiting forever on a slot that will
-        // never complete.
-        self.slot
-            .complete(|state| state.failure = Some(InflightFailureKind::WinnerPanicked))
-            .wake();
-        // Retire the in-flight slot from the per-cache table so the next
-        // caller starts a fresh build. `ptr_eq`-guarded: a cross-view
-        // joiner that forked may already have installed a fresh
-        // `InflightSlot` for the same key; an unconditional remove would
-        // evict that fresh slot.
-        let mut table = self.table.lock();
-        if table
-            .get(&self.key)
-            .is_some_and(|existing| Arc::ptr_eq(existing, &self.slot))
-        {
-            table.remove(&self.key);
-        }
-    }
-}
-
-/// Remove the in-flight slot from the per-cache table iff the table
-/// still holds the SAME `Arc` this caller owned. A cross-view joiner
-/// that forked may already have installed a fresh slot for the same
-/// key; an unconditional remove would evict that fresh slot.
+/// Retire only this flight. A follower may already have forked into a new
+/// flight under the same key, which this completion must leave intact.
 pub(super) fn retire_slot_if_current<K>(
     table: &Mutex<HashMap<K, Arc<InflightSlot>>>,
     key: &K,
@@ -720,11 +645,11 @@ pub fn cooperative_get_or_insert_with_post_publish<
     map: &DashMap<K, Arc<Entry>>,
     inflight: &InflightTable<K>,
     key: K,
-    mut validate: Validate,
+    validate: Validate,
     compute: Compute,
     project: Project,
-    mut revalidate_after_compute: Revalidate,
-    mut removal_cleanup: RemovalCleanup,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
     publish_fence: Option<&parking_lot::RwLock<()>>,
 ) -> Option<V>
@@ -739,179 +664,23 @@ where
     RemovalCleanup: FnMut(&K, &Arc<Entry>),
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
-    // `compute` and `project` are logically one-shot but the joiner
-    // re-validation loop may iterate (a follower whose `validate`
-    // rejects the winner's entry forks and re-enters admission). Carry
-    // them in `Option`s and `take()` them only on the iteration where
-    // THIS caller becomes the cold winner.
-    let mut compute = Some(compute);
-    let mut project = Some(project);
-    loop {
-        // Warm-hit + read-side validation.
-        if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
-            if let Some(value) = validate(&entry_arc) {
-                return Some(value);
-            }
-            // Stale entry; remove the exact `Arc` we validated so a
-            // concurrent fresh winner's entry is not evicted, and run
-            // the cache's removal-side cleanup so its live counter /
-            // reverse index stay symmetric with the publish-side
-            // bookkeeping. The removal runs under the cache's retention
-            // gate (if any) so it does not desync against a `clear`.
-            remove_published_entry_with_cleanup(
-                map,
-                &key,
-                &entry_arc,
-                &mut removal_cleanup,
-                publish_fence,
-            );
-        }
-
-        // Claim the inflight slot or join an in-progress build.
-        let slot = {
-            let mut table = inflight.table.lock();
-            table
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(InflightSlot::new()))
-                .clone()
-        };
-
-        let mut state = slot.state.lock();
-        if state.claimed {
-            // Joiner — wait for the winner to publish or fail.
-            #[cfg(any(test, feature = "test-support"))]
-            inflight.notify_joiner_park();
-            drop(state);
-            SlotJoin::new(&slot).wait();
-            let state = slot.state.lock();
-            if state.failure.is_some() {
-                // Artifact-path joiner policy: every failure kind surfaces
-                // `None` (the caller's fallback owns retry policy). The
-                // query-identity lookup-publish adapter applies the
-                // per-kind policy instead — see `InflightFailureKind`.
-                return None;
-            }
-            // Winner succeeded. Drop the slot lock, then re-read the
-            // published entry and run the caller's `validate` closure
-            // against THIS follower's view — NOT `project`. A follower
-            // joining this in-flight build is not guaranteed to be
-            // running under the same view/overlay as the winner, so the
-            // winner's entry must validate against the follower's own
-            // content identity (the same read-side contract a warm hit
-            // runs). `validate` returning `Some` also performs the
-            // caller's fact-bubble side effect.
-            drop(state);
-            if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
-                if let Some(value) = validate(&entry_arc) {
-                    return Some(value);
-                }
-                // The winner's entry is stale for the follower's view.
-                // Remove the exact stale entry (`ptr_eq`-guarded) AND run
-                // the cache's removal-side cleanup so its live counter /
-                // reverse index stay consistent, retire the same
-                // in-flight slot (`ptr_eq`-guarded), and re-enter
-                // admission so the follower cold-computes for its own
-                // view.
-                remove_published_entry_with_cleanup(
-                    map,
-                    &key,
-                    &entry_arc,
-                    &mut removal_cleanup,
-                    publish_fence,
-                );
-            }
-            retire_slot_if_current(&inflight.table, &key, &slot);
-            drop(slot);
-            continue;
-        }
-        state.claimed = true;
-        drop(state);
-
-        // Cold winner runs compute under a panic guard.
-        let mut panic_guard =
-            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
-
-        let computed = compute
-            .take()
-            .expect("compute is taken exactly once by the cold winner")();
-
-        let (value, joiners) = match computed {
-            Some(entry) => {
-                // Hold the cache's retention gate (shared read) across the
-                // WHOLE publish sequence — `revalidate_after_compute`, the
-                // `map.insert`, AND the `post_publish`. The revalidation is
-                // the last generation / dep-signature check before the
-                // entry lands; it must be atomic with the insert. If the
-                // guard were acquired only at `map.insert` (after
-                // revalidation already returned), a project-generation
-                // `invalidate_all` could take the write guard in the gap,
-                // clear the map+budget, and then this winner would publish
-                // an entry validated against the SUPERSEDED generation
-                // into the freshly-cleared cache. `invalidate_all` takes
-                // the write guard across its own map+budget clear, and
-                // `RwLock` read/write mutual exclusion fully orders the
-                // two. A cache with no retention budget passes `None` —
-                // the publish then runs unfenced, as before.
-                let _retention = publish_fence.map(parking_lot::RwLock::read);
-                // Post-compute revalidation. If a mutation invalidated the
-                // entry's dep-signature during the cold window, skip publish
-                // and signal failure to waiters.
-                if !revalidate_after_compute(&entry) {
-                    let joiners = slot.complete(|state| {
-                        state.failure = Some(InflightFailureKind::AdmissionRejected);
-                    });
-                    panic_guard.mark_finished();
-                    drop(panic_guard);
-                    retire_slot_if_current(&inflight.table, &key, &slot);
-                    // Wake the joiners only once the publish fence is released.
-                    drop(_retention);
-                    joiners.wake();
-                    return None;
-                }
-
-                let entry_arc = Arc::new(entry);
-                let value = project
-                    .take()
-                    .expect("project is taken exactly once by the cold winner")(
-                    &entry_arc
-                );
-                {
-                    // Test-only rendezvous fired inside the `publish_fence`
-                    // read-guard region, AFTER a successful revalidation
-                    // and BEFORE `map.insert`. Production fires nothing.
-                    fire_post_revalidate_pre_publish_hook();
-                    map.insert(key.clone(), Arc::clone(&entry_arc));
-
-                    // post_publish: fires AFTER entries.insert AND AFTER
-                    // successful revalidate. Reverse-index registration +
-                    // retention-budget admission live here. NOT inside the
-                    // inflight slot's state lock.
-                    post_publish(&entry_arc, &key);
-                }
-
-                // Mark slot completed; its joiners wake below, once the
-                // publish fence is released.
-                (Some(value), slot.complete(|_| {}))
-            }
-            None => {
-                // Compute returned None — failure.
-                let joiners = slot.complete(|state| {
-                    state.failure = Some(InflightFailureKind::ComputeFailed);
-                });
-                (None, joiners)
-            }
-        };
-        joiners.wake();
-
-        panic_guard.mark_finished();
-        drop(panic_guard);
-
-        // Retire the inflight slot. Future callers either hit the warm map
-        // or start a fresh inflight if the publish was skipped.
-        retire_slot_if_current(&inflight.table, &key, &slot);
-
-        return value;
-    }
+    cooperative_admit_impl(
+        map,
+        inflight,
+        key.clone(),
+        key,
+        validate,
+        || match compute() {
+            Some(entry) => ComputeAdmission::Cacheable(entry),
+            None => ComputeAdmission::Failed,
+        },
+        project,
+        revalidate_after_compute,
+        removal_cleanup,
+        post_publish,
+        publish_fence,
+        false,
+    )
 }
 
 /// Cooperative cold-compute admission with a first-class
@@ -1149,11 +918,11 @@ fn cooperative_admit_impl<
     inflight: &InflightTable<FlightK>,
     map_key: MapK,
     flight_key: FlightK,
-    mut validate: Validate,
+    validate: Validate,
     compute: Compute,
     project: Project,
-    mut revalidate_after_compute: Revalidate,
-    mut removal_cleanup: RemovalCleanup,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
     publish_fence: Option<&parking_lot::RwLock<()>>,
     linearize_publish: bool,
@@ -1170,101 +939,127 @@ where
     RemovalCleanup: FnMut(&MapK, &Arc<Entry>),
     PostPublish: FnOnce(&Arc<Entry>, &MapK),
 {
-    // `compute` and `project` are logically one-shot; the joiner
-    // re-validation loop carries them in `Option`s (see
-    // `cooperative_get_or_insert_with_post_publish` for the rationale).
-    let mut compute = Some(compute);
-    let mut project = Some(project);
-    loop {
-        // Warm-hit + read-side validation. Same shape as the
-        // `cooperative_get_or_insert_with_post_publish` warm path —
-        // including the removal-side cleanup so the cache's live
-        // counter / reverse index stay symmetric with publish.
-        if let Some(entry_arc) = map.get(&map_key).map(|e| e.clone()) {
-            if let Some(value) = validate(&entry_arc) {
+    let policy = ArtifactAdmissionPolicy {
+        map,
+        map_key,
+        stale_entry: None,
+        validate,
+        compute: Some(compute),
+        project: Some(project),
+        revalidate_after_compute,
+        removal_cleanup,
+        post_publish: Some(post_publish),
+        publish_fence,
+        linearize_publish,
+        marker: std::marker::PhantomData,
+    };
+    drive(AdmissionCore::new(
+        inflight,
+        flight_key,
+        policy,
+        verter_execution::tasks::ExecutionScope::current_task(),
+        verter_execution::cancellation::CancellationToken::new(),
+    ))
+}
+
+struct ArtifactAdmissionPolicy<
+    Map,
+    Fence,
+    MapK,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+    PostPublish,
+> {
+    map: Map,
+    map_key: MapK,
+    stale_entry: Option<Arc<Entry>>,
+    validate: Validate,
+    compute: Option<Compute>,
+    project: Option<Project>,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
+    post_publish: Option<PostPublish>,
+    publish_fence: Option<Fence>,
+    linearize_publish: bool,
+    marker: std::marker::PhantomData<fn() -> (Entry, V)>,
+}
+
+impl<
+        Map,
+        Fence,
+        MapK,
+        Entry,
+        V,
+        Validate,
+        Compute,
+        Project,
+        Revalidate,
+        RemovalCleanup,
+        PostPublish,
+    > AdmissionPolicy<V>
+    for ArtifactAdmissionPolicy<
+        Map,
+        Fence,
+        MapK,
+        Entry,
+        V,
+        Validate,
+        Compute,
+        Project,
+        Revalidate,
+        RemovalCleanup,
+        PostPublish,
+    >
+where
+    Map: std::ops::Deref<Target = DashMap<MapK, Arc<Entry>>>,
+    Fence: std::ops::Deref<Target = parking_lot::RwLock<()>>,
+    MapK: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    Validate: FnMut(&Entry) -> Option<V>,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry>,
+    Project: FnOnce(&Entry) -> V,
+    Revalidate: FnMut(&Entry) -> bool,
+    RemovalCleanup: FnMut(&MapK, &Arc<Entry>),
+    PostPublish: FnOnce(&Arc<Entry>, &MapK),
+{
+    fn lookup(&mut self) -> Option<V> {
+        if let Some(entry) = self.map.get(&self.map_key).map(|e| e.clone()) {
+            if let Some(value) = (self.validate)(&entry) {
                 return Some(value);
             }
+            // Cleanup takes the lifecycle fence and belongs to external work.
+            // Keep the exact identity so it cannot evict a later publication.
+            self.stale_entry = Some(entry);
+        }
+        None
+    }
+    fn retry_failure(&self, _: InflightFailureKind) -> bool {
+        false
+    }
+    fn produce(&mut self, slot: &Arc<InflightSlot>) -> Option<V> {
+        if let Some(entry) = self.stale_entry.take() {
             remove_published_entry_with_cleanup(
-                map,
-                &map_key,
-                &entry_arc,
-                &mut removal_cleanup,
-                publish_fence,
+                &self.map,
+                &self.map_key,
+                &entry,
+                &mut self.removal_cleanup,
+                self.publish_fence.as_deref(),
             );
         }
-
-        // Claim the inflight slot or join an in-progress build. The
-        // flight slot is keyed by `FlightK`, NOT the map key.
-        let slot = {
-            let mut table = inflight.table.lock();
-            table
-                .entry(flight_key.clone())
-                .or_insert_with(|| Arc::new(InflightSlot::new()))
-                .clone()
-        };
-
-        let mut state = slot.state.lock();
-        if state.claimed {
-            // Joiner — wait for the winner to publish or fail.
-            #[cfg(any(test, feature = "test-support"))]
-            inflight.notify_joiner_park();
-            drop(state);
-            SlotJoin::new(&slot).wait();
-            let state = slot.state.lock();
-            if state.failure.is_some() {
-                // Artifact-path joiner policy: every failure kind surfaces
-                // `None` (the caller's fallback owns retry policy). The
-                // query-identity lookup-publish adapter applies the
-                // per-kind policy instead — see `InflightFailureKind`.
-                return None;
-            }
-            // A `ReturnOnly` winner left the map empty and published no
-            // dep-signature carrier. The joiner cannot view-validate a
-            // carrier-less value against its own view — `ReturnOnly` is
-            // non-shareable across joiners — so it forks and
-            // cold-recomputes for its own view.
-            let non_cacheable_winner = state.non_cacheable_winner;
-            drop(state);
-            if non_cacheable_winner {
-                retire_slot_if_current(&inflight.table, &flight_key, &slot);
-                drop(slot);
-                continue;
-            }
-            // Cacheable winner — re-read the published entry and run the
-            // caller's `validate` closure against THIS follower's view
-            // (NOT `project`). A follower joining this in-flight build is
-            // not guaranteed to be running under the same view/overlay
-            // as the winner. `validate` returning `Some` also performs
-            // the caller's fact-bubble side effect.
-            if let Some(entry_arc) = map.get(&map_key).map(|e| e.clone()) {
-                if let Some(value) = validate(&entry_arc) {
-                    return Some(value);
-                }
-                // The winner's entry is stale for the follower's view.
-                // Fork: remove the stale entry AND run the cache's
-                // removal-side cleanup so its live counter / reverse
-                // index stay consistent, retire the slot, re-enter
-                // admission so the follower cold-computes for its view.
-                remove_published_entry_with_cleanup(
-                    map,
-                    &map_key,
-                    &entry_arc,
-                    &mut removal_cleanup,
-                    publish_fence,
-                );
-            }
-            retire_slot_if_current(&inflight.table, &flight_key, &slot);
-            drop(slot);
-            continue;
-        }
-        state.claimed = true;
-        drop(state);
-
-        // Cold winner runs compute under a panic guard keyed by the
-        // flight identity (the slot lives in the `FlightK` table).
-        let mut panic_guard =
-            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, flight_key.clone());
-
+        let map = &*self.map;
+        let map_key = &self.map_key;
+        let compute = &mut self.compute;
+        let project = &mut self.project;
+        let revalidate_after_compute = &mut self.revalidate_after_compute;
+        let mut removal_cleanup = &mut self.removal_cleanup;
+        let post_publish = self.post_publish.take().expect("one cold publisher");
+        let publish_fence = self.publish_fence.as_deref();
+        let linearize_publish = self.linearize_publish;
         let admission = compute
             .take()
             .expect("compute is taken exactly once by the cold winner")();
@@ -1297,9 +1092,6 @@ where
                     let joiners = slot.complete(|state| {
                         state.failure = Some(InflightFailureKind::AdmissionRejected);
                     });
-                    panic_guard.mark_finished();
-                    drop(panic_guard);
-                    retire_slot_if_current(&inflight.table, &flight_key, &slot);
                     // Wake the joiners only once the publish fence is released.
                     drop(_retention);
                     joiners.wake();
@@ -1329,7 +1121,7 @@ where
                     if linearize_publish {
                         publish_entry_linearized_per_map_key(
                             map,
-                            &map_key,
+                            map_key,
                             &entry_arc,
                             &mut removal_cleanup,
                             post_publish,
@@ -1337,7 +1129,7 @@ where
                     } else {
                         publish_entry_insert_then_post_publish(
                             map,
-                            &map_key,
+                            map_key,
                             &entry_arc,
                             &mut removal_cleanup,
                             post_publish,
@@ -1346,7 +1138,7 @@ where
                 }
                 let joiners = slot.complete(|_| {
                     // Cacheable winner: joiners fall through to the
-                    // `map.get(&map_key) + validate(&entry_arc)` path so
+                    // `map.get(map_key) + validate(&entry_arc)` path so
                     // each joiner thread runs `validate` against its own
                     // view. `validate` both view-checks the entry and runs
                     // the caller's fact-bubble side effect (e.g.
@@ -1384,16 +1176,191 @@ where
         };
         joiners.wake();
 
-        panic_guard.mark_finished();
-        drop(panic_guard);
-
         // Retire the inflight slot. Future callers either hit the warm map
         // (Cacheable path) or start a fresh inflight (ReturnOnly /
         // Failed paths leave the map empty).
-        retire_slot_if_current(&inflight.table, &flight_key, &slot);
 
-        return value;
+        value
     }
+}
+
+/// Begin owned artifact admission with one flight per map key. Post-publish hooks
+/// run after releasing the map shard so eviction may safely re-enter the map.
+#[allow(clippy::too_many_arguments)]
+pub fn owned_admit_with_post_publish<
+    K,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+    PostPublish,
+>(
+    map: Arc<DashMap<K, Arc<Entry>>>,
+    inflight: &InflightTable<K>,
+    key: K,
+    validate: Validate,
+    compute: Compute,
+    project: Project,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
+    post_publish: PostPublish,
+    publish_fence: Option<Arc<parking_lot::RwLock<()>>>,
+    waiter: verter_execution::tasks::ExecutionTask,
+    cancellation: verter_execution::cancellation::CancellationToken,
+) -> OwnedAdmission<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    Entry: Send + Sync + 'static,
+    V: 'static,
+    Validate: FnMut(&Entry) -> Option<V> + Send + 'static,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry> + Send + 'static,
+    Project: FnOnce(&Entry) -> V + Send + 'static,
+    Revalidate: FnMut(&Entry) -> bool + Send + 'static,
+    RemovalCleanup: FnMut(&K, &Arc<Entry>) + Send + 'static,
+    PostPublish: FnOnce(&Arc<Entry>, &K) + Send + 'static,
+{
+    owned_admit_impl(
+        map,
+        inflight,
+        key.clone(),
+        key,
+        validate,
+        compute,
+        project,
+        revalidate_after_compute,
+        removal_cleanup,
+        post_publish,
+        publish_fence,
+        false,
+        waiter,
+        cancellation,
+    )
+}
+
+/// Begin owned split-identity artifact admission. Publication linearizes displaced
+/// cleanup and the new post-publish bookkeeping under the map-key shard guard.
+#[allow(clippy::too_many_arguments)]
+pub fn owned_admit_with_post_publish_by_flight_key<
+    MapK,
+    FlightK,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+    PostPublish,
+>(
+    map: Arc<DashMap<MapK, Arc<Entry>>>,
+    inflight: &InflightTable<FlightK>,
+    map_key: MapK,
+    flight_key: FlightK,
+    validate: Validate,
+    compute: Compute,
+    project: Project,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
+    post_publish: PostPublish,
+    publish_fence: Option<Arc<parking_lot::RwLock<()>>>,
+    waiter: verter_execution::tasks::ExecutionTask,
+    cancellation: verter_execution::cancellation::CancellationToken,
+) -> OwnedAdmission<FlightK, V>
+where
+    MapK: Eq + Hash + Clone + Send + Sync + 'static,
+    FlightK: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: 'static,
+    Validate: FnMut(&Entry) -> Option<V> + Send + 'static,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry> + Send + 'static,
+    Project: FnOnce(&Entry) -> V + Send + 'static,
+    Revalidate: FnMut(&Entry) -> bool + Send + 'static,
+    RemovalCleanup: FnMut(&MapK, &Arc<Entry>) + Send + 'static,
+    PostPublish: FnOnce(&Arc<Entry>, &MapK) + Send + 'static,
+{
+    owned_admit_impl(
+        map,
+        inflight,
+        map_key,
+        flight_key,
+        validate,
+        compute,
+        project,
+        revalidate_after_compute,
+        removal_cleanup,
+        post_publish,
+        publish_fence,
+        true,
+        waiter,
+        cancellation,
+    )
+}
+
+/// Begin an owned artifact admission. Every captured callback must own its view
+/// and tracer inputs; cold work is returned as a transferable producer step.
+#[allow(clippy::too_many_arguments)]
+fn owned_admit_impl<
+    MapK,
+    FlightK,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+    PostPublish,
+>(
+    map: Arc<DashMap<MapK, Arc<Entry>>>,
+    inflight: &InflightTable<FlightK>,
+    map_key: MapK,
+    flight_key: FlightK,
+    validate: Validate,
+    compute: Compute,
+    project: Project,
+    revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
+    post_publish: PostPublish,
+    publish_fence: Option<Arc<parking_lot::RwLock<()>>>,
+    linearize_publish: bool,
+    waiter: verter_execution::tasks::ExecutionTask,
+    cancellation: verter_execution::cancellation::CancellationToken,
+) -> OwnedAdmission<FlightK, V>
+where
+    MapK: Eq + Hash + Clone + Send + Sync + 'static,
+    FlightK: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: 'static,
+    Validate: FnMut(&Entry) -> Option<V> + Send + 'static,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry> + Send + 'static,
+    Project: FnOnce(&Entry) -> V + Send + 'static,
+    Revalidate: FnMut(&Entry) -> bool + Send + 'static,
+    RemovalCleanup: FnMut(&MapK, &Arc<Entry>) + Send + 'static,
+    PostPublish: FnOnce(&Arc<Entry>, &MapK) + Send + 'static,
+{
+    OwnedAdmission::new(
+        inflight,
+        flight_key,
+        ArtifactAdmissionPolicy {
+            map,
+            map_key,
+            stale_entry: None,
+            validate,
+            compute: Some(compute),
+            project: Some(project),
+            revalidate_after_compute,
+            removal_cleanup,
+            post_publish: Some(post_publish),
+            publish_fence,
+            linearize_publish,
+            marker: std::marker::PhantomData,
+        },
+        waiter,
+        cancellation,
+    )
 }
 
 // ============================================================================
@@ -1408,3 +1375,7 @@ where
 #[cfg(test)]
 #[path = "singleflight_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "owned_admission_tests.rs"]
+mod owned_admission_tests;

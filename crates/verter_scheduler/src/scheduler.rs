@@ -87,7 +87,7 @@ mod submission;
 pub use dag_lock::SchedulerProgressSubscription;
 pub use scoped_handoff::{ScopedCacheNodeHandoff, ScopedCacheNodeProducer, ScopedCacheNodeStep};
 use submission::PendingSubmission;
-pub use submission::SchedulerSubmission;
+pub use submission::{OwnedSchedulerRequest, SchedulerSubmission};
 
 #[cfg(test)]
 #[path = "scheduler/submission_tests.rs"]
@@ -631,7 +631,10 @@ impl Scheduler {
     ) -> Arc<Self> {
         let inbox = SubmissionInbox::new();
         let dag = new_dag_mutex(
-            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            SchedulerDag::with_budget_and_registry(
+                config.resolved_dag_budget(),
+                task_registry.clone(),
+            ),
             inbox.sender.clone(),
         );
         let scheduler = Arc::new(Self {
@@ -749,7 +752,10 @@ impl Scheduler {
     ) -> Arc<Self> {
         let inbox = SubmissionInbox::new();
         let dag = new_dag_mutex(
-            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            SchedulerDag::with_budget_and_registry(
+                config.resolved_dag_budget(),
+                task_registry.clone(),
+            ),
             inbox.sender.clone(),
         );
         Arc::new(Self {
@@ -996,7 +1002,10 @@ impl Scheduler {
                 let candidate = match self.scoped_cache_flights.entry(identity.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
                     dashmap::mapref::entry::Entry::Vacant(entry) => {
-                        let flight = Arc::new(ScopedCacheFlight::new(Arc::clone(&self.dag)));
+                        let flight = Arc::new(ScopedCacheFlight::new(
+                            Arc::clone(&self.dag),
+                            self.task_registry.register_task(),
+                        ));
                         entry.insert(Arc::clone(&flight));
                         flight
                     }
@@ -1057,6 +1066,23 @@ impl Scheduler {
     ) -> SchedulerSubmission<CompletionSubscription<RequestResult>> {
         let (submission, handle) = self.prepare_request_submission(request);
         SchedulerSubmission::new(self, Some(submission), handle.subscribe())
+    }
+
+    /// Begin a cancellable request owned by the actual waiting root task.
+    /// Admission and stage completion yield without driving or parking.
+    pub fn begin_owned_request(
+        self: &Arc<Self>,
+        request: Request,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: CancellationToken,
+    ) -> OwnedSchedulerRequest {
+        OwnedSchedulerRequest::new(self, request, waiter, cancellation)
+    }
+
+    /// Enter the host's execution authority at an external synchronous boundary.
+    /// Polling dependencies receive only the resulting task, never this driver.
+    pub fn enter_execution_scope(&self) -> verter_execution::tasks::ExecutionScope {
+        verter_execution::tasks::ExecutionScope::enter(&self.task_registry)
     }
 
     fn prepare_request_submission(
@@ -2388,6 +2414,30 @@ impl Scheduler {
         #[cfg(target_arch = "wasm32")]
         {
             false
+        }
+    }
+
+    /// Cooperate from an external dependency driver using the existing worker
+    /// routing and active-path policy. External callers leave a live native
+    /// driver in charge; scheduler workers may execute their own class inline.
+    /// Poll-only dependencies never expose this execution capability.
+    pub fn pump_owned_dependency(self: &Arc<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let caller = crate::caller_kind::CallerKind::current();
+            if self.has_driver_thread()
+                && matches!(
+                    caller,
+                    crate::caller_kind::CallerKind::CpuWorker
+                        | crate::caller_kind::CallerKind::IoWorker
+                )
+            {
+                self.pump_ready_with_path(
+                    PumpReason::WaitOrDrive,
+                    caller,
+                    &crate::caller_kind::snapshot_active_path(),
+                );
+            }
         }
     }
 

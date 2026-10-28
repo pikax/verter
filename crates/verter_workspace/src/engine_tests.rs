@@ -291,7 +291,8 @@ fn a_compacted_resolution_witness_still_reobserves_the_pending_ledger() {
          re-observation"
     );
 
-    workspace.engine.refresh_resolution_evidence(
+    refresh_resolution_evidence(
+        &workspace.engine,
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
         None,
@@ -322,7 +323,8 @@ fn a_nonaggregate_unenumerable_witness_still_reobserves_the_pending_ledger() {
     let witness = dag_rooted_unenumerable_resolution_witness(&workspace);
     let generation = workspace.engine.bump_content_generation_for(dep);
 
-    workspace.engine.refresh_resolution_evidence(
+    refresh_resolution_evidence(
+        &workspace.engine,
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
         None,
@@ -348,7 +350,8 @@ fn a_precise_witness_still_reobserves_only_the_canonicals_it_names() {
     // Names a DIFFERENT canonical. The aggregate fallback must not degrade
     // into "always refresh the whole ledger": a precise witness stays
     // strictly O(its own facts).
-    workspace.engine.refresh_resolution_evidence(
+    refresh_resolution_evidence(
+        &workspace.engine,
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
         None,
@@ -378,7 +381,8 @@ fn an_empty_witness_reobserves_nothing() {
     // The fallback must key on the AGGREGATE, never on "the projection came
     // back empty" — an empty signature names nothing because it read
     // nothing, which is the opposite situation.
-    workspace.engine.refresh_resolution_evidence(
+    refresh_resolution_evidence(
+        &workspace.engine,
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
         None,
@@ -1618,4 +1622,24 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             assert_eq!(account.snapshot().retained_bytes, 0);
         }
     }
+}
+
+fn refresh_resolution_evidence(
+    engine: &Engine,
+    reader: &dyn crate::WorkspaceRead,
+    evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
+    overlay: Option<&crate::ResolutionOverlaySnapshot>,
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+) {
+    let task = engine.authority.current();
+    let mut future =
+        Box::pin(engine.refresh_resolution_evidence(reader, evidence, overlay, signature, &task));
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
+    .expect("evidence refresh completes in its task authority");
 }

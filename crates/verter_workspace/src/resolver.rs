@@ -1,5 +1,6 @@
 //! Workspace-owned resolver driving and configuration ingress.
 
+use crate::traits::WorkspaceRead;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -775,6 +776,7 @@ fn canonical_manifest_path(directory: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn drive_attempt<T>(
     reader: &dyn crate::traits::WorkspaceRead,
     ledger: &mut InputResolutionLedger,
@@ -942,7 +944,38 @@ impl Default for InputResolutionLedger {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn drive_attempt_with_bounded_io<T>(
+    reader: &dyn crate::traits::WorkspaceRead,
+    ledger: &mut InputResolutionLedger,
+    preflight: impl FnMut(
+        &[InputKey],
+        ResolutionBasis,
+    ) -> Result<ResolutionInputReservationBatch, AttemptFailure>,
+    load: impl FnMut(
+        &ResolutionInputReservationBatch,
+    ) -> Result<LoadedResolutionInputBatch, AttemptFailure>,
+    apply_attempt_output: impl FnMut(&ResolutionInputs, &AttemptOutput) -> bool,
+    run: impl FnMut(&ResolverAttemptView, ResolutionBasis) -> KernelAttempt<T>,
+) -> Result<T, Box<AttemptFailure>> {
+    let mut future = Box::pin(drive_attempt_with_bounded_io_async(
+        reader,
+        ledger,
+        preflight,
+        load,
+        apply_attempt_output,
+        run,
+        None,
+    ));
+    verter_execution::blocking::block_on_when_pending(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
+}
+
+async fn drive_attempt_with_bounded_io_async<T>(
     reader: &dyn crate::traits::WorkspaceRead,
     ledger: &mut InputResolutionLedger,
     mut preflight: impl FnMut(
@@ -954,6 +987,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
     ) -> Result<LoadedResolutionInputBatch, AttemptFailure>,
     mut apply_attempt_output: impl FnMut(&ResolutionInputs, &AttemptOutput) -> bool,
     mut run: impl FnMut(&ResolverAttemptView, ResolutionBasis) -> KernelAttempt<T>,
+    progress: Option<&crate::resolution_handoff::Progress>,
 ) -> Result<T, Box<AttemptFailure>> {
     let mut active_basis = None;
     let mut inputs = ResolutionInputs::default();
@@ -1117,6 +1151,11 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                 ledger.unique_keys.extend(new_keys);
                 ledger.bytes = prospective_key_bytes.expect("checked above");
 
+                if let Some(progress) = progress {
+                    progress
+                        .at(crate::resolution_handoff::ResolutionPhase::Preflight)
+                        .await;
+                }
                 let reservation = match preflight(&delta, basis) {
                     Ok(reservation) => reservation,
                     Err(AttemptFailure::TransientInputLoadFailure { .. }) => {
@@ -1169,6 +1208,11 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                 }
                 ledger.bytes = prospective_bytes.expect("checked above");
 
+                if let Some(progress) = progress {
+                    progress
+                        .at(crate::resolution_handoff::ResolutionPhase::Load)
+                        .await;
+                }
                 let loaded = match load(&reservation) {
                     Ok(loaded) => loaded,
                     Err(AttemptFailure::TransientInputLoadFailure { .. }) => {
@@ -1400,16 +1444,49 @@ pub(crate) fn resolve_tracked_in_project(
     request: &ResolveRequest,
     project: Option<&verter_session_query::resolution::ProjectOwnership>,
 ) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
+    let mut future = Box::pin(resolve_tracked_in_project_async(
+        resolver,
+        _capability,
+        reader,
+        ledger,
+        request,
+        project,
+        None,
+    ));
+    verter_execution::blocking::block_on_when_pending(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
+}
+
+pub(crate) async fn resolve_tracked_in_project_async(
+    resolver: &ModuleResolverCore,
+    _capability: &crate::engine::TrackedResolutionCapability,
+    reader: &crate::resolution_currency::TransactionReader<'_>,
+    ledger: &mut InputResolutionLedger,
+    request: &ResolveRequest,
+    project: Option<&verter_session_query::resolution::ProjectOwnership>,
+    progress: Option<&crate::resolution_handoff::Progress>,
+) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
     let frame = match project {
         Some(owner) => resolver.resolve_from_project_frame(owner, request),
         None => resolver.resolve_frame(request),
     };
-    let result = drive_attempt(
+    let result = drive_attempt_with_bounded_io_async(
         reader,
         ledger,
+        |keys, basis| reader.preflight_resolution_inputs_bounded(keys, basis),
+        |reservation| reader.load_preflighted_resolution_inputs(reservation),
         |inputs, output| apply_attempt_output(reader, inputs, output),
-        |view, basis| frame.attempt(view, basis),
-    );
+        move |view, basis| frame.attempt(view, basis),
+        progress,
+    )
+    .await;
+    if result.is_err() {
+        ledger.release_applied_outputs();
+    }
     match result {
         Err(failure)
             if failure.is_input_resolution_limit()
@@ -1425,6 +1502,7 @@ pub(crate) fn resolve_tracked_in_project(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_for_project_tracked(
     resolver: &ModuleResolverCore,
     _capability: &crate::engine::TrackedResolutionCapability,
@@ -1434,13 +1512,59 @@ pub(crate) fn resolve_for_project_tracked(
     specifier: &str,
     context: ResolutionContext,
 ) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
-    let frame = resolver.resolve_for_project_frame(owner, specifier, context);
-    let result = drive_attempt(
+    let mut future = Box::pin(resolve_for_project_tracked_async(
+        resolver,
+        _capability,
         reader,
         ledger,
+        ProjectRequest {
+            owner,
+            specifier,
+            context,
+        },
+        None,
+    ));
+    verter_execution::blocking::block_on_when_pending(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
+}
+
+pub(crate) struct ProjectRequest<'a> {
+    pub(crate) owner: &'a verter_session_query::resolution::ProjectOwnership,
+    pub(crate) specifier: &'a str,
+    pub(crate) context: ResolutionContext,
+}
+
+pub(crate) async fn resolve_for_project_tracked_async(
+    resolver: &ModuleResolverCore,
+    _capability: &crate::engine::TrackedResolutionCapability,
+    reader: &crate::resolution_currency::TransactionReader<'_>,
+    ledger: &mut InputResolutionLedger,
+    request: ProjectRequest<'_>,
+    progress: Option<&crate::resolution_handoff::Progress>,
+) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
+    let ProjectRequest {
+        owner,
+        specifier,
+        context,
+    } = request;
+    let frame = resolver.resolve_for_project_frame(owner, specifier, context);
+    let result = drive_attempt_with_bounded_io_async(
+        reader,
+        ledger,
+        |keys, basis| reader.preflight_resolution_inputs_bounded(keys, basis),
+        |reservation| reader.load_preflighted_resolution_inputs(reservation),
         |inputs, output| apply_attempt_output(reader, inputs, output),
-        |view, basis| frame.attempt(view, basis),
-    );
+        move |view, basis| frame.attempt(view, basis),
+        progress,
+    )
+    .await;
+    if result.is_err() {
+        ledger.release_applied_outputs();
+    }
     match result {
         Err(failure)
             if failure.is_input_resolution_limit()
@@ -1488,7 +1612,7 @@ impl ModuleResolverCoreTestExt for ModuleResolverCore {
             |keys, basis| preflight_workspace_inputs_for_test(reader, keys, basis),
             |reservation| load_workspace_inputs_for_test(reader, reservation),
             |_, _| true,
-            |view, basis| frame.attempt(view, basis),
+            move |view, basis| frame.attempt(view, basis),
         )
         .unwrap_or_else(|failure| {
             if failure.is_input_resolution_limit() {
@@ -1514,7 +1638,7 @@ impl ModuleResolverCoreTestExt for ModuleResolverCore {
             |keys, basis| preflight_workspace_inputs_for_test(reader, keys, basis),
             |reservation| load_workspace_inputs_for_test(reader, reservation),
             |_, _| true,
-            |view, basis| frame.attempt(view, basis),
+            move |view, basis| frame.attempt(view, basis),
         )
         .unwrap_or_else(|failure| {
             if failure.is_input_resolution_limit() {
