@@ -475,6 +475,7 @@ describe("ProcessTreeSampler against REAL processes", () => {
       // Exactly the production wiring: the server advertises ONE provider pid.
       sampler.setRoots({ serverPid: parentPid, relayPid: null, providerPid: childPid });
       sampler.start();
+      // RSS reads have no completion signal; refreshTopology only awaits discovery.
       await new Promise((resolve) => setTimeout(resolve, 4_000));
       await sampler.refreshTopology();
       sampler.stop();

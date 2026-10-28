@@ -333,6 +333,21 @@ pub fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
     })
 }
 
+/// Whether the innermost active tracer already holds `fact` — its own
+/// observation or an absorbed canonical run.
+///
+/// Every fact reaches the cells on the stack through one fan-out (down to
+/// the first delivering scope), so a fact the innermost scope holds
+/// arrived through a fan-out that reached every other active cell too: a
+/// producer that re-derives it can skip recording it again without
+/// leaving any enclosing scope's sealed signature without it.
+#[inline]
+pub(crate) fn tracer_holds_fact(
+    fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+) -> bool {
+    current_tracer().is_some_and(|tracer| tracer.holds(fact))
+}
+
 /// Fan an observed fact into every active tracer that must observe it (see
 /// the module docs: down to the first delivering scope).
 ///

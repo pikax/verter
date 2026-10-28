@@ -87,7 +87,7 @@ mod submission;
 pub use dag_lock::SchedulerProgressSubscription;
 pub use scoped_handoff::{ScopedCacheNodeHandoff, ScopedCacheNodeProducer, ScopedCacheNodeStep};
 use submission::PendingSubmission;
-pub use submission::SchedulerSubmission;
+pub use submission::{OwnedSchedulerRequest, SchedulerSubmission};
 
 #[cfg(test)]
 #[path = "scheduler/submission_tests.rs"]
@@ -631,7 +631,10 @@ impl Scheduler {
     ) -> Arc<Self> {
         let inbox = SubmissionInbox::new();
         let dag = new_dag_mutex(
-            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            SchedulerDag::with_budget_and_registry(
+                config.resolved_dag_budget(),
+                task_registry.clone(),
+            ),
             inbox.sender.clone(),
         );
         let scheduler = Arc::new(Self {
@@ -749,7 +752,10 @@ impl Scheduler {
     ) -> Arc<Self> {
         let inbox = SubmissionInbox::new();
         let dag = new_dag_mutex(
-            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            SchedulerDag::with_budget_and_registry(
+                config.resolved_dag_budget(),
+                task_registry.clone(),
+            ),
             inbox.sender.clone(),
         );
         Arc::new(Self {
@@ -996,7 +1002,10 @@ impl Scheduler {
                 let candidate = match self.scoped_cache_flights.entry(identity.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
                     dashmap::mapref::entry::Entry::Vacant(entry) => {
-                        let flight = Arc::new(ScopedCacheFlight::new(Arc::clone(&self.dag)));
+                        let flight = Arc::new(ScopedCacheFlight::new(
+                            Arc::clone(&self.dag),
+                            self.task_registry.register_task(),
+                        ));
                         entry.insert(Arc::clone(&flight));
                         flight
                     }
@@ -1057,6 +1066,23 @@ impl Scheduler {
     ) -> SchedulerSubmission<CompletionSubscription<RequestResult>> {
         let (submission, handle) = self.prepare_request_submission(request);
         SchedulerSubmission::new(self, Some(submission), handle.subscribe())
+    }
+
+    /// Begin a cancellable request owned by the actual waiting root task.
+    /// Admission and stage completion yield without driving or parking.
+    pub fn begin_owned_request(
+        self: &Arc<Self>,
+        request: Request,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: CancellationToken,
+    ) -> OwnedSchedulerRequest {
+        OwnedSchedulerRequest::new(self, request, waiter, cancellation)
+    }
+
+    /// Enter the host's execution authority at an external synchronous boundary.
+    /// Polling dependencies receive only the resulting task, never this driver.
+    pub fn enter_execution_scope(&self) -> verter_execution::tasks::ExecutionScope {
+        verter_execution::tasks::ExecutionScope::enter(&self.task_registry)
     }
 
     fn prepare_request_submission(
@@ -2242,6 +2268,43 @@ impl Scheduler {
         self.dag.lock().pending_len()
     }
 
+    /// Test-only: wait until the scheduler priority queue holds at least `depth` jobs while the
+    /// driver is parked at the dispatch pause, re-checking after each inbox re-drain the parked
+    /// driver completes. Returns whether the depth was reached before `budget`; the budget is a
+    /// hang guard only.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    #[doc(hidden)]
+    pub fn test_wait_until_job_queue_depth(
+        &self,
+        depth: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            // Note the re-drain count BEFORE reading the depth, so a re-drain landing in between
+            // is waited past rather than missed.
+            let seen = self.dispatch_pause.state.lock().redrains;
+            if self.test_job_queue_depth() >= depth {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            let mut state = self.dispatch_pause.state.lock();
+            while state.redrains == seen {
+                if self
+                    .dispatch_pause
+                    .cv
+                    .wait_until(&mut state, deadline)
+                    .timed_out()
+                {
+                    drop(state);
+                    return self.test_job_queue_depth() >= depth;
+                }
+            }
+        }
+    }
+
     /// Test-only: how many times [`Self::reset`] has posted its inbox
     /// teardown wake. Observing this instead of the inbox itself is what
     /// lets a teardown test release a rendezvous exactly once the wake is
@@ -2260,6 +2323,10 @@ impl Scheduler {
         let mut state = self.dispatch_pause.state.lock();
         state.released = true;
         self.dispatch_pause.cv.notify_all();
+        drop(state);
+        // The parked driver blocks on the inbox; a wake there lets it see the release. A full
+        // inbox already holds a submission that wakes it.
+        let _ = self.inbox.sender.try_send(Submission::Wake);
     }
 
     /// Test-only: install the mid-batch admission seam hook. Fired once
@@ -2347,6 +2414,30 @@ impl Scheduler {
         #[cfg(target_arch = "wasm32")]
         {
             false
+        }
+    }
+
+    /// Cooperate from an external dependency driver using the existing worker
+    /// routing and active-path policy. External callers leave a live native
+    /// driver in charge; scheduler workers may execute their own class inline.
+    /// Poll-only dependencies never expose this execution capability.
+    pub fn pump_owned_dependency(self: &Arc<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let caller = crate::caller_kind::CallerKind::current();
+            if self.has_driver_thread()
+                && matches!(
+                    caller,
+                    crate::caller_kind::CallerKind::CpuWorker
+                        | crate::caller_kind::CallerKind::IoWorker
+                )
+            {
+                self.pump_ready_with_path(
+                    PumpReason::WaitOrDrive,
+                    caller,
+                    &crate::caller_kind::snapshot_active_path(),
+                );
+            }
         }
     }
 

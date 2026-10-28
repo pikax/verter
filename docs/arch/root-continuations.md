@@ -18,7 +18,7 @@ producer, returns before an incomplete nested dependency settles.
 | Delivered and exercised | Remaining conversion or proof |
 | --- | --- |
 | Store-view and per-attempt snapshot capture, owner indexing and overlay indexing suspend through their existing handoffs | Metadata computation, extraction/fallthrough and output materialization still call synchronous dependency paths |
-| Resolver flights retain task identity; converted followers cancel or withdraw independently | Cache-slot, scheduler-completion and carrier stable-parse waits do not yet provide uniform cancellation and shared-registry wait edges |
+| Cache admission, scheduler completion, resolver flights, carrier publication/stable parse, store-view capture, lowering and workspace resolution offer task-owned handoffs with independent cancellation | Higher callers must consume these owned APIs throughout their traversal instead of driving compatibility entries inside a poll |
 | Root state and converted scopes move between polling threads | Nested semantic dispatch still drives tasks or waits on subscriptions synchronously; complete-root no-replay is not proved |
 | Compile roots hand out one macro producer and retain followers | That producer runs a synchronous traversal; compile-blocker hydration also remains synchronous |
 | An external consumer fixture and a queued-wake driver exercise multiple roots | The driver does not yet prove progress across every nested family with admission closed and no retained synchronous stack |
@@ -63,13 +63,12 @@ follows the same rules:
   borrow of the producer. They are `Send` whenever their result is, so a
   suspended subscriber may resume on another thread. One poller drives a
   subscriber at a time (`poll` takes `&mut self`).
-- **Cancellation wakes where integrated.** Semantic tasks, scoped cache-node
-  handoffs and resolver followers register the cancellation that stops them.
-  Cancellation wakes those pending polls without a timer. Snapshot capture
-  proves withdrawal on drop; a readiness subscription alone does not provide
-  cancellation:
-  `SlotJoin` and `CompletionSubscription` still need cancellation/task-wait
-  integration, as listed below.
+- **Owned cancellation and task waits.** Owned dependency adapters register
+  the stop token and the waiter-to-producer edge in the shared registry.
+  Cancellation wakes and detaches that subscriber without stopping siblings.
+  Raw readiness subscriptions, including `SlotJoin` and
+  `CompletionSubscription`, acquire this ownership through their owned
+  adapters; readiness alone does not provide cancellation or a task edge.
 
 ## Host roots
 
@@ -98,9 +97,10 @@ re-exported from the crate root with `RootWork`.
   request clears the poller's request slots for the poll instead. The task
   owns the converted semantic, scoped-cache and resolver producers and is
   the waiter of their task-registered flights. Their same-path recursion and
-  wait cycles are decided by task across threads; other dependency families
-  still need that integration. Dropping a pending root releases its suspended
-  state under the same ambient state.
+  wait cycles are decided by task across threads. The other dependency
+  families expose the same ownership through their owned adapters; higher
+  callers still need to carry those adapters through traversal. Dropping a
+  pending root releases its suspended state under the same ambient state.
 - **Result and errors.** `Ready` carries exactly what the synchronous entry
   returns, including its typed failures. Polling after `Ready` panics.
 - **Dependency work.** At a converted handoff, a root transfers the
@@ -201,28 +201,29 @@ a computation can suspend while it holds them:
   in the host's one `TaskRegistry` (below).
 - **Resolver request flights** (`SingleflightGroup`, used by stable
   requests, fallthrough requests, imported roots and IndexedReady
-  materialization) take the host registry at construction. A lane's leader
-  is the task that claimed it (`FlightInner::Running { owner: TaskId }`).
-  The flight protocol is one pollable computation
-  (`run_retaining_pollable`), whose leader may suspend inside its compute;
-  `run_retaining` drives it, as a task installed for its extent. A claim by
-  the leading task — same-path re-entry — computes inline as a nested
-  leader; any other task registers its `follower -> leader` edge first and
-  follows, and a wait that would close a cycle computes inline instead.
-  Dropping a suspended leader aborts the lane so followers re-elect;
-  dropping a follower withdraws its registration and edge. Evidence:
+  materialization) take the host registry at construction. The shared core
+  retains the producer's execution task. `run_retaining_pollable` lets its
+  leader suspend inside the compute under the polling root's task;
+  `run_retaining` externally drives a distinct synchronous producer task.
+  Compatibility reentry or a wait cycle computes inline as a nested leader;
+  owned callers receive a typed cycle refusal. Other tasks register their
+  `follower -> leader` edge before following. Dropping a suspended leader
+  aborts the lane: compatibility followers re-elect and owned followers
+  receive the typed abandonment. Dropping a follower withdraws its
+  registration and edge. Evidence:
   `resolver_core::singleflight_task_tests` (two tasks on one thread share
   one leader; re-entry and cycles compute inline; dropped leaders and
   followers release), each failed by an applied thread-style or edge-less
   mutation.
-- **Workspace resolution flights** decide "this thread owes a flight, so it
-  resolves directly" from the thread's lease count. A `FlightLease` is not
-  `Send`, so a suspending computation cannot hold one across a suspension
-  and the count is exactly the leases the polling computation owes; a
-  compile-time assertion in `resolution_flights` fails once a lease is
-  `Send`.
-- **Store-view build claims** are taken, built and released within one poll;
-  a reader never suspends while it holds a claim.
+- **Workspace resolution flights** retain a producer task in an owned
+  `FlightLease`. Each follower has its own subscription and task wait edge;
+  same-path and mixed-family cycles return `Cycle`. Producer leases and
+  resolution work can move across threads without relying on a thread-local
+  lease count. See [Workspace resolution](#workspace-resolution).
+- **Store-view build claims** remain owned by their independent producer
+  through external snapshot or reclamation work. Subscribers may suspend
+  while that claim is held; reset retains a physically running claim until
+  release. See [Base store-view capture](#base-store-view-capture).
 
 ## Scopes a suspended compute carries
 
@@ -295,6 +296,12 @@ live owner detaches. A requester cancelling while a sibling keeps the job
 live wakes nothing. The waker lock is never taken while an aggregate's
 owner list is held.
 
+Existing owners attach atomically through `register_owners`, so cancellation
+never observes only the cancelled prefix of a live batch. Under an enclosing
+owner lock, `register_owner_deferred` and `register_owners_deferred` return
+their notifications for delivery after that lock releases. Scheduler admission
+uses the deferred batch form and its shared wake delivery rail.
+
 Users: the semantic runtime registers on the token its stop selects
 (`Program::wake_on_stop`, called whenever a poll returns `Pending`; for
 `QueryProgram` the job token when it has owners, else the request's, else
@@ -305,6 +312,13 @@ carrier publication and stable-parse lanes and the workspace flight wait
 register on their cancellation and park untimed.
 
 ## The external-boundary driver
+
+Compatibility entries that can answer on their first poll use
+`block_on_when_pending`. They announce their wait family only after `Pending`.
+The legacy boolean-cancellation and worker-pump boundaries delegate a pending
+poll to `block_on` with their existing park interval; immediately ready answers
+stay outside that timed drive. Owned dependency polls use their readiness and
+stop subscriptions.
 
 `verter_execution::blocking::block_on(family, slice, poll)` drives a
 pollable computation to completion by blocking. It polls with a waker that
@@ -397,6 +411,40 @@ refusal rests on.
 
 ## Delivered boundaries
 
+### Task-owned cancellation
+
+`verter_execution::dependency::OwnedDependency<H>` binds a poll-only
+`DependencyPoll` to its actual producer and waiter tasks. Both must belong
+to the same registry. Pending registers one wait edge; a cycle, an already
+waiting task or an authority mismatch returns `DependencyStop::Cycle`.
+An immediately ready answer needs no edge. `DependencyStop::Cancelled`
+contains no partial answer. Terminal answers and drop withdraw the readiness
+and cancellation registrations, edge and task pins. No method exposes the
+underlying handoff or its synchronous driver.
+
+`CancellationToken::subscribe` observes explicit stop without timer-based
+re-polling. Registration and stop publication share the token's wake lock.
+Aggregate tokens forward the final owner's cancellation or withdrawal;
+surviving owners keep the shared computation live. Liveness probes remain
+callback-free. Owners that publish cancellation under an outer lock use
+`cancel_deferred`, `register_owner_deferred` or
+`CancellationOwner::detach_deferred` and deliver the
+returned wakes after unlocking. The scheduler uses its existing DAG/lifecycle
+delivery rail for these wakes as well as completion wakes.
+
+The host constructs one registry and injects it into its scheduler and
+semantic store. A scoped cache flight owns a producer task in that registry;
+its producer installs that task while executing, including when moved to
+another thread. A scoped subscriber captures the current task or owns a new
+task for an external caller. It retains its wait edge while the transferred
+producer runs under its own task, so a demand back into the waiting parent
+is refused. Terminalization withdraws that edge. Cancellation
+wakes the subscriber directly, and `Reentrant` also represents refused
+cross-family cycles.
+
+Terminal scoped handoffs also release their scheduler, identity and request
+context; keeping a completed handoff alive does not retain its scheduler tree.
+
 ### Scheduler completions
 
 | Boundary | Owner |
@@ -441,6 +489,109 @@ refusal rests on.
   `scheduler::reset_tests` exercises these paths using real completion wakes
   and retains cleanup guards that release dependencies and join test threads.
 - **Backpressure:** none at completion; admission has its own handoff below.
+
+`CompletionSubscription::owned(waiter, producer, cancellation)` returns an
+`OwnedDependency` with the same terminal states. The supplied producer must
+be the execution that actually produces the completion. It stops only that
+subscriber, preserving the handle's first-writer-wins result and siblings.
+
+`CompletionSubscription::owned_producer(waiter, cancellation)` follows the
+scheduler's actual producer instead of accepting one from the caller. Gated
+stages follow their first admitted prerequisite recursively, in dependency-key
+order. Analysis dependencies not yet admitted follow their Source producer.
+Each prerequisite release, new stage admission or scoped producer replacement
+updates affected ancestor completions through the reverse dependency indexes
+and wakes their subscriptions after the DAG lock releases. Re-polling moves
+the root's single wait edge to that producer; completion and cancellation
+release its readiness registration, stop registration and task pins.
+
+`Scheduler::begin_owned_request` combines pollable inbox admission with this
+completion ownership. Cancellation before admission drops the unsubmitted
+request; cancellation after admission detaches only the waiter. Shared stages
+and sibling requests continue.
+
+### Host load and external integration
+
+`VerterHost::begin_load` returns `HostLoadHandoff`. Its poll advances owned
+scheduler admission/completion and transfers `HostLoadCommit` once Analysis is
+ready. It performs no host integration, stage execution or blocking submission.
+`HostLoadCommit::apply` performs integration externally and refuses another
+host, cancellation, changed source incarnation/generation or a changed canonical
+eviction revision or project authority. This fence also applies to warm commits
+and prevents an old commit reversing a later eviction. Unrelated-file evictions
+and additive load-generation changes remain compatible. The same stop, source,
+project and revision fence is rechecked before any integration writes, under
+the existing host admission fence shared with source replacement and eviction.
+The fence permits same-thread nested contributor loading during ingress while
+excluding concurrent writers. Ambient ingestion takes admission before its
+snapshot cursor, matching upsert's lock order even when ingestion loads a file.
+Workspace edges and aliases land before the dependency row marks integration
+complete. A refused cold commit leaves no integrated marker; a superseded commit
+cannot overwrite replacement dependencies. The caller assignments above this
+handoff are DISPATCH for shared resolver loading, META for metadata traversal
+and COMPILE for compilation.
+
+The synchronous `ensure_loaded` entry drives this same handoff. Its external
+driver rechecks cancellation after yielding, parks external native callers on
+the driver, and lets scheduler workers use the existing cooperative pump and
+bounded park cadence. Inline drivers retain typed `NoProgress` when no work
+can advance. These driving operations are absent from the handoff capability.
+
+### Carrier publication and stable parse
+
+`CarrierPublicationStore::begin_publication` takes owned accepted source and
+request context plus a waiter task, and returns `OwnedPublication`. Its poll
+transfers `PublicationStep::Produce(PublicationProducer)` or returns a terminal
+`Outcome`. The independent producer polls a retained continuation: it transfers
+`PublicationProducerStep::Work(PublicationWork)` for the initial retained-unit
+read/adoption, the nested stable producer, and envelope finishing, then returns
+`Complete`. Only external `Work::run` performs backend reads, validation of
+retained payloads, parsing, rehoming or retention. No poll drives another
+computation synchronously. `publish_or_get` externally drives these same states.
+
+`begin_stable_parse` returns `OwnedStableParse`. Its `Produce` step transfers
+one `StableParseProducer`; `run` performs the double-checked retained read or
+one parser attempt. `Parsed(StableParseValue)` owns the complete immutable
+product and a retirement interest. A publication producer waits on this child
+under its own P task, giving W → P → S in the host's single task registry.
+Every store constructor takes its composition root's `TaskRegistry`. Host
+construction supplies the same registry as scheduling and semantic evaluation;
+standalone callers supply their execution authority explicitly. P/S always
+belong to that registry, including synchronous production and reentrant backend
+calls. Foreign pending waiters receive `Cycle`; an immediately ready answer
+needs no edge. Registry binding cannot be replaced on an existing cloned store.
+The synchronous wrapper inherits an ambient task only from that store's
+registry; an unrelated host scope does not prevent independent publication.
+
+Request cancellation stops only its subscriber, including the initiating
+subscriber after producer transfer. P and S install independent task and stop
+scopes during external work, restore them before notifications, and may move
+between threads. Another subscriber can claim an unclaimed producer after its
+initiator detaches. Terminal/drop cleanup releases its own edge, stop and wake
+registrations and task pins. `ProducerDropped` is explicit abandonment;
+after existing subscribers drain, the exact failed lane retires so unchanged
+source can retry. It cannot remove a successor lane or invalidate another
+subscriber's terminal.
+`WinnerPanicked` remains distinct, and stable rejection carries `SyntaxReject`.
+Source or grammar invalidation fences every snapshot-bound envelope, including
+adopted and shared products; a verified stable unit remains reusable despite a
+losing generation. Retention denial still returns the complete envelope.
+
+Successful publication delivery stays strong while attached consumers remain,
+then returns to the existing weak terminal retention. Attaching to a completed
+lane pins its live envelope atomically with subscription registration, before
+the first poll; if the envelope already expired, attachment restarts production.
+Stable lanes stay listed
+through each registered consumer's envelope finishing. The retirement interest
+moves into the actual Finish Work and survives dropping the P continuation;
+retirement rechecks consumer/producer state under table → lane locks and removes
+only the identical lane instance. Backend callbacks and wakes run after owner
+locks release. Adoption provenance, parser counters and snapshot rehoming use
+the existing helpers.
+
+Callers above these boundaries belong to DISPATCH for the scheduler Source
+stage and shared base/overlay indexing, META for metadata traversal, and COMPILE
+for compile hydration. Their conversion is separate from these dependency APIs.
 
 ### Scheduler request admission
 
@@ -513,13 +664,16 @@ producer on the existing CPU pool.
   even if the successor inbox is full. The handoff and producer retain the
   scheduler independently and can move between threads with exclusive
   polling. Dropping a handoff withdraws its registrations and detaches only
-  its owner; a surviving sibling keeps shared work live.
+  its owner; a surviving sibling keeps shared work live. Attaching owners
+  collected before admission holds a temporary aggregate registration until
+  every request is attached, so an already-cancelled request cannot retire
+  the flight ahead of an existing live sibling.
 - **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
   same-path re-entry retain the existing typed outcomes. Cancellation is
-  checked at each poll, and a pending handoff is registered on its request's
-  cancellation, so cancelling the request wakes it and the next poll answers
-  `Cancelled` without disturbing the producer or sibling followers. Polling
-  after a terminal result is a contract violation.
+  checked and registered at each poll. Cancelling the request wakes its
+  subscriber, whose next poll answers `Cancelled` without disturbing the
+  producer or sibling followers. Shared-registry wait edges refuse cycles
+  before suspension. Polling after a terminal result is a contract violation.
 - **Wake ordering:** dispatch and settlement take registrations under the
   flight lock. Delivery uses the scheduler's deferral rail, after flight,
   scoped-incarnation and DAG locks release, including reset's outer hold.
@@ -545,13 +699,15 @@ producer on the existing CPU pool.
 ### Store-view reads
 
 `StoreViewManager::base_view_pollable` (`crates/verter_session/src/resolver_store.rs`)
-is the store-view read: a warm hit answers at once; a reader that finds no
-in-flight build claims one, builds and publishes within the same poll; a
-reader that finds another thread's build in flight returns `Pending` with
-its waker registered for the claim's release (`BuildRelease`, a future), and
-holds no manager lock while it waits. `base_view` drives the same
-computation with `block_on_when_pending(StoreViewBuild, ..)`, so a reader
-announces the wait only when it would park. `HostStoreView::from_host_read_pollable`
+is a borrowed compatibility adapter over the same claim core as
+`VerterHost::begin_store_view`. A warm hit answers at once; a reader behind
+an active claim returns `Pending` with its own readiness registration and
+task edge, holding no manager lock. When it claims cold work, this adapter
+runs the producer before continuing. Callers that must also transfer that
+work outside polling use the owned entry described under
+[Base store-view capture](#base-store-view-capture).
+`base_view` drives the core with `block_on_when_pending(StoreViewBuild, ..)`,
+announcing the wait only when it would park. `HostStoreView::from_host_read_pollable`
 and `VerterHost::capture_batch_fixed_view_pollable` are its pollable callers;
 the component-metadata root captures its fixed view through them, and the
 compile root's macro bundle reads its cold seed through them.
@@ -568,8 +724,10 @@ warm reuse and stable promotion. The synchronous currentness accessor
 drives this same computation outside a poll.
 
 - **Lifetime and cancellation.** Dropping a pending read withdraws its
-  registration and its test-only parked-reader count. A claim is never held
-  across a suspension, so the self-await refusal keeps its thread identity.
+  registration, task edge and test-only parked-reader count. The borrowed
+  adapter keeps its execution-scoped reentry refusal while running producer
+  work. The owned entry also registers explicit cancellation and retains its
+  independent producer across subscriber suspension.
 - **Evidence:** `root_continuations_component_meta_root_suspends_behind_a_held_store_view_build`
   holds a real build at the test gate on another thread; the root's first
   poll answers `Pending` under a forbidding probe, the release wakes it, and
@@ -621,6 +779,106 @@ and answers it with the result; each poll also carries a refusal into the
 recording that encloses that poll, as `refusals_within` does when it
 returns. The compile root's entry records through it.
 
+### Resolver request flights
+
+`SingleflightGroup::begin_owned_retaining` returns `OwnedResolverFlight`.
+Its only advancing operation, `poll`, returns a complete
+`SingleflightRunResult` or transfers the sole `OwnedResolverProducer`.
+Polling does not compute or run the retention policy. `run_retaining` and
+`run` externally drive the same core with borrowed callbacks.
+Synchronous and transferred producers own distinct tasks. A pollable
+computation retains its polling root's task as the lane owner across suspension.
+
+- **Ownership:** host composition binds every resolver flight family to the
+  host's existing registry. Production compatibility entries install that
+  authority. Standalone synchronous default groups reuse ambient task authority
+  when available, otherwise lazily establish their group's registry so
+  cross-thread wait cycles retain the inline computation escape.
+  A transferred producer installs its actual distinct task and
+  installs a live aggregate cancellation owner while running. A cancelled waiter
+  whose thread executes the producer cannot stop shared work through either
+  its job or request token. Other request accounting stays installed.
+  Compatibility drivers retain ambient cancellation. The waiting parent keeps its edge until
+  terminalization or drop.
+- **Cancellation and errors:** cancellation stops one subscriber without
+  stopping its producer or siblings. `Cycle`, `ProducerUnowned`,
+  `ProducerDropped`, `ProducerPanicked`, `Reset` and the original producer
+  error are typed terminal refusals. The owned producer contains panic;
+  compatibility producers preserve unwinding and their followers re-elect. Same-path
+  owned recursion refuses a cycle; synchronous recursion retains its nested
+  computation escape outside poll.
+- **Publication:** `participate_owned` pins before a warm-cache probe and
+  can survive suspension without borrowing the group. Participation pins retain a stable rendezvous for its
+  concurrent burst. Non-retained results publish to existing followers and
+  leave the table in one locked operation. Pointer-checked retirement cannot
+  remove a successor flight. Reset wakes a held producer's subscribers and
+  prevents its later execution or publication.
+- **Lifetime and backpressure:** each subscriber owns one readiness and stop
+  registration and exactly its own task edge. Terminalization withdraws them
+  before dropping joined values, retained callbacks, keys, group handles and
+  task pins. Producer transfer has no queue or pool admission. Dropping an unrun producer wakes
+  followers with a typed failure; dropping a follower leaves siblings live.
+
+The metadata request and fallthrough flight callers belong to metadata
+traversal conversion. Module exports, overlay materialization, prepared
+and indexed declarations, imported sources, route names and barrel surfaces
+belong to dispatch conversion; compilation reaches them through dispatch.
+Their existing synchronous calls still need resumable traversal state.
+
+| Higher caller | Conversion owner |
+| --- | --- |
+| `resolver_core/component_meta_request.rs::run_component_meta_request` → `run_stable_request` | META |
+| `resolver_core/fallthrough_request.rs` → `run_stable_request` | META |
+| `host_manage/module_exports.rs` → `module_export_singleflight` | DISPATCH |
+| `host_manage/overlay_materialize.rs` → `indexed_singleflight` | DISPATCH |
+| `host_manage/prepared_decl.rs` → prepared-bundle and indexed flights | DISPATCH |
+| `host_manage/source_request.rs` → imported-root and route-name flights | DISPATCH |
+| `resolver_core/route_db.rs` → barrel-surface flight | DISPATCH |
+| Compile traversal and hydration above these shared dispatch calls | COMPILE |
+
+### Base store-view capture
+
+`VerterHost::begin_store_view(waiter, cancellation)` returns the opaque,
+owned `StoreViewHandoff`. `poll` returns `StoreViewStep::Produce` with an
+independent `Send` producer or `Value` with the capture's intrinsic currentness.
+It never builds a snapshot or sweeps retired artifacts. A cold producer's
+external `run` builds and publishes through the existing manager cache and
+its exact token/reset fence. A completed producer reply revalidates the full
+live token and cached snapshot identity under the manager lock when its owner
+resumes; publication alone cannot mint currentness after suspension. A warm
+hit returns immediately unless released roots left reclamation pending; then the same claim transfers maintenance
+with the exact cached read, preserving a return-only read's reason.
+
+The manager uses the host's shared registry and one physical claim. Each
+subscription retains its own wait edge and stop registration. Typed errors
+are `Cancelled`, `Cycle`, `ProducerUnowned`, `ProducerDropped`,
+`ProducerPanicked` and `Reset`; none carries a partial view. Dropping or
+cancelling a subscriber leaves its transferred producer and siblings live.
+An abandoned producer releases only its exact claim, and owned execution
+contains panic after settling subscribers. Readiness and reset take wakers
+under the manager lock and invoke them after unlocking.
+
+Reset revokes unstarted work immediately. Running work keeps the physical
+claim until it exits, while pre-reset subscribers become `Reset` at once.
+New subscribers wait for that physical release, then recapture under the new
+generation; they do not inherit the old reset result. Successful followers
+recapture and validate the cache under the original bounded main/final/fallback
+rounds. The synchronous `StoreViewManager::base_view` drives this same core,
+retaining its execution-scoped reentry refusal and external reclamation.
+Completed handoffs release their host, task and cancellation interests; the
+opaque result retains only its captured view and exposes no blocking driver.
+When a subscriber releases the final host, it pins the lowering service through
+host teardown, then closes its queues without joining. Already admitted jobs
+drain on their existing workers, so cancellation never waits for those jobs.
+The owned poll also pins that service through its transient cached views and
+result mapping, covering warm completion and failed production cleanup.
+Ordinary external service owners retain their joining release semantics.
+
+Caller conversion above this boundary remains with DISPATCH for shared
+`capture_batch_fixed_view`/resolver contexts, META for component metadata
+traversal, and COMPILE for compile traversal. Overlay application and batch
+membership ingestion remain caller operations, outside this base capture.
+
 ### Declaration-lowering owner-shard handoffs
 
 Retained parses live on dedicated worker shards and never leave them. A job
@@ -634,6 +892,36 @@ carries owned inputs to the shard and brings back owned results.
 | `DeclLoweringService::begin_run_leased_batch -> LeasedBatchHandoff<R>` | `run_leased_batch` | `Vec<Option<R>>` in input order |
 
 All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
+
+Each handoff additionally offers `owned(waiter, cancellation)` before its
+first poll. This returns `OwnedLoweringHandoff`, whose poll yields
+`LoweringStep::Work` or `Value`, with typed `LoweringFailure` (`WorkerStopped`,
+`ProducerDropped`, `Panicked` or `Reentrant`) inside its value. The existing worker job
+installs its producer task from the waiter's registry; no parser arena or
+borrowed AST crosses a shard boundary. A batch's pure shard operations
+jointly produce one ordered answer under its batch task identity. Cancellation
+drops unsubmitted jobs or abandons admitted replies; an arriving lease is
+released on its owner shard. Existing synchronous entries retain their panic
+compatibility and drive the same queue/reply state.
+
+On native workers the owned step normally carries `Value`. WASM transfers a
+`Send` `LoweringWork` token and polls a retained reply; no parser work or pure
+callback runs inside poll. External `run` contains operation panic, and dropping
+the token settles `ProducerDropped`. The shared dependency remains pending
+across this transfer, retaining its wait edge, task and stop interest until the
+value or stop is observed. Cancelling the subscriber after transfer leaves that
+work independent. Raw handoffs expose `poll_step` for the same transfer, and
+synchronous entries run it outside the reply poll. An empty batch is ready
+without work or an arena borrow. The generic inline reply/work protocol has
+native behavioral controls as well as target compilation; its fields carry
+owned operations and answers, never an AST or parser arena.
+
+The executing worker opens its existing shard identity on that actual task.
+An owned demand targeting a shard its waiter already owns returns `Reentrant`
+before queue admission. Batches preflight every target before admitting any
+share. WASM checks its single arena identity before borrowing the thread-local
+shard. This is a defensive refusal; callbacks remain pure and may not reenter
+the service or host.
 
 - **Backpressure yields.** A poll first offers the job to its worker's
   bounded queue with a non-blocking send. If the queue is full, the poll
@@ -653,42 +941,189 @@ All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
   registration it holds and abandons its reply. If the answer has already
   arrived, it is dropped. If it arrives later, the worker drops it on its
   own thread. Either way, a lease acquired for an abandoned handoff is
-  released on the shard that pinned it, so no live lease and no retained
-  parse outlives its handoff. While a handoff is outstanding it holds the
-  service, and so its workers, alive. Polling after the answer is a
-  contract violation.
+  released on the shard that pinned it, leaving no abandoned lease or parse
+  retained after shard cleanup. While a handoff is outstanding it holds the
+  service, and so its workers, alive. After releasing unclaimed answers and
+  unsubmitted closures, a final handoff atomically extracts the service and
+  closes its queues without joining workers. Already-admitted jobs finish
+  independently and their workers release shard state on exit. Even cancelling
+  the final unsubmitted subscriber cannot enter worker drainage inside poll.
+  A final external service owner retains joining shutdown; a worker dropping
+  the final service handle joins only other workers. Polling after the answer
+  is a contract violation.
 - **Batches:** each poll advances every share still outstanding, so every
   shard's share is offered on the first poll and the shards lower in
   parallel. The batch answers once every share has answered, and the first
   job panic re-panics then.
-- **wasm32:** the shard is the calling thread's own, so a handoff answers at
-  submission and its first poll is `Ready`.
+- **wasm32:** the shard remains thread-local. Construction retains owned
+  inputs; an owned poll or raw `poll_step` transfers `LoweringWork` before
+  execution. External `run` installs its actual task and opens the arena
+  identity around the pure operation. Later polls observe only its reply.
+  Stop before transfer executes nothing; stop after transfer abandons only
+  the subscriber. Panic containment requires an unwinding target; the default
+  wasm panic-abort target is checked for compilation rather than recovery.
+
+### Cache admission and publication
+
+Both artifact and query-candidate admission use one owned protocol. Artifact
+callers enter `singleflight::owned_admit_with_post_publish` or
+`owned_admit_with_post_publish_by_flight_key`; query-candidate callers enter
+`lookup_publish::owned_admit_with_lookup_publish` in the type engine.
+
+- **Work transfer:** `OwnedAdmission::poll` answers a validated warm value,
+  subscribes to a flight, or transfers the sole `OwnedAdmissionProducer`.
+  Running that producer is the external owner's job. Polling neither computes
+  cold work nor submits to a queue. The producer installs its actual task from
+  the waiter's shared registry, and the parent edge remains live until the
+  answer is observed or abandoned.
+- **Result and failure:** `Value(Some(value))` is complete. `Value(None)` keeps
+  the adapter's failure policy. `Cancelled`, `Cycle`, `ProducerUnowned`,
+  `ProducerDropped` and `ProducerPanicked` are typed refusals without partial values. The artifact
+  follower surfaces failed production; a query follower forks after producer
+  panic or rejected admission. Return-only production is never shared across
+  views. A cacheable follower revalidates and bubbles facts in its own view.
+- **Lifetime:** each subscriber owns one replaceable readiness registration
+  and its stop interest. Dropping or cancelling it leaves the producer and
+  sibling subscriptions intact. Terminalization releases task pins, its table,
+  key and callbacks while a completed handle may remain alive. Dropping an
+  unrun producer fails and retires its exact flight and wakes the followers.
+- **Publication:** the original validation, retention fences, pointer-checked
+  retirement, displaced-entry cleanup and deferred eviction stay in the
+  owning adapter. Wakes occur after publication locks release. The same-key
+  and split-flight artifact entries preserve their different publish locking.
+- **Compatibility:** synchronous admission/get-or-insert entries externally
+  drive this same state machine with borrowed callbacks. Explicit owned APIs
+  require owned transferable views/tracers; they refuse a pending producer
+  whose shared task authority is unavailable with `ProducerUnowned`. A ready
+  answer needs no wait authority. No extra registry or pool is
+  allocated by standalone compatibility calls.
+
+The dispatch layer owns conversion of `cache_runtime::node::{lookup,
+query::lookup}` and their semantic memo consumers. Metadata and compilation
+callers reach those nodes through dispatch and retain responsibility for their
+own resumable traversal state.
+
+### Higher-caller conversion inventory
+
+These assignments cover traversal above the dependency owner. Conversion must
+retain the exact view, source and project validation and resume saved work.
+A synchronous compatibility call is not a suspension boundary.
+
+| Direct caller or caller group | Conversion owner |
+| --- | --- |
+| `host_executor.rs::source_snapshot`, `host_manage/overlay_materialize.rs::registered_overlay_structure` → carrier publication | DISPATCH |
+| `host_lifecycle.rs::resolve_import_outcome_in`, `host_executor.rs::extract_deps`, `program_order.rs` → workspace resolution | DISPATCH; COMPILE owns compile traversal above program ordering |
+| `host_manage/{prepared_decl,eval_program,eval_env,overlay_priority}.rs`, `host_resolve/frontier_engine.rs`, `resolver_core/request_bound.rs` → host loading | DISPATCH |
+| `resolver_core/component_meta_query_engine/{mod,registry_cache_producers,registry_decl}.rs`, `component_meta_host.rs`, `meta.rs` → host loading | META |
+| `host_compile_audit.rs`, `host_resolve/virtual_file_pipeline.rs` → host loading | COMPILE |
+| `host_construction.rs` → initial program-member host loading | DISPATCH |
+| `host_manage/{component_meta_entry,component_meta_entry_resolution}.rs`, `meta.rs`, `meta/output_api.rs` → fixed store-view capture | META |
+| `host_manage/analysis_io.rs` → fixed store-view capture | DISPATCH |
+| `host_resolve/virtual_file_pipeline.rs` → fixed store-view capture | COMPILE |
+| `host_manage/overlay_materialize.rs` → lease acquisition and leased lowering; `host_manage/prepared_decl.rs` → lease acquisition with lowering | DISPATCH |
+| `typeinfo/vue_macro_codegen.rs` → scoped cache-node execution | COMPILE |
+| `host_upsert.rs::UpsertBatchTxn::finish` and atomic batch submission reached by `compile_many` | COMPILE |
+
+Resolver request-flight callers are enumerated beside their owned interface
+above. Artifact and query-candidate cache consumers, semantic memo joins and
+semantic task driving belong to DISPATCH. META and COMPILE retain their
+traversal above those shared semantic operations. Host CPU batch coordination
+is the executor boundary; it is not another dependency service.
+
+### Workspace resolution
+
+`WorkspaceRead::begin_resolution(Arc<Self>, ResolutionRequest, waiter, stop)`
+returns `WorkspaceResolution`. Importer, specifier, context, optional published
+root, immutable overlay and explicit project are owned inputs. The separate
+`begin_project_resolution` accepts a project-only request without inventing an
+importer. Engine-backed memory and filesystem workspaces implement both;
+adapters without that ownership protocol return `ResolutionError::Unsupported`.
+
+The subscriber polls `ResolutionStep::{Produce,Value}`. The independent
+`ResolutionProducer` only transfers `ResolutionWork` or registers readiness;
+only external `ResolutionWork::run` advances the retained continuation. Work
+uses the caller's existing execution service, creates no pool or CPU authority,
+and installs its producer task for that slice. Parser state remains in the
+existing resolver owner; only owned resolution records cross this interface.
+
+Phases include stable-world capture, candidate validation, bounded input
+preflight and loading, filesystem discovery, freezing, replay and publication.
+Flight and publication-gate contention register wakes and shared-registry wait
+edges instead of parking the owner execution. Input loading transfers external
+work before performing IO. An incomplete input load, gate or flight can be held
+while other already-admitted work continues; resuming never admits a new root
+or discards the captured attempt. Discovery and replay share the same
+`InputResolutionLedger`, including attempts, bytes, churn, staged inputs and
+completed-output ownership. Directory evidence is owned by that continuation
+and installed only for external slices, so migration cannot lose it in worker
+TLS. Frozen-reader completeness and independent live validation still govern
+filesystem admission.
+
+The host injects its TaskRegistry through `WorkspaceServices::attach`, including
+workspace replacement. If a workspace is shared by hosts, attach joins their
+existing cycle graphs through `TaskRegistry::share_authority_with`; it never
+revokes earlier tasks or creates another task service. Generation-qualified task
+ids retain their registration namespace, live wait edges survive composition,
+and installed scopes follow the joined authority. Union by rank and ordered
+root locks make concurrent joins safe. The last registration-owner release
+removes its pool, so repeated workspace swaps retain no pool history.
+Standalone workspace compatibility calls use their own composition authority. Flights own producer leases across threads; every joining
+task has its own subscription and wait edge. Same-path and mixed scheduler/flight
+cycles return `Cycle`, including a nested request on the same OS thread. A shared
+candidate is adopted only after validation in the subscriber's captured world;
+retention refusal still delivers the complete unretained answer. The final fence
+also rejects a replaced pinned published root.
+
+Cancellation wakes and detaches only the subscriber. Transferred producer work
+continues for other demands. Its external owner must finish it or drop it; dropping
+a producer or transferred slice publishes `ProducerDropped`, and an unwind
+publishes `ProducerPanicked`. An abandoned inner candidate flight wakes followers
+for their own bounded retry. Explicit request cancellation (including a host
+reset/shutdown stop token) returns `Cancelled`; a changed pinned world returns
+the existing noncacheable `ResolutionViewSuperseded` outcome. No stop admits a
+partial answer. Terminal observation/drop releases exactly that subscriber's
+registrations, wait edges and task pins. Flight retirement removes only its exact
+lane; all notifications run after the table/slot/publication locks release.
+
+The synchronous importer and project entries externally drive these same
+continuations. Legacy boolean cancellation is sampled only at that external
+compatibility driver; token-owned production entries register stop wakes. Polling
+capabilities expose neither that driver nor the underlying engine/reader.
+Completion/flight replies exert no bounded-queue backpressure; input reservations
+retain their existing explicit budget and integrity outcomes. Observation remains
+the existing optional VFS/audit capture, with no new history or enabled checks.
+
+Above this handoff, host loading and index dependency extraction
+(`host_lifecycle::resolve_import_outcome_in`, `host_executor::extract_deps`),
+resolver import/route demands, explicit-project intrinsics and program ordering
+belong to DISPATCH; metadata import traversal belongs to META; hydration and
+compile traversal above program ordering belong to COMPILE. Those caller
+conversions consume these APIs separately from the dependency owner.
 
 ## Boundaries that still block
 
 These are the production waits a component-meta or compile root can reach
-in the current tree, with the `WaitFamily` each announces. Each one parks
-the polling thread inside whatever poll reaches it, so a root that reaches
-one is not yet pollable at that point. Semantic memo flights, scoped
-cache-node followers and resolver request followers share `TaskRegistry`
-wait edges; the remaining families do not yet register their waits there.
+in the current tree, with the `WaitFamily` each announces. A synchronous
+caller still parks when it drives an incomplete dependency. Each dependency
+family supplies an owned handoff under the shared task registry; higher-level
+traversals consume those interfaces as they become suspendable.
 
 | Wait | Family | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- | --- |
-| Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `SemanticFlight` | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
-| Semantic task drive (`SemanticTask::drive`) | `SemanticDrive` | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
-| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `CacheFlight` | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
-| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `CacheFlight` | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
-| Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `ResolverFlight` | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; IndexedReady materialization; imported roots | `run_retaining_pollable`, led and followed by task; callers still synchronous |
-| Store-view build park, synchronous reads | `StoreViewBuild` | `verter_session/src/resolver_store.rs` | `resolver_store_view_read` and the synchronous capture, from inside resolution | `base_view_pollable`; the roots' own captures already use it |
-| Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `CarrierPublication` | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
-| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`), a completion handle's `wait` | `SchedulerCompletion` | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs`, `verter_scheduler/src/job.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
-| Batch upsert completion (`Scheduler::wait_batch`) | `SchedulerCompletion` | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
-| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a CPU-pool `install`) | `ScopedCacheNode`, then `CpuPool` | `verter_scheduler/src/scheduler/scoped_handoff.rs` | the synchronous macro bundle entry and the Vue API projector | the compile root awaits the handoff and hands out its producer |
-| Scheduler inbox submission (`send_submission`) | `SchedulerAdmission` | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
-| Workspace import-resolution flight (`FlightSubscription::wait`) | `WorkspaceResolution` | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
+| Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | SemanticFlight | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
+| Semantic task drive (`SemanticTask::drive`) | SemanticDrive | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
+| Artifact cache singleflight joiner (`cooperative_admit_impl`) | CacheFlight | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
+| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | CacheFlight | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
+| Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | ResolverFlight | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
+| Store-view capture (`StoreViewManager::base_view`) | StoreViewBuild | `verter_session/src/store_view_handoff.rs` | `capture_batch_fixed_view` at every component-meta entry | `VerterHost::begin_store_view` with owned build/maintenance producer; callers still synchronous |
+| Carrier publication and stable parse | CarrierPublication | `verter_session/src/carrier_publication_store/owned.rs` | scheduler Source stage; base/overlay structure | `OwnedPublication` → external Work and owned S subscription; `OwnedStableParse` → external stable producer; callers still synchronous |
+| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | SchedulerCompletion | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; synchronous callers externally drive and integrate |
+| Batch upsert completion (`Scheduler::wait_batch`) | SchedulerCompletion | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
+| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | ScopedCacheNode / CpuPool | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
+| Scheduler inbox submission (`send_submission`) | SchedulerAdmission | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
+| Workspace resolution (synchronous compatibility entries) | WorkspaceResolution | `verter_workspace/src/resolution_flights.rs` | DISPATCH: host loading, analysis-stage dependencies and shared resolver import/route demands; META: metadata's import traversal; COMPILE: hydration and compile traversal | `WorkspaceRead::begin_resolution` / `begin_project_resolution` transfer retained phase work and register owned flight/publication readiness; traversal callers still synchronous |
+| Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | CpuPool | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
 | Declaration-lowering synchronous entries (`acquire_lease*`, `run_leased*`) | `DeclLowering` | `verter_semantic_source/src/decl_lowering.rs` | IndexedReady materialization and the declaration body memo, from inside resolution and semantic evaluation | the `begin_*` handoffs above; callers still synchronous |
-| Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) and the scheduler pool's `install` | `CpuPool` | `verter_session/src/host_batch_coordinator.rs`, `verter_scheduler/src/execution/` | `compile_many`, `get_component_meta_batch`, and the synchronous drivers' handed-out producers | none; the batch topology itself is the executor's to replace |
 
 The declaration-lowering row's handoffs are pollable, and so is the
 IndexedReady build a cold component-meta root's input capture reaches; what

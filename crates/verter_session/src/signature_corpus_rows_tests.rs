@@ -1,6 +1,6 @@
 //! THE signature observation corpus ROW TABLE — the pinned-oracle evidence lock's
 //! hand-authored observation set, measured against the pinned oracle
-//! (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig` for the
+//! (TypeScript 7.1.0-beta `tsc`, `--noEmit --strict --ignoreConfig` for the
 //! `checker` column and `--declaration --emitDeclarationOnly --strict`
 //! for the `decl_emit` bytes; see
 //! `docs/evidence/signature-kernel/manifest.json` for the toolchain
@@ -12,12 +12,12 @@
 //! This corpus carries its OWN identity (`verter-signature-corpus-v0`):
 //! it is NOT the reported 9,300-union / 56,548-observation corpus, whose
 //! artifacts were not recovered (recorded in the manifest). Every
-//! observation below was measured on the installed 7.0.2 platform
+//! observation below was measured on the installed 7.1.0-beta platform
 //! package whose executable and `lib/*.d.ts` digests the toolchain
 //! record pins.
 //!
 //! Each row is one witness module plus a type-level probe expression.
-//! The `checker` column is what 7.0.2 prints for the probe through the
+//! The `checker` column is what 7.1.0-beta prints for the probe through the
 //! two-step wrapper (`declare const __v: <probe>; export const __shape:
 //! null = __v;`), with `IsAny`/`IsNever` legs proving the `any`/`never`
 //! answers whose shape leg is legitimately silent. `decl_emit` is the
@@ -38,7 +38,7 @@ pub(crate) struct Row {
     pub(crate) source: &'static str,
     /// The type-level probe expression the observation is taken over.
     pub(crate) probe: &'static str,
-    /// What 7.0.2 prints for the probe (RECORDED — never re-run in-tree).
+    /// What 7.1.0-beta prints for the probe (RECORDED — never re-run in-tree).
     pub(crate) checker: &'static str,
     /// The probe is `any`: the shape leg is silent and the `IsAny` leg
     /// fires `true` (the corpus's any convention).
@@ -73,7 +73,7 @@ pub(crate) struct RecordedDiagnostic {
     pub(crate) code: u32,
     /// The diagnostic's message text.
     pub(crate) message: &'static str,
-    /// The type the checker continues with after reporting, as 7.0.2
+    /// The type the checker continues with after reporting, as 7.1.0-beta
     /// prints it through the TUPLE wrapper (`declare const __v: [<probe>];
     /// export const __shape: null = __v;`). The checker's error type keeps
     /// both the two-step wrapper and the `IsAny` leg silent, so the tuple
@@ -482,7 +482,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type A<T> = {\n    ka: T;\n};\ntype B<T> = {\n    kb: T;\n};\nexport declare function witness<T>(v: A<T> | B<T> | A<T>): A<T> | B<T>;\nexport {};\n",
-        verdict: Verdict::StableOrderDifference { note: "Order-heavy generic union with a duplicate arm: `ReturnType` instantiates `T` at its constraint, so `A<unknown> | B<unknown>` is the checker's ANSWER, not a display. The live answer holds the same two members, deduplicated, and orders them by the `VerterStableV1` stable key (`B<unknown> | A<unknown>`); 7.0.2 orders by its own type identities, and the contract forbids cloning that order." },
+        verdict: Verdict::StableOrderDifference { note: "Order-heavy generic union with a duplicate arm: `ReturnType` instantiates `T` at its constraint, so `A<unknown> | B<unknown>` is the checker's ANSWER, not a display. The live answer holds the same two members, deduplicated, and orders them by the `VerterStableV1` stable key (`B<unknown> | A<unknown>`); 7.1.0-beta orders by its own type identities, and the contract forbids cloning that order." },
     },
     Row {
         id: "SV26_literal_generic_union_order",
@@ -495,6 +495,6 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T>(v: 'a' | T | 'b' | 'a'): \"a\" | \"b\" | T;\n",
-        verdict: Verdict::StableOrderDifference { note: "Mixed literal/generic union with a duplicate arm, instantiated at `T := \"c\"` so the binder arm stays distinct: 7.0.2 answers `\"a\" | \"b\" | \"c\"`, the declared return's arm order with the binder's argument in its place. The live answer holds the same three members, deduplicated, ordered by the `VerterStableV1` stable key (`\"c\" | \"b\" | \"a\"`); the contract forbids cloning the checker's order." },
+        verdict: Verdict::StableOrderDifference { note: "Mixed literal/generic union with a duplicate arm, instantiated at `T := \"c\"` so the binder arm stays distinct: 7.1.0-beta answers `\"a\" | \"b\" | \"c\"`, the declared return's arm order with the binder's argument in its place. The live answer holds the same three members, deduplicated, ordered by the `VerterStableV1` stable key (`\"c\" | \"b\" | \"a\"`); the contract forbids cloning the checker's order." },
     },
 ];

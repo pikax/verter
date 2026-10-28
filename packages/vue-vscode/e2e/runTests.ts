@@ -72,7 +72,7 @@ const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
  * the correctly-declared nested package can serve.
  */
 const OUT_OF_TREE_FIXTURES: ReadonlySet<string> = new Set([EXTENSION_ACCEPTANCE_FIXTURE]);
-const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
+const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@1.0.1";
 const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework; only: string }>> =
   {
     "vue-contract": { framework: "vue", only: "frameworks/vue/contract.test" },

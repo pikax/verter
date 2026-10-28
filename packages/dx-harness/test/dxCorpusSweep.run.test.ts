@@ -243,6 +243,19 @@ function quiescer(client: CollectorLspClient): () => Promise<boolean> {
   };
 }
 
+async function waitForDiagnostics(client: LspClient, uri: string, version: number): Promise<void> {
+  const deadline = Date.now() + REQUEST_TIMEOUT;
+  while (Date.now() < deadline) {
+    const snapshot = await client.sendRequest<{
+      diagnostics?: Record<string, { version: number; ready: boolean }>;
+    }>(GET_STATISTICS_METHOD, {}, Math.max(1, deadline - Date.now()));
+    const receipt = snapshot.diagnostics?.[uri];
+    // A complete receipt is recorded only after the diagnostics bytes are delivered.
+    if (receipt?.ready && receipt.version === version) return;
+  }
+  throw new Error(`diagnostics for ${uri} version ${version} never completed`);
+}
+
 const fileUri = (root: string, rel: string): string => pathToFileURL(join(root, rel)).toString();
 
 // ── event construction ───────────────────────────────────────────────────────────
@@ -300,10 +313,15 @@ function anchorPos(
   return a ? { line: a.line, character: a.character } : null;
 }
 
-function openVue(verter: LspClient, uri: string, text: string): void {
+// Distinct revisions keep an earlier open's receipt from satisfying a later wait.
+let documentVersion = 0;
+
+function openVue(verter: LspClient, uri: string, text: string): number {
+  const version = ++documentVersion;
   verter.sendNotification("textDocument/didOpen", {
-    textDocument: { uri, languageId: "vue", version: 1, text },
+    textDocument: { uri, languageId: "vue", version, text },
   });
+  return version;
 }
 
 /** Strip the `<script setup>` body out of a `.vue` and rewrite Vue macros to plain TS. */
@@ -510,15 +528,14 @@ async function runCompletionProbe(
   const insertPos = { line: tok.line, character: tokenEnd };
 
   run.verter.sendNotification("textDocument/didClose", { textDocument: { uri: entryUri } });
-  run.verter.sendNotification("textDocument/didOpen", {
-    textDocument: { uri: entryUri, languageId: "vue", version: 1, text: entryText },
-  });
-  await new Promise((r) => setTimeout(r, 150));
+  const openedVersion = openVue(run.verter, entryUri, entryText);
+  await waitForDiagnostics(run.verter, entryUri, openedVersion);
+  const changedVersion = ++documentVersion;
   run.verter.sendNotification("textDocument/didChange", {
-    textDocument: { uri: entryUri, version: 2 },
+    textDocument: { uri: entryUri, version: changedVersion },
     contentChanges: [{ range: { start: insertPos, end: insertPos }, text: "." }],
   });
-  await new Promise((r) => setTimeout(r, 300));
+  await waitForDiagnostics(run.verter, entryUri, changedVersion);
 
   let result: unknown;
   try {
@@ -616,7 +633,12 @@ async function runDiagnosticsProbes(
   try {
     await quiescer(run.verter)();
     // A nudge edit to provoke a fresh diagnostics publish, then settle again.
-    await new Promise((r) => setTimeout(r, 400));
+    const version = ++documentVersion;
+    run.verter.sendNotification("textDocument/didChange", {
+      textDocument: { uri: entryUri, version },
+      contentChanges: [{ text: entryText }],
+    });
+    await waitForDiagnostics(run.verter, entryUri, version);
   } finally {
     run.verter.offNotification("textDocument/publishDiagnostics", handler);
   }
@@ -760,8 +782,8 @@ async function runScenario(run: ScenarioRun): Promise<void> {
   const { scenario, ws, verter } = run;
   const entryUri = fileUri(ws.root, scenario.entryFile);
   const entryText = readFileSync(join(ws.root, scenario.entryFile), "utf-8");
-  openVue(verter, entryUri, entryText);
-  await new Promise((r) => setTimeout(r, 250));
+  const version = openVue(verter, entryUri, entryText);
+  await waitForDiagnostics(verter, entryUri, version);
 
   const methods = new Set(scenario.probes.map((p) => p.method));
 

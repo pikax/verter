@@ -85,6 +85,7 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+verter_execution = { path = "../verter_execution", features = ["test-support"] }
 # An isolated retention account with size-controlled limits for the
 # retention-refusal tests.
 verter_session_query = { workspace = true, features = ["test-support"] }

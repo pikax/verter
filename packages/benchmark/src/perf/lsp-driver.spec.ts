@@ -331,11 +331,9 @@ const settleOpen =
   (initialDiags: unknown[] = []) =>
   (params: unknown, emit: (m: string, p: unknown) => void): void => {
     if (didOpenUri(params) === sfcUriOf()) {
-      setTimeout(
+      queueMicrotask(
         () =>
-          emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: initialDiags }),
-        2,
-      );
+          emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: initialDiags }));
     }
   };
 
@@ -347,10 +345,8 @@ describe("editToDiagnosticsLatency measures the edit's EFFECT, not a stale publi
     const connect = connectWith({
       onDidOpen: settleOpen(),
       onDidChange: (_p, emit) =>
-        setTimeout(
-          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: [] }),
-          3,
-        ),
+        queueMicrotask(
+          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: [] })),
     });
     await expect(editToDiagnosticsLatency("bin", corpus, { ops: 1 }, connect)).rejects.toThrow(
       /timed out/i,
@@ -368,16 +364,14 @@ describe("editToDiagnosticsLatency measures the edit's EFFECT, not a stale publi
         // satisfies the unversioned wait. A value-position token would widen to `string` and
         // be absent from the message (the old never-match bug, guarded below).
         const token = /:\s*"(perf-[^"]*)"\s*=\s*0/.exec(text)?.[1];
-        setTimeout(
+        queueMicrotask(
           () =>
             emit("textDocument/publishDiagnostics", {
               uri: sfcUriOf(),
               diagnostics: token
                 ? [diag(1, `Type '0' is not assignable to type '"${token}"'.`)]
                 : [],
-            }),
-          3,
-        );
+            }));
       },
     });
     const s = await editToDiagnosticsLatency("bin", corpus, { ops: 2 }, connect);
@@ -396,14 +390,12 @@ describe("editToDiagnosticsLatency measures the edit's EFFECT, not a stale publi
       onDidOpen: settleOpen(),
       onDidChange: (_p, emit) => {
         const at = line++;
-        setTimeout(
+        queueMicrotask(
           () =>
             emit("textDocument/publishDiagnostics", {
               uri: sfcUriOf(),
               diagnostics: [diag(at, "Type 'string' is not assignable to type 'number'.")],
-            }),
-          3,
-        );
+            }));
       },
     });
     await expect(editToDiagnosticsLatency("bin", corpus, { ops: 1 }, connect)).rejects.toThrow(
@@ -420,15 +412,13 @@ describe("editToDiagnosticsLatency measures the edit's EFFECT, not a stale publi
     const connect = connectWith({
       onDidOpen: settleOpen(),
       onDidChange: (_p, emit) =>
-        setTimeout(
+        queueMicrotask(
           () =>
             emit("textDocument/publishDiagnostics", {
               uri: sfcUriOf(),
               version: 1, // STALE — below the edit's version 2
               diagnostics: [diag(1)],
-            }),
-          3,
-        ),
+            })),
     });
     await expect(editToDiagnosticsLatency("bin", corpus, { ops: 1 }, connect)).rejects.toThrow(
       /timed out/i,
@@ -449,10 +439,8 @@ describe("editToDiagnosticsLatency measures the edit's EFFECT, not a stale publi
           : text.includes("perf-base")
             ? [diag(1, `Type '0' is not assignable to type '"perf-base"'.`)]
             : []; // i=1 (the odd "clear" edit): a stale/queued EMPTY publish
-        setTimeout(
-          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: diags }),
-          3,
-        );
+        queueMicrotask(
+          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: diags }));
       },
     });
     await expect(editToDiagnosticsLatency("bin", corpus, { ops: 2 }, connect)).rejects.toThrow(
@@ -474,10 +462,8 @@ describe("editToDiagnosticsLatency measures the edit's EFFECT, not a stale publi
           : text.includes("perf-base")
             ? [diag(1, `Type '0' is not assignable to type '"perf-base"'.`)]
             : [diag(2, `Type '0' is not assignable to type '"perf-99"'.`)]; // wrong token
-        setTimeout(
-          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: diags }),
-          3,
-        );
+        queueMicrotask(
+          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: diags }));
       },
     });
     await expect(editToDiagnosticsLatency("bin", corpus, { ops: 2 }, connect)).rejects.toThrow(
@@ -498,10 +484,8 @@ describe("warmDependencyEditLatency binds each warm cross-file edit to THIS edit
     (initial: unknown[]) =>
     (params: unknown, emit: (m: string, p: unknown) => void): void => {
       if (didOpenUri(params) === sfcUriOf()) {
-        setTimeout(
-          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: initial }),
-          2,
-        );
+        queueMicrotask(
+          () => emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: initial }));
       }
     };
 
@@ -524,11 +508,9 @@ describe("warmDependencyEditLatency binds each warm cross-file edit to THIS edit
     const connect = connectWith({
       onDidOpen: settleSfcOpen([]), // EMPTY baseline ⇒ no non-empty settle
       onDidChange: (_p, emit) =>
-        setTimeout(
+        queueMicrotask(
           () =>
-            emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: [diag(2)] }),
-          3,
-        ),
+            emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: [diag(2)] })),
     });
     await expect(warmDependencyEditLatency("bin", corpus, { ops: 1 }, connect)).rejects.toThrow(
       /timed out|baseline|non-empty/i,
@@ -542,12 +524,10 @@ describe("warmDependencyEditLatency binds each warm cross-file edit to THIS edit
     const connect = connectWith({
       onDidOpen: settleSfcOpen([dep2322("perfDepBase")]), // non-empty baseline
       onDidChange: (_p, emit) =>
-        setTimeout(
+        queueMicrotask(
           // a publish that DIFFERS from the baseline but lacks the unique edit token
           () =>
-            emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: [diag(2)] }),
-          3,
-        ),
+            emit("textDocument/publishDiagnostics", { uri: sfcUriOf(), diagnostics: [diag(2)] })),
     });
     await expect(warmDependencyEditLatency("bin", corpus, { ops: 1 }, connect)).rejects.toThrow(
       /timed out/i,
@@ -560,14 +540,12 @@ describe("warmDependencyEditLatency binds each warm cross-file edit to THIS edit
     const connect = connectWith({
       onDidOpen: settleSfcOpen([dep2322("perfDepBase")]),
       onDidChange: (_p, emit) =>
-        setTimeout(
+        queueMicrotask(
           () =>
             emit("textDocument/publishDiagnostics", {
               uri: sfcUriOf(),
               diagnostics: [dep2322("perfDepBase")], // equal to the pre-edit baseline
-            }),
-          3,
-        ),
+            })),
     });
     await expect(warmDependencyEditLatency("bin", corpus, { ops: 1 }, connect)).rejects.toThrow(
       /timed out/i,
@@ -583,14 +561,12 @@ describe("warmDependencyEditLatency binds each warm cross-file edit to THIS edit
       onDidChange: (params, emit) => {
         const token = warmTokenOf(editTextOf(params));
         if (token) {
-          setTimeout(
+          queueMicrotask(
             () =>
               emit("textDocument/publishDiagnostics", {
                 uri: sfcUriOf(),
                 diagnostics: [dep2322(token)],
-              }),
-            3,
-          );
+              }));
         }
       },
     });
@@ -863,8 +839,10 @@ describe("waitForReady fails closed on a missing $/verter/ready when required", 
 
   it("RESOLVES when ready IS emitted", async () => {
     const client = new FakeLspClient({});
-    setTimeout(() => client.emit("$/verter/ready", {}), 3);
-    await expect(waitForReady(client, 30, true)).resolves.toBeUndefined();
+    // waitForReady subscribes before it first yields, so the emit lands on its wait.
+    const ready = waitForReady(client, 30, true);
+    client.emit("$/verter/ready", {});
+    await expect(ready).resolves.toBeUndefined();
   });
 });
 

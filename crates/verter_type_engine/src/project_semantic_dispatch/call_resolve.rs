@@ -1221,6 +1221,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 component_proof_complete,
             ) {
                 Some(result) => {
+                    // The drain publishes this member under the enclosing
+                    // root carrier's read set: every version its value
+                    // embeds is observed into it here, before the member
+                    // leaves this frame — the call result's references do
+                    // not all survive into the root's own value.
+                    self.observe_retained_reference_versions(
+                        &crate::semantic_query::SemanticQueryValue::ResolveCall(
+                            verter_session_query::retention::owned::Owned::new(
+                                result.get().clone(),
+                            ),
+                        ),
+                    );
                     let member = CompletedResolveCallMember {
                         key: root_key,
                         result,

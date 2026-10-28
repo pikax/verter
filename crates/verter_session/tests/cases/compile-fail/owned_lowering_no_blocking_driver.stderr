@@ -1,0 +1,5 @@
+error[E0599]: no method named `wait` found for struct `OwnedLoweringHandoff<H>` in the current scope
+ --> tests/cases/compile-fail/owned_lowering_no_blocking_driver.rs:4:13
+  |
+4 |     handoff.wait();
+  |             ^^^^ method not found in `OwnedLoweringHandoff<LeaseHandoff<usize>>`

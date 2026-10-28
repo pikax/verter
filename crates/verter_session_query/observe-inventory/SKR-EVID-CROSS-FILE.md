@@ -75,3 +75,19 @@ Source-header payload reads compare hash, incarnation and generation against
 captured or explicitly completed source identity. Same-byte node replacements
 cannot lend a new parsed payload to an old view. A session override cannot use
 the base parser payload, even if its bytes match.
+
+## Retained reference-version observation bounds
+
+| item | production consumer | classification | lifetime | owner module | gate |
+| --- | --- | --- | --- | --- | --- |
+| `NodeStructureBits::versioned_ref`, `node_reaches_versioned_reference` | Bounds the retained-reference version observation at every cold-build close: a value whose retained closure reaches no versioned `DeclRef`/`InstantiationRef` costs one memo read, and the walk descends only ref-reaching structure | REQUIRED | Pure inductive per-node bit in the existing append-only arena sidecar; decided once per node id, dropped with the node | engine `semantic_query_memo/unresolved_reach.rs`, `project_semantic_dispatch/arena_ops.rs` | always |
+| `FactReadSet::holds`, `tracer_holds_fact` | Skips re-recording an embedded version fact the active tracer already holds through a delivered or absorbed witness; the sealed signature keeps the same union | REQUIRED | Read-only query over the live tracer's observations and absorbed runs; no stored state | query `facts/fact_read_set.rs`, engine `fact_tracing/tracing.rs`, `resolver_core/resolver_context.rs` | always |
+| `FactReadSet::run_addresses` | Recognises a replayed canonical signature the scope already absorbed by storage address, so a warm read's repeated replays grow neither the run list nor comparison work | REQUIRED | Per-tracer index mirroring `canonical_runs`; inserted and removed with its runs and cleared at canonicalisation | query `facts/fact_read_set.rs` | always |
+| Nested ResolveCall root member version observation at queue time | The drain publishes the member under the enclosing root carrier's read set | REQUIRED | Same observation as the batch members in `relation.rs`, performed before the member leaves the frame | engine `project_semantic_dispatch/call_resolve.rs` | always |
+| `PreparedDeclBundle` resolution-segment retention charge | Shared-cache admission and bundle readers see the segments' vector, specifier and narrow fact-slice bytes | REQUIRED | Charged with the bundle's own retention via the existing heap meter; wide tree-sealed sets keep their own charge | session `resolver_core/prepared_decl.rs` | always |
+| `subset_memo` (`FactSet::storage_weak`) | Canonicalisation skips a non-base run an exact ordered scan already proved contained in the base run it seals against, so a replayed run a held seal covers is not re-merged; the sealed signature keeps the same union | REQUIRED | Bounded per-thread proof map from run-storage address pair to weak handles of both allocations; entries die with their storages, prune at 4096 entries and reset at 8192 | query `facts/fact_set.rs`, `facts/fact_read_set.rs` | always |
+
+The versioned-reference bit and the address index add no optional counter,
+trace or enable flag; they only bound the required observations' cost. Every
+embedded version observation remains unconditional at the close that retains
+a reference the scope does not already hold.

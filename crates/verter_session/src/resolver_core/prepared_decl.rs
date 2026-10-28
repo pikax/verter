@@ -1488,13 +1488,20 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
     /// it fills ([`Held`]). The shared shallow state carries its own pin until its last artifact or
     /// bundle holder drops; the identity pool likewise charges its own cells.
     /// The bundle pays only for its handles to those shared owners.
+    ///
+    /// The sealed resolution-witness segments are the bundle's own
+    /// retention: their vector and specifier blocks are plain owned
+    /// allocations, and a narrow fact set's shared slice is charged by its
+    /// holder (only a wide tree-sealed set carries its own charge), so the
+    /// bundle charges the segment storage and every narrow set's slice and
+    /// fact heap here.
     fn heap_size<'t>(
         &'t self,
         meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
     ) -> usize {
         let Self {
             input_projection: _,
-            resolution_facts: _, // the witness rail owns its charge
+            resolution_facts,
             account: _,
             owner_whole_hash: _,
             prepared_type_decls,
@@ -1502,10 +1509,30 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
             dep_edges,
             owner_scopes,
         } = self;
+        let segments = resolution_facts
+            .get()
+            .map(|segments| {
+                verter_retention::allocation::vec_bytes(segments)
+                    + segments
+                        .iter()
+                        .map(|segment| {
+                            segment
+                                .specifier
+                                .as_ref()
+                                .map_or(0, verter_retention::allocation::string_bytes)
+                                + verter_session_query::retention::allocation::fact_slice_bytes(
+                                    &segment.facts,
+                                    meter.handles(),
+                                )
+                        })
+                        .sum::<usize>()
+            })
+            .unwrap_or(0);
         prepared_type_decls.heap_size(meter)
             + prepared_value_decls.heap_size(meter)
             + dep_edges.heap_size(meter)
             + owner_scopes.heap_size(meter)
+            + segments
     }
 }
 

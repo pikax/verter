@@ -479,6 +479,7 @@ mod inner {
             query: &ProviderQuery,
             answer: ProviderFuture<'a, T>,
         ) -> ProviderFuture<'a, T> {
+            self.note_recorded();
             let barriers = self.request_barriers.lock().unwrap().clone();
             let failed_deliveries = Arc::clone(&self.failed_deliveries);
             // The answer was selected by the incarnation serving now. Like the
@@ -1780,6 +1781,7 @@ mod inner {
             if hang {
                 // A wedged provider: never resolves. The handler must fail
                 // closed on its request deadline rather than park here.
+                self.note_recorded();
                 return Box::pin(std::future::pending());
             }
             // Run the one-shot mid-request seam AFTER releasing the state lock
@@ -1831,6 +1833,7 @@ mod inner {
                 callback();
             }
             if hang {
+                self.note_recorded();
                 return Box::pin(std::future::pending());
             }
             self.note_recorded();
@@ -1885,6 +1888,7 @@ mod inner {
             if hang {
                 // A wedged provider: never resolves. The handler must fail closed
                 // on its production deadline rather than park here forever.
+                self.note_recorded();
                 return Box::pin(std::future::pending());
             }
             // Run the one-shot mid-request seam AFTER releasing the state lock
@@ -2062,6 +2066,7 @@ mod inner {
             if hang {
                 // A wedged provider: never resolves. The handler must fail
                 // closed on its request deadline rather than park here.
+                self.note_recorded();
                 return Box::pin(std::future::pending());
             }
             // Run the one-shot mid-request seam AFTER releasing the state lock
@@ -2122,6 +2127,7 @@ mod inner {
                 .find(|(p, _)| p == path)
                 .map(|(_, tokens)| tokens.clone())
                 .unwrap_or_default();
+            drop(state);
             self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
@@ -2143,6 +2149,7 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, hl)| hl.clone())
                 .unwrap_or_default();
+            drop(state);
             self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
@@ -2166,6 +2173,7 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, hints)| hints.clone())
                 .unwrap_or_default();
+            drop(state);
             self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
@@ -2186,6 +2194,7 @@ mod inner {
                 .iter()
                 .find(|(p, candidate, _)| p == path && *candidate == data)
                 .and_then(|(_, _, resolved)| resolved.clone());
+            drop(state);
             self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 

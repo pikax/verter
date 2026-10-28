@@ -411,6 +411,23 @@ impl RouteDb {
     /// Exposed under `cfg(any(test, feature = "test-support"))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can call it.
     #[cfg(any(test, feature = "test-support"))]
+    pub fn test_wait_for_route_inflight_strong_count<V: StoreView + ?Sized>(
+        &self,
+        key: &RouteNameKey,
+        view: &V,
+        more_than: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        self.route_singleflight.test_wait_for_flight_strong_count(
+            key,
+            view.compat_token(),
+            more_than,
+            budget,
+        )
+    }
+
+    /// Test-only: the route lane's strong count for `key` under `view`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_route_inflight_strong_count<V: StoreView + ?Sized>(
         &self,
         key: &RouteNameKey,
@@ -595,6 +612,13 @@ impl RouteDb {
         for key in barrel_keys {
             self.barrel_surfaces.remove(&key);
         }
+    }
+
+    pub(crate) fn bind_task_registry(&self, registry: verter_execution::tasks::TaskRegistry) {
+        self.module_export_singleflight
+            .bind_task_registry(registry.clone());
+        self.route_singleflight.bind_task_registry(registry.clone());
+        self.barrel_singleflight.bind_task_registry(registry);
     }
 
     // -----------------------------------------------------------------------

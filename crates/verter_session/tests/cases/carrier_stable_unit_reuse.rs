@@ -77,7 +77,11 @@ fn request(id: u64, accepted: &AcceptedRegisteredCarrierSource) -> PublicationRe
 #[test]
 fn repeated_generations_of_one_content_parse_once_and_adopt_after() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let bytes = "<template><p>stable</p></template>";
 
     for generation in 1..=3u64 {
@@ -107,7 +111,11 @@ fn repeated_generations_of_one_content_parse_once_and_adopt_after() {
 #[test]
 fn alternating_contents_hold_one_stable_unit_each() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let variants = [
         "<template><p>A</p></template>",
         "<template><p>B</p></template>",
@@ -142,7 +150,11 @@ fn alternating_contents_hold_one_stable_unit_each() {
 #[test]
 fn an_adopted_envelope_reports_its_own_generation() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let bytes = "<template><p>provenance</p></template>";
 
     let first = accepted(&source, &grammar, 1, bytes);
@@ -182,6 +194,7 @@ fn stable_unit_retention_is_bounded_and_evicts_least_recently_used() {
         Arc::clone(&source),
         Arc::clone(&grammar),
         2,
+        verter_execution::tasks::TaskRegistry::default(),
     );
 
     let contents = [

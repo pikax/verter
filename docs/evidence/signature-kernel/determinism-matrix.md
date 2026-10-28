@@ -98,7 +98,7 @@ DET-07 was registered Ready while driving only its authored-duplicate and
 anonymous-unit axes. Driving the rest found a defect: a member read through a
 SYNTHESIZED optional member (`Partial<{ a: 1 }>`) answered `1` where the
 authored `{ a?: 1 }` answered `1 | undefined` — both `1 | undefined` on the
-pinned 7.0.2. The optionality proof that gates the absent-key `undefined`
+pinned checker (7.1.0-beta, unchanged from 7.0.2). The optionality proof that gates the absent-key `undefined`
 fold recognised only an `Object` surface, and the mapped result reaches the
 read as a deferred shell. It now reduces such a node through the
 structural-fact demand before deciding, and the row passes on every axis.
@@ -111,15 +111,19 @@ of the checker version, and not a semantic-difference class: the checker's own
 relation cache lets an earlier relation change a later one's answer through
 its two recursion bounds, and §5.9 (DET-02, DET-05) and §15 forbid that here.
 
-Measured on the pinned 7.0.2 checker (`tsc --noEmit --strict`, each answer
-read off TS2322; `strictNullChecks` × `noImplicitAny` all agree), with
+Measured on the pinned 7.1.0-beta checker (`tsc --noEmit --strict`, each
+answer read off TS2322; `strictNullChecks` × `noImplicitAny` all agree), with
 `interface Box<T> { v: T }`, `Bₙ(X)` for `Box<…<X>…>` of `n` applications and
-`type N<T, D extends unknown[]> = D['length'] extends 3 ? T : { v: N<T, [...D, 0]> }`:
+`type N<T, D extends unknown[]> = D['length'] extends 3 ? T : { v: N<T, [...D, 0]> }`.
+The `Box` rows relate a leaf that fails (`1` to `string`): past the depth
+limit 7.1.0-beta answers `Maybe`, which holds and reports nothing, where 7.0.2
+overflowed to false with TS2321 (over a `number` leaf every `Box` row is `1`
+on 7.1.0-beta, in any order). The `N` rows are unchanged from 7.0.2:
 
 | Relation | Cold (a checker of its own) | After the other relation, in one file |
 |---|---|---|
-| `[B₉₉(1)] extends [B₉₉(number)] ? 1 : 2` | `1` | `2` after the 100-deep one (its overflow cached the failures) |
-| `[B₁₀₀(1)] extends [B₁₀₀(number)] ? 1 : 2` | `2`, TS2321 | `1` after the 99-deep one (the cached pair spares the depth) |
+| `[B₉₉(1)] extends [B₉₉(string)] ? 1 : 2` | `2` | `1` after the 100-deep one (its `Maybe` was cached) |
+| `[B₁₀₀(1)] extends [B₁₀₀(string)] ? 1 : 2` | `1` (`Maybe` past the depth) | `2` after the 99-deep one (the cached failure) |
 | `[N<1, [0, 0]>] extends [N<string, [0, 0]>] ? 1 : 2` | `2` | `1` after the next one |
 | `[N<1, []>] extends [N<string, []>] ? 1 : 2` | `1` (deeply nested) | `2` after the previous one (the cached inner failure) |
 
@@ -166,7 +170,7 @@ with the measurement open. A measurement nested inside another
 declaration's that reaches the OUTER declaration's references depends on
 the outer measurement, so nothing of that build is memoized: each root
 relation measures the variance it needs as if it were the first. Measured
-on 7.0.2 over `interface E<T> { d: D<T> }` and `interface D<T> { e: E<T>;
+on 7.1.0-beta (unchanged from 7.0.2) over `interface E<T> { d: D<T> }` and `interface D<T> { e: E<T>;
 f: (x: T) => void }`, `E` is contravariant whichever relation comes first
 (`[E<1>] extends [E<number>] ? 1 : 2` is `2` cold and after `[D<1>]
 extends [D<number>]`); measured inside `D`'s measurement it reads
@@ -292,7 +296,7 @@ carriers unresolved:
 
 * A union over two unresolved spellings of one module keeps both arms: the
   keys differ, and the union reducer's structural comparator compares the
-  carrier heads, whose specifiers differ. tsc 7.0.2 emits one arm —
+  carrier heads, whose specifiers differ. tsc 7.1.0-beta emits one arm, as 7.0.2 did —
   `declare const p: import("./a").G; declare const q: import("../x/a").G;
   export const u = Math.random() ? p : q;` in `x/b.ts` declares
   `u: import("./a").G` under every `strictNullChecks` × `noImplicitAny`
@@ -312,7 +316,7 @@ published observation can therefore contain an unresolved import type, and a
 union of two spellings inside one is observable as two arms.
 
 **One spelling from two importers.** One spelling written in two importing
-units can name two modules; tsc 7.0.2 keeps both (`u = Math.random() ? x : y` over values of
+units can name two modules; tsc 7.1.0-beta keeps both, as 7.0.2 did (`u = Math.random() ? x : y` over values of
 `import("./m").G` from `src/a.ts` and `src/lib/b.ts`, with `src/m.ts` and
 `src/lib/m.ts` declaring different `G`, declares
 `u: import("./m").G | import("./lib/m").G` under every setting). The stable

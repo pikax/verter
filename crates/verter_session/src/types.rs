@@ -3804,6 +3804,10 @@ pub struct DerivedRawState {
     /// diffing during reload.
     pub(crate) evicted: bool,
 
+    /// Revision of this canonical's eviction state. Repeated evictions advance
+    /// it even while hidden; load integration checks it under the row lock.
+    eviction_revision: u64,
+
     /// Whole-hash recorded at eviction time, when available. `None` indicates
     /// the caller did not have the hash in scope (e.g. eviction triggered by
     /// a delete path that already discarded the snapshot). Read by
@@ -3813,13 +3817,8 @@ pub struct DerivedRawState {
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
 
-    /// How many times this file has been evicted. A reload clears
-    /// `evicted` only when no eviction has landed since it started, so an
-    /// eviction during a reload leaves the file evicted for the next reload.
-    pub(crate) eviction_epoch: u64,
-
     /// The eviction whose pre-eviction scheduler snapshot a reload has
-    /// already reset. Below `eviction_epoch`, the next reload resets the
+    /// already reset. Below `eviction_revision`, the next reload resets the
     /// scheduler before loading; at it, a reload joins the reset one.
     pub(crate) eviction_reset_epoch: u64,
 
@@ -3831,6 +3830,19 @@ pub struct DerivedRawState {
 }
 
 impl DerivedRawState {
+    pub(crate) fn eviction_revision(&self) -> u64 {
+        self.eviction_revision
+    }
+
+    pub(crate) fn mark_evicted(&mut self, whole_hash: Option<Hash16>) {
+        self.eviction_revision = self
+            .eviction_revision
+            .checked_add(1)
+            .expect("eviction revision exhausted");
+        self.evicted = true;
+        self.evicted_whole_hash = whole_hash;
+    }
+
     /// Read access to the module-private `raw_template_analysis`
     /// slot. Readers validate the entry against their own snapshot's
     /// version (the entry's `source_version` rail) before

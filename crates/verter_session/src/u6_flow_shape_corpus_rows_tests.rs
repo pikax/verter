@@ -4,7 +4,7 @@
 // lane is driven from it by the shared drivers in the parent module.
 // Nothing else in the tree changes.
 //
-// The `checker` column is what TypeScript 7.0.2 (`tsc`) prints for the
+// The `checker` column is what TypeScript 7.1.0-beta (`tsc`) prints for the
 // row's `probe` under `--noEmit --strict --ignoreConfig`. It is a RECORDED
 // measurement: nothing in the default build re-runs the checker — the suite
 // never invokes tsgo (a runtime tsgo driver is separately forbidden here),
@@ -1029,7 +1029,7 @@ pub(crate) const CORPUS: &[Row] = &[
     // the widening membership its reads consume. Pinned sources — an
     // `as const` arm, an authored return annotation, a same-value pinned
     // sibling anywhere in the join — cancel the freshness for that
-    // literal value (pinned wins). Measured against tsc 7.0.2 and tsgo,
+    // literal value (pinned wins). Measured against tsc 7.1.0-beta and tsgo,
     // with each direction's control below.
     Row { id: "N139_flow_callee_authored_fresh_arm_widens_at_member", script: "function runF<T>(v: T, ok: boolean) { if (ok) { return { value: v } } return \"error\" }\nfunction makeProps() { return { a: runF(\"error\", true) } }", probe: "ReturnType<typeof makeProps>", checker: "{ a: string | { value: string; }; }", owner: Owner::U6CallResolve, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("a", NodeShape::Union)], degradation: Degr::None, candidates: 1 }, expect: Expect::Node(&ExpectedNode::Object(&[("a", ExpectedNode::Union(&[ExpectedNode::Primitive(PrimitiveKind::String), ExpectedNode::Object(&[("value", ExpectedNode::Primitive(PrimitiveKind::String))])]))])), boundary: Boundary::Audit { json: r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"a"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"value"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]},{"kind":"primitive","name":"string"}]}}]}"#, degradation: Degr::None, warm_replay: true }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // Control: the callee arm pinned `as const` stays the literal at the

@@ -6221,6 +6221,7 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
     // Events tsserver emits (`host.write`), each with the companion-read count
     // at the moment it was written — after that event's conversions ran.
     const events: Array<{ event: string; diagnostics: number; reads: number }> = [];
+    let requestCompleted: (() => void) | undefined;
     let sampleCount = () => 0;
     const host: ts.server.ServerHost = {
       ...ts.sys,
@@ -6241,6 +6242,7 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
               diagnostics: parsed.body?.diagnostics?.length ?? 0,
               reads: sampleCount(),
             });
+            if (parsed.event === "requestCompleted") requestCompleted?.();
           }
         } catch {
           // not a protocol message
@@ -6355,11 +6357,18 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
       // share one sample (a syntax check with no diagnostic converts nothing).
       const beforeEvents = blobReads.mock.calls.length;
       events.length = 0;
-      execute("geterr", { files: [source], delay: 0 });
-      for (let waited = 0; waited < 500; waited += 1) {
-        if (events.some((event) => event.event === "requestCompleted")) break;
-        await new Promise<void>((resolve) => setTimeout(resolve, 10));
-      }
+      await new Promise<void>((resolve, reject) => {
+        const guard = setTimeout(() => {
+          requestCompleted = undefined;
+          reject(new Error("geterr never completed"));
+        }, 5_000);
+        requestCompleted = () => {
+          clearTimeout(guard);
+          requestCompleted = undefined;
+          resolve();
+        };
+        execute("geterr", { files: [source], delay: 0 });
+      });
       const samplesPerEvent: Record<string, number> = {};
       const diagnosticsPerEvent: Record<string, number> = {};
       let previous = beforeEvents;
