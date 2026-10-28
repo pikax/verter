@@ -81,6 +81,32 @@ export function pollDeadlineFits(childBudgetMs: number, parentTimeoutMs: number)
  */
 export const REFERENCES_POLL_INTERVAL_MS = 2_000;
 
+/**
+ * Interval between `verter._getDiagnosticStatus` polls in every diagnostics
+ * SETTLE wait (`waitForDiagnosticsSettled`).
+ *
+ * Deliberately slow, and for the same reason as
+ * {@link REFERENCES_POLL_INTERVAL_MS}: each status poll first awaits a
+ * per-document `getAnalysis` request, which the server records as demand for
+ * the document — owed work served first, dependency publication enqueued, the
+ * scanner promoting the document and its imports. A settle poll running at
+ * 50 ms re-signals that demand faster than the server's frontier advances, and
+ * the wait then starves the very publication it is waiting for. Same tree,
+ * same debug LSP binary, vue-parity@tsgo, only this cadence changed:
+ *
+ * | settle cadence | restarted carrier pass | matrix suiteSetup |
+ * | -------------- | ---------------------- | ----------------- |
+ * | 50 ms          | 33.7 s (vs 11.3 s cold) | `Diagnostics did not complete within 23866ms (last readiness: ready=false, server version=1, editor version=1)` |
+ * | 50 ms elsewhere, 1000 ms after the restart only | 18.1 s, and the restart boot itself took ~36 s | same hook failed at 6689ms |
+ * | 1000 ms everywhere | 7.6 s                   | whole route green |
+ *
+ * The restart-only row matters as much as the first: the suites BEFORE a
+ * restart poll settles at the same rate, and their demand traffic is what the
+ * old server drains while the new one boots, so the cadence cannot be
+ * scoped to the restart window alone.
+ */
+export const DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS = 1_000;
+
 /** A test that awaits a hover and then a completion needs room for both. */
 export const IMPORTED_PROPS_TEST_TIMEOUT_MS = 30_000;
 
@@ -204,14 +230,18 @@ export const POLL_BUDGETS = {
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
   restartEntryDiagnostics: {
-    budgetMs: 30_000,
+    budgetMs: 40_000,
     parentTimeoutMs: 60_000,
     reason:
       "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
       "level-1 announcement, and the entry document's own merged diagnostics under its sync and " +
-      "import closure. It takes the cold root handshake's 30s and nothing wider: the restarted " +
-      "server certifies the entry while its workspace scan is still running, so neither the scan " +
-      "nor the replay of every held document is on this path",
+      "import closure — the WHOLE path, because the clock starts before the restart command. " +
+      "Measured at vue-parity@tsgo with a debug LSP: the restart alone (process spawn, pinned " +
+      "tsgo resolution, provider establish) took 6.5s on CI and 1.1-18s locally, and the entry's " +
+      "semantic readiness settles only once the restarted server's carrier pass completes " +
+      "(7.6-13.8s once the settle poll stopped starving it — DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS). " +
+      "30s held only healthy runners; 40s holds the loaded tail without touching the wider " +
+      "workspace handshake",
   },
   restartTypeProviderSync: {
     budgetMs: 45_000,
@@ -399,11 +429,12 @@ export const POLL_SEQUENCES = {
       "restartEntryDiagnostics",
       "waitForFileReady",
     ],
-    parentTimeoutMs: 90_000,
+    parentTimeoutMs: 120_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
       "server epoch: restart and entry diagnostics, then file ready — twice, in series, under its " +
-      "own 90s",
+      "own deadline. Two restarts mean two spawn-and-establish paths (each measured 6.5s on CI " +
+      "and up to ~18s locally), so the parent rose with `restartEntryDiagnostics`",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],
