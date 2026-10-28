@@ -283,6 +283,32 @@ pub(crate) fn clear() {
     });
 }
 
+/// Run `f` with no fact tracer or recorder installed, then restore the stack.
+///
+/// For work that serves the cache's own validation rather than the enclosing
+/// computation: whatever it reads is not a dependency of the answer being
+/// computed, so it must reach no enclosing read set.
+pub(crate) fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
+    type Suspended = (
+        SmallVec<[ActiveTracer; 8]>,
+        SmallVec<[*const FactReadRecorder; 4]>,
+    );
+    struct Restore(Option<Suspended>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some((tracers, recorders)) = self.0.take() {
+                ACTIVE_TRACERS.with(|slot| *slot.borrow_mut() = tracers);
+                ACTIVE_RECORDERS.with(|slot| *slot.borrow_mut() = recorders);
+            }
+        }
+    }
+    let _restore = Restore(Some((
+        ACTIVE_TRACERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+        ACTIVE_RECORDERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+    )));
+    f()
+}
+
 /// Return the top-of-stack tracer, or `None` when the stack is empty.
 ///
 /// Used by existing single-tracer callers that only need the innermost
@@ -305,6 +331,21 @@ pub fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
             _ => None,
         }
     })
+}
+
+/// Whether the innermost active tracer already holds `fact` — its own
+/// observation or an absorbed canonical run.
+///
+/// Every fact reaches the cells on the stack through one fan-out (down to
+/// the first delivering scope), so a fact the innermost scope holds
+/// arrived through a fan-out that reached every other active cell too: a
+/// producer that re-derives it can skip recording it again without
+/// leaving any enclosing scope's sealed signature without it.
+#[inline]
+pub(crate) fn tracer_holds_fact(
+    fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+) -> bool {
+    current_tracer().is_some_and(|tracer| tracer.holds(fact))
 }
 
 /// Fan an observed fact into every active tracer that must observe it (see
@@ -343,6 +384,20 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
             cell.observe(fact);
             return;
         }
+    }
+}
+
+/// [`observe_fan_out`] for a fact whose construction allocates: `make` runs
+/// only while a tracer or recorder is installed, so an unobserved read pays
+/// no allocation for a fact nobody receives.
+#[inline]
+pub(crate) fn observe_fan_out_lazy(make: impl FnOnce() -> FactVersionRef) {
+    let observed = ACTIVE_TRACERS.with(|slot| !slot.borrow().is_empty())
+        || ACTIVE_RECORDERS.with(|slot| !slot.borrow().is_empty());
+    if observed {
+        observe_fan_out(make());
+    } else {
+        verter_audit::attribute_n!(FactObserve, 1);
     }
 }
 

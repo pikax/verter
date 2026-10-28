@@ -3028,11 +3028,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         frame: &mut InstantiateFrame<'_, 'a, C>,
         output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
     ) -> QueryDelivery {
-        let finalise = frame
+        let mut tracer = frame
             .tracer
             .take()
-            .expect("a stepped frame owns its tracer")
-            .finish();
+            .expect("a stepped frame owns its tracer");
+        // Every retained family roots on the exact version each interned
+        // reference embeds, inside this build's tracer, as the synchronous
+        // cold build does.
+        if let QueryResult::Value(value) = &output.result {
+            let _scope = tracer.install();
+            self.observe_retained_reference_versions(value);
+        }
+        let finalise = tracer.finish();
         let (output, rooting) = self.close_cold_build(
             output,
             std::mem::take(&mut frame.taint),

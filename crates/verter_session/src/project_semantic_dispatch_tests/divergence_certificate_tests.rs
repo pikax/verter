@@ -20,13 +20,17 @@
 //! dependencies are its reads, so editing a helper the loop runs through
 //! retires it.
 //!
-//! Every checker answer below is TypeScript 7.0.2's (`tsc --noEmit
-//! --strict`): `Same<0>`, `Pair<0, 0>`, `Outer<0>`, `C<0>` over `H<T> = T`,
-//! `G<string>`, `O<{}>`, `W<number>` and `GL<[]>` report TS2589; `Cyc`
-//! reports TS2456; `Alt<0>` is `"end"`, `G<never>` is `never`, `K<0>` is
-//! `1`, `C<0>` over `H<T> = 1` is `1`, `Rep<3>["length"]` is `3`,
-//! `Stop<string>` is `"deep"` and `D<string>["a"]["a"]` is `D<[[string]]>`,
-//! each with no diagnostic.
+//! Every checker answer below is TypeScript 7.1.0-beta's (`tsc --noEmit
+//! --strict`): `Same<0>`, `Pair<0, 0>`, `Outer<0>` and `GL<[]>` report
+//! TS2589; the growing aliases behind `C<0>` over `H<T> = T`, `G<string>`,
+//! `O<{}>` and `W<number>` are reported at their declarations as TS5114
+//! ("Instantiations of type 'G' appear infinitely circular.", which 7.0.2
+//! reported as TS2589), with the same `any` recovery; the certified
+//! divergence still names TS2589, the semantic-difference ledger's open
+//! TS5114 row. `Cyc` reports TS2456; `Alt<0>` is `"end"`, `G<never>` is
+//! `never`, `K<0>` is `1`, `C<0>` over `H<T> = 1` is `1`,
+//! `Rep<3>["length"]` is `3`, `Stop<string>` is `"deep"` and
+//! `D<string>["a"]["a"]` is `D<[[string]]>`, each with no diagnostic.
 
 use super::checker_probe_lane_tests::{
     default_probe_host, mismatches_in_one_host, upsert_probe_files, with_probe_outcome_on_host,

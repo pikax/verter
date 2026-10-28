@@ -1435,6 +1435,14 @@ impl PreparedValueDeclCache {
     }
 }
 
+/// One run of an owner's import-route witness: the evidence the resolution
+/// of one authored specifier recorded, or the whole witness when no
+/// specifier attribution exists (`specifier: None`, always replayed).
+struct ResolutionWitnessSegment {
+    specifier: Option<String>,
+    facts: verter_session_query::facts::fact_set::FactSet,
+}
+
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -1444,6 +1452,9 @@ pub struct PreparedDeclBundle {
     /// The engine's input record, minted on first read after admission:
     /// its own cell, held by the bundle (see [`Held`]).
     input_projection: OnceLock<Held<verter_session_query::inputs::prepared::PreparedInputRecord>>,
+    /// Immutable producing route witnesses, replayed even on committed
+    /// declaration slots and request-memo/shared/follower bundle hits.
+    resolution_facts: OnceLock<Vec<ResolutionWitnessSegment>>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1477,12 +1488,20 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
     /// it fills ([`Held`]). The shared shallow state carries its own pin until its last artifact or
     /// bundle holder drops; the identity pool likewise charges its own cells.
     /// The bundle pays only for its handles to those shared owners.
+    ///
+    /// The sealed resolution-witness segments are the bundle's own
+    /// retention: their vector and specifier blocks are plain owned
+    /// allocations, and a narrow fact set's shared slice is charged by its
+    /// holder (only a wide tree-sealed set carries its own charge), so the
+    /// bundle charges the segment storage and every narrow set's slice and
+    /// fact heap here.
     fn heap_size<'t>(
         &'t self,
         meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
     ) -> usize {
         let Self {
             input_projection: _,
+            resolution_facts,
             account: _,
             owner_whole_hash: _,
             prepared_type_decls,
@@ -1490,10 +1509,30 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
             dep_edges,
             owner_scopes,
         } = self;
+        let segments = resolution_facts
+            .get()
+            .map(|segments| {
+                verter_retention::allocation::vec_bytes(segments)
+                    + segments
+                        .iter()
+                        .map(|segment| {
+                            segment
+                                .specifier
+                                .as_ref()
+                                .map_or(0, verter_retention::allocation::string_bytes)
+                                + verter_session_query::retention::allocation::fact_slice_bytes(
+                                    &segment.facts,
+                                    meter.handles(),
+                                )
+                        })
+                        .sum::<usize>()
+            })
+            .unwrap_or(0);
         prepared_type_decls.heap_size(meter)
             + prepared_value_decls.heap_size(meter)
             + dep_edges.heap_size(meter)
             + owner_scopes.heap_size(meter)
+            + segments
     }
 }
 
@@ -1606,6 +1645,86 @@ fn base_table_heap<'t>(
 }
 
 impl PreparedDeclBundle {
+    /// Seal the owner's whole witness as one unattributed run that every
+    /// read replays.
+    pub(crate) fn seal_resolution_facts(
+        &self,
+        policy: verter_session_query::facts::policy::FactPolicy,
+        witness: Option<Vec<verter_session_query::facts::fact_cache::FactVersionRef>>,
+    ) {
+        // A sealed set is replayed as one shared run per read, not fact by fact.
+        if let Some(witness) = witness {
+            let _ = self.resolution_facts.set(vec![ResolutionWitnessSegment {
+                specifier: None,
+                facts: policy.set_of(witness),
+            }]);
+        }
+    }
+
+    /// Seal the owner's witness grouped by the authored specifier whose
+    /// resolution recorded each run, so a declaration read replays only the
+    /// imports it uses.
+    pub(crate) fn seal_resolution_segments(
+        &self,
+        policy: verter_session_query::facts::policy::FactPolicy,
+        witness: Option<
+            Vec<(
+                String,
+                Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+            )>,
+        >,
+    ) {
+        if let Some(witness) = witness {
+            let _ = self.resolution_facts.set(
+                witness
+                    .into_iter()
+                    .map(|(specifier, facts)| ResolutionWitnessSegment {
+                        specifier: Some(specifier),
+                        facts: policy.set_of(facts),
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    /// Observe the owner's whole import-route witness, for a read whose
+    /// import use is not known.
+    pub(crate) fn observe_read(&self) {
+        self.observe_read_of(|_| true);
+    }
+
+    /// Observe the witness of exactly the imports `deps` names, for a read
+    /// of one declaration: its prepared cross-file dependencies are the
+    /// complete frontier of the imports it uses.
+    pub(crate) fn observe_read_for(&self, deps: &[PreparedExternalDep]) {
+        self.observe_read_of(|specifier| deps.iter().any(|dep| dep.source_specifier == specifier));
+    }
+
+    fn observe_read_of(&self, uses_specifier: impl Fn(&str) -> bool) {
+        super::owned_lowering_port::observe_whole_content(
+            &self.prepared_type_decls.canonical_id,
+            self.owner_whole_hash,
+        );
+        if let Some(segments) = self.resolution_facts.get() {
+            for segment in segments {
+                if segment.specifier.as_deref().is_none_or(&uses_specifier) {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                        &segment.facts,
+                    );
+                }
+            }
+        } else if !self
+            .prepared_type_decls
+            .state
+            .owner_import_targets
+            .is_empty()
+        {
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
+            );
+        }
+    }
+
     pub(crate) fn input_record(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
         if let Some(record) = self.input_projection.get() {
             return record.value.clone();
@@ -1762,6 +1881,7 @@ pub fn build_prepared_decl_bundle(
     let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
         input_projection: OnceLock::new(),
+        resolution_facts: OnceLock::new(),
         account: StoreAccount::default(),
         owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(

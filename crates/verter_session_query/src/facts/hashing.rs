@@ -51,7 +51,7 @@ use verter_type_expr::{
 
 use crate::analysis::types::hash_16;
 use crate::declarations::{EnumMemberValue, FunctionSignature, ValueDeclKind};
-use crate::facts::registry::{FactHash, MemberKind, SymbolSpace};
+use crate::facts::registry::{FactHash, FactLane, MemberKind, SymbolSpace};
 
 /// Depth budget per R27. A walk that hits this depth emits
 /// `Opaque(BudgetExceeded)` and the cache entry is admitted as
@@ -213,6 +213,21 @@ pub fn compute_semantic_hash(
     lens: &dyn CrossDeclLens,
 ) -> HashOutcome {
     let mut walker = Walker::new(lens, space);
+    walker.walk(body);
+    walker.finish()
+}
+
+/// Display-bearing structural evidence uses the same bounded grammar and
+/// reference lens as semantic evidence, adding names retained by graph
+/// payloads. Source coordinates and function bodies are not display inputs.
+pub fn compute_display_hash(
+    body: &TypeExpr,
+    space: SymbolSpace,
+    lens: &dyn CrossDeclLens,
+) -> HashOutcome {
+    let mut walker = Walker::new(lens, space);
+    walker.lane = FactLane::Display;
+    walker.buf.extend_from_slice(b"display-type:");
     walker.walk(body);
     walker.finish()
 }
@@ -550,6 +565,7 @@ struct Walker<'a> {
     budget_exceeded: bool,
     lens: &'a dyn CrossDeclLens,
     default_space: SymbolSpace,
+    lane: FactLane,
     type_param_frame: Vec<Vec<Arc<str>>>,
     /// Owned by the computation's root walker and shared with every
     /// scratch walker it spawns; dropped when the computation returns.
@@ -574,6 +590,7 @@ impl<'a> Walker<'a> {
             budget_exceeded: false,
             lens,
             default_space,
+            lane: FactLane::Semantic,
             type_param_frame: Vec::new(),
             member_sort_keys,
         }
@@ -601,6 +618,7 @@ impl<'a> Walker<'a> {
             self.default_space,
             std::rc::Rc::clone(&self.member_sort_keys),
         );
+        scratch.lane = self.lane;
         scratch.write_object_member(member);
         let key: Arc<[u8]> = Arc::from(std::mem::take(&mut scratch.buf).into_boxed_slice());
         self.member_sort_keys
@@ -1239,7 +1257,8 @@ impl<'a> Walker<'a> {
         self.buf.push(0x62);
         self.buf.push(u8::from(sig.readonly));
         // `key_name` is display-only (`[k: string]` vs `[x: string]`
-        // is the same type). Hash only the structural pieces.
+        // is the same type). Only the display lane records its spelling.
+        self.write_cosmetic_name(Some(&sig.key_name));
         self.walk_node(&sig.key_type);
         self.buf.push(0xFE);
         self.walk_node(&sig.value_type);
@@ -1301,11 +1320,23 @@ impl<'a> Walker<'a> {
         self.type_param_frame.pop();
     }
 
+    fn write_cosmetic_name(&mut self, name: Option<&str>) {
+        if self.lane == FactLane::Display {
+            self.buf.push(u8::from(name.is_some()));
+            if let Some(name) = name {
+                self.buf
+                    .extend_from_slice(&(name.len() as u64).to_le_bytes());
+                self.buf.extend_from_slice(name.as_bytes());
+            }
+        }
+    }
+
     fn write_parameter(&mut self, p: &FunctionParam) {
         // Parameter names are display-only; alpha-normalise to slot
         // index, NOT to the source identifier (R16 cosmetic-
         // invariance for parameter rename).
         self.buf.push(0x71);
+        self.write_cosmetic_name(p.name.as_deref());
         self.buf.push(u8::from(p.optional));
         self.buf.push(u8::from(p.rest));
         self.walk_node(&p.ty);
@@ -1316,6 +1347,7 @@ impl<'a> Walker<'a> {
         // Lock in the constraint / default shape but rename the
         // parameter to its binder-relative slot.
         self.buf.push(0x72);
+        self.write_cosmetic_name(Some(&p.name));
         if let Some(c) = &p.constraint {
             self.buf.push(1);
             self.walk_node(c);
@@ -1335,6 +1367,7 @@ impl<'a> Walker<'a> {
         self.buf.push(u8::from(tuple_elem.optional));
         self.buf.push(u8::from(tuple_elem.rest));
         // Label is display-only.
+        self.write_cosmetic_name(tuple_elem.label.as_deref());
         self.walk_node(&tuple_elem.ty);
         self.buf.push(0xFD);
     }

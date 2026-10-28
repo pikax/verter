@@ -76,6 +76,10 @@
     "reason": "Runs on its own trigger; no ci.yml job reads the file."
   },
   {
+    "glob": ".github/workflows/perturbation.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
     "glob": "tests/component-workbench/CWB0/contract.md",
     "reason": "Component-workbench contract prose; no ci.yml job reads its contents."
   },

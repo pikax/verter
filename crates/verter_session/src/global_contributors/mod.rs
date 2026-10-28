@@ -403,7 +403,7 @@ impl GlobalContributorPopulation {
                     (
                         rank(entry.canonical()),
                         Arc::clone(entry.canonical()),
-                        entry.parse_stable_hash,
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         AugmentationCandidate::Augmenter(i),
                     )
                 })
@@ -435,7 +435,7 @@ impl GlobalContributorPopulation {
                     (
                         rank(&entry.artifact_key.canonical),
                         Arc::clone(&entry.artifact_key.canonical),
-                        entry.parse_stable_hash,
+                        entry.owner,
                         AugmentationCandidate::FileScope(i),
                     )
                 })
@@ -641,7 +641,6 @@ fn compare_contributors(a: &ContributorEntry, b: &ContributorEntry) -> std::cmp:
         .canonical
         .as_ref()
         .cmp(b.artifact_key.canonical.as_ref())
-        .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
         .then_with(|| a.owner.cmp(&b.owner))
         .then_with(|| a.space.tag().cmp(&b.space.tag()))
 }

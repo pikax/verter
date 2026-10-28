@@ -98,6 +98,7 @@ fn rejected_guarded_augmenter_install_flushes_contributors_completed_meanwhile()
             entries: smallvec::smallvec![],
             fingerprint: [4u8; 16],
         }),
+        None,
         |_| {
             // The guarded install's epoch is in flight here.
             store.insert(Arc::from("/globals.d.ts"), indexed);
@@ -277,9 +278,15 @@ fn convenience_reads_do_not_serve_a_same_content_different_profile() {
     healing.insert_artifacts(current_wrong_profile, synth_artifacts(0x42));
     assert!(
         healing
-            .augmenter_artifacts_self_healing(&old_requested, [0x42; 16])
+            .augmenter_artifacts_for_served_identity(
+                &old_requested,
+                &FileArtifactKey {
+                    content_hash: [0x42; 16],
+                    ..old_requested.clone()
+                }
+            )
             .is_none(),
-        "self-healing must not replace a captured default-profile key with another profile"
+        "an exact current identity must not serve another parser profile"
     );
 }
 
@@ -585,6 +592,7 @@ fn augmentation_index_round_trip() {
     };
     let set = Arc::new(AugmenterSet {
         entries: smallvec![AugmenterEntry {
+            population_hash: [0; 16],
             artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }],
@@ -1116,6 +1124,7 @@ fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
     let make_set = |fingerprint: Hash16| {
         Arc::new(AugmenterSet {
             entries: smallvec![AugmenterEntry {
+                population_hash: [0; 16],
                 artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
                 parse_stable_hash: [3u8; 16],
             }],
@@ -1173,6 +1182,7 @@ fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
     };
     let set = |content_hash: Hash16, fingerprint: Hash16| AugmenterSet {
         entries: smallvec![AugmenterEntry {
+            population_hash: [0; 16],
             artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), content_hash),
             parse_stable_hash: [3u8; 16],
         }],
@@ -1223,7 +1233,7 @@ fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
     // guard, so a set superseded after a caller's look still is not written.
     assert!(
         store
-            .install_augmenter_set_if(key.clone(), Arc::new(served.clone()), |held| {
+            .install_augmenter_set_if(key.clone(), Arc::new(served.clone()), None, |held| {
                 held.is_some_and(|held| held.fingerprint == served.fingerprint)
             })
             .is_none(),
@@ -1731,6 +1741,7 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
         key.clone(),
         Arc::new(AugmenterSet {
             entries: smallvec![AugmenterEntry {
+                population_hash: [0; 16],
                 artifact_key: FileArtifactKey::base_for_test(
                     Arc::from("/src/pkg/aug.ts"),
                     [9u8; 16]
@@ -1977,7 +1988,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
                 ModuleAugmentationFact {
                     specifier: InternedSpecifier::from("./dep"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    augmented_name: InternedName::from("Augmented"),
+                    augmented_name: InternedName::from("Changed"),
                     space: SymbolSpace::Type,
                     // CHANGED member-shape fingerprint → genuine contribution change.
                     augmented_member_shape_fingerprint: [0x77u8; 16],
@@ -2002,183 +2013,297 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
 }
 
 #[test]
-fn parse_stable_hash_change_with_same_facts_invalidates_augmentation_index_and_bumps() {
-    // DISCRIMINATING (the [P2] under-invalidation arm): replace an augmenter
-    // with the IDENTICAL `ModuleAugmentationFact` set but a DIFFERENT
-    // `parse_stable_hash`. `parse_stable_hash` (with the augmenter canonical)
-    // is folded into `compute_augmenter_set_fingerprint`, so a populated index
-    // row this augmenter contributes to now carries a STALE fingerprint and
-    // MUST be invalidated (so the next cold rescan re-folds the new hash) and
-    // the base-folded `artifact_generation` MUST advance.
-    //
-    // PRE-FIX (`augmentation_contribution_equivalent` compared only the fact
-    // multiset): SAME facts → predicate returns `true` → invalidation skipped →
-    // the stale-fingerprint row survives and `artifact_generation` does NOT
-    // bump, so BOTH assertions below fail.
-    // POST-FIX (equivalence derives from the fingerprint inputs, i.e. also
-    // `parse_stable_hash`): a `parse_stable_hash` change is NOT equivalent → the
-    // row is invalidated and the generation bumps.
+fn parse_stable_hash_change_with_same_membership_preserves_augmentation_population() {
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0xA9; 16]);
     store.insert_artifacts(
         aug_key.clone(),
-        synth_relative_augmenter_artifacts([0x11u8; 16]),
+        synth_relative_augmenter_artifacts([0x11; 16]),
     );
-
     let target = relative_dep_target_key();
-    let _ =
+    let population =
         store.ensure_augmentation_index_populated(&target, |_, _| Some(Arc::from("/dep")), None);
-    assert_eq!(
-        store.augmentation_index_len(),
-        1,
-        "precondition: index populated"
-    );
-
     let before = store.artifact_generation();
-    // SAME facts (identical specifier / name / space / member-shape fingerprint),
-    // DIFFERENT `parse_stable_hash` — a decl-skeleton edit that moves the
-    // fingerprint without changing the augmenter's declared target membership.
-    store.insert_artifacts(aug_key, synth_relative_augmenter_artifacts([0x22u8; 16]));
-    assert!(
-        store.artifact_generation() > before,
-        "REGRESSION (augmentation under-invalidation): an augmenter replaced with the SAME facts \
-         but a DIFFERENT parse_stable_hash did NOT advance artifact_generation — the no-op gate \
-         compared only the fact multiset, not the parse_stable_hash that feeds the \
-         AugmenterSet fingerprint, so the stale-fingerprint index row keeps validating until an \
-         unrelated invalidation lands"
-    );
+    store.insert_artifacts(aug_key, synth_relative_augmenter_artifacts([0x22; 16]));
     assert_eq!(
-        store.augmentation_index_len(),
-        0,
-        "REGRESSION (augmentation under-invalidation): the stale-fingerprint index row survived a \
-         parse_stable_hash change — equivalence MUST be derived from the fingerprint inputs \
-         (canonical + parse_stable_hash), not the fact multiset alone, so the next cold rescan \
-         re-folds the new parse_stable_hash"
+        store.artifact_generation(),
+        before,
+        "content metadata is not population evidence"
+    );
+    let retained = store
+        .get_augmenter_set(&target)
+        .expect("same membership retains its row");
+    assert_eq!(population.fingerprint, retained.fingerprint);
+}
+
+#[test]
+fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
+    use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::source::augmentation::augmentation_population_hash;
+    let fingerprint = |art: &FileArtifacts| {
+        super::compute_augmenter_set_fingerprint(&[AugmenterEntry {
+            artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9; 16]),
+            population_hash: augmentation_population_hash(art.augmentations.iter()),
+            parse_stable_hash: art.parse_stable_hash,
+        }])
+    };
+    let base = synth_relative_augmenter_artifacts([0x11; 16]);
+    let mut edited = (*base).clone();
+    edited.parse_stable_hash = [0x22; 16];
+    let mut facts = edited.augmentations.to_vec();
+    facts[0].augmented_member_shape_fingerprint = [0x77; 16];
+    edited.augmentations = Arc::new(verter_retention::pinned_heap::SelfPinned::new(facts));
+    assert!(super::augmentation_contribution_equivalent(&base, &edited));
+    assert_eq!(
+        fingerprint(&base),
+        fingerprint(&edited),
+        "content and member headers are not population evidence"
+    );
+    for axis in 0..5 {
+        let mut changed = (*base).clone();
+        let mut facts = changed.augmentations.to_vec();
+        match axis {
+            0 => facts[0].owner = verter_type_expr::TopLevelOwnerId::instance(0),
+            1 => facts[0].specifier = InternedSpecifier::from("./other"),
+            2 => facts[0].augmented_name = InternedName::from("Other"),
+            3 => facts[0].space = SymbolSpace::Value,
+            _ => {
+                facts[0].declaring_file =
+                    verter_session_query::inputs::contributors::FileModuleKind::Script
+            }
+        }
+        changed.augmentations = Arc::new(verter_retention::pinned_heap::SelfPinned::new(facts));
+        assert!(
+            !super::augmentation_contribution_equivalent(&base, &changed),
+            "population axis {axis}"
+        );
+        assert_ne!(
+            fingerprint(&base),
+            fingerprint(&changed),
+            "population axis {axis}"
+        );
+    }
+}
+
+#[test]
+fn augmentation_population_ignores_contributor_body_and_skeleton_content() {
+    use verter_session_query::resolution::AugmenterEntry;
+    let entry = |canonical: &str, content: u8| AugmenterEntry {
+        population_hash: [0; 16],
+        artifact_key: FileArtifactKey::base_for_test(Arc::from(canonical), [content; 16]),
+        parse_stable_hash: [content; 16],
+    };
+    let before = vec![entry("/a.ts", 1), entry("/b.ts", 2)];
+    let edited = vec![entry("/a.ts", 3), entry("/b.ts", 4)];
+    assert_eq!(
+        super::compute_augmenter_set_fingerprint(&before),
+        super::compute_augmenter_set_fingerprint(&edited),
+        "same contributor membership and order, different authored content"
+    );
+    assert_ne!(
+        super::compute_augmenter_set_fingerprint(&before),
+        super::compute_augmenter_set_fingerprint(&before[..1]),
+        "removal changes the population"
+    );
+    let reversed = vec![before[1].clone(), before[0].clone()];
+    assert_ne!(
+        super::compute_augmenter_set_fingerprint(&before),
+        super::compute_augmenter_set_fingerprint(&reversed),
+        "order remains evidence"
+    );
+    assert!(super::augmentation_contribution_equivalent(
+        &synth_relative_augmenter_artifacts([1; 16]),
+        &synth_relative_augmenter_artifacts([2; 16]),
+    ));
+}
+
+#[test]
+fn augmentation_population_selects_overlay_before_matching_including_empty_overlays() {
+    for overlay in [
+        synth_artifacts(9),
+        synth_augmenter_artifacts_for_specifier("other", [9; 16]),
+    ] {
+        let store = FileArtifactStore::new();
+        let base = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [7; 16]);
+        let discriminator = [0x77; 16];
+        let overlay_key = FileArtifactKey {
+            parse_env_hash: discriminator,
+            ..base.clone()
+        };
+        store.insert_artifacts(base, synth_relative_augmenter_artifacts([1; 16]));
+        store.insert_artifacts(overlay_key, overlay);
+        let mut target = relative_dep_target_key();
+        target.population = crate::file_artifact_store::AugmentationPopulation::Session(7);
+        let set = store.ensure_augmentation_index_populated(
+            &target,
+            |_, spec| Some(Arc::from(if spec == "./dep" { "/dep" } else { "/other" })),
+            Some(discriminator),
+        );
+        assert!(set.entries.is_empty(), "a session overlay shadows the base before target matching, including when it has no augmentation facts");
+        let base_set = store.ensure_augmentation_index_populated(
+            &relative_dep_target_key(),
+            |_, _| Some(Arc::from("/dep")),
+            None,
+        );
+        assert_eq!(
+            base_set.entries.len(),
+            1,
+            "the unaffected base population remains intact"
+        );
+    }
+}
+
+#[test]
+fn augmentation_source_selection_does_not_serve_unrelated_noncontributors() {
+    use crate::host_manage::source_augmentation::{AugmentationRequestDriver, AugmentationTarget};
+    let store = FileArtifactStore::new();
+    let aug = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [1; 16]);
+    let unrelated = FileArtifactKey::base_for_test(Arc::from("/unrelated.ts"), [2; 16]);
+    store.insert_artifacts(aug.clone(), synth_relative_augmenter_artifacts([3; 16]));
+    store.insert_artifacts(unrelated.clone(), synth_artifacts(2));
+    let visited = std::cell::RefCell::new(Vec::new());
+    let current = |canonical: &str| {
+        visited.borrow_mut().push(canonical.to_owned());
+        Some(if canonical == "/aug.ts" {
+            aug.clone()
+        } else {
+            unrelated.clone()
+        })
+    };
+    let set = AugmentationRequestDriver::new(&store).ensure_populated(
+        &relative_dep_target_key(),
+        |_, _| AugmentationTarget::admitted(Some(Arc::from("/dep"))),
+        None,
+        Some(&current),
+    );
+    assert_eq!(set.entries.len(), 1);
+    assert_eq!(
+        &*visited.borrow(),
+        &["/aug.ts"],
+        "target matching must not materialize unrelated noncontributors"
     );
 }
 
-// ── Lockstep invariant: the augmentation no-op equivalence predicate is
-//    derived from the SAME inputs that determine the `AugmenterSet`
-//    fingerprint, so it can never drift (too loose → under-invalidate, or
-//    too tight → over-invalidate). Two artifacts differing ONLY in
-//    `parse_stable_hash` (a fingerprint input) must BOTH be non-equivalent
-//    under the predicate AND produce different fingerprints; identical
-//    fingerprint inputs must be equivalent. The predicate and
-//    `compute_augmenter_set_fingerprint` are checked together so the two
-//    definitions stay in lockstep. ──
 #[test]
-fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
-    use smallvec::smallvec;
-
-    use super::{augmentation_contribution_equivalent, compute_augmenter_set_fingerprint};
-    use verter_session_query::resolution::AugmenterEntry;
-    use verter_session_query::source::artifact_key::FileArtifactKey;
-
-    // Helper: the single fingerprint input that varies per augmenter at a
-    // fixed canonical is `parse_stable_hash`. Build the one-entry augmenter
-    // set the index would fold for a `/aug.ts` augmenter at a given hash.
-    let canonical: Arc<str> = Arc::from("/aug.ts");
-    let fingerprint_for = |parse_stable_hash: Hash16| -> Hash16 {
-        let entries: smallvec::SmallVec<[AugmenterEntry; 2]> = smallvec![AugmenterEntry {
-            artifact_key: FileArtifactKey::base_for_test(Arc::clone(&canonical), [9u8; 16]),
-            parse_stable_hash,
-        }];
-        compute_augmenter_set_fingerprint(&entries)
+fn unavailable_known_augmenter_cannot_publish_an_empty_population() {
+    use crate::host_manage::source_augmentation::{AugmentationRequestDriver, AugmentationTarget};
+    let store = FileArtifactStore::new();
+    let aug = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [1; 16]);
+    store.insert_artifacts(aug, synth_relative_augmenter_artifacts([3; 16]));
+    let target = relative_dep_target_key();
+    let before =
+        store.ensure_augmentation_index_populated(&target, |_, _| Some(Arc::from("/dep")), None);
+    assert_eq!(before.entries.len(), 1);
+    let unavailable = |canonical: &str| {
+        // Storage can retire while source authority is unavailable. Absence
+        // from the candidate map is not evidence of source-world deletion.
+        store.remove_canonical(canonical);
+        None
     };
-
-    let base = synth_relative_augmenter_artifacts([0x11u8; 16]);
-    let same = synth_relative_augmenter_artifacts([0x11u8; 16]);
-    let diff_hash = synth_relative_augmenter_artifacts([0x22u8; 16]);
-
-    // Identical fingerprint inputs (same facts, same parse_stable_hash) →
-    // equivalent AND identical fingerprint.
+    let answer = AugmentationRequestDriver::new(&store).ensure_populated(
+        &target,
+        |_, _| AugmentationTarget::admitted(Some(Arc::from("/dep"))),
+        None,
+        Some(&unavailable),
+    );
+    assert!(answer.entries.is_empty());
     assert!(
-        augmentation_contribution_equivalent(&base, &same),
-        "identical facts + identical parse_stable_hash MUST be equivalent (no over-invalidation; \
-         preserves the no-op perf win)"
+        store.get_augmenter_set(&target).is_none(),
+        "an unavailable known source must leave its computed empty answer return-only"
     );
-    assert_eq!(
-        fingerprint_for([0x11u8; 16]),
-        fingerprint_for([0x11u8; 16]),
-        "fingerprint MUST be stable for identical inputs"
-    );
+}
 
-    // Differ ONLY in parse_stable_hash (a fingerprint input) → NOT equivalent
-    // AND different fingerprint. This is the lockstep guard: if the predicate
-    // stopped tracking parse_stable_hash it would return `true` here while the
-    // fingerprint still differs — the exact [P2] under-invalidation drift.
-    assert!(
-        !augmentation_contribution_equivalent(&base, &diff_hash),
-        "a parse_stable_hash change MUST NOT be equivalent — it changes the AugmenterSet \
-         fingerprint, so the predicate must track it (lockstep with the fingerprint definition)"
-    );
-    assert_ne!(
-        fingerprint_for([0x11u8; 16]),
-        fingerprint_for([0x22u8; 16]),
-        "a parse_stable_hash change MUST change the fingerprint — confirms parse_stable_hash is a \
-         genuine fingerprint input, so the predicate's non-equivalence above is required, not \
-         spurious"
-    );
+#[test]
+fn raced_new_augmenter_cannot_publish_an_empty_or_partial_population() {
+    use crate::host_manage::source_augmentation::{AugmentationRequestDriver, AugmentationTarget};
+    for initial_specifier in ["./else", "./dep"] {
+        let store = FileArtifactStore::new();
+        let first = FileArtifactKey::base_for_test(Arc::from("/first.ts"), [1; 16]);
+        let added = FileArtifactKey::base_for_test(Arc::from("/added.ts"), [2; 16]);
+        store.insert_artifacts(
+            first.clone(),
+            synth_augmenter_artifacts_for_specifier(initial_specifier, [1; 16]),
+        );
+        let injected = std::cell::Cell::new(false);
+        let current = |canonical: &str| {
+            if !injected.replace(true) {
+                // The new candidate invalidates no row yet: target discovery
+                // took its candidate snapshot before entering this callback.
+                store.insert_artifacts(added.clone(), synth_relative_augmenter_artifacts([2; 16]));
+            }
+            Some(if canonical == first.canonical.as_ref() {
+                first.clone()
+            } else {
+                added.clone()
+            })
+        };
+        let resolve = |_: &str, specifier: &str| {
+            AugmentationTarget::admitted(Some(Arc::from(if specifier == "./dep" {
+                "/dep"
+            } else {
+                "/else"
+            })))
+        };
+        let target = relative_dep_target_key();
+        let raced = AugmentationRequestDriver::new(&store).ensure_populated(
+            &target,
+            resolve,
+            None,
+            Some(&current),
+        );
+        assert_eq!(
+            raced.entries.len(),
+            usize::from(initial_specifier == "./dep")
+        );
+        assert!(
+            store.get_augmenter_set(&target).is_none(),
+            "an empty or partial scan racing a new canonical cannot poison the shared population"
+        );
+        let settled = AugmentationRequestDriver::new(&store).ensure_populated(
+            &target,
+            resolve,
+            None,
+            Some(&current),
+        );
+        assert_eq!(
+            settled.entries.len(),
+            1 + usize::from(initial_specifier == "./dep")
+        );
+        assert!(
+            store.get_augmenter_set(&target).is_some(),
+            "the stable authoritative rescan admits normally"
+        );
+    }
+}
 
-    // Differ in facts only (member-shape fingerprint) → NOT equivalent
-    // (target-membership / contribution change). The fingerprint inputs here
-    // are unchanged, but the fact multiset governs which index rows the
-    // augmenter contributes to, so a fact change must still invalidate.
-    let diff_facts = {
-        use super::FileFacts;
-        use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
-        use verter_session_query::source::augmentation::ModuleAugmentationFact;
-        Arc::new(FileArtifacts {
-            storage: Default::default(),
-            indexed: synth_indexed(0xA9),
-            facts: Arc::new(FileFacts::empty()),
-            parse_stable_hash: [0x11u8; 16],
-            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(vec![
-                ModuleAugmentationFact {
-                    specifier: InternedSpecifier::from("./dep"),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    augmented_name: InternedName::from("Augmented"),
-                    space: SymbolSpace::Type,
-                    augmented_member_shape_fingerprint: [0x77u8; 16],
-                    declaring_file:
-                        verter_session_query::inputs::contributors::FileModuleKind::Module,
-                },
-            ])),
-        })
-    };
-    assert!(
-        !augmentation_contribution_equivalent(&base, &diff_facts),
-        "a fact-set change MUST NOT be equivalent — it can change which index rows the augmenter \
-         contributes to"
-    );
-
-    let diff_owner = {
-        use super::FileFacts;
-        use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
-        use verter_session_query::source::augmentation::ModuleAugmentationFact;
-        Arc::new(FileArtifacts {
-            storage: Default::default(),
-            indexed: synth_indexed(0xA9),
-            facts: Arc::new(FileFacts::empty()),
-            parse_stable_hash: [0x11u8; 16],
-            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(vec![
-                ModuleAugmentationFact {
-                    specifier: InternedSpecifier::from("./dep"),
-                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    augmented_name: InternedName::from("Augmented"),
-                    space: SymbolSpace::Type,
-                    augmented_member_shape_fingerprint: [0u8; 16],
-                    declaring_file:
-                        verter_session_query::inputs::contributors::FileModuleKind::Module,
-                },
-            ])),
-        })
-    };
-    assert!(
-        !augmentation_contribution_equivalent(&base, &diff_owner),
-        "moving an otherwise identical augmentation between lexical owners changes its exact \
-         contribution"
-    );
+#[test]
+fn augmentation_population_refuses_inflight_and_exhausted_membership() {
+    use crate::host_manage::source_augmentation::{AugmentationRequestDriver, AugmentationTarget};
+    for exhausted in [false, true] {
+        let store = FileArtifactStore::new();
+        let aug = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [1; 16]);
+        store.insert_artifacts(aug.clone(), synth_relative_augmenter_artifacts([3; 16]));
+        let in_flight = (!exhausted).then(|| store.reserve_membership_epoch());
+        if exhausted {
+            store
+                .membership_epoch
+                .store(super::EXHAUSTED_EPOCH, std::sync::atomic::Ordering::Release);
+        }
+        let target = relative_dep_target_key();
+        let answer = AugmentationRequestDriver::new(&store).ensure_populated(
+            &target,
+            |_, _| AugmentationTarget::admitted(Some(Arc::from("/dep"))),
+            None,
+            Some(&|_| Some(aug.clone())),
+        );
+        assert_eq!(answer.entries.len(), 1);
+        assert!(
+            store.get_augmenter_set(&target).is_none(),
+            "unsettled or exhausted membership cannot certify population publication"
+        );
+        drop(in_flight);
+    }
 }
 
 // ── Per-canonical read-surface parity battery ──
@@ -2857,6 +2982,7 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
     let target = relative_dep_target_key();
     let set = Arc::new(AugmenterSet {
         entries: smallvec![AugmenterEntry {
+            population_hash: [0; 16],
             artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }] as SmallVec<[AugmenterEntry; 2]>,
@@ -2917,6 +3043,7 @@ fn removing_one_canonical_keeps_unrelated_augmenter_sets() {
         Arc::new(AugmenterSet {
             entries: smallvec![AugmenterEntry {
                 artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
+                population_hash: [0; 16],
                 parse_stable_hash: [3u8; 16],
             }] as SmallVec<[AugmenterEntry; 2]>,
             fingerprint: [0xaa; 16],

@@ -11,6 +11,10 @@ pub struct ImportRouteObservation {
     pub refused: bool,
     pub unretained: bool,
     pub observed: Vec<FactVersionRef>,
+    /// The span of `observed` each authored specifier's resolution recorded,
+    /// in resolution order. A specifier resolved more than once appears once
+    /// per resolution.
+    pub segments: Vec<(String, std::ops::Range<usize>)>,
 }
 
 /// The identity of one witness build within a request: the host, the

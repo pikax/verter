@@ -430,6 +430,30 @@ pub fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersio
     tracer_stack::observe_fan_out(fact);
 }
 
+/// Whether the innermost active tracer already holds `fact` (its own
+/// observation or an absorbed canonical run), so a producer re-deriving it
+/// can skip fanning it out again: it reached every active cell when it was
+/// first recorded. `false` when no tracer is installed.
+#[inline]
+pub fn tracer_holds_fact(fact: &verter_session_query::facts::fact_cache::FactVersionRef) -> bool {
+    tracer_stack::tracer_holds_fact(fact)
+}
+
+/// Run `f` with every installed fact tracer and recorder suspended: what it
+/// reads serves cache validation and is no dependency of the enclosing
+/// computation.
+pub fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
+    tracer_stack::without_fact_observers(f)
+}
+
+/// [`observe_fan_out`] that builds the fact only when an observer is installed.
+#[inline]
+pub fn observe_fan_out_lazy(
+    make: impl FnOnce() -> verter_session_query::facts::fact_cache::FactVersionRef,
+) {
+    tracer_stack::observe_fan_out_lazy(make);
+}
+
 /// Record that the active computation ordered declarations by `order`, so
 /// its result misses once the program lists its files differently. No-op
 /// for a file no program owns.

@@ -36,7 +36,6 @@ use smallvec::SmallVec;
 use verter_language::FileLanguage;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::registry as fact_registry;
-use verter_type_expr::TopLevelOwnerId;
 
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
@@ -248,24 +247,6 @@ pub use verter_session_query::resolution::{
 };
 use verter_session_query::resolution::{AugmenterEntry, AugmenterSet};
 
-/// An owned snapshot of one base artifact's augmenter-relevant fields,
-/// captured off the `self.artifacts` DashMap so the augmenter match
-/// (and any resolver it invokes) runs after every shard guard is
-/// released. See [`FileArtifactStore::collect_base_augmenter_candidates`].
-pub(crate) struct AugmenterCandidate {
-    /// Exact content-addressed key of the candidate augmenter artifact.
-    pub(crate) artifact_key: FileArtifactKey,
-    /// The candidate's canonical id (also reachable via `artifact_key`,
-    /// kept alongside to avoid re-borrowing through the key on the hot
-    /// match loop).
-    pub(crate) canonical: Arc<str>,
-    /// `parse_stable_hash` folded into the augmenter-set fingerprint.
-    pub(crate) parse_stable_hash: Hash16,
-    /// The candidate's augmentation facts. Cloned `Arc` — a cheap
-    /// refcount bump, not a deep copy.
-    pub(crate) augmentations: verter_session_query::source::augmentation::ArtifactAugmentations,
-}
-
 // ── FileArtifacts ──
 
 /// The per-file payload stored under [`FileArtifactKey`].
@@ -423,93 +404,13 @@ fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool 
         && prev.facts == next.facts
 }
 
-/// `true` when replacing the augmenter artifact `prev` with `next` cannot
-/// change ANY augmentation-index entry the augmenter participates in — i.e.
-/// it produces the IDENTICAL `AugmenterSet` contribution for every target.
-///
-/// Two orthogonal inputs determine that contribution, and BOTH must be
-/// unchanged for a true no-op:
-///
-/// 1. **Which target rows the augmenter contributes to** — governed by the
-///    `ModuleAugmentationFact` multiset (via [`augmenter_fact_could_contribute`]
-///    / [`augmenter_matches_target`]). A retargeted specifier, an
-///    added/removed augmented binding, or a changed
-///    `augmented_member_shape_fingerprint` changes the multiset.
-/// 2. **The fingerprint baked into each contributed row** — the row's
-///    [`AugmenterSet::fingerprint`] is [`compute_augmenter_set_fingerprint`]
-///    folded over each contributing augmenter's
-///    `(augmenter_canonical, parse_stable_hash)`. The fact multiset is NOT a
-///    fingerprint input. So an augmenter whose facts are unchanged but whose
-///    `parse_stable_hash` moved (a decl-skeleton edit reparsed under a new
-///    `FileArtifactKey`) still changes every contributed row's fingerprint.
-///
-/// The insert paths gate
-/// [`FileArtifactStore::invalidate_augmentation_index_for_augmenter`] on this
-/// equivalence so a byte-identical augmenter reinsert neither invalidates nor
-/// bumps the base-folded `artifact_generation` (the no-op perf win), while any
-/// real contribution change still invalidates the stale rows and bumps.
-///
-/// ## Soundness (no under-invalidation, no drift)
-///
-/// Equivalence is derived from the EXACT inputs that determine the contribution,
-/// not a hand-picked subset, so it cannot drift loose from the fingerprint
-/// definition (the [P2] under-invalidation class). The `parse_stable_hash`
-/// gate is the SAME value [`compute_augmenter_set_fingerprint`] folds; the
-/// augmenter canonical — the fingerprint's only other input — is identical at
-/// every call site (an augmenter artifact only ever replaces itself at its own
-/// canonical), so comparing `parse_stable_hash` here is exactly comparing the
-/// per-augmenter fingerprint contribution. The fact compare is order-
-/// INDEPENDENT (a multiset over the six fact dimensions) and CONSERVATIVE:
-/// any genuine membership change makes the multisets differ. The lockstep unit
-/// invariant
-/// `file_artifact_store_tests::augmentation_contribution_equivalence_tracks_fingerprint_inputs`
-/// pins this predicate to [`compute_augmenter_set_fingerprint`] so the two
-/// definitions cannot diverge.
+/// Whether replacing one file changes no augmentation binding membership.
+/// Body/header content is validated at its exact consuming port. Ownership,
+/// scope, binding and symbol-space membership remain population evidence.
 fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool {
-    // (2) Fingerprint contribution: `parse_stable_hash` is folded into the
-    // `AugmenterSet` fingerprint (with the augmenter canonical, which is fixed
-    // across a self-replace). A moved hash changes every contributed row's
-    // fingerprint, so it is NOT a no-op even when the facts are identical.
-    if prev.parse_stable_hash != next.parse_stable_hash {
-        return false;
-    }
-    // (1) Target membership: the `ModuleAugmentationFact` multiset governs which
-    // index rows the augmenter contributes to.
-    let prev_facts = prev.augmentations.as_slice();
-    let next_facts = next.augmentations.as_slice();
-    if prev_facts.len() != next_facts.len() {
-        return false;
-    }
-    // Multiset compare keyed by the six fact dimensions (all `Eq + Hash`).
-    // `ModuleAugmentationFact` is not `Eq`, so fold a per-fact count map and
-    // confirm `next` exactly drains it.
-    type FactKey = (
-        InternedSpecifier,
-        TopLevelOwnerId,
-        InternedName,
-        SymbolSpace,
-        Hash16,
-        verter_session_query::inputs::contributors::FileModuleKind,
-    );
-    let key_of = |fact: &ModuleAugmentationFact| -> FactKey {
-        (
-            fact.specifier.clone(),
-            fact.owner,
-            fact.augmented_name.clone(),
-            fact.space,
-            fact.augmented_member_shape_fingerprint,
-            fact.declaring_file,
-        )
-    };
-    let mut counts: rustc_hash::FxHashMap<FactKey, i64> = rustc_hash::FxHashMap::default();
-    for fact in prev_facts {
-        *counts.entry(key_of(fact)).or_insert(0) += 1;
-    }
-    for fact in next_facts {
-        let entry = counts.entry(key_of(fact)).or_insert(0);
-        *entry -= 1;
-    }
-    counts.values().all(|&c| c == 0)
+    use verter_session_query::source::augmentation::augmentation_population_hash;
+    augmentation_population_hash(prev.augmentations.iter())
+        == augmentation_population_hash(next.augmentations.iter())
 }
 
 // ── Membership epochs, roots, and retention leases ──
@@ -2735,7 +2636,7 @@ impl FileArtifactStore {
         let new_augmentations: Vec<ModuleAugmentationFact> =
             payload.augmentations.iter().cloned().collect();
         // Cheap `Arc` clone of the new payload so the no-op gate can compare the
-        // full augmentation contribution (fact set AND `parse_stable_hash`, the
+        // augmentation binding membership (the content-free
         // `AugmenterSet` fingerprint input) without re-fetching after the
         // conditional insert below may move `payload`.
         let payload_for_compare: Arc<FileArtifacts> = Arc::clone(&payload);
@@ -2791,16 +2692,15 @@ impl FileArtifactStore {
         }
 
         // Demand-driven coherence — gated on augmentation-contribution
-        // equivalence. A base-equivalent reinsert whose augmentation facts AND
-        // `parse_stable_hash` (the `AugmenterSet` fingerprint input) are
-        // unchanged is a true no-op for the index: invalidating would remove a
+        // equivalence. A base-equivalent reinsert whose augmentation binding
+        // membership is unchanged is a true no-op for the index: invalidating would remove a
         // contributing row and bump `artifact_generation` on a no-op, churning
         // the store-view validation token and forcing warm-cache misses /
         // base-view rebuilds. A content change (current key NOT base-equivalent)
         // always invalidates the NEW target — its contribution may differ — and
         // the drain above already cleaned the prior versions' rows. A genuine
         // contribution change at a base-equivalent key (rare: same base
-        // snapshot, different augmentation facts or moved `parse_stable_hash`)
+        // snapshot, different augmentation binding membership)
         // likewise invalidates.
         let publish_invalidation_needed = match current_key_prior_payload.as_ref() {
             Some(prior_payload) => {
@@ -2921,73 +2821,19 @@ impl FileArtifactStore {
         })
     }
 
-    /// Fetch an augmenter's `FileArtifacts` by its captured exact
-    /// `FileArtifactKey`, self-healing a STALE captured key after a
-    /// same-canonical re-key whose decl skeleton (hence `parse_stable_hash`,
-    /// hence the augmenter-set fingerprint) is unchanged.
-    ///
-    /// The augmentation index captures each augmenter's exact
-    /// content-addressed `FileArtifactKey` at index-population time, and
-    /// the augmenter-set fingerprint folds over `parse_stable_hash`, NOT
-    /// `content_hash`. So a member-body / cosmetic edit to an augmenter —
-    /// content hash advances, decl skeleton unchanged — does NOT
-    /// invalidate the cached `AugmenterSet`: its
-    /// [`AugmenterEntry::artifact_key`] keeps pointing at the PRE-edit
-    /// content hash, which a same-canonical re-key has drained from the
-    /// store. A bare [`Self::get_artifacts`] then misses, and a caller
-    /// that silently skips the augmenter would shrink the stitched
-    /// surface while keeping the (now wrong) fingerprint / count.
-    ///
-    /// On a miss this re-derives the augmenter's CURRENT exact key by
-    /// advancing ONLY the `content_hash` dimension to
-    /// `current_content_hash` (the scheduler-authoritative current content
-    /// hash — for the names stitch the `contributor_whole_hash` oracle, for
-    /// the body stitch `IndexedReady::whole_hash`) while preserving the
-    /// captured key's `parse_env_hash` / `parse_key` shape (so base
-    /// and overlay augmenters both heal correctly), and reads pinned to
-    /// it — never a content-agnostic `get_artifacts_any` scan.
-    ///
-    /// Returns `(artifacts, refreshed_key)`. `refreshed_key` is `Some`
-    /// ONLY when the heal fired (the captured key missed but the
-    /// re-derived current key hit) so the caller can write the refreshed
-    /// key back into the cached `AugmenterSet`. A genuine miss after the
-    /// current-key re-fetch (the augmenter's artifact is not materialised
-    /// under its current content hash) returns `None` — a principled
-    /// skip, never a content-agnostic fallback.
-    #[must_use]
-    pub fn augmenter_artifacts_self_healing(
+    /// Read an augmenter's exact request-served artifact identity. The
+    /// captured population key is only a locator; it never authorizes old
+    /// content or a canonical-wide scan across parser profiles/overlays.
+    pub fn augmenter_artifacts_for_served_identity(
         &self,
-        captured_key: &FileArtifactKey,
-        current_content_hash: Hash16,
+        captured: &FileArtifactKey,
+        served: &FileArtifactKey,
     ) -> Option<(Arc<FileArtifacts>, Option<FileArtifactKey>)> {
-        if let Some(art) = self.get_artifacts(captured_key) {
-            return Some((art, None));
-        }
-        // The captured key already carries the current content hash, so
-        // the miss is a genuine absence, not a stale-key miss — no heal.
-        if current_content_hash == captured_key.content_hash {
+        if captured.canonical != served.canonical {
             return None;
         }
-        let current_key = self
-            .canonical_keys
-            .get(captured_key.canonical.as_ref())
-            .and_then(|slot| {
-                slot.value()
-                    .iter()
-                    .filter(|version| {
-                        version.span.is_live()
-                            && version.key.content_hash == current_content_hash
-                            && version.key.parse_env_hash == captured_key.parse_env_hash
-                            && version.key.parse_key == captured_key.parse_key
-                            && version.key.file_language_id == captured_key.file_language_id
-                            && version.key.build_toolchain_fingerprint
-                                == captured_key.build_toolchain_fingerprint
-                    })
-                    .map(|version| version.key.clone())
-                    .next()
-            })?;
-        self.get_artifacts(&current_key)
-            .map(|art| (art, Some(current_key)))
+        self.get_artifacts(served)
+            .map(|artifact| (artifact, (captured != served).then(|| served.clone())))
     }
 
     /// Look up a `FileArtifacts` payload for `canonical` whose key's
@@ -3182,14 +3028,13 @@ impl FileArtifactStore {
         let prev = self.insert_artifact_entry(key, artifacts, tick);
         // Demand-driven coherence — gated on augmentation-contribution
         // equivalence. A byte-identical reinsert of a module-augmentation file
-        // leaves both the augmenter's `ModuleAugmentationFact` set AND its
-        // `parse_stable_hash` (the `AugmenterSet` fingerprint input) unchanged,
+        // leaves the augmenter's content-free binding membership unchanged,
         // so no index entry's fold can change: invalidating would bump the base-
         // folded `artifact_generation` on a no-op (the invalidation removes
         // contributing rows and bumps on removal), churning the store-view
         // validation token and forcing warm-cache misses / base-view rebuilds.
         // Only a CHANGED contribution (fresh augmenter, retarget, a changed
-        // augmented-member fingerprint, or a moved `parse_stable_hash`)
+        // binding owner, name or symbol space)
         // invalidates — with the union of the new ∪ replaced facts, so both the
         // prior and new targets are cleaned and the next cold rescan folds the
         // change in.
@@ -3475,23 +3320,14 @@ impl FileArtifactStore {
     /// epoch and RETIRES the version it supersedes into the retired
     /// chain, so a root captured before this publication keeps
     /// resolving the augmenter set its world had.
-    fn install_augmenter_set(
-        &self,
-        key: AugmentationTargetKey,
-        set: Arc<AugmenterSet>,
-    ) -> Option<Arc<AugmenterSet>> {
-        self.install_augmenter_set_if(key, set, |_| true)
-            .expect("an unconditional install always installs")
-    }
-
-    /// [`Self::install_augmenter_set`], applied only when `admit` accepts
-    /// the set the index holds at `key` (`None` when vacant), decided under
-    /// the same entry guard as the install. `None` when nothing was
-    /// installed; otherwise the displaced set, if any.
+    /// The pure held-set predicate is checked under the install guard. A
+    /// source scan additionally proves its fully-applied input root while
+    /// preventing new membership reservations through the actual insert.
     fn install_augmenter_set_if(
         &self,
         key: AugmentationTargetKey,
         set: Arc<AugmenterSet>,
+        scan_root: Option<&FileArtifactRoot>,
         admit: impl FnOnce(Option<&AugmenterSet>) -> bool,
     ) -> Option<Option<Arc<AugmenterSet>>> {
         let reservation = self.reserve_membership_epoch();
@@ -3518,13 +3354,28 @@ impl FileArtifactStore {
         //   version reaches the retired chain before the live slot stops
         //   holding it, so a root-relative reader can never find it in
         //   neither map.
+        let scan_state = scan_root.map(|_| self.live_roots.state.lock());
+        let scan_current = scan_root.is_none_or(|root| {
+            let state = scan_state
+                .as_ref()
+                .expect("a scan holds its admission lock");
+            self.owns_root(root)
+                && !root.is_exhausted()
+                && epoch < EXHAUSTED_EPOCH
+                && root.epoch().checked_add(1) == Some(epoch)
+                && self.membership_epoch() == epoch
+                && state.in_flight.len() == 1
+                && state.in_flight.get(&epoch) == Some(&1)
+        });
         let entry = self.augmentation_index.entry(key.clone());
-        let admitted = match &entry {
-            AugmentationIndexEntry::Occupied(slot) => admit(Some(&slot.get().set)),
-            AugmentationIndexEntry::Vacant(_) => admit(None),
-        };
+        let admitted = scan_current
+            && match &entry {
+                AugmentationIndexEntry::Occupied(slot) => admit(Some(&slot.get().set)),
+                AugmentationIndexEntry::Vacant(_) => admit(None),
+            };
         if !admitted {
             drop(entry);
+            drop(scan_state);
             self.table_storage[4].settle(&self.augmentation_index, &key);
             drop(reservation);
             // A rejection still completes a reserved transition: a mutation
@@ -3550,6 +3401,7 @@ impl FileArtifactStore {
                 None
             }
         };
+        drop(scan_state);
         drop(reservation);
         self.publish_global_contributors();
         if retired.is_some() {
@@ -3569,7 +3421,7 @@ impl FileArtifactStore {
         for key in keys {
             // One entry guard across the retire and the removal — same
             // atomicity + publish-before-retract contract as
-            // [`Self::install_augmenter_set`].
+            // [`Self::install_augmenter_set_if`].
             if let AugmentationIndexEntry::Occupied(slot) =
                 self.augmentation_index.entry(key.clone())
             {
@@ -3627,15 +3479,24 @@ impl FileArtifactStore {
         &self,
         key: AugmentationTargetKey,
         set: Arc<AugmenterSet>,
-    ) -> Option<Arc<AugmenterSet>> {
+        scan_root: Option<&FileArtifactRoot>,
+    ) -> Option<Option<Arc<AugmenterSet>>> {
         let new_fingerprint = set.fingerprint;
-        self.route_surface_generation.mutate(|| {
-            let prev = self.install_augmenter_set(key, set);
+        let prev = self.route_surface_generation.mutate(|| {
+            let prev = self.install_augmenter_set_if(key, set, scan_root, |_| true);
             let changed = prev
                 .as_ref()
+                .and_then(Option::as_ref)
                 .is_some_and(|previous| previous.fingerprint != new_fingerprint);
             (prev, changed)
-        })
+        })?;
+        if prev
+            .as_ref()
+            .is_none_or(|previous| previous.fingerprint != new_fingerprint)
+        {
+            self.bump_artifact_generation();
+        }
+        Some(prev)
     }
 
     pub fn populate_augmenter_set(
@@ -3643,24 +3504,19 @@ impl FileArtifactStore {
         key: AugmentationTargetKey,
         set: Arc<AugmenterSet>,
     ) -> Option<Arc<AugmenterSet>> {
-        let new_fingerprint = set.fingerprint;
-        let prev = self.publish_augmenter_set(key, set);
-        // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
-        // `HostStoreView`. Bump the base-folded `artifact_generation` ONLY
-        // when this populate actually changes the snapshotted fingerprint
-        // (R4 parity with the bump-iff-actually-changed gate on the artifact
-        // insert paths): a re-populate of an identical augmenter set is a
-        // no-op for the base snapshot and must not churn the token. Any real
-        // fingerprint change (including absent → present) still bumps (no
-        // under-bump).
-        let snapshot_changed = match prev.as_ref() {
-            Some(prev_set) => prev_set.fingerprint != new_fingerprint,
-            None => true,
-        };
-        if snapshot_changed {
-            self.bump_artifact_generation();
-        }
-        prev
+        self.publish_augmenter_set(key, set, None)
+            .expect("unconditional population installs")
+    }
+
+    /// Admit a cold source scan only if its fully-applied membership basis
+    /// still holds atomically through publication. Rejection leaves no row.
+    pub(crate) fn populate_augmenter_set_at_root(
+        &self,
+        key: AugmentationTargetKey,
+        set: Arc<AugmenterSet>,
+        scan_root: &FileArtifactRoot,
+    ) -> Option<Option<Arc<AugmenterSet>>> {
+        self.publish_augmenter_set(key, set, Some(scan_root))
     }
 
     /// Re-key the entries of the set `key` holds: `observed`, with each
@@ -3699,64 +3555,60 @@ impl FileArtifactStore {
         // moves neither the route-surface generation nor the artifact one.
         self.route_surface_generation.mutate(|| {
             let installed = self
-                .install_augmenter_set_if(key.clone(), set, holds_observed)
+                .install_augmenter_set_if(key.clone(), set, None, holds_observed)
                 .is_some();
             (installed, false)
         })
     }
 
-    /// Snapshot the base-artifact augmenter rows into an owned `Vec`,
-    /// then drop the `self.artifacts` shard guards.
-    ///
-    /// The match step (`augmenter_matches_target`) may invoke a
-    /// caller-supplied resolver that re-enters `FileArtifactStore` and
-    /// inserts into `self.artifacts` (a relative `declare module "./x"`
-    /// target resolves its specifier through `ensure_indexed_ready_serve`,
-    /// which materialises and inserts the dependency). The DashMap
-    /// shards are `std::sync::RwLock`, which is non-reentrant: a write
-    /// to a shard the current thread already read-locks via an active
-    /// `iter()` guard would block on itself. Collecting the candidate
-    /// rows first — and only matching/resolving after every shard guard
-    /// is released — keeps the resolver off the guard. Same discipline
-    /// as the snapshot in
-    /// [`Self::ensure_augmentation_index_populated`].
-    ///
-    /// Candidate selection is population-aware (overlay isolation): a base
-    /// scan (`overlay_discriminator: None`) collects base
-    /// ([`FileArtifactKey::is_base`]) artifacts only; a session scan
-    /// (`Some(discriminator)`) collects base artifacts UNIONED with this
-    /// session's own overlay artifacts (the non-base key whose
-    /// `parse_env_hash` discriminator matches). A different session's overlay
-    /// artifact carries a different discriminator and is excluded — overlay
-    /// augmenters never cross sessions or poison the base index. Only
-    /// artifacts carrying at least one augmentation fact are collected.
+    /// Discover live candidate identities without retaining storage guards.
+    /// This is a cold scan of loaded keys. A session's overlay shadows its
+    /// base before matching, including an overlay with no augmentation facts.
+    /// Real requests subsequently select the source owner's exact current key.
     pub(crate) fn collect_augmenter_candidates(
         &self,
         overlay_discriminator: Option<Hash16>,
-    ) -> Vec<AugmenterCandidate> {
-        self.artifacts
+    ) -> Vec<FileArtifactKey> {
+        let mut keys: Vec<_> = self
+            .canonical_keys
             .iter()
-            .filter(|entry| {
-                let key = entry.key();
-                // Base population: base-key artifacts only. Session
-                // population: base artifacts UNIONED with the session's own
-                // overlay artifacts (the non-base key whose `parse_env_hash`
-                // discriminator matches this session). A DIFFERENT session's
-                // overlay artifact carries a different discriminator and is
-                // excluded — overlay augmenters never cross sessions or poison
-                // the base index.
-                key.is_base()
-                    || overlay_discriminator
-                        .is_some_and(|d| !key.is_base() && key.parse_env_hash == d)
+            .filter_map(|slot| {
+                slot.value()
+                    .iter()
+                    .filter(|version| {
+                        version.span.is_live()
+                            && (version.key.is_base()
+                                || overlay_discriminator.is_some_and(|d| {
+                                    !version.key.is_base() && version.key.parse_env_hash == d
+                                }))
+                    })
+                    .max_by_key(|version| {
+                        (
+                            !version.key.is_base(),
+                            version.span.birth,
+                            version.key.content_hash,
+                            version.key.parse_env_hash,
+                        )
+                    })
+                    .map(|version| version.key.clone())
             })
-            .filter(|entry| !entry.value().payload.augmentations.is_empty())
-            .map(|entry| AugmenterCandidate {
-                artifact_key: entry.key().clone(),
-                canonical: Arc::clone(&entry.key().canonical),
-                parse_stable_hash: entry.value().payload.parse_stable_hash,
-                augmentations: Arc::clone(&entry.value().payload.augmentations),
-            })
-            .collect()
+            .collect();
+        // Select overlay authority first: an empty overlay must shadow an
+        // augmenting base. Only then discard known noncontributors, so cold
+        // target discovery does not materialize unrelated loaded files.
+        // Candidate discovery reads the payload without recording a hit, so a
+        // scan over loaded files does not promote them in the LRU.
+        let current_schema =
+            self.schema_version == verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION;
+        keys.retain(|key| {
+            !current_schema
+                || self
+                    .artifacts
+                    .get(key)
+                    .is_none_or(|entry| !entry.value().payload.augmentations.is_empty())
+        });
+        keys.sort_by(|a, b| a.canonical.cmp(&b.canonical));
+        keys
     }
 
     /// Lazily populate the augmentation-index entry for `key`, then
@@ -3767,7 +3619,7 @@ impl FileArtifactStore {
     /// files whose `FileArtifacts.augmentations` match the queried
     /// target under the current `(project_identity, resolve_env_hash,
     /// lib_env_hash)`, sorts the matched augmenters by
-    /// `(augmenter_canonical, parse_stable_hash)`, computes a stable
+    /// `augmenter_canonical`, computes a content-free binding-membership
     /// fingerprint, inserts, and emits a `ModuleAugmentationIndexShape`
     /// audit event recording the install (or refresh on
     /// re-population). Subsequent reads under the same key are
@@ -3803,6 +3655,7 @@ impl FileArtifactStore {
                     ))
                 },
                 discriminator,
+                None,
             )
     }
 
@@ -4084,7 +3937,7 @@ fn augmenter_fact_could_contribute(
 }
 
 /// Compute the stable `AugmenterSet.fingerprint` over the sorted
-/// `[(augmenter_canonical, parse_stable_hash)]` list.
+/// `[(augmenter_canonical, population_hash)]` list.
 ///
 /// Two FxHasher passes seeded with distinct salts produce a 16-byte
 /// hash with low collision risk. Matches the cheap-hash pattern used
@@ -4097,16 +3950,15 @@ pub(crate) fn compute_augmenter_set_fingerprint(entries: &[AugmenterEntry]) -> H
     let mut h_hi = salt_hi.build_hasher();
     h_lo.write_u64(0xC4A1_C4A1_4A1C_4A1C);
     h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
-    // R29: the fingerprint folds in `(augmenter_canonical,
-    // augmenter_parse_stable_hash)` — the `FileArtifactKey`'s other
-    // dimensions are deliberately NOT mixed in, so a cosmetic edit
-    // (content_hash changes, parse_stable_hash invariant) does not
-    // perturb the augmenter-set fingerprint.
+    // R29: membership and precedence are independent of source bytes and
+    // consumed member content. Exact content ports carry that separate proof.
     for entry in entries {
         let canon = entry.canonical();
-        let hash = &entry.parse_stable_hash;
+        let hash = &entry.population_hash;
+        h_lo.write_usize(canon.len());
         h_lo.write(canon.as_bytes());
         h_lo.write(hash);
+        h_hi.write_usize(canon.len());
         h_hi.write(canon.as_bytes());
         h_hi.write(hash);
     }
@@ -4183,7 +4035,9 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
         FactKey::Export { .. } => FactKeyKindTag::Export,
         FactKey::ExportAlias { .. } => FactKeyKindTag::ExportAlias,
         FactKey::SyntacticExportSet => FactKeyKindTag::SyntacticExportSet,
-        FactKey::SyntacticRouteInterface => FactKeyKindTag::SyntacticRouteInterface,
+        FactKey::SyntacticRouteInterface | FactKey::DirectDeclarationExport { .. } => {
+            FactKeyKindTag::SyntacticRouteInterface
+        }
         FactKey::LocalDecl { .. } => FactKeyKindTag::LocalDecl,
         FactKey::Member { .. } => FactKeyKindTag::Member,
         FactKey::MemberPresence { .. } => FactKeyKindTag::MemberPresence,

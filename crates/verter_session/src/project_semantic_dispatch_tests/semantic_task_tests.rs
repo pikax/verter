@@ -5947,7 +5947,29 @@ fn hosts_with_different_fact_policies_run_side_by_side() {
         });
     assert_eq!(production_answer, "\"ok\"");
     assert_eq!(narrow_answer, production_answer);
-    assert_eq!(narrow_set, production_set, "both hosts seal the same facts");
+    // A resolution fact names the population of the workspace engine that
+    // decided it, and every engine mints its own: the two hosts agree on
+    // every other fact and on how many resolutions each decided.
+    let (narrow_resolutions, narrow_facts): (Vec<_>, Vec<_>) =
+        narrow_set.to_vec().into_iter().partition(|fact| {
+            matches!(
+                fact,
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(_)
+            )
+        });
+    let (production_resolutions, production_facts): (Vec<_>, Vec<_>) =
+        production_set.to_vec().into_iter().partition(|fact| {
+            matches!(
+                fact,
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(_)
+            )
+        });
+    assert_eq!(
+        narrow_facts, production_facts,
+        "both hosts seal the same facts"
+    );
+    assert!(!narrow_resolutions.is_empty());
+    assert_eq!(narrow_resolutions.len(), production_resolutions.len());
     assert!(
         narrow_set.len() > narrow.fresh_slice_max(),
         "the read set is wide under the narrow policy: {}",

@@ -580,6 +580,24 @@ impl ShallowInputAssembly {
                 .contains_key(&DeclBindingKey::new(owner, name))
     }
 
+    /// Whether this exact lexical owner declares a local export's binding.
+    /// Export spellings alone do not establish existence. Namespaces and
+    /// namespace aliases have their own header inventories, while framework
+    /// symbols use the centralized effective type/value presence lookup.
+    pub fn declares_local_binding_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        self.effective_type_header_present_in(owner, name)
+            || self.effective_value_header_present_in(owner, name)
+            || self
+                .headers
+                .namespace_blocks
+                .iter()
+                .any(|block| block.owner == owner && block.qualified_name == name)
+            || self
+                .headers
+                .namespace_aliases
+                .contains_key(&DeclBindingKey::new(owner, name))
+    }
+
     /// Canonical one-way lexical parent for a carrier instance owner.
     ///
     /// The relation is derived exclusively from the validated owner table. An

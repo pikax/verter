@@ -363,6 +363,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
           "crates/verter_session/src/root_continuation.rs",
+          "crates/verter_session/src/store_view_roots.rs",
           "crates/verter_session/src/test_worker_pools.rs",
           "crates/verter_session/src/tests/meta/mod.rs",
           "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",

@@ -4504,3 +4504,150 @@ fn a_skipped_import_roots_on_its_own_decision() {
          its target appears"
     );
 }
+
+/// An export target names a route, not proof that its local binding exists.
+/// Follow both the direct and reexport routes across deletion/replacement
+/// without pre-indexing the edited dependency.
+#[test]
+fn imported_root_requires_a_declaration_at_the_exact_leaf_owner() {
+    let host = make_host(&[]);
+    let barrel = "/workspace/src/index.ts";
+    let leaf = "/workspace/src/leaf.ts";
+    upsert(&host, barrel, "export { B } from './leaf';");
+    for (source, exists) in [
+        ("export class B { a!: string; }", true),
+        ("class B { a!: string; } export { B };", true),
+        ("export { B };", false),
+        ("class Other {} export { B };", false),
+        ("const B = 1; export { B };", true),
+        ("namespace B {} export { B };", true),
+        ("namespace N {} import B = N; export { B };", true),
+        ("export class B { a!: number; }", true),
+    ] {
+        upsert(&host, leaf, source);
+        for path in [leaf, barrel] {
+            let (answer, _) = host.resolve_imported_type_root_with_facts(path, "B");
+            assert_eq!(
+                answer.is_some(),
+                exists,
+                "{path}: an exported spelling cannot invent a declaration: {source}"
+            );
+            if let Some(answer) = answer {
+                assert_eq!(answer.canonical_id.as_ref(), leaf);
+                assert_eq!(
+                    answer.owner,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file()
+                );
+                assert_eq!(answer.symbol_name.as_ref(), "B");
+            }
+        }
+    }
+}
+
+/// A declaration in the instance script cannot satisfy a module script's
+/// unresolved export, even when it is the only declaration with that name.
+#[test]
+fn imported_root_does_not_adopt_a_declaration_from_another_script_owner() {
+    let host = make_host(&[]);
+    let leaf = "/workspace/src/leaf.vue";
+    upsert(
+        &host,
+        leaf,
+        "<script lang=\"ts\">export { B };</script>\n<script setup lang=\"ts\">class B { a!: string; }</script>",
+    );
+    let (answer, _) = host.resolve_imported_type_root_with_facts(leaf, "B");
+    assert!(
+        answer.is_none(),
+        "a module export cannot adopt its instance sibling: {answer:?}"
+    );
+}
+
+/// Header-only direct export resolution records a declaration/owner proof
+/// without forcing an indexed artifact or depending on unrelated member text.
+#[test]
+fn direct_source_export_records_content_free_existence_proof() {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::StoreView;
+
+    let host = make_host(&[]);
+    let leaf = "/workspace/src/header.ts";
+    upsert(&host, leaf, "export class B { a!: string; u = 1; }");
+    assert!(host.project_type_store().indexed().get_any(leaf).is_none());
+    let (_, facts) = host
+        .resolve_direct_imported_type_root_fast_path_with_context(&*host, None, leaf, "B")
+        .expect("a direct declaration resolves from its source header");
+    let adopted = facts
+        .into_iter()
+        .find(|fact| matches!(fact, FactVersionRef::Parse(parse) if &*parse.canonical_id == leaf))
+        .expect("the direct source export records a parse-owned existence/owner proof");
+    for (source, valid) in [
+        ("export class B { a!: string; u = 22; }", true),
+        ("class B { a!: string; } export { B };", false),
+        ("export { B };", false),
+        ("export { B } from './other';", false),
+    ] {
+        upsert(&host, leaf, source);
+        assert_eq!(
+            host.resolver_store_view_read()
+                .into_owned_view()
+                .validates(&adopted),
+            valid,
+            "source-header evidence validates against the exact current header: {source}"
+        );
+        assert!(host.project_type_store().indexed().get_any(leaf).is_none());
+    }
+}
+
+#[test]
+fn direct_source_export_rejects_same_bytes_from_a_replaced_node() {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::StoreView;
+
+    let host = make_host(&[]);
+    let leaf = "/workspace/src/replaced-header.ts";
+    let source = "export class B { a!: string; }";
+    upsert(&host, leaf, source);
+    let (_, facts) = host
+        .resolve_direct_imported_type_root_fast_path_with_context(&*host, None, leaf, "B")
+        .unwrap();
+    let fact = facts
+        .into_iter()
+        .find(|fact| matches!(fact, FactVersionRef::Parse(_)))
+        .unwrap();
+    let captured = host.resolver_store_view_read().into_owned_view();
+    assert!(captured.validates(&fact));
+    host.remove(leaf).expect("the original node exists");
+    upsert(&host, leaf, source);
+    assert!(
+        !captured.validates(&fact),
+        "a replacement payload cannot certify a retired source root"
+    );
+    assert!(host
+        .resolver_store_view_read()
+        .into_owned_view()
+        .validates(&fact));
+}
+
+#[test]
+fn direct_source_export_completes_a_cold_header_without_indexing() {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+
+    let leaf = "/workspace/src/cold-header.ts";
+    let host = make_host(&[(leaf, "export class B { a!: string; }")]);
+    crate::resolver_core::host_resolver_context::with_bare_host_ctx_for_test(&host, |ctx| {
+        assert!(host.ensure_loaded(leaf));
+        let (_, facts) = host
+            .resolve_direct_imported_type_root_fast_path_with_context(ctx, None, leaf, "B")
+            .expect("the completed source header resolves");
+        let fact = facts
+            .into_iter()
+            .find(|fact| matches!(fact, FactVersionRef::Parse(_)))
+            .unwrap();
+        assert!(
+            FactValidation::validates(ctx, &fact),
+            "completion admits the exact source version"
+        );
+        assert!(host.project_type_store().indexed().get_any(leaf).is_none());
+    });
+}

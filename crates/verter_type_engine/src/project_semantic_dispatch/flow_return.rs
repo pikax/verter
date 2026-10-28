@@ -3863,13 +3863,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(proof) => proof.value().clone(),
                     None => result,
                 };
-                let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::FlowReturn(
-                        verter_session_query::retention::owned::Owned::new(published),
-                    )),
-                    fence,
-                ))
-                .with_observed_self_roots(scc_self_roots);
+                let value = SemanticQueryValue::FlowReturn(
+                    verter_session_query::retention::owned::Owned::new(published),
+                );
+                let mut output: QueryBuildOutput<SemanticQueryValue> =
+                    QueryBuildOutput::from((QueryResult::Value(value), fence))
+                        .with_observed_self_roots(scc_self_roots);
                 // §3.4: the published entry's `satisfied_projection` is
                 // the point set the compute ACTUALLY produced — recorded
                 // by the evaluation, never the nominal request echoed at
@@ -3951,6 +3950,86 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             built.flow_completion = None;
         }
         built
+    }
+
+    /// Observe the live content version of every declaration reference the
+    /// retained answer interns.
+    ///
+    /// Reference routing and receiver-member selection stay content-free;
+    /// the version is only read where a `DeclRef` / `InstantiationRef`
+    /// becomes part of the value that is retained and served. A warm answer
+    /// whose only contact with a dependency is such a reference therefore
+    /// misses on that dependency's next edit and re-interns the live
+    /// version, instead of serving a superseded one.
+    ///
+    /// Two bounds keep this proportional at every enclosing close: the
+    /// memoized `node_reaches_versioned_reference` bit cuts the walk at
+    /// every subtree that retains no versioned reference at all, and a
+    /// version whose fact the active tracer already holds — a nested
+    /// build's delivered signature or a warm read's absorbed witness
+    /// carried it into this scope — is not re-recorded. The first
+    /// observation of each embedded version still happens here, whatever
+    /// close retains it.
+    pub(super) fn observe_retained_reference_versions(&self, value: &SemanticQueryValue) {
+        let mut pending: Vec<SemanticNodeId> = Vec::new();
+        value.for_each_retained_node(|node| pending.push(node));
+        if !pending
+            .iter()
+            .any(|&node| self.arena().node_reaches_versioned_reference(node))
+        {
+            return;
+        }
+        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = Default::default();
+        let mut observed: Vec<(Arc<str>, _)> = Vec::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            // A node whose retained closure reaches no versioned reference
+            // has nothing to observe at or below it.
+            if !self.arena().node_reaches_versioned_reference(node) {
+                continue;
+            }
+            let Some(data) = self.arena().node_data(node) else {
+                continue;
+            };
+            let identity = match &*data {
+                SemanticNodeData::DeclRef { identity } => Some(identity),
+                SemanticNodeData::InstantiationRef { base, .. } => Some(base),
+                _ => None,
+            };
+            if let Some(identity) = identity {
+                let canonical: &str = identity.canonical_id.as_ref();
+                let embedded = identity.whole_hash;
+                // A reference minted before its file's content was
+                // authoritative embeds the zero version: no version was
+                // interned, so there is none to certify (a zero fact could
+                // never validate against any content).
+                if embedded != [0u8; 16]
+                    && !observed
+                        .iter()
+                        .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
+                {
+                    // The version the retained payload actually embeds, not
+                    // the live one: a stale embedded version must make this
+                    // entry miss on the next validation, never certify the
+                    // live hash next to an old payload.
+                    let fact = FactVersionRef::FileWholeHash {
+                        canonical_id: Arc::from(canonical),
+                        hash: embedded,
+                    };
+                    observed.push((Arc::from(canonical), embedded));
+                    // Already held through a delivered or absorbed witness:
+                    // the sealed signature is the same union without it, so
+                    // recording it again only widens the work of every
+                    // enclosing seal.
+                    if !crate::resolver_core::resolver_context::tracer_holds_fact(&fact) {
+                        crate::resolver_core::resolver_context::observe_fan_out(fact);
+                    }
+                }
+            }
+            data.for_each_retained_child(|child| pending.push(child));
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -5999,6 +6078,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // (the usable value still flows to the caller).
                     match &verdict {
                         Some(FlowSolveOutcome::Complete(proof)) => {
+                            // The batched publish copies the root carrier's
+                            // read-set signature, so every version each
+                            // embedded reference interns must be observed
+                            // into that carrier HERE, before the member
+                            // leaves this frame — the shared cold-build
+                            // close only observes the enclosing build's own
+                            // value, not a queued member's.
+                            let value = crate::semantic_query::SemanticQueryValue::FlowReturn(
+                                verter_session_query::retention::owned::Owned::new(
+                                    proof.value().clone(),
+                                ),
+                            );
+                            self.observe_retained_reference_versions(&value);
                             let member = CompletedFlowReturnMember {
                                 key: root_key,
                                 result: proof.clone(),
