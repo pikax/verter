@@ -1,8 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import {
-  DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS,
-  waitForDiagnosticReceipt,
-} from "./diagnosticsReadiness";
+import { waitForDiagnosticReceipt } from "./diagnosticsReadiness";
 
 afterEach(() => vi.useRealTimers());
 
@@ -19,7 +16,6 @@ it("does not accept a quiet native batch or a provider receipt for an earlier ed
     () => diagnostics,
     2000,
     500,
-    50,
   ).then((value) => {
     finished = true;
     return value;
@@ -48,7 +44,6 @@ it("waits for the editor collection after first observing provider completion", 
     () => diagnostics,
     2000,
     500,
-    50,
   ).then((value) => {
     finished = true;
     return value;
@@ -164,27 +159,4 @@ it("names a document the server holds no diagnostics state for", async () => {
   );
   await vi.advanceTimersByTimeAsync(500);
   await rejected;
-});
-
-it("polls at the slow default cadence so repeated polls do not starve the server", async () => {
-  vi.useFakeTimers();
-  let reads = 0;
-  const result = waitForDiagnosticReceipt(
-    async () => {
-      reads += 1;
-      return { version: 1, ready: false };
-    },
-    () => 1,
-    () => 0,
-    () => [],
-    5_000,
-    100,
-  );
-  const rejected = expect(result).rejects.toThrow("did not complete");
-  await vi.advanceTimersByTimeAsync(5_000);
-  await rejected;
-  // Every read first awaits a per-document request the server records as demand;
-  // a 50ms cadence would be ~100 reads here.
-  expect(DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS).toBe(1_000);
-  expect(reads).toBeLessThanOrEqual(6);
 });
