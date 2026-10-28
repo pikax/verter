@@ -3590,9 +3590,16 @@ impl FileArtifactStore {
         // Select overlay authority first: an empty overlay must shadow an
         // augmenting base. Only then discard known noncontributors, so cold
         // target discovery does not materialize unrelated loaded files.
+        // Candidate discovery reads the payload without recording a hit, so a
+        // scan over loaded files does not promote them in the LRU.
+        let current_schema =
+            self.schema_version == verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION;
         keys.retain(|key| {
-            self.get_artifacts(key)
-                .is_none_or(|artifacts| !artifacts.augmentations.is_empty())
+            !current_schema
+                || self
+                    .artifacts
+                    .get(key)
+                    .is_none_or(|entry| !entry.value().payload.augmentations.is_empty())
         });
         keys.sort_by(|a, b| a.canonical.cmp(&b.canonical));
         keys

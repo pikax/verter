@@ -10900,7 +10900,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<ClassMemberStep> {
-        if !self.class_takes_module_augmentation(canonical, class) {
+        let takes_augmentation = self.class_takes_module_augmentation(canonical, class);
+        if !takes_augmentation {
             if let Some(input) = self.ctx.class_member_input(canonical, owner, class, name) {
                 if let verter_session_query::source::deref::DerefedBodyShape::Single(
                     TypeExpr::Object(ref members),
@@ -11057,7 +11058,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // interface C { … } }`) declares members its own body does not, so a read its own body
         // does not answer and that is about to follow `extends` decides it: only
         // the whole declaration, which merges the augmentations, answers.
-        if self.class_takes_module_augmentation(canonical, class) {
+        if takes_augmentation {
             return None;
         }
         // An inherited member reads off the base the class extends: its
