@@ -172,6 +172,32 @@ fn scoped_handoff_suspends_without_running_its_producer_and_resumes_elsewhere() 
 }
 
 #[test]
+fn terminal_scoped_flight_releases_tasks_with_a_late_submission_still_queued() {
+    let scheduler = scheduler();
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    assert!(scheduler.drive_one());
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("dispatch transfers the producer");
+    };
+    let mut follower = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(follower.poll(Waker::noop()).is_pending());
+    producer.run(|_| 42);
+    for handoff in [&mut root, &mut follower] {
+        assert!(matches!(
+            handoff.poll(Waker::noop()),
+            Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 42
+        ));
+    }
+    assert!(!scheduler.inbox.receiver.is_empty());
+    assert_eq!(
+        scheduler.task_registry.active_task_count_for_tests(),
+        0,
+        "terminal flight envelopes must not retain execution tasks"
+    );
+}
+
+#[test]
 fn dropping_a_scoped_producer_resolves_followers_without_a_second_producer() {
     let scheduler = scheduler();
     let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();

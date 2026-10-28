@@ -160,6 +160,7 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
                 self.task.as_ref().expect("live task").clone(),
                 self.owner_id,
             ));
+            state.admission_task = None;
             state.wakers.withdraw(&mut self.registration);
             // Followers that yielded before election must register their wait
             // edges now that the producer is known, even if it never runs.

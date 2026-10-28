@@ -70,6 +70,9 @@ The DAG uses that same injected registry. Producer election replaces its
 admission-time task stamp with the transferred task, provided the aggregate
 cancellation source still identifies the same incarnation. Owned completion
 subscribers therefore follow the task that actually executes the producer.
+Late sibling admissions preserve that elected task. The provisional task lives
+in the flight's locked lifecycle state and releases on election or terminalization;
+queued envelopes for a terminal flight retain no execution task.
 Pending scoped handoffs subscribe to their request's cancellation. Scheduler
 `CompletionSubscription::owned` binds completion waits to explicit producer
 and waiter tasks plus a stop token, and `begin_owned_request` follows the

@@ -37,6 +37,9 @@ pub(super) struct ScopedFlightOwner {
 
 #[derive(Default)]
 pub(super) struct ScopedCacheFlightState {
+    /// Provisional producer until a subscriber claims execution. This belongs
+    /// to the live flight, not to queued envelopes that may outlive it.
+    pub(super) admission_task: Option<ExecutionTask>,
     pub(super) owners: HashMap<u64, ScopedFlightOwner>,
     pub(super) aggregate: Option<CancellationToken>,
     pub(super) dispatched: bool,
@@ -53,13 +56,16 @@ impl ScopedCacheFlight {
         task: verter_execution::tasks::ExecutionTask,
     ) -> Self {
         Self {
-            state: Mutex::new(ScopedCacheFlightState::default()),
+            state: Mutex::new(ScopedCacheFlightState {
+                admission_task: Some(task),
+                ..ScopedCacheFlightState::default()
+            }),
             delivery,
-            task,
         }
     }
 
     fn clear_owners(&self, state: &mut ScopedCacheFlightState) {
+        state.admission_task = None;
         state.producer = None;
         for owner in state.owners.values() {
             if let Some(registration) = &owner.aggregate_registration {

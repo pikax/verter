@@ -617,8 +617,12 @@ mod tests {
                 }
             }
         }
-        let runtime = Arc::new(UnifiedResolverRuntime::<(), ()>::for_tests());
         let registry = TaskRegistry::default();
+        let runtime = Arc::new(UnifiedResolverRuntime::<(), ()>::new(
+            Arc::new(RouteDb::new()),
+            Arc::new(ImportedRootDb::new()),
+            registry.clone(),
+        ));
         let mut flight = runtime.component_meta.singleflight.begin_owned_retaining(
             view_key("/view.vue", 1),
             verter_session_query::facts::store_view::StoreViewCompatToken {
