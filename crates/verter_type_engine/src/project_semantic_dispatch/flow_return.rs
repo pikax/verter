@@ -3961,13 +3961,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// whose only contact with a dependency is such a reference therefore
     /// misses on that dependency's next edit and re-interns the live
     /// version, instead of serving a superseded one.
+    ///
+    /// Two bounds keep this proportional at every enclosing close: the
+    /// memoized `node_reaches_versioned_reference` bit cuts the walk at
+    /// every subtree that retains no versioned reference at all, and a
+    /// version whose fact the active tracer already holds — a nested
+    /// build's delivered signature or a warm read's absorbed witness
+    /// carried it into this scope — is not re-recorded. The first
+    /// observation of each embedded version still happens here, whatever
+    /// close retains it.
     pub(super) fn observe_retained_reference_versions(&self, value: &SemanticQueryValue) {
         let mut pending: Vec<SemanticNodeId> = Vec::new();
         value.for_each_retained_node(|node| pending.push(node));
+        if !pending
+            .iter()
+            .any(|&node| self.arena().node_reaches_versioned_reference(node))
+        {
+            return;
+        }
         let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = Default::default();
         let mut observed: Vec<(Arc<str>, _)> = Vec::new();
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
+                continue;
+            }
+            // A node whose retained closure reaches no versioned reference
+            // has nothing to observe at or below it.
+            if !self.arena().node_reaches_versioned_reference(node) {
                 continue;
             }
             let Some(data) = self.arena().node_data(node) else {
@@ -3990,17 +4010,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .iter()
                         .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
                 {
+                    // The version the retained payload actually embeds, not
+                    // the live one: a stale embedded version must make this
+                    // entry miss on the next validation, never certify the
+                    // live hash next to an old payload.
+                    let fact = FactVersionRef::FileWholeHash {
+                        canonical_id: Arc::from(canonical),
+                        hash: embedded,
+                    };
                     observed.push((Arc::from(canonical), embedded));
-                    // The version the retained payload actually embeds, not the
-                    // live one: a stale embedded version must make this entry
-                    // miss on the next validation, never certify the live hash
-                    // next to an old payload.
-                    crate::resolver_core::resolver_context::observe_fan_out(
-                        FactVersionRef::FileWholeHash {
-                            canonical_id: Arc::from(canonical),
-                            hash: embedded,
-                        },
-                    );
+                    // Already held through a delivered or absorbed witness:
+                    // the sealed signature is the same union without it, so
+                    // recording it again only widens the work of every
+                    // enclosing seal.
+                    if !crate::resolver_core::resolver_context::tracer_holds_fact(&fact) {
+                        crate::resolver_core::resolver_context::observe_fan_out(fact);
+                    }
                 }
             }
             data.for_each_retained_child(|child| pending.push(child));

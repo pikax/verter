@@ -341,6 +341,12 @@ pub struct FactReadSet {
     /// re-sorting a set that was already sorted once. Every run in here has
     /// been verified strictly increasing at insertion.
     canonical_runs: Vec<FactSet>,
+    /// The storage address of every run in `canonical_runs`, so a replay
+    /// of a shared canonical signature this scope already absorbed is one
+    /// hash lookup instead of a scan that must also compare content.
+    /// Mirrors `canonical_runs` exactly: inserted together, removed
+    /// together (absorption, receipt collapse, canonicalisation).
+    run_addresses: rustc_hash::FxHashSet<usize>,
     /// TRUE when a NON-CACHEABLE read was consumed inside this tracer's
     /// scope. The class is: a FENCED (ReturnOnly, `store_published ==
     /// false`) `IndexedReady` serve; a broken decl-body lease
@@ -407,6 +413,7 @@ impl FactReadSet {
             policy,
             observations: SmallVec::new(),
             canonical_runs: Vec::new(),
+            run_addresses: rustc_hash::FxHashSet::default(),
             non_cacheable_propagation: None,
             untrusted_non_cacheable: false,
             aggregate_basis: AggregateGenerations::default(),
@@ -607,41 +614,51 @@ impl FactReadSet {
     /// A [`FactSet`] is canonical by construction, so the run is kept as is
     /// with no check, and finalisation merges it with the other runs and
     /// the local observations into the same canonical set — there is
-    /// exactly one canonicaliser.
+    /// exactly one canonicaliser. A replay of a signature this scope
+    /// already absorbed is recognised by its storage address and never
+    /// stored or charged twice, however many absorptions pass between the
+    /// two replays.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &FactSet) {
         self.policy.assert_compatible(signature.policy());
-        if signature.is_empty() || self.recently_absorbed(signature) {
+        if signature.is_empty() {
             return;
         }
+        // A shared canonical set this scope already holds — by storage, not
+        // by a bounded window — is one hash lookup: a warm read replays the
+        // SAME retained signature object many times into one scope, and
+        // each replay must neither grow the run list nor pay a comparison
+        // against it again. Every run this scope holds is a cloned Arc, so
+        // a held address cannot be freed and reused while it is in the set.
+        let address = signature.address();
+        if self.run_addresses.contains(&address) {
+            return;
+        }
+        self.run_addresses.insert(address);
         self.canonical_runs.push(signature.clone());
     }
 
-    /// Whether one of the last [`RECENT_WINDOW`] absorbed runs is
-    /// `signature`. An immutable retained run already proved its canonical
-    /// order; replaying it must not grow live storage for each warm read.
+    /// Whether this scope already holds `fact` — recorded as one of its own
+    /// observations or inside an absorbed canonical run, so it is in the
+    /// set this scope will seal either way.
+    ///
+    /// A producer that re-derives a fact a nested delivery or a warm read
+    /// already carried into this scope uses this to skip recording it
+    /// again: the sealed signature is the same union, only narrower to
+    /// build. The scan is over this scope's own live observations plus one
+    /// ordered lookup per absorbed run.
     #[inline]
-    fn recently_absorbed(&self, signature: &FactSet) -> bool {
-        let recent =
-            &self.canonical_runs[self.canonical_runs.len().saturating_sub(RECENT_WINDOW)..];
-        let mut comparisons = 0;
-        let mut seen = false;
-        for run in recent.iter().rev() {
-            comparisons += 1;
-            if run.ptr_eq(signature) {
-                seen = true;
-                break;
-            }
-            if run.len() == signature.len() {
-                comparisons += run.len();
-                if run == signature {
-                    seen = true;
-                    break;
-                }
-            }
+    #[must_use]
+    pub fn holds(&self, fact: &FactVersionRef) -> bool {
+        if self
+            .observations
+            .iter()
+            .rev()
+            .any(|observed| observed == fact)
+        {
+            return true;
         }
-        record_signature_work(comparisons);
-        seen
+        self.canonical_runs.iter().any(|run| run.contains(fact))
     }
 
     /// The mark of everything observed so far.
@@ -677,8 +694,12 @@ impl FactReadSet {
             && end.canonical_len <= self.canonical_runs.len();
         if intact {
             self.observations.drain(start.len..end.len);
-            self.canonical_runs
-                .drain(start.canonical_len..end.canonical_len);
+            for run in self
+                .canonical_runs
+                .drain(start.canonical_len..end.canonical_len)
+            {
+                self.run_addresses.remove(&run.address());
+            }
             self.observations.insert(start.len, receipt);
         } else {
             self.observations.push(receipt);
@@ -706,8 +727,8 @@ impl FactReadSet {
     }
 
     /// The absorbed run that holds every fact this scope observed, when its
-    /// own seal reproduces it ([`seals_unchanged`]): the widest run, every
-    /// other run a subset of it and every local observation in it.
+    /// own seal reproduces it ([`seals_unchanged`]) and it is the scope's
+    /// ONE absorbed witness: every local observation lies in it.
     fn covering_run(&self) -> Option<usize> {
         let mut widest = 0;
         let mut index = 1;
@@ -716,6 +737,14 @@ impl FactReadSet {
                 widest = index;
             }
             index += 1;
+        }
+        // Only the scope that replayed exactly ONE witness seals as it: a
+        // scope that absorbed several runs merges them, which costs one
+        // pass over what the base lacks, while proving every other run a
+        // subset of the widest first would walk the widest run once per
+        // other run and still leave the merge nothing saved.
+        if self.canonical_runs.len() > 1 {
+            return None;
         }
         let run = self.canonical_runs.get(widest)?;
         if !seals_unchanged(run) {
@@ -730,14 +759,6 @@ impl FactReadSet {
                 break;
             }
         }
-        let mut other = 0;
-        while covered && other < self.canonical_runs.len() {
-            if other != widest {
-                compared += self.canonical_runs[other].len();
-                covered = run.is_superset(&self.canonical_runs[other]);
-            }
-            other += 1;
-        }
         record_signature_work(compared);
         covered.then_some(widest)
     }
@@ -751,6 +772,7 @@ impl FactReadSet {
     fn canonicalise(&mut self) -> FactSet {
         self.rewrites = self.rewrites.wrapping_add(1);
         let runs = std::mem::take(&mut self.canonical_runs);
+        self.run_addresses.clear();
         let mut edit = if runs.is_empty() {
             // Nothing absorbed: the local observations are the whole set.
             // Observations held inline are copied straight into the set's
@@ -946,6 +968,14 @@ impl FactReadSetCell {
         self.inner
             .borrow_mut()
             .absorb_canonical_signature(signature);
+    }
+
+    /// Whether this scope already holds `fact`, through `&self`. See
+    /// [`FactReadSet::holds`].
+    #[inline]
+    #[must_use]
+    pub fn holds(&self, fact: &FactVersionRef) -> bool {
+        self.inner.borrow().holds(fact)
     }
 
     /// The mark of everything observed so far, through `&self`. See
