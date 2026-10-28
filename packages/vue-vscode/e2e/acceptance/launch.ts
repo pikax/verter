@@ -18,7 +18,7 @@ import {
  * run reproduces the user's editor rather than whatever the marketplace serves
  * that day; override with `VERTER_E2E_NATIVE_PREVIEW_EXTENSION`.
  */
-const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
+const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@1.0.1";
 
 /**
  * Launcher for the VS Code acceptance lane.

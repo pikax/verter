@@ -2,7 +2,7 @@
 
 This page records the semantic benchmark's relation rows
 (`relation-aligned-N`, `relation-aligned-false-N`, `relation-reversed-N`):
-each row's answer class against tsc 7.0.2, the warm-repeat checks, and the
+each row's answer class against the pinned tsc, the warm-repeat checks, and the
 deterministic work and allocation counts at several sizes with their growth
 ratios. It is a portable summary; the raw harness runs stay out of the tree.
 
@@ -25,6 +25,11 @@ The following measurements describe the candidate named below. They retain its f
   --only relation-aligned-false` under `verter-supervise` (hard containment):
   tsc 7.0.2 answers `2`, with no diagnostic, at 200, 600, 1,800 and 3,200
   arms in all four `strictNullChecks` × `noImplicitAny` settings.
+- **Re-measured references.** The same command over every `relation-` row
+  on tsc 7.1.0-beta (`win32-x64`, under `verter-supervise`) reproduces each
+  row's answer and diagnostic in all four settings, and so do the
+  `expected.json` references recorded on 7.1.0-beta; the tsc column below is
+  unchanged by the move from 7.0.2.
 - **Answers and allocations.** `node scripts/benchmark/semantic-perf.mjs
   --tier stress --only relation-`. The quick tier admits only the three
   200-arm rows (`relation-aligned-200`, `relation-aligned-false-200`,
@@ -47,7 +52,7 @@ The following measurements describe the candidate named below. They retain its f
 
 ## Answer classes
 
-| scenario | tsc 7.0.2 (measured) | Verter | warm repeats answer the cold answer | time and memory |
+| scenario | tsc 7.1.0-beta (measured; as on 7.0.2) | Verter | warm repeats answer the cold answer | time and memory |
 | --- | --- | --- | --- | --- |
 | relation-aligned-200 | `1` | matched | yes | not measured |
 | relation-aligned-600 | `1` | matched | yes | not measured |
