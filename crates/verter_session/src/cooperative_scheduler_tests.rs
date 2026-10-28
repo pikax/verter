@@ -40,6 +40,72 @@ fn standalone_host() -> VerterHost {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn unchanged_carrier_routes_materialize_after_source_publication_unlocks() {
+    let host = Arc::new(standalone_host());
+    let canonical = "/work/App.vue";
+    let initial = "<script setup lang=\"ts\">defineProps<{ title: string }>()</script><template>{{ title }}</template>";
+    let edited = "<script setup lang=\"ts\">defineProps<{ title: string }>()</script><template><h1>{{ title }}</h1></template>";
+    let upsert = |source: &str| {
+        host.upsert(crate::types::UpsertRequest {
+            canonical_id: Some(canonical.into()),
+            input_id: canonical.into(),
+            source: Arc::from(source),
+            file_language: host.language_classifier().classify(canonical),
+            aliases: Vec::new(),
+        })
+        .unwrap()
+    };
+    assert!(upsert(initial).changed);
+    assert!(host
+        .ensure_indexed_ready_serve_unobserved(canonical)
+        .is_some());
+    let observed = Arc::new(AtomicUsize::new(0));
+    let locked = Arc::new(AtomicUsize::new(0));
+    let weak = Arc::downgrade(&host);
+    let observed_hook = observed.clone();
+    let locked_hook = locked.clone();
+    *host.test_force.indexed_source_capture_seam_hook.0.lock() = Some(Arc::new(move || {
+        let host = weak.upgrade().expect("fixture owns host");
+        observed_hook.fetch_add(1, Ordering::SeqCst);
+        if host
+            .block_content
+            .admission_fence
+            .is_owned_by_current_thread()
+        {
+            locked_hook.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    assert!(!upsert(initial).changed);
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        0,
+        "a byte-identical upsert stays warm"
+    );
+    assert!(upsert(edited).changed);
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        1,
+        "the unchanged route is eagerly re-indexed"
+    );
+    assert_eq!(
+        locked.load(Ordering::SeqCst),
+        0,
+        "indexing may join a producer that needs source publication"
+    );
+    let current = host
+        .ensure_indexed_ready_serve_unobserved(canonical)
+        .unwrap();
+    assert!(current.store_published);
+    assert_eq!(current.indexed.raw_source.as_ref(), edited);
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        1,
+        "the published route stays warm"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn upsert_program_discovery_runs_after_source_publication_unlocks() {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
     workspace.inject_file(
