@@ -78,8 +78,20 @@ impl Scheduler {
         }
         let aggregate = {
             let mut dag = self.dag.lock();
+            let task = {
+                let state = flight.state.lock();
+                let Some(task) = state
+                    .producer
+                    .as_ref()
+                    .map(|(task, _)| task.clone())
+                    .or_else(|| state.admission_task.clone())
+                else {
+                    return;
+                };
+                task
+            };
             dag.submit_cache(identity.clone(), priority, request_context);
-            dag.set_execution_task(&identity, flight.task.clone());
+            dag.set_execution_task(&identity, task);
             dag.cancellation_for(&identity)
                 .expect("fresh or deduplicated scoped cache node must own a token")
         };

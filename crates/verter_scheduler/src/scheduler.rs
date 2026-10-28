@@ -260,7 +260,6 @@ pub enum ScopedCacheNodeError {
 pub struct ScopedCacheFlight {
     state: Mutex<ScopedCacheFlightState>,
     delivery: Arc<DagMutex>,
-    task: verter_execution::tasks::ExecutionTask,
 }
 
 /// Typed result of a submission attempt.

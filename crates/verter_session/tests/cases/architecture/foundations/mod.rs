@@ -866,6 +866,9 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // `VerterHost::release_completion` and its failure: the soak runner
         // and retention measurements await it after a close.
         "pub use host_lifecycle::HostReleaseCompletion",
+        // Owned load dependencies returned by VerterHost::begin_load; the
+        // external driver applies HostLoadCommit after poll transfers it.
+        "pub use host_load::{HostLoadCommit, HostLoadError, HostLoadHandoff}",
         "pub use verter_semantic_source::decl_lowering::ParseReleaseError",
         // verter_lsp::background_init,
         // verter_type_runtime::tsserver::ipc, verter_type_runtime::tsgo::ipc

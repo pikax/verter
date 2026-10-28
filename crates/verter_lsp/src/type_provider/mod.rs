@@ -15,6 +15,8 @@ pub mod lazy_managed;
 mod lazy_managed_tests;
 pub mod merge;
 pub mod mock;
+#[cfg(test)]
+mod mock_call_notifications_tests;
 pub mod project_sync;
 pub mod protocol;
 pub mod specifier_rewrite;
