@@ -61,7 +61,7 @@ use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 /// cell's `checker` column) was measured against. CHECKER only, never
 /// `.d.ts` emission.
 pub(crate) const ORACLE_STAMP: &str =
-    "tsc 7.0.2 --noEmit --strict --ignoreConfig --pretty false (checker only)";
+    "tsc 7.1.0-beta --noEmit --strict --ignoreConfig --pretty false (checker only)";
 
 /// The semantic profile in force for every measurement this module
 /// takes: host construction, demand point, and rail.
@@ -4377,7 +4377,7 @@ mod expectation_controls {
     }
 
     /// CONTROL — the checker's display rule for a CONSTRUCT signature,
-    /// live, beside its call twin. TypeScript 7.0.2 prints an object type
+    /// live, beside its call twin. TypeScript 7.1.0-beta prints an object type
     /// whose only content is one construct signature as a constructor
     /// type and one whose only content is one call signature as a
     /// function type (`.d.ts` of `f(x: T) { return x }`): `{ new ():
@@ -4428,7 +4428,7 @@ mod expectation_controls {
                     if let Some(matching) = matching {
                         assert!(
                             accepts(dispatch, node, matching),
-                            "`{annotation}` prints `{matching}` on 7.0.2 (measured {measured})"
+                            "`{annotation}` prints `{matching}` on 7.1.0-beta (measured {measured})"
                         );
                     }
                     for rejected in rejected {
@@ -6296,7 +6296,7 @@ mod expectation_controls {
 /// an ENCLOSING frame declares, establishes a narrowing the checker
 /// applies to every read that follows it in that nested body — and the
 /// nested frame carries it: a captured binding is a narrowing subject like
-/// any other, so the answer is exact, complete and warm (measured, 7.0.2:
+/// any other, so the answer is exact, complete and warm (measured, 7.1.0-beta:
 /// `() => string | 0` for the two returned arrows and `string | 0` for the
 /// invoked value).
 ///
@@ -6352,12 +6352,12 @@ fn narrowing_over_a_captured_binding_is_carried_and_warms() {
 /// A top type under a runtime guard narrows as the checker narrows it,
 /// exact and warm: `instanceof` takes `unknown` or `any` to the instance
 /// type on the positive edge (`getNarrowedType` answers the candidate for
-/// a top type; measured, 7.0.2 `--strict`: `C | 0` for both), and a
+/// a top type; measured, 7.1.0-beta `--strict`: `C | 0` for both), and a
 /// `typeof` test classifies a top arm: the checker substitutes the
 /// kind's implied type for `unknown` / `any` on the positive edge (`any`
 /// stays `any` under `"object"`) and keeps the arm on the negated one,
 /// except that `unknown` loses `undefined` under a negated `"undefined"`
-/// (measured, 7.0.2 `--strict`: `string | 0` for both `"string"` spellings
+/// (measured, 7.1.0-beta `--strict`: `string | 0` for both `"string"` spellings
 /// over `unknown` and the positive one over `any`, `0 | object | null`
 /// under `"object"`, `any` for `any` under `"object"`, `{} | null` under
 /// `!== "undefined"`).
@@ -6554,7 +6554,7 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
 ///   — the subset direction, the one that is never acceptable.
 /// - Where the checker resolves the union by a sibling arm that DOES
 ///   declare the key (`T | { k: number }` on the positive edge, whose
-///   measured tsc 7.0.2 verdict is `0 | { k: number; }` — the `T` arm
+///   measured tsc 7.1.0-beta verdict is `0 | { k: number; }` — the `T` arm
 ///   is dropped, NOT intersected with `Record<"k", unknown>`; that
 ///   intersection is what a NON-union `in` subject gets), retaining the
 ///   undecidable arm is a deliberate SUPERSET. It is admissible only
@@ -6714,7 +6714,7 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
     struct Case {
         id: &'static str,
         script: &'static str,
-        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        /// tsc 7.1.0-beta `--strict --emitDeclarationOnly` verdict.
         checker: &'static str,
         rendered: &'static str,
         degradation: Degr,
@@ -6865,7 +6865,7 @@ fn alias_union_subjects_enumerate_and_narrow_like_the_checker() {
     struct Case {
         id: &'static str,
         script: &'static str,
-        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        /// tsc 7.1.0-beta `--strict --emitDeclarationOnly` verdict.
         checker: &'static str,
         rendered: &'static str,
         degradation: Degr,
@@ -7057,7 +7057,7 @@ fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
     struct Case {
         id: &'static str,
         script: &'static str,
-        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        /// tsc 7.1.0-beta `--strict --emitDeclarationOnly` verdict.
         checker: &'static str,
         rendered: &'static str,
         degradation: Degr,
@@ -7263,14 +7263,14 @@ fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
 /// return publishes a subset of the checker's type. An arm whose domain
 /// the authority cannot decide (an unresolved operator carrier) stays on
 /// both edges, records the typed guard gap, and never warms. Every
-/// `checker` column is measured against the pinned tsc 7.0.2
+/// `checker` column is measured against the pinned tsc 7.1.0-beta
 /// (`--strict --declaration --emitDeclarationOnly`).
 #[test]
 fn truthiness_domain_facts_narrow_like_the_checker() {
     struct Case {
         id: &'static str,
         script: &'static str,
-        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        /// tsc 7.1.0-beta `--strict --emitDeclarationOnly` verdict.
         checker: &'static str,
         rendered: &'static str,
         degradation: Degr,
@@ -7475,7 +7475,7 @@ fn single_v_object_json(ty: &str) -> String {
 // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 /// `as const` literal identity through EVOLVING-variable assignments and
-/// joins (checker-measured, tsgo 7.0.2 `--strict`): an assignment into a
+/// joins (checker-measured, tsgo 7.1.0-beta `--strict`): an assignment into a
 /// binding with no declared authority widens EXACTLY the fresh
 /// positions — a bare literal, a fresh ternary arm, a read of a
 /// widening-literal `const` — and preserves every pinned one — a
@@ -7607,7 +7607,7 @@ fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
 #[cfg(feature = "semantic-observe")]
 /// `"k" in x` models KEY PRESENCE separately from value
 /// non-`undefined`-ness, and a member VALUE READ carries the optional
-/// member's own absent-key `undefined` (checker-measured, tsgo 7.0.2
+/// member's own absent-key `undefined` (checker-measured, tsgo 7.1.0-beta
 /// `--strict`, `exactOptionalPropertyTypes` NOT in the oracle profile):
 /// the positive edge keeps an optional arm UNCHANGED — the checker does
 /// not refine the value to non-`undefined` (`if ("k" in x) x.k` reads

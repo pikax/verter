@@ -1,4 +1,7 @@
-import { join } from "path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { createRequire } from "module";
+import { tmpdir } from "os";
+import { dirname, join } from "path";
 
 import { describe, expect, it } from "vitest";
 
@@ -327,7 +330,8 @@ describe("prepareEditorTsdk", () => {
   //    `<node_modules>/@typescript/<name>-<platform>-<arch>/lib/<bin>[.exe]`.
   //    A bare directory holding one `tsgo.exe` can never be selected, which is
   //    why tier 1 never armed. The staged tree must satisfy that contract.
-  //    (Evidence: TypeScriptTeam.native-preview 0.20260708.2 dist bundle.) ───────
+  //    (Evidence: the 0.20260708.2 dist bundle; 1.0.1 resolves the same path,
+  //    below.) ───────────────────────────────────────────────────────────────
   it("stages an npm-shaped tsdk Native Preview can actually resolve", () => {
     const made: string[] = [];
     const copied: Array<[string, string]> = [];
@@ -350,9 +354,13 @@ describe("prepareEditorTsdk", () => {
     );
     // The shim bytes land at the exact path Native Preview stats.
     expect(copied).toEqual([["/ext/bin/verter-relay-shim", staged.executable]]);
-    // The manifest the validator parses: scoped name + a `tsgo` bin entry.
-    expect(written).toHaveLength(1);
+    // The manifest the validator parses: scoped name + a `tsgo` bin entry,
+    // and the platform package's own manifest beside the engine.
+    expect(written).toHaveLength(2);
     expect(written[0][0]).toBe(join(staged.dir, "package.json"));
+    expect(written[1][0]).toBe(
+      join(modules, "@typescript", "native-preview-linux-x64", "package.json"),
+    );
     const manifest = JSON.parse(written[0][1]);
     expect(manifest.name).toBe("@typescript/native-preview");
     expect(typeof manifest.version).toBe("string");
@@ -360,6 +368,38 @@ describe("prepareEditorTsdk", () => {
     // Both directories are created before anything is written into them.
     expect(made).toContain(staged.dir);
     expect(made).toContain(join(modules, "@typescript", "native-preview-linux-x64", "lib"));
+  });
+
+  // ── DISCRIMINATING: Native Preview 1.0.1 no longer stats a fixed path. It
+  //    resolves the platform package from the tsdk manifest with Node's module
+  //    resolution, `createRequire(<tsdk>/package.json)
+  //    .resolve("@typescript/<name>-<platform>-<arch>/package.json")`, and runs
+  //    `lib/<bin>` beside the manifest it finds. A platform directory without
+  //    its own `package.json` is never selected.
+  //    (Evidence: TypeScriptTeam.native-preview 1.0.1 dist bundle.) ───────────
+  it("stages a platform package Native Preview's module resolution finds", () => {
+    const root = mkdtempSync(join(tmpdir(), "verter-staged-tsdk-"));
+    try {
+      const shim = join(root, "verter-relay-shim");
+      writeFileSync(shim, "shim");
+      const staged = prepareEditorTsdk({
+        shimPath: shim,
+        controlDir: root,
+        platform: "linux",
+        arch: "x64",
+        chmod: () => {},
+      });
+      const manifest = JSON.parse(readFileSync(join(staged.dir, "package.json"), "utf8"));
+      const platformManifest = createRequire(join(staged.dir, "package.json")).resolve(
+        `${manifest.name}-linux-x64/package.json`,
+      );
+      expect(join(dirname(platformManifest), "lib", "tsgo")).toBe(staged.executable);
+      expect(JSON.parse(readFileSync(platformManifest, "utf8")).name).toBe(
+        "@typescript/native-preview-linux-x64",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("suffixes the staged engine with .exe on win32", () => {
