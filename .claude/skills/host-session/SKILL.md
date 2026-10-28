@@ -136,6 +136,9 @@ Their owned poll yields `LoweringStep::{Work,Value}`. WASM transfers its pure
 inline operation as independent `LoweringWork` and observes the same retained
 reply; parser work never runs in poll. External sync drivers run that token,
 and stop after transfer detaches only the subscriber.
+Compatibility index materializers consume `LoweringStep` too: on WASM they run
+transferred work between polls before awaiting its retained reply. Raw readiness
+polling alone cannot advance an inline lease or index operation.
 
 Carrier publication also shares that registry. `CarrierPublicationStore` is a
 cheap cloned handle over its existing publication/stable-parse tables, stable
