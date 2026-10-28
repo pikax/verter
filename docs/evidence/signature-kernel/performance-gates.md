@@ -454,16 +454,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   the checker relates without caching it (`skipCaching`) and, without
   `strictNullChecks`, a union of one type and `null` / `undefined` (that
   type, to the checker) are no entry of their own. The 101st entry
-  overflows: the relation is false, every structured relation after it in
-  the chain is false (the checker's `overflow` flag), and nothing computed
-  under it is admitted. Measured on TypeScript 7.0.2 with each probe in its
-  own file: `[B] extends [<B around number>] ? 1 : 2` is `1` over 97–99
-  nested `Box` applications or `{ v: … }` literals and `2` with TS2321
+  answers `Maybe`, which holds and reports nothing, so a pair that fails
+  only below the limit relates once it is nested past it. Measured on
+  TypeScript 7.1.0-beta with each probe in its own file, around a leaf that
+  fails (`1` to `string`): `[B] extends [<B around string>] ? 1 : 2` is
+  `2` over 97–99 nested `Box` applications or `{ v: … }` literals and `1`
   over 100, 101, 102 and 500 (the tuple wrapper is the first entry), written
-  inline or behind an alias; `[{ v: … }]` and `{ v: … }[]` count two a
-  level and overflow at 50, nested tuples at 100, `{ v: … } | null` two a
-  level under `strictNullChecks` and one without, and a small union source
-  one a level; the lane answers the same (`relation_depth_tests.rs` →
+  inline or behind an alias (7.0.2 overflowed there instead: `2` with
+  TS2321, around a leaf that holds or fails); `[{ v: … }]` and
+  `{ v: … }[]` count two a level and answer `Maybe` at 50, nested tuples
+  at 100, `{ v: … } | null` two a level under `strictNullChecks` and one
+  without, and a small union source one a level; the lane answers the same (`relation_depth_tests.rs` →
   `nested_object_types_overflow_at_the_checkers_depth`,
   `inline_nested_object_types_overflow_at_the_checkers_depth`,
   `inline_element_and_union_pairs_count_toward_the_checkers_depth`,
@@ -593,7 +594,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   `type_syntax_depth_tests.rs` →
   `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
   answers the checker's `"v"` for `keyof D` and `1` for `D extends
-  Box<unknown> ? 1 : 2` on the default workers. TypeScript 7.0.2 answers
+  Box<unknown> ? 1 : 2` on the default workers. TypeScript 7.1.0-beta answers, as 7.0.2 did,
   at 10,000 nested type arguments or parentheses (`"v"` and `1` for the
   `Box` nesting, `1` for `(((…1…)))`, each in under
   2 s). The slice lowering of a returned value (`Lowerer::lower_expr`,
@@ -698,7 +699,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   `deep_input_tests.rs` answers 1,000 nested conditionals (returned, and
   as a member's value), 3,000 nested object literals and 3,000 nested
   blocks on a 1 MiB caller with 8 MiB workers, unoptimized, with
-  TypeScript 7.0.2's answers (`1 | 2`, `number`, `"v"`, `number`);
+  TypeScript 7.1.0-beta's answers (`1 | 2`, `number`, `"v"`, `number`);
   restoring any of the recursions (the conditional lowering, the member
   conditional's evaluation, the return's arm walk, the object lowering or
   evaluation, the block lowering or evaluation) or the derived statement
@@ -718,7 +719,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   the last is delivered (a body-derived return is still demanded from the
   whole-function producer in place). `deep_input_tests.rs` →
   `function_and_constructor_types_nested_10000_deep_answer_on_production_stacks`
-  answers `1` (TypeScript 7.0.2's) for `D extends Function ? 1 : 2` over
+  answers `1` (TypeScript 7.1.0-beta's) for `D extends Function ? 1 : 2` over
   10,000 nested function types and 10,000 nested constructor types;
   lowering the declared return in place overflows it. A type parameter's
   constraint and default still lower in place, one native level per
@@ -796,7 +797,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   route over the same arguments reads the values the first evaluated
   instead of evaluating the nest inside them again (1,100 nested calls
   took 238 s, 3.4 s now, unoptimized). `deep_input_tests.rs` answers 500
-  nested calls on a 1 MiB caller with 8 MiB workers (TypeScript 7.0.2's
+  nested calls on a 1 MiB caller with 8 MiB workers (TypeScript 7.1.0-beta's
   `number`); evaluating the arguments in place overflows the caller. At
   10,000 levels the call resolutions exceed the connected-demand work
   budget, so the return is its typed budget failure; it returns on the
@@ -830,7 +831,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   contextual element type still evaluates in place), and the frames the
   stack holds for object literals, array literals and calls are boxed so
   the evaluator's own frame stays at about 5 KiB. `deep_input_tests.rs`
-  answers 64 nested array literals on a 1 MiB caller (TypeScript 7.0.2's
+  answers 64 nested array literals on a 1 MiB caller (TypeScript 7.1.0-beta's
   `1` for `ReturnType<typeof pf> extends unknown[] ? 1 : 2`); evaluating
   the elements in place overflows it. At 10,000 levels the literal
   exceeds that inference depth budget, so the return is its typed budget
@@ -915,7 +916,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   shared chain, so no evaluator borrows a native frame of the one around
   it and the native stack a nest takes no longer depends on its depth.
   `deep_input_tests.rs` → `arrows_nested_10000_deep_answer_on_production_stacks`
-  answers TypeScript 7.0.2's `1` for `ReturnType<typeof pf> extends
+  answers TypeScript 7.1.0-beta's `1` for `ReturnType<typeof pf> extends
   Function ? 1 : 2` over 10,000 nested arrows on a 1 MiB caller;
   evaluating the return's nested function in place overflows it.
   `flow_return_nested.rs` → `nested_store_tests` hold the store's
@@ -934,7 +935,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   expression's members (`flow_return_class.rs`: its `extends` value,
   initializers and member functions are children of the class's step).
   `await` and a comma sequence's value operand evaluate from the
-  expression stack too. `deep_input_tests.rs` answers TypeScript 7.0.2 on
+  expression stack too. `deep_input_tests.rs` answers TypeScript 7.1.0-beta on
   a 1 MiB caller for callbacks 10,000 deep (`number`; through a generic
   callee they answer at 400 levels and return their typed work-budget
   failure at 2,000), and 2,000 deep for immediately invoked arrows and
@@ -954,7 +955,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   evaluated from the stack of evaluators too:
   the `arrows_returned_from_*_nested_2000_deep_answer_on_production_stacks`
   tests answer `1` for arrows returned from a block, an `if` arm, a
-  `switch` clause and a labeled statement, 2,000 deep (TypeScript 7.0.2
+  `switch` clause and a labeled statement, 2,000 deep (TypeScript 7.1.0-beta
   answers `1` too; 10,000 deep it reports TS2563 — body too large for
   control-flow analysis — on the `if` and `switch` nests), and
   evaluating each nested function in place overflows every one of them
@@ -992,7 +993,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   `switch`), and a write there leaves its reference its declared type.
   `differential_flow_tests.rs` →
   `returns_past_a_path_the_checker_proves_dead_contribute` holds 22 rows
-  measured on TypeScript 7.0.2 under the four settings (`"end" | 1 | 2`
+  measured on TypeScript 7.1.0-beta under the four settings (`"end" | 1 | 2`
   past an exhaustive `switch`, where the lane answered `2 | 1`);
   skipping the tail, reading the `switch` entry state instead of the
   no-matching-case edge and dropping the dead-write record each fail it.
@@ -1126,7 +1127,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   resolves a call over its evaluated parts), in the same order, a call
   ending where its callee or an argument has no value. `deep_input_tests.rs`
   → `module_calls_nested_1000_deep_answer_on_production_stacks` answers
-  TypeScript 7.0.2's `1` for 1,000 nested generic calls at module level,
+  TypeScript 7.1.0-beta's `1` for 1,000 nested generic calls at module level,
   and `module_calls_nested_10000_deep_return_on_production_stacks` returns
   on a 1 MiB caller for 10,000 read in a function (its calls' resolutions
   exceed the connected-demand work budget, a typed failure); with the
@@ -1196,7 +1197,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   unmodeled), and `expression_effect_tree` walks from a stack in the same
   tree order. `flow_return_null_policy_tests.rs` →
   `operator_chains_10000_deep_evaluate_on_a_small_stack` answers
-  `boolean`, `number` and `number` (TypeScript 7.0.2's answers) for
+  `boolean`, `number` and `number` (TypeScript 7.1.0-beta's answers) for
   10,000-deep `!`, unary `-` and `+` chains on a 1 MiB caller thread,
   unoptimized; restoring either recursion overflows it.
 

@@ -102,7 +102,7 @@ describe("VS Code E2E extension provisioning", () => {
         "--extensions-dir=/stale/extensions",
         "--user-data-dir=/stale/user-data",
       ],
-      extension: "TypeScriptTeam.native-preview@0.20260708.2",
+      extension: "TypeScriptTeam.native-preview@1.0.1",
       extensionsDir: "/isolated/extensions",
       userDataDir: "/isolated/user-data",
       run,
@@ -118,7 +118,7 @@ describe("VS Code E2E extension provisioning", () => {
       "--extensions-dir=/isolated/extensions",
       "--user-data-dir=/isolated/user-data",
       "--install-extension",
-      "TypeScriptTeam.native-preview@0.20260708.2",
+      "TypeScriptTeam.native-preview@1.0.1",
       "--force",
     ]);
     expect(options).toMatchObject({ timeout: 180_000, shell: false, windowsHide: true });
@@ -134,14 +134,14 @@ describe("VS Code E2E extension provisioning", () => {
     await expect(
       provisionVsCodeExtension({
         cliArgs: ["code"],
-        extension: "TypeScriptTeam.native-preview@0.20260708.2",
+        extension: "TypeScriptTeam.native-preview@1.0.1",
         extensionsDir: "/isolated/extensions",
         userDataDir: "/isolated/user-data",
         run,
         retry: { attempts: 3, delayMs: 1, sleep: async () => undefined, warn: () => undefined },
       }),
     ).rejects.toThrow(
-      /Failed to provision VS Code extension TypeScriptTeam\.native-preview@0\.20260708\.2 after 3 attempt\(s\)[\s\S]*extension not found/,
+      /Failed to provision VS Code extension TypeScriptTeam\.native-preview@1\.0\.1 after 3 attempt\(s\)[\s\S]*extension not found/,
     );
     expect(attempts).toBe(3);
   });
@@ -160,7 +160,7 @@ describe("VS Code E2E extension provisioning", () => {
 
     await provisionVsCodeExtension({
       cliArgs: ["code"],
-      extension: "TypeScriptTeam.native-preview@0.20260708.2",
+      extension: "TypeScriptTeam.native-preview@1.0.1",
       extensionsDir: "/isolated/extensions",
       userDataDir: "/isolated/user-data",
       run,
