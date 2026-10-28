@@ -106,8 +106,6 @@ use cancellation::*;
 use completion::*;
 use dag_lock::*;
 use dependencies::*;
-#[cfg(all(target_arch = "wasm32", any(test, feature = "test-support")))]
-use driver::DispatchPauseHook;
 #[cfg(not(target_arch = "wasm32"))]
 use driver::*;
 // The dispatch pause hook is test instrumentation every build that carries
