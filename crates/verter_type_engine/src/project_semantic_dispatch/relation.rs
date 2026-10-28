@@ -8493,15 +8493,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         current
     }
 
-    /// The type a key-domain operand names for a relation: a declaration
-    /// carrier unwrapped and aliases followed, so a key domain spelled
-    /// through an alias (`PropertyKey`) reads as the union it names.
-    /// `None` when the carrier does not resolve.
-    fn relation_key_domain(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self.unwrap_identity_carrier_for_relation(node) {
-            IdentityCarrierUnwrap::Concrete(node) => Some(self.follow_relation_aliases(node)),
-            IdentityCarrierUnwrap::Unresolvable => None,
+    /// The leaves of a relation's key domain, resolving aliases at every
+    /// union level. Shared subdomains are visited once; an unresolved or
+    /// cyclic domain leaves the relation undecided.
+    fn relation_key_constituents(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.graph();
+        let mut pending = vec![(node, false)];
+        let mut active = FxHashSet::default();
+        let mut complete = FxHashSet::default();
+        let mut keys = Vec::new();
+        while let Some((node, finish)) = pending.pop() {
+            if finish {
+                active.remove(&node);
+                complete.insert(node);
+                continue;
+            }
+            let node = match self.unwrap_identity_carrier_for_relation(node) {
+                IdentityCarrierUnwrap::Concrete(node) => self.follow_relation_aliases(node),
+                IdentityCarrierUnwrap::Unresolvable => return None,
+            };
+            if complete.contains(&node) {
+                continue;
+            }
+            if !active.insert(node) {
+                return None;
+            }
+            match graph.node_data(node).as_deref()? {
+                SemanticNodeData::Union(members) => {
+                    pending.push((node, true));
+                    pending.extend(members.iter().rev().map(|member| (*member, false)));
+                }
+                _ => {
+                    keys.push(node);
+                    active.remove(&node);
+                    complete.insert(node);
+                }
+            }
         }
+        Some(keys)
     }
 
     /// When `node == node` unwraps (alias follow + identity-carrier unwrap) to
@@ -12712,12 +12741,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let key_domain = self
             .evaluate_deferred_semantic_node_with_context(mapper.key_space, transit)
             .into_active_query_build_node(self);
-        let key_domain = self.relation_key_domain(key_domain)?;
-        let constituents: Vec<SemanticNodeId> = match graph.node_data(key_domain).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-            Some(_) => vec![key_domain],
-            None => return None,
-        };
+        let constituents = self.relation_key_constituents(key_domain)?;
         let optional = matches!(
             mapper.optionality,
             crate::semantic_query::OptionalityMod::Add
@@ -12748,7 +12772,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut members: Vec<crate::semantic_query::SurfaceMember> = Vec::new();
         let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
         for key in constituents {
-            let key = self.relation_key_domain(key)?;
             let data = graph.node_data(key)?;
             match &*data {
                 SemanticNodeData::Literal(LiteralValue::String(text)) => {
@@ -13002,20 +13025,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         let graph = self.graph();
-        let Some(key_type) = self.relation_key_domain(key_type) else {
+        let Some(keys) = self.relation_key_constituents(key_type) else {
             return RelationResult::Unknown;
-        };
-        let keys: Vec<SemanticNodeId> = match graph.node_data(key_type).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
-            Some(_) => vec![key_type],
-            None => return RelationResult::Unknown,
         };
         let mut required_keys: Vec<crate::semantic_query::PropertyKey> = Vec::new();
         let mut index_keys: Vec<SemanticNodeId> = Vec::new();
         for key in keys {
-            let Some(key) = self.relation_key_domain(key) else {
-                return RelationResult::Unknown;
-            };
             match graph.node_data(key).as_deref() {
                 Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
                     required_keys.push(crate::semantic_query::PropertyKey::string_literal(

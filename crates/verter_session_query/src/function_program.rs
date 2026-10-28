@@ -319,9 +319,9 @@ pub struct FunctionProgramKey {
     pub overload_ordinal: u32,
 }
 
-/// The parameters a call must supply to `params` before the first optional,
-/// defaulted or rest one (the target count of the checker's
-/// `isAritySmaller`).
+/// The leading required parameters used by the checker's contextual
+/// `isAritySmaller` filter. This stops at the first default even if a later
+/// parameter is required; it is not the minimum argument count for a call.
 #[must_use]
 pub fn required_parameter_count(params: &[FunctionParamRecord]) -> u32 {
     let required = params
@@ -329,6 +329,45 @@ pub fn required_parameter_count(params: &[FunctionParamRecord]) -> u32 {
         .take_while(|param| !param.optional && !param.has_initializer && !param.rest)
         .count();
     u32::try_from(required).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod arity_tests {
+    use super::{required_parameter_count, FunctionParamRecord};
+
+    #[test]
+    fn contextual_arity_stops_at_a_default_before_a_required_parameter() {
+        let required = FunctionParamRecord {
+            name: None,
+            optional: false,
+            has_initializer: false,
+            rest: false,
+            has_ts_annotation: false,
+            annotation_reference: None,
+        };
+        let defaulted = FunctionParamRecord {
+            has_initializer: true,
+            ..required.clone()
+        };
+        let optional = FunctionParamRecord {
+            optional: true,
+            ..required.clone()
+        };
+        let rest = FunctionParamRecord {
+            rest: true,
+            ..required.clone()
+        };
+        for (params, expected) in [
+            (vec![], 0),
+            (vec![defaulted.clone()], 0),
+            (vec![optional.clone(), rest.clone()], 0),
+            (vec![required.clone(), defaulted.clone()], 1),
+            (vec![defaulted.clone(), required.clone()], 0),
+            (vec![defaulted, required, optional, rest], 0),
+        ] {
+            assert_eq!(required_parameter_count(&params), expected, "{params:?}");
+        }
+    }
 }
 
 /// One formal parameter's binding fact.

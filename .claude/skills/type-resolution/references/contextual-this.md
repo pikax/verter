@@ -1,5 +1,12 @@
 # Contextual object receivers
 
+Contextual signature selection counts only the leading required parameters,
+stopping at the first default, optional or rest parameter, as the checker's
+`isAritySmaller` does. This differs from a call's minimum argument count when
+a default precedes a required parameter. The shared function-program facts
+own this count, consumed by nested callback contextual typing. The arity unit
+controls and `pinia_options_store_tests` cover leading and trailing defaults.
+
 Object-literal methods use the argument of the global `ThisType<T>` marker
 in their contextual type, including intersections, unions and generic aliases.
 Intersections select the first marker in authored order; unions combine the

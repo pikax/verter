@@ -4,6 +4,13 @@
 with an empty arm key set has no shared keys; a nullish branch erased by
 the project's union policy contributes no arm.
 
+Record relations and key-dependent mapped index relations resolve aliases at
+every level of a key union before classifying its leaves. The shared relation
+walk visits a repeated resolved subdomain once and leaves cyclic or unavailable
+domains undecided. Each literal leaf still requires its property and value;
+index leaves use the ordinary index-signature rule. Nested aliases, missing
+properties and wrong values are covered by `pinia_options_store_tests`.
+
 Path projection is the default shape of every semantic query. Whole-surface expansion is a degenerate case of projecting the empty path; single-hop `ProjectMember` / `IndexedAccess` are sugar for `ProjectPath` with length 1.
 
 - **Path queries are first-class semantic queries.** `SemanticQueryKey::ProjectPath { base, path, context }` is the canonical form (`context` is a `ProjectionReductionContext { mode, demand, provenance, merge_role, vue_heritage_policy }` — `provenance`, `merge_role`, and the content-free Vue heritage policy are folded into `FamilyKey` for every context-bearing projection-reduction family; the terminal projection mode rides on `context.mode`).
