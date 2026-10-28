@@ -54,6 +54,8 @@ impl SourceLoader for CapturedSourceLoader<'_> {
 /// File-stage work returns its terminal `StageComplete` (cache-node work
 /// returns `None`); the caller owns delivery so a sole inbox consumer can
 /// drain rather than park on its own full inbox.
+/// The entry consumes the dispatched job, releasing its task before the caller
+/// can publish that terminal envelope, including when execution unwinds.
 ///
 /// `file_node` is the resolved [`FileNode`] for file-stage work (the caller
 /// looks it up and applies the removed-node / generation-mismatch guards
@@ -61,7 +63,7 @@ impl SourceLoader for CapturedSourceLoader<'_> {
 #[allow(clippy::too_many_arguments)]
 #[must_use = "the terminal StageComplete must be delivered to the inbox"]
 pub(super) fn dispatch_ready_job_to_executor(
-    job: &ReadyJob,
+    job: ReadyJob,
     file_node: Option<&FileNode>,
     generation: u64,
     failed_blocker_deps: std::collections::BTreeMap<DepKey, crate::dag::FailedDepRecord>,
@@ -163,7 +165,7 @@ pub(super) fn dispatch_ready_job_to_executor(
         // executor chokepoint.
         (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => run_file_stage(
             TaskKind::Load,
-            job,
+            &job,
             file_node,
             generation,
             failed_blocker_deps,
@@ -193,7 +195,7 @@ pub(super) fn dispatch_ready_job_to_executor(
         }
         (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => run_file_stage(
             TaskKind::Analysis,
-            job,
+            &job,
             file_node,
             generation,
             failed_blocker_deps,
@@ -207,7 +209,7 @@ pub(super) fn dispatch_ready_job_to_executor(
             TaskKind::Artifact {
                 profile_hash: profile_hash_from_bytes(*profile_hash),
             },
-            job,
+            &job,
             file_node,
             generation,
             failed_blocker_deps,
@@ -860,7 +862,7 @@ impl Scheduler {
                 let job = job.started();
                 let cancellation = job.cancellation.clone();
                 let completion = dispatch_ready_job_to_executor(
-                    &job,
+                    job,
                     None,
                     0,
                     std::collections::BTreeMap::new(),
@@ -1067,7 +1069,7 @@ impl Scheduler {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let cancellation = job.cancellation.clone();
                     dispatch_ready_job_to_executor(
-                        &job,
+                        job,
                         Some(&node),
                         generation,
                         failed_blocker_deps,
@@ -1127,7 +1129,7 @@ impl Scheduler {
                     caller_kind::with_active_path(identity, || {
                         let cancellation = job.cancellation.clone();
                         dispatch_ready_job_to_executor(
-                            &job,
+                            job,
                             Some(&node),
                             generation,
                             failed_blocker_deps,
@@ -1190,7 +1192,7 @@ impl Scheduler {
                     caller_kind::with_active_path(identity, || {
                         let cancellation = job.cancellation.clone();
                         dispatch_ready_job_to_executor(
-                            &job,
+                            job,
                             Some(&node),
                             generation,
                             failed_blocker_deps,
@@ -1479,7 +1481,7 @@ impl Scheduler {
             let completion = caller_kind::with_active_path(identity, || {
                 let cancellation = job.cancellation.clone();
                 dispatch_ready_job_to_executor(
-                    &job,
+                    job,
                     None,
                     0,
                     std::collections::BTreeMap::new(),
@@ -1557,7 +1559,7 @@ impl Scheduler {
         let completion = caller_kind::with_active_path(identity, || {
             let cancellation = job.cancellation.clone();
             dispatch_ready_job_to_executor(
-                &job,
+                job,
                 Some(&node),
                 generation,
                 failed_blocker_deps,

@@ -77,6 +77,9 @@ Native and inline dispatch release the dequeued job's temporary task handle
 before publishing readiness. A consumer can therefore elect, finish and release
 its producer while the dispatcher is still delivering that readiness wake;
 the DAG's reservation continues to cover the admitted work until settlement.
+File-stage execution likewise consumes its dequeued job before returning the
+terminal completion envelope. Worker request-context cleanup can continue after
+publication without retaining the completed execution task.
 Pending scoped handoffs subscribe to their request's cancellation. Scheduler
 `CompletionSubscription::owned` binds completion waits to explicit producer
 and waiter tasks plus a stop token, and `begin_owned_request` follows the
