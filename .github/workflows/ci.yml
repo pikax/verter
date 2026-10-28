@@ -431,12 +431,17 @@ jobs:
       # three minutes.
       - name: Run core Rust tests from the shared archive
         timeout-minutes: 30
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
         run: |
           mkdir -p target/rust-nextest-archive
-          export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
-          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER"
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
+          export VERTER_NEXTEST_FILTER
+          nextest_argv=(nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER")
+          echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
+          cargo "${nextest_argv[@]}"
       - name: Locate nextest JUnit report
         if: always()
         id: junit
@@ -449,6 +454,16 @@ jobs:
           fi
           echo "path=$found" >> "$GITHUB_OUTPUT"
           echo "JUnit report: $found"
+      # The JUnit report plus its metadata document, under a stable name per shard.
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          junit-path: ${{ steps.junit.outputs.path }}
+          name: nextest-evidence-rust-test-core-${{ matrix.shard }}-of-4
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+          matrix-json: ${{ toJSON(matrix) }}
       - name: Test report
         if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
@@ -458,58 +473,32 @@ jobs:
           reporter: java-junit
           fail-on-error: false
 
-  # The instrumentation lane. Audit capture, footprints and timing compile only
-  # under the default-off `semantic-observe` feature, so the core shards above
-  # build them away and the suites that read a captured record run here, with
-  # the feature on for every workspace member that declares it
-  # (`scripts/observe-lane.mjs` derives that set from `cargo metadata`). The
-  # test selection is the same provider-free core filter.
+  # Verify real host capture without rebuilding/running every Rust test.
+  # The full semantic-observe suite runs in nightly.yml.
   rust-observe:
-    name: Rust Test (instrumentation)
+    name: Rust Test (instrumentation smoke)
     needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 95
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: rust-observe
-      - uses: pnpm/action-setup@v6
+          key: rust-observe-smoke
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Fetch locked Cargo dependencies
-        run: cargo fetch --locked
-      - name: Run the instrumentation lane
-        timeout-minutes: 80
-        env:
-          NEXTEST_PROFILE: ci
-        run: node scripts/observe-lane.mjs run
-      - name: Locate nextest JUnit report
-        if: always()
-        id: junit
-        run: |
-          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
-            exit 1
-          fi
-          echo "path=$found" >> "$GITHUB_OUTPUT"
-      - name: Test report
-        if: always() && steps.junit.outputs.path != ''
-        uses: dorny/test-reporter@v3
-        with:
-          name: Rust Instrumentation Test Results
-          path: ${{ steps.junit.outputs.path }}
-          reporter: java-junit
-          fail-on-error: false
+          package-manager-cache: false
+      - name: Check the instrumentation runner
+        run: node --test scripts/observe-lane.test.mjs
+      - name: Verify host output and audit capture
+        timeout-minutes: 30
+        run: node scripts/observe-lane.mjs smoke
 
   # The real-provider lane: tsgo, the main platform. Its tests run exactly as
   # before — serial libtest, explicitly initialized, one test at a time.
@@ -673,9 +662,21 @@ jobs:
       - name: Verify BF2 CI lane contract
         run: node --test scripts/bf2-ci-lane-selftest.mjs
       - name: Run exact BF2 authoritative inventory
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
-        run: node scripts/bf2-authoritative.mjs
+        run: |
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node -e 'import("./scripts/gate-internals.mjs").then((m) => console.log(JSON.stringify(m.buildBf2NextestArgs("run"))))')"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/bf2-authoritative.mjs
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-bf2-authoritative
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
 
   js-build-test:
     name: JS Build & Test
@@ -1125,7 +1126,7 @@ jobs:
       - name: Install wasm-bindgen CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.122
+          tool: wasm-bindgen-cli@0.2.129
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -1225,7 +1226,7 @@ jobs:
       - name: Install wasm-bindgen CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.122
+          tool: wasm-bindgen-cli@0.2.129
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -1260,8 +1261,30 @@ jobs:
     if: needs.detect-changes.outputs.wasm == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # The official Playwright image carries Chromium, Firefox and WebKit at the
+    # exact builds Playwright resolves, plus their system libraries
+    # (`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`). That replaces the browser
+    # download, the Actions cache and `install-deps`: the cache is saved only
+    # from main, so every PR re-downloaded whenever the Playwright version
+    # moved, and a cold `playwright install --with-deps` took 40 minutes.
+    #
+    # The tag MUST equal the `@playwright/test` version pnpm-lock.yaml
+    # resolves, because a mismatched image has the wrong browser builds.
+    # `scripts/browser-host-gate.test.mjs` (test:scripts) fails on drift, so a
+    # Playwright bump has to move this tag in the same change.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    env:
+      # Never download over the preinstalled browsers.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v5
+      # The native probe links with `cc`; the image is not guaranteed to ship it.
+      - name: Ensure a C linker
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: command -v cc >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev)
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-unknown-unknown
@@ -1280,34 +1303,14 @@ jobs:
         with:
           name: wasm-build
           path: packages/wasm
-      # The browser binaries are keyed on the resolved Playwright version, which
-      # pins the exact browser builds it downloads. The apt system libraries
-      # cannot live in a cache, so a hit still runs `install-deps`.
-      - name: Resolve Playwright version
-        id: playwright-version
-        working-directory: packages/playground
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      # Restored everywhere, saved only from main (see "Caches" at the top).
-      - name: Restore Playwright browsers
-        id: playwright-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium-firefox-webkit
-      - name: Install Playwright browsers (Chromium, Firefox, WebKit)
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
-      - name: Save Playwright browsers
-        if: github.ref == 'refs/heads/main' && steps.playwright-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
-      - name: Install Playwright system dependencies
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: pnpm --filter @verter/playground exec playwright install-deps chromium firefox webkit
+      # Container jobs set HOME=/github/home, owned by another user than root,
+      # and Firefox refuses to launch under root unless HOME is root's own
+      # (Playwright's documented workaround). Only this step switches it; the
+      # toolchain homes stay where the setup steps installed them.
       - name: Run the browser-host-domain gate
+        env:
+          HOME: /root
+          RUSTUP_HOME: /github/home/.rustup
         run: node scripts/browser-host-gate.mjs --skip-build
 
   # ---------------------------------------------------------------------------

@@ -1117,7 +1117,7 @@ impl VerterHost {
     ) -> bool {
         let view = current_view.view();
         use verter_session_query::facts::store_view::StoreView;
-        view.validates_fact_signature(&signature.facts)
+        view.validates_fact_signature((&signature.facts).into())
     }
 
     /// Read-only predicate: would `get_virtual_file(query)` for this
@@ -1193,8 +1193,8 @@ impl VerterHost {
     /// the producer actually recorded the cross-file fact set the
     /// consumer's read-side fact-validation oracle depends on. The
     /// returned `ReadSetSignature` exposes `.facts` (the path-precise
-    /// fact rail, paged when wide) and `.entries()` (every entry with its
-    /// pages read through).
+    /// fact rail, one canonical set at any width) and `.entries()` (every
+    /// entry, in canonical order).
     pub fn compile_slot_fact_dep_signature(
         &self,
         canonical_id: &str,
@@ -2111,7 +2111,9 @@ impl VerterHost {
                 },
                 refusal.diagnostics,
                 false,
-                crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
+                crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(
+                    self.project_type_store().fact_policy(),
+                ),
             ),
             Err(diagnostics) => {
                 let publication_fence = self.block_content.admission_fence.lock();
@@ -2295,6 +2297,7 @@ impl VerterHost {
                             captured_key,
                             compile_output_value,
                             captured_generation,
+                            self.project_type_store().fact_policy(),
                         );
                     }
                 }
@@ -3523,7 +3526,9 @@ impl VerterHost {
 
         // Convert raw template data into analysis types when available.
         let mut template_class_admission =
-            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable();
+            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(
+                self.project_type_store().fact_policy(),
+            );
         let template_analysis = products.template_facts().map(|facts_product| {
             let (analysis, admission) = self.template_analysis_from_facts(snapshot, facts_product);
             template_class_admission = admission;

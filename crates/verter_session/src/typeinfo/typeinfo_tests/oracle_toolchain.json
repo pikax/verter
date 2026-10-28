@@ -1,12 +1,12 @@
 {
-  "typescript": "7.0.2",
-  "engine_version_report": "Version 7.0.2",
+  "typescript": "7.1.0-beta",
+  "engine_version_report": "Version 7.1.0-beta",
   "platforms": {
     "darwin-arm64": {
       "package": "@typescript/typescript-darwin-arm64",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "executable": "lib/tsc",
-      "executable_sha256": "sha256:a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2",
+      "executable_sha256": "sha256:29f5eb8daa5c8cf6ef1c0cb79fbcf47c0cfdf26edabdf148bb779d0b2d56cebc",
       "lib_d_ts": [
         {
           "path": "lib/lib.d.ts",
@@ -14,7 +14,7 @@
         },
         {
           "path": "lib/lib.decorators.d.ts",
-          "sha256": "sha256:1ce14b81c5cc821994aa8ec1d42b220dd41b27fcc06373bce3958af7421b77d4"
+          "sha256": "sha256:940824bc0b599c6ecf5afe930218ebbb1831219b65f7f1ed78ec677b275f3edf"
         },
         {
           "path": "lib/lib.decorators.legacy.d.ts",
@@ -26,7 +26,7 @@
         },
         {
           "path": "lib/lib.dom.d.ts",
-          "sha256": "sha256:d6b1eba8496bdd0eed6fc8a685768fe01b2da4a0388b5fe7df558290bffcf32f"
+          "sha256": "sha256:2f8c8d9e23d03e00c353412f5b2be3b1fd893290fc0976ad2229681bb7d46a35"
         },
         {
           "path": "lib/lib.dom.iterable.d.ts",
@@ -142,7 +142,7 @@
         },
         {
           "path": "lib/lib.es2018.intl.d.ts",
-          "sha256": "sha256:805c86f6cca8d7702a62a844856dbaa2a3fd2abef0536e65d48732441dde5b5b"
+          "sha256": "sha256:b477b19cafa67ab59a4818c40d821674e641bf11e6200d5567b28cabedbc953d"
         },
         {
           "path": "lib/lib.es2018.promise.d.ts",
@@ -198,7 +198,7 @@
         },
         {
           "path": "lib/lib.es2020.intl.d.ts",
-          "sha256": "sha256:db839fa0625981ae6e20a55e079c3613184310ca246879245b294573e7cc6926"
+          "sha256": "sha256:7b4f295ddb7e8c73f608bf54aa5d76b604b4fc44340a2eaa1f34040e7261afd4"
         },
         {
           "path": "lib/lib.es2020.number.d.ts",
@@ -246,7 +246,7 @@
         },
         {
           "path": "lib/lib.es2022.array.d.ts",
-          "sha256": "sha256:6d3261badeb7843d157ef3e6f5d1427d0eeb0af0cf9df84a62cfd29fd47ac86e"
+          "sha256": "sha256:a6b2211fcbf07dcc84e274b0ce935473ac4e24e75a12234f6a65b7a6fbe9285b"
         },
         {
           "path": "lib/lib.es2022.d.ts",
@@ -294,7 +294,7 @@
         },
         {
           "path": "lib/lib.es2023.intl.d.ts",
-          "sha256": "sha256:135d5cf4d345f59f1a9caadfafcd858d3d9cc68290db616cc85797224448cccc"
+          "sha256": "sha256:2c14b6fc74e9488a93c8212bdac44cbf534d5c30c7b688d52d7e6013d19a56c1"
         },
         {
           "path": "lib/lib.es2024.arraybuffer.d.ts",
@@ -365,24 +365,52 @@
           "sha256": "sha256:20884846cef428b992b9bd032e70a4ef88e349263f63aeddf04dda837a7dba26"
         },
         {
+          "path": "lib/lib.es2026.array.d.ts",
+          "sha256": "sha256:9fdb2d4893f2582d5d96c89aa3606a0692ff620fb2eb81314f598d4c705cdba2"
+        },
+        {
+          "path": "lib/lib.es2026.collection.d.ts",
+          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
+        },
+        {
+          "path": "lib/lib.es2026.d.ts",
+          "sha256": "sha256:7e15d13e27b1b7f3c13680bdf0b96a367e11d16db15b48662664492c9b028341"
+        },
+        {
+          "path": "lib/lib.es2026.error.d.ts",
+          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
+        },
+        {
+          "path": "lib/lib.es2026.full.d.ts",
+          "sha256": "sha256:103cc88b49cbf0968e60b700e470b0cf8a4406fb41e720223391d5ab5ef6d5b1"
+        },
+        {
+          "path": "lib/lib.es2026.iterator.d.ts",
+          "sha256": "sha256:980c5476cbc0589d977c043f32c0c6a08ee76d5eb28450079a39aa8b76451b42"
+        },
+        {
+          "path": "lib/lib.es2026.json.d.ts",
+          "sha256": "sha256:76e348ff85f0a6a3b0b29312a678ce8f5f551ff3ceb01898e0f75ab992542786"
+        },
+        {
+          "path": "lib/lib.es2026.math.d.ts",
+          "sha256": "sha256:b49218cb3617a535a9f82c9f9fbf00de62b60e3afb1aa2e2c7df989b37fb2ece"
+        },
+        {
+          "path": "lib/lib.es2026.typedarrays.d.ts",
+          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
+        },
+        {
           "path": "lib/lib.es5.d.ts",
-          "sha256": "sha256:6388847232654d7fcbed7fe89ea511a65ad1f5104b41e905c43f90910e1408b6"
+          "sha256": "sha256:45cc92f8dd3df7cb07b7d19e2b2ca34e78bc005c910c1e53ee1cf9bf37910215"
         },
         {
           "path": "lib/lib.es6.d.ts",
           "sha256": "sha256:174a0fa01bb60bcb80e09b0b7bdcdddf688891433d6030244df5b44eb9ebd210"
         },
         {
-          "path": "lib/lib.esnext.array.d.ts",
-          "sha256": "sha256:5fcab789c73a97cd43828ee3cc94a61264cf24d4c44472ce64ced0e0f148bdb2"
-        },
-        {
-          "path": "lib/lib.esnext.collection.d.ts",
-          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
-        },
-        {
           "path": "lib/lib.esnext.d.ts",
-          "sha256": "sha256:17f13ecb98cbc39243f2eee1f16d45cd8ec4706b03ee314f1915f1a8b42f6984"
+          "sha256": "sha256:c527e446837b7d310f855182dc902d9352d82ebf49f3fa5a91f567490272150b"
         },
         {
           "path": "lib/lib.esnext.date.d.ts",
@@ -397,10 +425,6 @@
           "sha256": "sha256:1ecb8e347cb6b2a8927c09b86263663289418df375f5e68e11a0ae683776978f"
         },
         {
-          "path": "lib/lib.esnext.error.d.ts",
-          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
-        },
-        {
           "path": "lib/lib.esnext.full.d.ts",
           "sha256": "sha256:ef4a897cd2a3f91000c10264e400b3667c7e51e1b7365f03b62e8081dc53bde6"
         },
@@ -409,16 +433,24 @@
           "sha256": "sha256:379bc41580c2d774f82e828c70308f24a005b490c25ba34d679d84bcf05c3d9d"
         },
         {
+          "path": "lib/lib.esnext.iterator.d.ts",
+          "sha256": "sha256:7838fe28f089cd1d07670ef889f9f5d1291972f3eb30ca0d5c35c4b4f643dee8"
+        },
+        {
+          "path": "lib/lib.esnext.modulesource.d.ts",
+          "sha256": "sha256:07d0263a8b648fe19544ded6e93dfd5dfd9d204bd1f897cf629b200006b90b6f"
+        },
+        {
+          "path": "lib/lib.esnext.promise.d.ts",
+          "sha256": "sha256:6ea73fc934d2d487cad935bdab38d5be9b315a808f6a38083ea6926373b115c3"
+        },
+        {
           "path": "lib/lib.esnext.sharedmemory.d.ts",
           "sha256": "sha256:ed484fb2aa8a1a23d0277056ec3336e0a0b52f9b8d6a961f338a642faf43235d"
         },
         {
           "path": "lib/lib.esnext.temporal.d.ts",
           "sha256": "sha256:4ffedae1d1c2d53fdbca1c96d3c7dda544281f7d262f99b6880634f8fd8d9820"
-        },
-        {
-          "path": "lib/lib.esnext.typedarrays.d.ts",
-          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
         },
         {
           "path": "lib/lib.scripthost.d.ts",
@@ -430,7 +462,7 @@
         },
         {
           "path": "lib/lib.webworker.d.ts",
-          "sha256": "sha256:d52ed68e7eb5881768a55713c9b5c7c443e6b46de15c04e348928b8efd20b110"
+          "sha256": "sha256:fd62aa7e72f83ebbbc0bf278cc101846bb50ae08c688cc5143751ea33bbe3c6d"
         },
         {
           "path": "lib/lib.webworker.importscripts.d.ts",
@@ -444,9 +476,9 @@
     },
     "darwin-x64": {
       "package": "@typescript/typescript-darwin-x64",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "executable": "lib/tsc",
-      "executable_sha256": "sha256:76e4987d060ef8207875a53a73619ce665ff16fb2800c0d57a452e21c829bd7b",
+      "executable_sha256": "sha256:57e8068d9b0398b82fa857d1d5d6548a0103d52525e6556805b0d92ce38e7db6",
       "lib_d_ts": [
         {
           "path": "lib/lib.d.ts",
@@ -454,7 +486,7 @@
         },
         {
           "path": "lib/lib.decorators.d.ts",
-          "sha256": "sha256:1ce14b81c5cc821994aa8ec1d42b220dd41b27fcc06373bce3958af7421b77d4"
+          "sha256": "sha256:940824bc0b599c6ecf5afe930218ebbb1831219b65f7f1ed78ec677b275f3edf"
         },
         {
           "path": "lib/lib.decorators.legacy.d.ts",
@@ -466,7 +498,7 @@
         },
         {
           "path": "lib/lib.dom.d.ts",
-          "sha256": "sha256:d6b1eba8496bdd0eed6fc8a685768fe01b2da4a0388b5fe7df558290bffcf32f"
+          "sha256": "sha256:2f8c8d9e23d03e00c353412f5b2be3b1fd893290fc0976ad2229681bb7d46a35"
         },
         {
           "path": "lib/lib.dom.iterable.d.ts",
@@ -582,7 +614,7 @@
         },
         {
           "path": "lib/lib.es2018.intl.d.ts",
-          "sha256": "sha256:805c86f6cca8d7702a62a844856dbaa2a3fd2abef0536e65d48732441dde5b5b"
+          "sha256": "sha256:b477b19cafa67ab59a4818c40d821674e641bf11e6200d5567b28cabedbc953d"
         },
         {
           "path": "lib/lib.es2018.promise.d.ts",
@@ -638,7 +670,7 @@
         },
         {
           "path": "lib/lib.es2020.intl.d.ts",
-          "sha256": "sha256:db839fa0625981ae6e20a55e079c3613184310ca246879245b294573e7cc6926"
+          "sha256": "sha256:7b4f295ddb7e8c73f608bf54aa5d76b604b4fc44340a2eaa1f34040e7261afd4"
         },
         {
           "path": "lib/lib.es2020.number.d.ts",
@@ -686,7 +718,7 @@
         },
         {
           "path": "lib/lib.es2022.array.d.ts",
-          "sha256": "sha256:6d3261badeb7843d157ef3e6f5d1427d0eeb0af0cf9df84a62cfd29fd47ac86e"
+          "sha256": "sha256:a6b2211fcbf07dcc84e274b0ce935473ac4e24e75a12234f6a65b7a6fbe9285b"
         },
         {
           "path": "lib/lib.es2022.d.ts",
@@ -734,7 +766,7 @@
         },
         {
           "path": "lib/lib.es2023.intl.d.ts",
-          "sha256": "sha256:135d5cf4d345f59f1a9caadfafcd858d3d9cc68290db616cc85797224448cccc"
+          "sha256": "sha256:2c14b6fc74e9488a93c8212bdac44cbf534d5c30c7b688d52d7e6013d19a56c1"
         },
         {
           "path": "lib/lib.es2024.arraybuffer.d.ts",
@@ -805,24 +837,52 @@
           "sha256": "sha256:20884846cef428b992b9bd032e70a4ef88e349263f63aeddf04dda837a7dba26"
         },
         {
+          "path": "lib/lib.es2026.array.d.ts",
+          "sha256": "sha256:9fdb2d4893f2582d5d96c89aa3606a0692ff620fb2eb81314f598d4c705cdba2"
+        },
+        {
+          "path": "lib/lib.es2026.collection.d.ts",
+          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
+        },
+        {
+          "path": "lib/lib.es2026.d.ts",
+          "sha256": "sha256:7e15d13e27b1b7f3c13680bdf0b96a367e11d16db15b48662664492c9b028341"
+        },
+        {
+          "path": "lib/lib.es2026.error.d.ts",
+          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
+        },
+        {
+          "path": "lib/lib.es2026.full.d.ts",
+          "sha256": "sha256:103cc88b49cbf0968e60b700e470b0cf8a4406fb41e720223391d5ab5ef6d5b1"
+        },
+        {
+          "path": "lib/lib.es2026.iterator.d.ts",
+          "sha256": "sha256:980c5476cbc0589d977c043f32c0c6a08ee76d5eb28450079a39aa8b76451b42"
+        },
+        {
+          "path": "lib/lib.es2026.json.d.ts",
+          "sha256": "sha256:76e348ff85f0a6a3b0b29312a678ce8f5f551ff3ceb01898e0f75ab992542786"
+        },
+        {
+          "path": "lib/lib.es2026.math.d.ts",
+          "sha256": "sha256:b49218cb3617a535a9f82c9f9fbf00de62b60e3afb1aa2e2c7df989b37fb2ece"
+        },
+        {
+          "path": "lib/lib.es2026.typedarrays.d.ts",
+          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
+        },
+        {
           "path": "lib/lib.es5.d.ts",
-          "sha256": "sha256:6388847232654d7fcbed7fe89ea511a65ad1f5104b41e905c43f90910e1408b6"
+          "sha256": "sha256:45cc92f8dd3df7cb07b7d19e2b2ca34e78bc005c910c1e53ee1cf9bf37910215"
         },
         {
           "path": "lib/lib.es6.d.ts",
           "sha256": "sha256:174a0fa01bb60bcb80e09b0b7bdcdddf688891433d6030244df5b44eb9ebd210"
         },
         {
-          "path": "lib/lib.esnext.array.d.ts",
-          "sha256": "sha256:5fcab789c73a97cd43828ee3cc94a61264cf24d4c44472ce64ced0e0f148bdb2"
-        },
-        {
-          "path": "lib/lib.esnext.collection.d.ts",
-          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
-        },
-        {
           "path": "lib/lib.esnext.d.ts",
-          "sha256": "sha256:17f13ecb98cbc39243f2eee1f16d45cd8ec4706b03ee314f1915f1a8b42f6984"
+          "sha256": "sha256:c527e446837b7d310f855182dc902d9352d82ebf49f3fa5a91f567490272150b"
         },
         {
           "path": "lib/lib.esnext.date.d.ts",
@@ -837,10 +897,6 @@
           "sha256": "sha256:1ecb8e347cb6b2a8927c09b86263663289418df375f5e68e11a0ae683776978f"
         },
         {
-          "path": "lib/lib.esnext.error.d.ts",
-          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
-        },
-        {
           "path": "lib/lib.esnext.full.d.ts",
           "sha256": "sha256:ef4a897cd2a3f91000c10264e400b3667c7e51e1b7365f03b62e8081dc53bde6"
         },
@@ -849,16 +905,24 @@
           "sha256": "sha256:379bc41580c2d774f82e828c70308f24a005b490c25ba34d679d84bcf05c3d9d"
         },
         {
+          "path": "lib/lib.esnext.iterator.d.ts",
+          "sha256": "sha256:7838fe28f089cd1d07670ef889f9f5d1291972f3eb30ca0d5c35c4b4f643dee8"
+        },
+        {
+          "path": "lib/lib.esnext.modulesource.d.ts",
+          "sha256": "sha256:07d0263a8b648fe19544ded6e93dfd5dfd9d204bd1f897cf629b200006b90b6f"
+        },
+        {
+          "path": "lib/lib.esnext.promise.d.ts",
+          "sha256": "sha256:6ea73fc934d2d487cad935bdab38d5be9b315a808f6a38083ea6926373b115c3"
+        },
+        {
           "path": "lib/lib.esnext.sharedmemory.d.ts",
           "sha256": "sha256:ed484fb2aa8a1a23d0277056ec3336e0a0b52f9b8d6a961f338a642faf43235d"
         },
         {
           "path": "lib/lib.esnext.temporal.d.ts",
           "sha256": "sha256:4ffedae1d1c2d53fdbca1c96d3c7dda544281f7d262f99b6880634f8fd8d9820"
-        },
-        {
-          "path": "lib/lib.esnext.typedarrays.d.ts",
-          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
         },
         {
           "path": "lib/lib.scripthost.d.ts",
@@ -870,7 +934,7 @@
         },
         {
           "path": "lib/lib.webworker.d.ts",
-          "sha256": "sha256:d52ed68e7eb5881768a55713c9b5c7c443e6b46de15c04e348928b8efd20b110"
+          "sha256": "sha256:fd62aa7e72f83ebbbc0bf278cc101846bb50ae08c688cc5143751ea33bbe3c6d"
         },
         {
           "path": "lib/lib.webworker.importscripts.d.ts",
@@ -884,9 +948,9 @@
     },
     "linux-arm64": {
       "package": "@typescript/typescript-linux-arm64",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "executable": "lib/tsc",
-      "executable_sha256": "sha256:f86e8070c267b12d6c119bf567cb82d8b245e9d93da1864bc7c603cea10a8b2f",
+      "executable_sha256": "sha256:a13ba35a75869bc240411e702f837ab0d91848d0c6c3d13d1e327b337756bb47",
       "lib_d_ts": [
         {
           "path": "lib/lib.d.ts",
@@ -894,7 +958,7 @@
         },
         {
           "path": "lib/lib.decorators.d.ts",
-          "sha256": "sha256:1ce14b81c5cc821994aa8ec1d42b220dd41b27fcc06373bce3958af7421b77d4"
+          "sha256": "sha256:940824bc0b599c6ecf5afe930218ebbb1831219b65f7f1ed78ec677b275f3edf"
         },
         {
           "path": "lib/lib.decorators.legacy.d.ts",
@@ -906,7 +970,7 @@
         },
         {
           "path": "lib/lib.dom.d.ts",
-          "sha256": "sha256:d6b1eba8496bdd0eed6fc8a685768fe01b2da4a0388b5fe7df558290bffcf32f"
+          "sha256": "sha256:2f8c8d9e23d03e00c353412f5b2be3b1fd893290fc0976ad2229681bb7d46a35"
         },
         {
           "path": "lib/lib.dom.iterable.d.ts",
@@ -1022,7 +1086,7 @@
         },
         {
           "path": "lib/lib.es2018.intl.d.ts",
-          "sha256": "sha256:805c86f6cca8d7702a62a844856dbaa2a3fd2abef0536e65d48732441dde5b5b"
+          "sha256": "sha256:b477b19cafa67ab59a4818c40d821674e641bf11e6200d5567b28cabedbc953d"
         },
         {
           "path": "lib/lib.es2018.promise.d.ts",
@@ -1078,7 +1142,7 @@
         },
         {
           "path": "lib/lib.es2020.intl.d.ts",
-          "sha256": "sha256:db839fa0625981ae6e20a55e079c3613184310ca246879245b294573e7cc6926"
+          "sha256": "sha256:7b4f295ddb7e8c73f608bf54aa5d76b604b4fc44340a2eaa1f34040e7261afd4"
         },
         {
           "path": "lib/lib.es2020.number.d.ts",
@@ -1126,7 +1190,7 @@
         },
         {
           "path": "lib/lib.es2022.array.d.ts",
-          "sha256": "sha256:6d3261badeb7843d157ef3e6f5d1427d0eeb0af0cf9df84a62cfd29fd47ac86e"
+          "sha256": "sha256:a6b2211fcbf07dcc84e274b0ce935473ac4e24e75a12234f6a65b7a6fbe9285b"
         },
         {
           "path": "lib/lib.es2022.d.ts",
@@ -1174,7 +1238,7 @@
         },
         {
           "path": "lib/lib.es2023.intl.d.ts",
-          "sha256": "sha256:135d5cf4d345f59f1a9caadfafcd858d3d9cc68290db616cc85797224448cccc"
+          "sha256": "sha256:2c14b6fc74e9488a93c8212bdac44cbf534d5c30c7b688d52d7e6013d19a56c1"
         },
         {
           "path": "lib/lib.es2024.arraybuffer.d.ts",
@@ -1245,24 +1309,52 @@
           "sha256": "sha256:20884846cef428b992b9bd032e70a4ef88e349263f63aeddf04dda837a7dba26"
         },
         {
+          "path": "lib/lib.es2026.array.d.ts",
+          "sha256": "sha256:9fdb2d4893f2582d5d96c89aa3606a0692ff620fb2eb81314f598d4c705cdba2"
+        },
+        {
+          "path": "lib/lib.es2026.collection.d.ts",
+          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
+        },
+        {
+          "path": "lib/lib.es2026.d.ts",
+          "sha256": "sha256:7e15d13e27b1b7f3c13680bdf0b96a367e11d16db15b48662664492c9b028341"
+        },
+        {
+          "path": "lib/lib.es2026.error.d.ts",
+          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
+        },
+        {
+          "path": "lib/lib.es2026.full.d.ts",
+          "sha256": "sha256:103cc88b49cbf0968e60b700e470b0cf8a4406fb41e720223391d5ab5ef6d5b1"
+        },
+        {
+          "path": "lib/lib.es2026.iterator.d.ts",
+          "sha256": "sha256:980c5476cbc0589d977c043f32c0c6a08ee76d5eb28450079a39aa8b76451b42"
+        },
+        {
+          "path": "lib/lib.es2026.json.d.ts",
+          "sha256": "sha256:76e348ff85f0a6a3b0b29312a678ce8f5f551ff3ceb01898e0f75ab992542786"
+        },
+        {
+          "path": "lib/lib.es2026.math.d.ts",
+          "sha256": "sha256:b49218cb3617a535a9f82c9f9fbf00de62b60e3afb1aa2e2c7df989b37fb2ece"
+        },
+        {
+          "path": "lib/lib.es2026.typedarrays.d.ts",
+          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
+        },
+        {
           "path": "lib/lib.es5.d.ts",
-          "sha256": "sha256:6388847232654d7fcbed7fe89ea511a65ad1f5104b41e905c43f90910e1408b6"
+          "sha256": "sha256:45cc92f8dd3df7cb07b7d19e2b2ca34e78bc005c910c1e53ee1cf9bf37910215"
         },
         {
           "path": "lib/lib.es6.d.ts",
           "sha256": "sha256:174a0fa01bb60bcb80e09b0b7bdcdddf688891433d6030244df5b44eb9ebd210"
         },
         {
-          "path": "lib/lib.esnext.array.d.ts",
-          "sha256": "sha256:5fcab789c73a97cd43828ee3cc94a61264cf24d4c44472ce64ced0e0f148bdb2"
-        },
-        {
-          "path": "lib/lib.esnext.collection.d.ts",
-          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
-        },
-        {
           "path": "lib/lib.esnext.d.ts",
-          "sha256": "sha256:17f13ecb98cbc39243f2eee1f16d45cd8ec4706b03ee314f1915f1a8b42f6984"
+          "sha256": "sha256:c527e446837b7d310f855182dc902d9352d82ebf49f3fa5a91f567490272150b"
         },
         {
           "path": "lib/lib.esnext.date.d.ts",
@@ -1277,10 +1369,6 @@
           "sha256": "sha256:1ecb8e347cb6b2a8927c09b86263663289418df375f5e68e11a0ae683776978f"
         },
         {
-          "path": "lib/lib.esnext.error.d.ts",
-          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
-        },
-        {
           "path": "lib/lib.esnext.full.d.ts",
           "sha256": "sha256:ef4a897cd2a3f91000c10264e400b3667c7e51e1b7365f03b62e8081dc53bde6"
         },
@@ -1289,16 +1377,24 @@
           "sha256": "sha256:379bc41580c2d774f82e828c70308f24a005b490c25ba34d679d84bcf05c3d9d"
         },
         {
+          "path": "lib/lib.esnext.iterator.d.ts",
+          "sha256": "sha256:7838fe28f089cd1d07670ef889f9f5d1291972f3eb30ca0d5c35c4b4f643dee8"
+        },
+        {
+          "path": "lib/lib.esnext.modulesource.d.ts",
+          "sha256": "sha256:07d0263a8b648fe19544ded6e93dfd5dfd9d204bd1f897cf629b200006b90b6f"
+        },
+        {
+          "path": "lib/lib.esnext.promise.d.ts",
+          "sha256": "sha256:6ea73fc934d2d487cad935bdab38d5be9b315a808f6a38083ea6926373b115c3"
+        },
+        {
           "path": "lib/lib.esnext.sharedmemory.d.ts",
           "sha256": "sha256:ed484fb2aa8a1a23d0277056ec3336e0a0b52f9b8d6a961f338a642faf43235d"
         },
         {
           "path": "lib/lib.esnext.temporal.d.ts",
           "sha256": "sha256:4ffedae1d1c2d53fdbca1c96d3c7dda544281f7d262f99b6880634f8fd8d9820"
-        },
-        {
-          "path": "lib/lib.esnext.typedarrays.d.ts",
-          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
         },
         {
           "path": "lib/lib.scripthost.d.ts",
@@ -1310,7 +1406,7 @@
         },
         {
           "path": "lib/lib.webworker.d.ts",
-          "sha256": "sha256:d52ed68e7eb5881768a55713c9b5c7c443e6b46de15c04e348928b8efd20b110"
+          "sha256": "sha256:fd62aa7e72f83ebbbc0bf278cc101846bb50ae08c688cc5143751ea33bbe3c6d"
         },
         {
           "path": "lib/lib.webworker.importscripts.d.ts",
@@ -1324,9 +1420,9 @@
     },
     "linux-x64": {
       "package": "@typescript/typescript-linux-x64",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "executable": "lib/tsc",
-      "executable_sha256": "sha256:4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4",
+      "executable_sha256": "sha256:a183b1956edbe7e7d98f2249858eedf2d8a9790809cc4909db1276e202faaa70",
       "lib_d_ts": [
         {
           "path": "lib/lib.d.ts",
@@ -1334,7 +1430,7 @@
         },
         {
           "path": "lib/lib.decorators.d.ts",
-          "sha256": "sha256:1ce14b81c5cc821994aa8ec1d42b220dd41b27fcc06373bce3958af7421b77d4"
+          "sha256": "sha256:940824bc0b599c6ecf5afe930218ebbb1831219b65f7f1ed78ec677b275f3edf"
         },
         {
           "path": "lib/lib.decorators.legacy.d.ts",
@@ -1346,7 +1442,7 @@
         },
         {
           "path": "lib/lib.dom.d.ts",
-          "sha256": "sha256:d6b1eba8496bdd0eed6fc8a685768fe01b2da4a0388b5fe7df558290bffcf32f"
+          "sha256": "sha256:2f8c8d9e23d03e00c353412f5b2be3b1fd893290fc0976ad2229681bb7d46a35"
         },
         {
           "path": "lib/lib.dom.iterable.d.ts",
@@ -1462,7 +1558,7 @@
         },
         {
           "path": "lib/lib.es2018.intl.d.ts",
-          "sha256": "sha256:805c86f6cca8d7702a62a844856dbaa2a3fd2abef0536e65d48732441dde5b5b"
+          "sha256": "sha256:b477b19cafa67ab59a4818c40d821674e641bf11e6200d5567b28cabedbc953d"
         },
         {
           "path": "lib/lib.es2018.promise.d.ts",
@@ -1518,7 +1614,7 @@
         },
         {
           "path": "lib/lib.es2020.intl.d.ts",
-          "sha256": "sha256:db839fa0625981ae6e20a55e079c3613184310ca246879245b294573e7cc6926"
+          "sha256": "sha256:7b4f295ddb7e8c73f608bf54aa5d76b604b4fc44340a2eaa1f34040e7261afd4"
         },
         {
           "path": "lib/lib.es2020.number.d.ts",
@@ -1566,7 +1662,7 @@
         },
         {
           "path": "lib/lib.es2022.array.d.ts",
-          "sha256": "sha256:6d3261badeb7843d157ef3e6f5d1427d0eeb0af0cf9df84a62cfd29fd47ac86e"
+          "sha256": "sha256:a6b2211fcbf07dcc84e274b0ce935473ac4e24e75a12234f6a65b7a6fbe9285b"
         },
         {
           "path": "lib/lib.es2022.d.ts",
@@ -1614,7 +1710,7 @@
         },
         {
           "path": "lib/lib.es2023.intl.d.ts",
-          "sha256": "sha256:135d5cf4d345f59f1a9caadfafcd858d3d9cc68290db616cc85797224448cccc"
+          "sha256": "sha256:2c14b6fc74e9488a93c8212bdac44cbf534d5c30c7b688d52d7e6013d19a56c1"
         },
         {
           "path": "lib/lib.es2024.arraybuffer.d.ts",
@@ -1685,24 +1781,52 @@
           "sha256": "sha256:20884846cef428b992b9bd032e70a4ef88e349263f63aeddf04dda837a7dba26"
         },
         {
+          "path": "lib/lib.es2026.array.d.ts",
+          "sha256": "sha256:9fdb2d4893f2582d5d96c89aa3606a0692ff620fb2eb81314f598d4c705cdba2"
+        },
+        {
+          "path": "lib/lib.es2026.collection.d.ts",
+          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
+        },
+        {
+          "path": "lib/lib.es2026.d.ts",
+          "sha256": "sha256:7e15d13e27b1b7f3c13680bdf0b96a367e11d16db15b48662664492c9b028341"
+        },
+        {
+          "path": "lib/lib.es2026.error.d.ts",
+          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
+        },
+        {
+          "path": "lib/lib.es2026.full.d.ts",
+          "sha256": "sha256:103cc88b49cbf0968e60b700e470b0cf8a4406fb41e720223391d5ab5ef6d5b1"
+        },
+        {
+          "path": "lib/lib.es2026.iterator.d.ts",
+          "sha256": "sha256:980c5476cbc0589d977c043f32c0c6a08ee76d5eb28450079a39aa8b76451b42"
+        },
+        {
+          "path": "lib/lib.es2026.json.d.ts",
+          "sha256": "sha256:76e348ff85f0a6a3b0b29312a678ce8f5f551ff3ceb01898e0f75ab992542786"
+        },
+        {
+          "path": "lib/lib.es2026.math.d.ts",
+          "sha256": "sha256:b49218cb3617a535a9f82c9f9fbf00de62b60e3afb1aa2e2c7df989b37fb2ece"
+        },
+        {
+          "path": "lib/lib.es2026.typedarrays.d.ts",
+          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
+        },
+        {
           "path": "lib/lib.es5.d.ts",
-          "sha256": "sha256:6388847232654d7fcbed7fe89ea511a65ad1f5104b41e905c43f90910e1408b6"
+          "sha256": "sha256:45cc92f8dd3df7cb07b7d19e2b2ca34e78bc005c910c1e53ee1cf9bf37910215"
         },
         {
           "path": "lib/lib.es6.d.ts",
           "sha256": "sha256:174a0fa01bb60bcb80e09b0b7bdcdddf688891433d6030244df5b44eb9ebd210"
         },
         {
-          "path": "lib/lib.esnext.array.d.ts",
-          "sha256": "sha256:5fcab789c73a97cd43828ee3cc94a61264cf24d4c44472ce64ced0e0f148bdb2"
-        },
-        {
-          "path": "lib/lib.esnext.collection.d.ts",
-          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
-        },
-        {
           "path": "lib/lib.esnext.d.ts",
-          "sha256": "sha256:17f13ecb98cbc39243f2eee1f16d45cd8ec4706b03ee314f1915f1a8b42f6984"
+          "sha256": "sha256:c527e446837b7d310f855182dc902d9352d82ebf49f3fa5a91f567490272150b"
         },
         {
           "path": "lib/lib.esnext.date.d.ts",
@@ -1717,10 +1841,6 @@
           "sha256": "sha256:1ecb8e347cb6b2a8927c09b86263663289418df375f5e68e11a0ae683776978f"
         },
         {
-          "path": "lib/lib.esnext.error.d.ts",
-          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
-        },
-        {
           "path": "lib/lib.esnext.full.d.ts",
           "sha256": "sha256:ef4a897cd2a3f91000c10264e400b3667c7e51e1b7365f03b62e8081dc53bde6"
         },
@@ -1729,16 +1849,24 @@
           "sha256": "sha256:379bc41580c2d774f82e828c70308f24a005b490c25ba34d679d84bcf05c3d9d"
         },
         {
+          "path": "lib/lib.esnext.iterator.d.ts",
+          "sha256": "sha256:7838fe28f089cd1d07670ef889f9f5d1291972f3eb30ca0d5c35c4b4f643dee8"
+        },
+        {
+          "path": "lib/lib.esnext.modulesource.d.ts",
+          "sha256": "sha256:07d0263a8b648fe19544ded6e93dfd5dfd9d204bd1f897cf629b200006b90b6f"
+        },
+        {
+          "path": "lib/lib.esnext.promise.d.ts",
+          "sha256": "sha256:6ea73fc934d2d487cad935bdab38d5be9b315a808f6a38083ea6926373b115c3"
+        },
+        {
           "path": "lib/lib.esnext.sharedmemory.d.ts",
           "sha256": "sha256:ed484fb2aa8a1a23d0277056ec3336e0a0b52f9b8d6a961f338a642faf43235d"
         },
         {
           "path": "lib/lib.esnext.temporal.d.ts",
           "sha256": "sha256:4ffedae1d1c2d53fdbca1c96d3c7dda544281f7d262f99b6880634f8fd8d9820"
-        },
-        {
-          "path": "lib/lib.esnext.typedarrays.d.ts",
-          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
         },
         {
           "path": "lib/lib.scripthost.d.ts",
@@ -1750,7 +1878,7 @@
         },
         {
           "path": "lib/lib.webworker.d.ts",
-          "sha256": "sha256:d52ed68e7eb5881768a55713c9b5c7c443e6b46de15c04e348928b8efd20b110"
+          "sha256": "sha256:fd62aa7e72f83ebbbc0bf278cc101846bb50ae08c688cc5143751ea33bbe3c6d"
         },
         {
           "path": "lib/lib.webworker.importscripts.d.ts",
@@ -1764,9 +1892,9 @@
     },
     "win32-arm64": {
       "package": "@typescript/typescript-win32-arm64",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "executable": "lib/tsc.exe",
-      "executable_sha256": "sha256:2ec832b3d17ce25676fe92b3810ecc0a7580ffb9287d4972bc9a5acc4da2aa50",
+      "executable_sha256": "sha256:56d73f78be9efa2c8ba86749de10770be9f868df956739da423746bb3dc28d21",
       "lib_d_ts": [
         {
           "path": "lib/lib.d.ts",
@@ -1774,7 +1902,7 @@
         },
         {
           "path": "lib/lib.decorators.d.ts",
-          "sha256": "sha256:1ce14b81c5cc821994aa8ec1d42b220dd41b27fcc06373bce3958af7421b77d4"
+          "sha256": "sha256:940824bc0b599c6ecf5afe930218ebbb1831219b65f7f1ed78ec677b275f3edf"
         },
         {
           "path": "lib/lib.decorators.legacy.d.ts",
@@ -1786,7 +1914,7 @@
         },
         {
           "path": "lib/lib.dom.d.ts",
-          "sha256": "sha256:d6b1eba8496bdd0eed6fc8a685768fe01b2da4a0388b5fe7df558290bffcf32f"
+          "sha256": "sha256:2f8c8d9e23d03e00c353412f5b2be3b1fd893290fc0976ad2229681bb7d46a35"
         },
         {
           "path": "lib/lib.dom.iterable.d.ts",
@@ -1902,7 +2030,7 @@
         },
         {
           "path": "lib/lib.es2018.intl.d.ts",
-          "sha256": "sha256:805c86f6cca8d7702a62a844856dbaa2a3fd2abef0536e65d48732441dde5b5b"
+          "sha256": "sha256:b477b19cafa67ab59a4818c40d821674e641bf11e6200d5567b28cabedbc953d"
         },
         {
           "path": "lib/lib.es2018.promise.d.ts",
@@ -1958,7 +2086,7 @@
         },
         {
           "path": "lib/lib.es2020.intl.d.ts",
-          "sha256": "sha256:db839fa0625981ae6e20a55e079c3613184310ca246879245b294573e7cc6926"
+          "sha256": "sha256:7b4f295ddb7e8c73f608bf54aa5d76b604b4fc44340a2eaa1f34040e7261afd4"
         },
         {
           "path": "lib/lib.es2020.number.d.ts",
@@ -2006,7 +2134,7 @@
         },
         {
           "path": "lib/lib.es2022.array.d.ts",
-          "sha256": "sha256:6d3261badeb7843d157ef3e6f5d1427d0eeb0af0cf9df84a62cfd29fd47ac86e"
+          "sha256": "sha256:a6b2211fcbf07dcc84e274b0ce935473ac4e24e75a12234f6a65b7a6fbe9285b"
         },
         {
           "path": "lib/lib.es2022.d.ts",
@@ -2054,7 +2182,7 @@
         },
         {
           "path": "lib/lib.es2023.intl.d.ts",
-          "sha256": "sha256:135d5cf4d345f59f1a9caadfafcd858d3d9cc68290db616cc85797224448cccc"
+          "sha256": "sha256:2c14b6fc74e9488a93c8212bdac44cbf534d5c30c7b688d52d7e6013d19a56c1"
         },
         {
           "path": "lib/lib.es2024.arraybuffer.d.ts",
@@ -2125,24 +2253,52 @@
           "sha256": "sha256:20884846cef428b992b9bd032e70a4ef88e349263f63aeddf04dda837a7dba26"
         },
         {
+          "path": "lib/lib.es2026.array.d.ts",
+          "sha256": "sha256:9fdb2d4893f2582d5d96c89aa3606a0692ff620fb2eb81314f598d4c705cdba2"
+        },
+        {
+          "path": "lib/lib.es2026.collection.d.ts",
+          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
+        },
+        {
+          "path": "lib/lib.es2026.d.ts",
+          "sha256": "sha256:7e15d13e27b1b7f3c13680bdf0b96a367e11d16db15b48662664492c9b028341"
+        },
+        {
+          "path": "lib/lib.es2026.error.d.ts",
+          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
+        },
+        {
+          "path": "lib/lib.es2026.full.d.ts",
+          "sha256": "sha256:103cc88b49cbf0968e60b700e470b0cf8a4406fb41e720223391d5ab5ef6d5b1"
+        },
+        {
+          "path": "lib/lib.es2026.iterator.d.ts",
+          "sha256": "sha256:980c5476cbc0589d977c043f32c0c6a08ee76d5eb28450079a39aa8b76451b42"
+        },
+        {
+          "path": "lib/lib.es2026.json.d.ts",
+          "sha256": "sha256:76e348ff85f0a6a3b0b29312a678ce8f5f551ff3ceb01898e0f75ab992542786"
+        },
+        {
+          "path": "lib/lib.es2026.math.d.ts",
+          "sha256": "sha256:b49218cb3617a535a9f82c9f9fbf00de62b60e3afb1aa2e2c7df989b37fb2ece"
+        },
+        {
+          "path": "lib/lib.es2026.typedarrays.d.ts",
+          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
+        },
+        {
           "path": "lib/lib.es5.d.ts",
-          "sha256": "sha256:6388847232654d7fcbed7fe89ea511a65ad1f5104b41e905c43f90910e1408b6"
+          "sha256": "sha256:45cc92f8dd3df7cb07b7d19e2b2ca34e78bc005c910c1e53ee1cf9bf37910215"
         },
         {
           "path": "lib/lib.es6.d.ts",
           "sha256": "sha256:174a0fa01bb60bcb80e09b0b7bdcdddf688891433d6030244df5b44eb9ebd210"
         },
         {
-          "path": "lib/lib.esnext.array.d.ts",
-          "sha256": "sha256:5fcab789c73a97cd43828ee3cc94a61264cf24d4c44472ce64ced0e0f148bdb2"
-        },
-        {
-          "path": "lib/lib.esnext.collection.d.ts",
-          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
-        },
-        {
           "path": "lib/lib.esnext.d.ts",
-          "sha256": "sha256:17f13ecb98cbc39243f2eee1f16d45cd8ec4706b03ee314f1915f1a8b42f6984"
+          "sha256": "sha256:c527e446837b7d310f855182dc902d9352d82ebf49f3fa5a91f567490272150b"
         },
         {
           "path": "lib/lib.esnext.date.d.ts",
@@ -2157,10 +2313,6 @@
           "sha256": "sha256:1ecb8e347cb6b2a8927c09b86263663289418df375f5e68e11a0ae683776978f"
         },
         {
-          "path": "lib/lib.esnext.error.d.ts",
-          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
-        },
-        {
           "path": "lib/lib.esnext.full.d.ts",
           "sha256": "sha256:ef4a897cd2a3f91000c10264e400b3667c7e51e1b7365f03b62e8081dc53bde6"
         },
@@ -2169,16 +2321,24 @@
           "sha256": "sha256:379bc41580c2d774f82e828c70308f24a005b490c25ba34d679d84bcf05c3d9d"
         },
         {
+          "path": "lib/lib.esnext.iterator.d.ts",
+          "sha256": "sha256:7838fe28f089cd1d07670ef889f9f5d1291972f3eb30ca0d5c35c4b4f643dee8"
+        },
+        {
+          "path": "lib/lib.esnext.modulesource.d.ts",
+          "sha256": "sha256:07d0263a8b648fe19544ded6e93dfd5dfd9d204bd1f897cf629b200006b90b6f"
+        },
+        {
+          "path": "lib/lib.esnext.promise.d.ts",
+          "sha256": "sha256:6ea73fc934d2d487cad935bdab38d5be9b315a808f6a38083ea6926373b115c3"
+        },
+        {
           "path": "lib/lib.esnext.sharedmemory.d.ts",
           "sha256": "sha256:ed484fb2aa8a1a23d0277056ec3336e0a0b52f9b8d6a961f338a642faf43235d"
         },
         {
           "path": "lib/lib.esnext.temporal.d.ts",
           "sha256": "sha256:4ffedae1d1c2d53fdbca1c96d3c7dda544281f7d262f99b6880634f8fd8d9820"
-        },
-        {
-          "path": "lib/lib.esnext.typedarrays.d.ts",
-          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
         },
         {
           "path": "lib/lib.scripthost.d.ts",
@@ -2190,7 +2350,7 @@
         },
         {
           "path": "lib/lib.webworker.d.ts",
-          "sha256": "sha256:d52ed68e7eb5881768a55713c9b5c7c443e6b46de15c04e348928b8efd20b110"
+          "sha256": "sha256:fd62aa7e72f83ebbbc0bf278cc101846bb50ae08c688cc5143751ea33bbe3c6d"
         },
         {
           "path": "lib/lib.webworker.importscripts.d.ts",
@@ -2204,9 +2364,9 @@
     },
     "win32-x64": {
       "package": "@typescript/typescript-win32-x64",
-      "version": "7.0.2",
+      "version": "7.1.0-beta",
       "executable": "lib/tsc.exe",
-      "executable_sha256": "sha256:f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7",
+      "executable_sha256": "sha256:498f59d207e22c40f1ecc218dfa67d1db25629a231bd0948c3db92df7457afc7",
       "lib_d_ts": [
         {
           "path": "lib/lib.d.ts",
@@ -2214,7 +2374,7 @@
         },
         {
           "path": "lib/lib.decorators.d.ts",
-          "sha256": "sha256:1ce14b81c5cc821994aa8ec1d42b220dd41b27fcc06373bce3958af7421b77d4"
+          "sha256": "sha256:940824bc0b599c6ecf5afe930218ebbb1831219b65f7f1ed78ec677b275f3edf"
         },
         {
           "path": "lib/lib.decorators.legacy.d.ts",
@@ -2226,7 +2386,7 @@
         },
         {
           "path": "lib/lib.dom.d.ts",
-          "sha256": "sha256:d6b1eba8496bdd0eed6fc8a685768fe01b2da4a0388b5fe7df558290bffcf32f"
+          "sha256": "sha256:2f8c8d9e23d03e00c353412f5b2be3b1fd893290fc0976ad2229681bb7d46a35"
         },
         {
           "path": "lib/lib.dom.iterable.d.ts",
@@ -2342,7 +2502,7 @@
         },
         {
           "path": "lib/lib.es2018.intl.d.ts",
-          "sha256": "sha256:805c86f6cca8d7702a62a844856dbaa2a3fd2abef0536e65d48732441dde5b5b"
+          "sha256": "sha256:b477b19cafa67ab59a4818c40d821674e641bf11e6200d5567b28cabedbc953d"
         },
         {
           "path": "lib/lib.es2018.promise.d.ts",
@@ -2398,7 +2558,7 @@
         },
         {
           "path": "lib/lib.es2020.intl.d.ts",
-          "sha256": "sha256:db839fa0625981ae6e20a55e079c3613184310ca246879245b294573e7cc6926"
+          "sha256": "sha256:7b4f295ddb7e8c73f608bf54aa5d76b604b4fc44340a2eaa1f34040e7261afd4"
         },
         {
           "path": "lib/lib.es2020.number.d.ts",
@@ -2446,7 +2606,7 @@
         },
         {
           "path": "lib/lib.es2022.array.d.ts",
-          "sha256": "sha256:6d3261badeb7843d157ef3e6f5d1427d0eeb0af0cf9df84a62cfd29fd47ac86e"
+          "sha256": "sha256:a6b2211fcbf07dcc84e274b0ce935473ac4e24e75a12234f6a65b7a6fbe9285b"
         },
         {
           "path": "lib/lib.es2022.d.ts",
@@ -2494,7 +2654,7 @@
         },
         {
           "path": "lib/lib.es2023.intl.d.ts",
-          "sha256": "sha256:135d5cf4d345f59f1a9caadfafcd858d3d9cc68290db616cc85797224448cccc"
+          "sha256": "sha256:2c14b6fc74e9488a93c8212bdac44cbf534d5c30c7b688d52d7e6013d19a56c1"
         },
         {
           "path": "lib/lib.es2024.arraybuffer.d.ts",
@@ -2565,24 +2725,52 @@
           "sha256": "sha256:20884846cef428b992b9bd032e70a4ef88e349263f63aeddf04dda837a7dba26"
         },
         {
+          "path": "lib/lib.es2026.array.d.ts",
+          "sha256": "sha256:9fdb2d4893f2582d5d96c89aa3606a0692ff620fb2eb81314f598d4c705cdba2"
+        },
+        {
+          "path": "lib/lib.es2026.collection.d.ts",
+          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
+        },
+        {
+          "path": "lib/lib.es2026.d.ts",
+          "sha256": "sha256:7e15d13e27b1b7f3c13680bdf0b96a367e11d16db15b48662664492c9b028341"
+        },
+        {
+          "path": "lib/lib.es2026.error.d.ts",
+          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
+        },
+        {
+          "path": "lib/lib.es2026.full.d.ts",
+          "sha256": "sha256:103cc88b49cbf0968e60b700e470b0cf8a4406fb41e720223391d5ab5ef6d5b1"
+        },
+        {
+          "path": "lib/lib.es2026.iterator.d.ts",
+          "sha256": "sha256:980c5476cbc0589d977c043f32c0c6a08ee76d5eb28450079a39aa8b76451b42"
+        },
+        {
+          "path": "lib/lib.es2026.json.d.ts",
+          "sha256": "sha256:76e348ff85f0a6a3b0b29312a678ce8f5f551ff3ceb01898e0f75ab992542786"
+        },
+        {
+          "path": "lib/lib.es2026.math.d.ts",
+          "sha256": "sha256:b49218cb3617a535a9f82c9f9fbf00de62b60e3afb1aa2e2c7df989b37fb2ece"
+        },
+        {
+          "path": "lib/lib.es2026.typedarrays.d.ts",
+          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
+        },
+        {
           "path": "lib/lib.es5.d.ts",
-          "sha256": "sha256:6388847232654d7fcbed7fe89ea511a65ad1f5104b41e905c43f90910e1408b6"
+          "sha256": "sha256:45cc92f8dd3df7cb07b7d19e2b2ca34e78bc005c910c1e53ee1cf9bf37910215"
         },
         {
           "path": "lib/lib.es6.d.ts",
           "sha256": "sha256:174a0fa01bb60bcb80e09b0b7bdcdddf688891433d6030244df5b44eb9ebd210"
         },
         {
-          "path": "lib/lib.esnext.array.d.ts",
-          "sha256": "sha256:5fcab789c73a97cd43828ee3cc94a61264cf24d4c44472ce64ced0e0f148bdb2"
-        },
-        {
-          "path": "lib/lib.esnext.collection.d.ts",
-          "sha256": "sha256:db59a81f070c1880ad645b2c0275022baa6a0c4f0acdc58d29d349c6efcf0903"
-        },
-        {
           "path": "lib/lib.esnext.d.ts",
-          "sha256": "sha256:17f13ecb98cbc39243f2eee1f16d45cd8ec4706b03ee314f1915f1a8b42f6984"
+          "sha256": "sha256:c527e446837b7d310f855182dc902d9352d82ebf49f3fa5a91f567490272150b"
         },
         {
           "path": "lib/lib.esnext.date.d.ts",
@@ -2597,10 +2785,6 @@
           "sha256": "sha256:1ecb8e347cb6b2a8927c09b86263663289418df375f5e68e11a0ae683776978f"
         },
         {
-          "path": "lib/lib.esnext.error.d.ts",
-          "sha256": "sha256:142efd4ce210576f777dc34df121777be89eda476942d6d6663b03dcb53be3ff"
-        },
-        {
           "path": "lib/lib.esnext.full.d.ts",
           "sha256": "sha256:ef4a897cd2a3f91000c10264e400b3667c7e51e1b7365f03b62e8081dc53bde6"
         },
@@ -2609,16 +2793,24 @@
           "sha256": "sha256:379bc41580c2d774f82e828c70308f24a005b490c25ba34d679d84bcf05c3d9d"
         },
         {
+          "path": "lib/lib.esnext.iterator.d.ts",
+          "sha256": "sha256:7838fe28f089cd1d07670ef889f9f5d1291972f3eb30ca0d5c35c4b4f643dee8"
+        },
+        {
+          "path": "lib/lib.esnext.modulesource.d.ts",
+          "sha256": "sha256:07d0263a8b648fe19544ded6e93dfd5dfd9d204bd1f897cf629b200006b90b6f"
+        },
+        {
+          "path": "lib/lib.esnext.promise.d.ts",
+          "sha256": "sha256:6ea73fc934d2d487cad935bdab38d5be9b315a808f6a38083ea6926373b115c3"
+        },
+        {
           "path": "lib/lib.esnext.sharedmemory.d.ts",
           "sha256": "sha256:ed484fb2aa8a1a23d0277056ec3336e0a0b52f9b8d6a961f338a642faf43235d"
         },
         {
           "path": "lib/lib.esnext.temporal.d.ts",
           "sha256": "sha256:4ffedae1d1c2d53fdbca1c96d3c7dda544281f7d262f99b6880634f8fd8d9820"
-        },
-        {
-          "path": "lib/lib.esnext.typedarrays.d.ts",
-          "sha256": "sha256:83a730b125d477dd264df8ba479afab27a3dae7152b005c214ab94dc7ee44fd3"
         },
         {
           "path": "lib/lib.scripthost.d.ts",
@@ -2630,7 +2822,7 @@
         },
         {
           "path": "lib/lib.webworker.d.ts",
-          "sha256": "sha256:d52ed68e7eb5881768a55713c9b5c7c443e6b46de15c04e348928b8efd20b110"
+          "sha256": "sha256:fd62aa7e72f83ebbbc0bf278cc101846bb50ae08c688cc5143751ea33bbe3c6d"
         },
         {
           "path": "lib/lib.webworker.importscripts.d.ts",

@@ -52,6 +52,7 @@ enum RequiredImportClosure {
 /// authority.
 #[derive(Debug, Clone)]
 pub struct ShallowFileState {
+    storage: verter_retention::pinned_heap::StoragePin,
     inputs: ShallowInputAssembly,
     decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
     type_deps_cache: verter_semantic_source::per_file_map::PerFileMap<
@@ -65,7 +66,7 @@ pub struct ShallowFileState {
 }
 
 #[derive(Debug, Default)]
-struct InputProjectionCell(std::sync::OnceLock<Arc<ShallowInputRecord>>);
+struct InputProjectionCell(verter_retention::pinned_heap::PinnedOnce<Arc<ShallowInputRecord>>);
 impl Clone for InputProjectionCell {
     fn clone(&self) -> Self {
         Self::default()
@@ -80,12 +81,22 @@ impl std::ops::Deref for ShallowFileState {
 }
 impl std::ops::DerefMut for ShallowFileState {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.storage.invalidate();
         self.input_projection = InputProjectionCell::default();
         &mut self.inputs
     }
 }
 
 impl ShallowFileState {
+    /// Seal this state's own storage charge (idempotent until a mutation
+    /// through `DerefMut` invalidates it).
+    pub(crate) fn seal_storage(&self) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            &Default::default(),
+        );
+    }
     /// The published observation of this state's current facts, finalized
     /// once per assembled version: a mutation through `DerefMut` resets it,
     /// so changed facts are always a new observation.
@@ -95,6 +106,31 @@ impl ShallowFileState {
                 .0
                 .get_or_init(|| Arc::new(ShallowInputRecord::finalize(self.inputs.clone()))),
         )
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for ShallowFileState {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            storage: _,
+            inputs,
+            decl_bodies,
+            type_deps_cache: _,
+            synthesised_value_bodies,
+            route_surface_hash: _,
+            syntactic_route_interface_hash: _,
+            input_projection: _,
+        } = self;
+        inputs.heap_size(meter)
+            + decl_bodies.heap_size(meter)
+            + synthesised_value_bodies.heap_size(meter)
+    }
+    fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
+        self.seal_storage();
+        true
     }
 }
 
@@ -622,6 +658,7 @@ impl ShallowFileState {
             .map(|assignment| assignment.local.clone());
 
         Self {
+            storage: Default::default(),
             inputs: ShallowInputAssembly {
                 whole_hash,
                 exports,
@@ -658,6 +695,7 @@ impl ShallowFileState {
     /// the one the memo serves forever, which is why assembly never
     /// installs early.)
     fn install_shallow_lens_from_final_state(&self) {
+        self.seal_storage();
         self.decl_bodies
             .install_shallow_lens(Arc::new(crate::fact_emission::build_shallow_lens(self)));
         self.decl_bodies
@@ -733,6 +771,22 @@ impl ShallowFileState {
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
         self.decl_bodies.type_decl_outcome_in(owner, name)
+    }
+
+    /// [`Self::type_decl_outcome_in`], keeping the declaration's body parts
+    /// when `keep` is set and this demand lowers it
+    /// ([`verter_semantic_source::decl_body_memo::DeclBodyMemo::type_decl_outcome_keeping_in`]).
+    pub(crate) fn type_decl_outcome_keeping_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (
+        DemandOutcome<LoweredTypeDecl>,
+        Option<verter_semantic_source::decl_body_memo::KeptTypeBody>,
+    ) {
+        self.decl_bodies
+            .type_decl_outcome_keeping_in(owner, name, keep)
     }
 
     /// Demand the lowered BODY of a local VALUE symbol — eager
@@ -1005,6 +1059,31 @@ impl ShallowFileState {
             .augmentation_type_decl_outcome_in(scope, owner, name)
     }
 
+    /// [`Self::augmentation_type_decl_outcome_in`], keeping the
+    /// declaration's body parts when `keep` is set and this demand lowers
+    /// it.
+    pub(crate) fn augmentation_type_decl_outcome_keeping_in(
+        &self,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (
+        DemandOutcome<LoweredTypeDecl>,
+        Option<verter_semantic_source::decl_body_memo::KeptTypeBody>,
+    ) {
+        if self
+            .decl_bodies
+            .header_index()
+            .augmentation_type_header_in(scope, owner, name)
+            .is_none()
+        {
+            return (DemandOutcome::Ready(None), None);
+        }
+        self.decl_bodies
+            .augmentation_type_decl_outcome_keeping_in(scope, owner, name, keep)
+    }
+
     /// Lease-aware value-space counterpart of
     /// [`Self::augmentation_type_decl_outcome_in`].
     pub(crate) fn augmentation_value_decl_outcome_in(
@@ -1185,6 +1264,7 @@ impl ShallowFileState {
                 owner,
                 symbol_name: name.to_string(),
             });
+        self.seal_storage();
     }
 
     // -----------------------------------------------------------------------
@@ -2826,5 +2906,48 @@ export interface Props extends Base {
             ext_names.contains(&"Alpha"),
             "missing direct metadata should conservatively fall back to whole closure"
         );
+    }
+
+    /// A classification read out of the per-file cache stays charged for as
+    /// long as its reader holds it, after the state that cached it is gone.
+    #[test]
+    fn type_deps_readers_keep_their_charge_after_state_teardown() {
+        let context = verter_retention::pinned_heap::PinContext::new(
+            verter_retention::SemanticRetentionAccount::new(
+                verter_retention::RetentionLimits::defaults(),
+            ),
+        );
+        let _scope = context.enter_for_test();
+        let mut source = (0..128)
+            .map(|n| format!("type Dependency{n} = {{ v: {n} }};\n"))
+            .collect::<String>();
+        source.push_str("export type Kept = ");
+        source.push_str(
+            &(0..128)
+                .map(|n| format!("Dependency{n}"))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
+        source.push_str(";\n");
+        let state = ShallowFileState::service_backed_for_test(&source);
+        let reader = state.type_deps("Kept").expect("Kept classifies");
+        assert_eq!(reader.local_deps.len(), 128);
+        let mut handles = verter_retention::allocation::AliasSet::estimating();
+        let bytes = verter_retention::heap_size::HeapSize::heap_size(
+            &*reader,
+            &mut verter_retention::heap_size::HeapMeter::new(&mut handles),
+        );
+        drop(handles);
+        assert!(bytes > 128 * std::mem::size_of::<String>());
+        let warm = state.type_deps("Kept").expect("cached classification");
+        assert!(Arc::ptr_eq(&reader, &warm));
+        drop(warm);
+        drop(state);
+        assert!(
+            context.account().snapshot().pinned_bytes >= bytes,
+            "the escaping classification remains charged after state teardown"
+        );
+        drop(reader);
+        assert_eq!(context.account().snapshot().pinned_bytes, 0);
     }
 }

@@ -818,7 +818,7 @@ export function allScenarios() {
   // literal. These three sources are reconstructions, not the original
   // catalog's bytes: the `let` copy is the reported minimal repro; the
   // `satisfies` and object-arrow sources are written to the answers the
-  // original scenarios reported for tsc 7.0.2, and their references are
+  // original catalog's scenarios reported, and their references are
   // measured on these sources, not carried over.
   out.push(
     scenario(

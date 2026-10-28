@@ -19,7 +19,7 @@ import {
 const config = loadEnduranceConfig();
 
 for (const lane of ENDURANCE_LANES) {
-  describe.sequential(`endurance: build-component [${lane.id}/${config.route}]`, () => {
+  describe(`endurance: build-component [${lane.id}/${config.route}]`, { concurrent: false }, () => {
     let rig: EnduranceRig;
     let receipt: EnduranceReceipt | null = null;
     const fixture = buildComponentFixture(lane);

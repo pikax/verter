@@ -57,7 +57,8 @@ fn component_meta_result_signature_carries_member() {
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-            Arc::clone(&signature),
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of_shared(Arc::clone(&signature)),
         ),
         validated_at_generation: 0,
     };
@@ -69,7 +70,7 @@ fn component_meta_result_signature_carries_member() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.read_set_signature.facts),
+        view.validates_fact_signature((&entry.read_set_signature.facts).into()),
         "permissive view must accept a Member fact in the entry's \
          read_set_signature.facts"
     );

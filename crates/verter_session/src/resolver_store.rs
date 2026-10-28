@@ -1640,6 +1640,7 @@ impl HostStoreView {
             // "built token" that could straddle a mid-build mutation.
             let pre = PreBuildTokenInputs::capture(host);
             let pre_token = pre.token();
+            let artifact_root_settled = pre.root_capture.artifact_root_is_settled();
             // Test-only: if a test armed the build gate, park HERE (holding
             // the singleflight claim, having already captured `pre` at the
             // pre-bump token) until the test releases. The test uses this to
@@ -1710,8 +1711,17 @@ impl HostStoreView {
             // that moved WITHOUT bumping `store_view_epoch` — and forces a
             // retry / `Superseded` rather than publishing a torn view whose
             // snapshot maps and token straddle the mutation.
+            //
+            // The token alone cannot vouch for the artifact root: an
+            // artifact publication that finished above a mutation still in
+            // flight has already advanced the captured artifact generation,
+            // yet the root, held back below the in-flight epoch, omits it.
+            // Both tokens then agree while the view lacks that artifact, and
+            // caching it as current would refuse every fact recorded against
+            // the artifact until some later mutation moved the token. Such a
+            // capture retries like a superseded one.
             let live_token = capture_store_view_validation_token(host);
-            if pre_token == live_token {
+            if pre_token == live_token && artifact_root_settled {
                 return SnapshotBuildOutcome::Coherent {
                     view,
                     token: pre_token,
@@ -5384,6 +5394,13 @@ impl HostStoreView {
         self.memo.len()
     }
 
+    /// Test-only: whether the view holds a canonical's parse facts — the
+    /// artifact its parse-domain validator reads — through the captured
+    /// roots exactly as that validator does.
+    pub(crate) fn tracks_file_facts_for_tests(&self, canonical: &str) -> bool {
+        self.canonical_view(canonical).file_facts.is_some()
+    }
+
     /// Test-only: the view's tracked whole hash for a canonical, resolved
     /// through the captured roots exactly as every validator does.
     pub(crate) fn whole_hash_for_tests(&self, canonical: &str) -> Option<Hash16> {
@@ -5512,6 +5529,7 @@ impl crate::VerterHost {
         verter_type_engine::resolver_core::RequestSnapshot::new_in::<M>(
             self.project_type_store().project_generation_clock(),
             self.aggregate_clock_reader(),
+            self.project_type_store().fact_policy(),
         )
     }
 

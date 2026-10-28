@@ -206,24 +206,30 @@ use verter_session_query::resolution::{
 /// A witness whose `Resolution` bucket compacted: it carries the terminal
 /// aggregate and nothing else, so it names zero canonicals.
 fn compacted_resolution_witness() -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from([FactVersionRef::DomainGeneration(
-        DomainGenerationFact {
-            domain: CompactionDomain::Resolution,
-            population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
-            stamp: AggregateStamp::ResolutionRoots {
-                base: ResolutionWorldId::from_raw(1),
-                session: None,
-            },
-        },
-    )]))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of([
+            FactVersionRef::DomainGeneration(DomainGenerationFact {
+                domain: CompactionDomain::Resolution,
+                population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
+                stamp: AggregateStamp::ResolutionRoots {
+                    base: ResolutionWorldId::from_raw(1),
+                    session: None,
+                },
+            }),
+        ]),
+    )
 }
 
 /// A precise witness naming exactly `canonical`.
 fn precise_witness(canonical: &str) -> ReadSetSignature {
-    ReadSetSignature::new(Arc::from([FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: [7u8; 16],
-    }]))
+    ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of([
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [7u8; 16],
+            },
+        ]),
+    )
 }
 
 /// Resolve through the Engine and return its real derived Decision witness.
@@ -376,7 +382,7 @@ fn an_empty_witness_reobserves_nothing() {
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
         None,
-        &ReadSetSignature::empty(),
+        &ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
     );
 
     assert_eq!(
@@ -430,7 +436,10 @@ fn an_uncovered_backend_refuses_a_compacted_witness_it_cannot_reobserve() {
          reusable under the same backend"
     );
     assert!(
-        !Engine::witness_evidence_is_unenumerable(uncovered, &ReadSetSignature::empty()),
+        !Engine::witness_evidence_is_unenumerable(
+            uncovered,
+            &ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production())
+        ),
         "an empty witness observed no resolution facts, so there is nothing \
          it fails to enumerate"
     );
@@ -1089,8 +1098,8 @@ fn a_workspace_importer_keeps_its_dependency_edge_whatever_the_lane_retains() {
 /// retired decision, so its bytes stay charged until that snapshot drops,
 /// and are then released exactly once.
 ///
-/// Mutation recipe: in `publish_charged_decision`, drop the
-/// `decision_charges` insert. The charge then drains when the slot retires,
+/// Mutation recipe: in `publish_charged_decision`, publish the record
+/// without its charge. The charge then drains when the slot retires,
 /// while the held snapshot still holds the decision.
 #[test]
 fn a_held_snapshot_keeps_its_retired_decision_charged_until_it_drops() {
@@ -1497,29 +1506,32 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
                     ))
                 })
                 .collect();
-            let facts = seal_canonical_signature(facts);
-            let pages: Vec<_> = facts
-                .iter()
-                .filter_map(|fact| match fact {
-                    FactVersionRef::Receipt(page) => Some(page.clone()),
-                    _ => None,
-                })
-                .collect();
-            let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-            assert!(!pages.is_empty());
+            // The witness reaches one consumed result holding every wide
+            // fact: its receipt is the unclaimed storage the publication
+            // must claim.
+            let facts = seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                facts,
+            );
             let consumed = ResultReceipt::new(facts.to_vec());
             drop(facts);
-            let witness = ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(consumed)]));
+            let evidence = consumed.clone();
+            let evidence_bytes = evidence.retained_charge_bytes();
+            assert!(evidence_bytes > 0);
+            let witness = ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of(vec![FactVersionRef::Receipt(consumed)]),
+            );
             assert!(witness.validates(world.as_ref()));
             let captured = witness.clone();
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 max_entry_bytes: if admitted || pressure {
                     usize::MAX
                 } else {
-                    page_bytes
+                    evidence_bytes
                 },
                 aggregate_ceiling_bytes: if pressure {
-                    page_bytes
+                    evidence_bytes
                 } else {
                     RetentionLimits::defaults().aggregate_ceiling_bytes
                 },
@@ -1574,9 +1586,7 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             } else {
                 ChargeClass::Pinned
             };
-            assert!(pages
-                .iter()
-                .all(|page| page.retained_charge_class() == Some(expected)));
+            assert_eq!(evidence.retained_charge_class(), Some(expected));
             if !overlay_lane {
                 assert_eq!(
                     outcome.non_admission_reason(),
@@ -1594,16 +1604,16 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             let unrelated = WorkspaceRead::capture_resolution_world(&workspace).unwrap();
             assert!(
                 captured.validates(unrelated.as_ref()),
-                "unrelated edits preserve the complete paged witness"
+                "unrelated edits preserve the complete wide witness"
             );
             workspace.remove_file("/p/wide/1024.ts");
             let edited = WorkspaceRead::capture_resolution_world(&workspace).unwrap();
             assert!(
                 !captured.validates(edited.as_ref()),
-                "the last evidence page participates in invalidation"
+                "every fact of the wide witness participates in invalidation, the 1025th included"
             );
             drop((
-                outcome, world, unrelated, edited, captured, workspace, overlay, pages,
+                outcome, world, unrelated, edited, captured, workspace, overlay, evidence,
             ));
             assert_eq!(account.snapshot().retained_bytes, 0);
         }

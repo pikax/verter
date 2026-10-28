@@ -4,7 +4,7 @@ import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  findWorkspaceRcTsgoBinary,
+  findWorkspacePinnedTsgoBinary,
   provisionVsCodeExtension,
   writeVsCodeUserSettings,
   type SynchronousCommandRunner,
@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 describe("VS Code E2E extension provisioning", () => {
-  it("discovers the pinned RC tsgo package from a nested pnpm workspace", () => {
+  it("discovers the pinned tsgo package from a nested pnpm workspace", () => {
     const root = mkdtempSync(join(tmpdir(), "verter-e2e-tsgo-"));
     temporaryRoots.push(root);
     const extensionPath = join(root, "packages", "vue-vscode");
@@ -27,7 +27,7 @@ describe("VS Code E2E extension provisioning", () => {
       root,
       "node_modules",
       ".pnpm",
-      "@typescript+typescript-win32-x64@7.0.2",
+      "@typescript+typescript-win32-x64@7.1.0-beta",
       "node_modules",
       "@typescript",
       "typescript-win32-x64",
@@ -35,10 +35,10 @@ describe("VS Code E2E extension provisioning", () => {
       "tsc.exe",
     );
     mkdirSync(join(binary, ".."), { recursive: true });
-    writeFileSync(binary, "rc-tsgo");
+    writeFileSync(binary, "pinned-tsgo");
 
     expect(
-      findWorkspaceRcTsgoBinary(extensionPath, {
+      findWorkspacePinnedTsgoBinary(extensionPath, {
         env: {},
         platform: "win32",
         arch: "x64",
@@ -46,7 +46,7 @@ describe("VS Code E2E extension provisioning", () => {
     ).toBe(binary);
   });
 
-  it("never treats the legacy native-preview package as the RC tsgo engine", () => {
+  it("never treats a native-preview package as the pinned tsgo engine", () => {
     const root = mkdtempSync(join(tmpdir(), "verter-e2e-legacy-tsgo-"));
     temporaryRoots.push(root);
     const extensionPath = join(root, "packages", "vue-vscode");
@@ -54,7 +54,7 @@ describe("VS Code E2E extension provisioning", () => {
       root,
       "node_modules",
       ".pnpm",
-      "@typescript+native-preview-win32-x64@7.0.0-dev.20260101.1",
+      "@typescript+native-preview-win32-x64@7.1.0-dev.20261022.1",
       "node_modules",
       "@typescript",
       "native-preview-win32-x64",
@@ -62,10 +62,10 @@ describe("VS Code E2E extension provisioning", () => {
       "tsgo.exe",
     );
     mkdirSync(join(legacy, ".."), { recursive: true });
-    writeFileSync(legacy, "legacy-tsgo");
+    writeFileSync(legacy, "native-preview-tsgo");
 
     expect(
-      findWorkspaceRcTsgoBinary(extensionPath, {
+      findWorkspacePinnedTsgoBinary(extensionPath, {
         env: {},
         platform: "win32",
         arch: "x64",
@@ -79,7 +79,7 @@ describe("VS Code E2E extension provisioning", () => {
     const missing = join(root, "missing", "tsc.exe");
 
     expect(() =>
-      findWorkspaceRcTsgoBinary(root, {
+      findWorkspacePinnedTsgoBinary(root, {
         env: { VERTER_TSGO_BIN: missing },
         platform: "win32",
         arch: "x64",
@@ -102,7 +102,7 @@ describe("VS Code E2E extension provisioning", () => {
         "--extensions-dir=/stale/extensions",
         "--user-data-dir=/stale/user-data",
       ],
-      extension: "TypeScriptTeam.native-preview@0.20260708.2",
+      extension: "TypeScriptTeam.native-preview@1.0.1",
       extensionsDir: "/isolated/extensions",
       userDataDir: "/isolated/user-data",
       run,
@@ -118,7 +118,7 @@ describe("VS Code E2E extension provisioning", () => {
       "--extensions-dir=/isolated/extensions",
       "--user-data-dir=/isolated/user-data",
       "--install-extension",
-      "TypeScriptTeam.native-preview@0.20260708.2",
+      "TypeScriptTeam.native-preview@1.0.1",
       "--force",
     ]);
     expect(options).toMatchObject({ timeout: 180_000, shell: false, windowsHide: true });
@@ -134,14 +134,14 @@ describe("VS Code E2E extension provisioning", () => {
     await expect(
       provisionVsCodeExtension({
         cliArgs: ["code"],
-        extension: "TypeScriptTeam.native-preview@0.20260708.2",
+        extension: "TypeScriptTeam.native-preview@1.0.1",
         extensionsDir: "/isolated/extensions",
         userDataDir: "/isolated/user-data",
         run,
         retry: { attempts: 3, delayMs: 1, sleep: async () => undefined, warn: () => undefined },
       }),
     ).rejects.toThrow(
-      /Failed to provision VS Code extension TypeScriptTeam\.native-preview@0\.20260708\.2 after 3 attempt\(s\)[\s\S]*extension not found/,
+      /Failed to provision VS Code extension TypeScriptTeam\.native-preview@1\.0\.1 after 3 attempt\(s\)[\s\S]*extension not found/,
     );
     expect(attempts).toBe(3);
   });
@@ -160,7 +160,7 @@ describe("VS Code E2E extension provisioning", () => {
 
     await provisionVsCodeExtension({
       cliArgs: ["code"],
-      extension: "TypeScriptTeam.native-preview@0.20260708.2",
+      extension: "TypeScriptTeam.native-preview@1.0.1",
       extensionsDir: "/isolated/extensions",
       userDataDir: "/isolated/user-data",
       run,

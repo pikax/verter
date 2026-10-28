@@ -443,6 +443,7 @@ fn threaded_drive_parks_on_the_driver_instead_of_inline_pumping() {
     };
 
     let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let parked_on = handle.clone();
     let drive_thread = {
         let scheduler = Arc::clone(&scheduler);
         let completed = Arc::clone(&completed);
@@ -455,7 +456,13 @@ fn threaded_drive_parks_on_the_driver_instead_of_inline_pumping() {
             );
         })
     };
-    std::thread::sleep(Duration::from_millis(300));
+    // A drive that parks on the driver blocks in the handle's plain wait; one that pumps
+    // (inline, or through the cooperative pump's bounded waits) never parks there. The budget
+    // is a hang guard only.
+    assert!(
+        parked_on.test_wait_until_parked(1, Duration::from_secs(10)),
+        "with the driver parked, a threaded drive must park on its handle rather than pump"
+    );
     assert!(
         !completed.load(Ordering::SeqCst),
         "with the driver parked and the request's stages ready but \

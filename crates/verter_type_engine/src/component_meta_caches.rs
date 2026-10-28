@@ -86,7 +86,6 @@ use crate::cache_runtime::singleflight::InflightTable;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
-use verter_session_query::facts::fact_cache::FactVersionRef;
 #[cfg(any(test, feature = "test-support"))]
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 // `ProjectionMode` is referenced only by the mode-only key constructors and
@@ -136,18 +135,18 @@ use crate::semantic_query::ProjectionMode;
 /// first.
 pub enum ComputedEntry<V> {
     /// Value plus the path-precise fact signature that roots it.
-    Rooted(V, Arc<[FactVersionRef]>),
+    Rooted(V, verter_session_query::facts::fact_set::FactSet),
     /// Value produced, but no signature can root it. Serve it; publish nothing.
     Unrooted(V, NonAdmissionReason),
     /// The cold build produced no value.
     Failed,
 }
 
-impl<V> From<Option<(V, Arc<[FactVersionRef]>)>> for ComputedEntry<V> {
+impl<V> From<Option<(V, verter_session_query::facts::fact_set::FactSet)>> for ComputedEntry<V> {
     /// Adapt the funnels whose producers hold their own copy of the computed
     /// value (the shape caches: the value is captured before the closure and
     /// returned verbatim on refusal, so a `None` costs no re-compute).
-    fn from(computed: Option<(V, Arc<[FactVersionRef]>)>) -> Self {
+    fn from(computed: Option<(V, verter_session_query::facts::fact_set::FactSet)>) -> Self {
         match computed {
             Some((value, facts)) => ComputedEntry::Rooted(value, facts),
             None => ComputedEntry::Failed,
@@ -171,7 +170,7 @@ pub struct ImportedRegistryEntry {
     /// so the leading self-root `FileWholeHash` is validated strictly:
     /// a same-canonical content edit, or a keyed canonical untracked by
     /// the live store view, rejects the entry.
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
+    pub fact_dep_signature: verter_session_query::facts::fact_set::FactSet,
     /// Project generation this entry was computed under, snapshotted by
     /// the producer before the cold compute dispatched any work. The
     /// `fact_dep_signature` carrier validates only file-content
@@ -338,9 +337,9 @@ impl ImportedRegistryDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(key.0.as_str())]);
-        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
-            &entry.fact_dep_signature,
-        ));
+        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            entry.fact_dep_signature.clone(),
+        );
         let footprint = imported_registry_footprint(&key, &entry.value);
         self.store.insert_for_test(
             key,
@@ -367,7 +366,8 @@ impl ImportedRegistryDb {
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                .empty_set(),
             validated_at_generation: 0,
         });
         self.insert_for_test(key, entry);
@@ -1380,7 +1380,11 @@ impl ShapeCacheDb {
             crate::semantic_query::DepSignature::default(),
             false,
         );
-        let entry = Arc::new(self.charged_entry(&key, value));
+        let entry = Arc::new(self.charged_entry(
+            &key,
+            value,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        ));
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1429,6 +1433,7 @@ impl ShapeCacheDb {
         carrier: &verter_type_expr::SyntheticCarrierKey,
         mode: ProjectionMode,
         deep_type: TypeExpr,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) {
         use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
         let key = ShapeCacheKey::synthetic_binding_whole(
@@ -1441,7 +1446,7 @@ impl ShapeCacheDb {
             crate::semantic_query::DepSignature::default(),
             false,
         );
-        let entry = Arc::new(self.charged_entry(&key, value));
+        let entry = Arc::new(self.charged_entry(&key, value, policy));
         // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`
         // returns `Some(old)` on overwrite, `None` on a fresh insert — an
         // unconditional `fetch_add` over-counts when two same-identity
@@ -1488,11 +1493,12 @@ impl ShapeCacheDb {
         &self,
         key: &ShapeCacheKey,
         value: MaterializedOutputTypeExpr,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) -> CacheEntry<MaterializedOutputTypeExpr> {
         let footprint = verter_session_query::retention::heap_size::footprint(&(key, &value));
         CacheEntry::admit::<ShapeCacheKey>(
             value,
-            ReadSetSignature::empty(),
+            ReadSetSignature::empty(policy),
             Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
             0,
             footprint,
@@ -1662,7 +1668,12 @@ mod retention_tests {
             TypeExpr::Literal(LiteralValue::String("l".repeat(TEXT))),
             TypeExpr::Literal(LiteralValue::String("small".into())),
         ]));
-        db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep);
+        db.insert_synthetic_carrier_deep_for_test(
+            &carrier,
+            ProjectionMode::Shallow,
+            deep,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         let retained = account.snapshot().retained_bytes;
         assert!(
             retained > TEXT,
@@ -1725,7 +1736,8 @@ mod retention_tests {
             key(),
             Arc::new(super::ImportedRegistryEntry {
                 value: Some(value.clone()),
-                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                fact_dep_signature: verter_session_query::facts::policy::FactPolicy::production()
+                    .empty_set(),
                 validated_at_generation: 0,
             }),
         );
@@ -1779,11 +1791,11 @@ mod retention_tests {
         let admitted = crate::cache_runtime::Candidate::admit::<super::ImportedRegistryKey>(
             crate::cache_runtime::FactCandidateDiscriminant {
                 validated_at_generation: 0,
-                facts: crate::fact_signature_helpers::empty_fact_signature(),
+                facts: verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             },
             (),
             verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             ),
             Arc::from(Vec::<Arc<str>>::new()),
             0,

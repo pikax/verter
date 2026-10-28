@@ -834,3 +834,73 @@ fn final_capacity_release_wakes_progress_subscribers_after_lifecycle_unlock() {
     drop(current);
     assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
 }
+
+/// Dispatch can select an admitted node before its submission binds the
+/// node's job token to the flight. The owners that arrived before either
+/// still own the job: a later follower's cancellation must not cancel it,
+/// while every owner's cancellation still does.
+#[test]
+fn dispatch_before_aggregate_binding_keeps_earlier_owners_on_the_job() {
+    let scheduler = scheduler();
+    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    let root = CancellationToken::new();
+    let follower = CancellationToken::new();
+    assert!(flight.try_add_owner(1, Some(root.clone())));
+    let aggregate = CancellationToken::aggregate();
+    assert!(flight.mark_dispatched(aggregate.clone()));
+    assert!(flight.attach_aggregate(aggregate.clone()));
+    assert!(flight.try_add_owner(2, Some(follower.clone())));
+    follower.cancel();
+    assert!(
+        !aggregate.is_cancelled(),
+        "the earlier owner still wants the job"
+    );
+    root.cancel();
+    assert!(aggregate.is_cancelled(), "no owner wants the job any more");
+}
+
+fn bind_with_a_cancelled_owner(dispatch_first: bool) {
+    let scheduler = scheduler();
+    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    assert!(flight.try_add_owner(1, Some(CancellationToken::new())));
+    assert!(flight.try_add_owner(2, Some(CancellationToken::new())));
+    // Cancel the first owner in this map's iteration order, after insertion
+    // but before binding, so the regression is independent of the hash seed.
+    let live_owner_id = {
+        let state = flight.state.lock();
+        let mut owners = state.owners.iter();
+        owners.next().unwrap().1.request.as_ref().unwrap().cancel();
+        *owners.next().unwrap().0
+    };
+    let aggregate = CancellationToken::aggregate();
+    let wake = Arc::new(CountWake::default());
+    let mut waiting = aggregate.subscribe();
+    assert!(waiting.poll(&Waker::from(Arc::clone(&wake))).is_pending());
+    if dispatch_first {
+        assert!(flight.mark_dispatched(aggregate.clone()));
+        assert!(flight.attach_aggregate(aggregate.clone()));
+    } else {
+        assert!(flight.attach_aggregate(aggregate.clone()));
+        assert!(flight.mark_dispatched(aggregate.clone()));
+    }
+    assert!(!aggregate.is_cancelled(), "the live owner retains the job");
+    assert!(flight.terminal().is_none());
+    assert_eq!(wake.0.load(Ordering::SeqCst), 0);
+    assert!(flight.detach_owner(live_owner_id));
+    assert!(aggregate.is_cancelled());
+    assert!(matches!(
+        flight.terminal(),
+        Some(ScopedCacheTerminal::Cancelled)
+    ));
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn admission_binding_keeps_a_live_owner_after_a_cancelled_owner() {
+    bind_with_a_cancelled_owner(false);
+}
+
+#[test]
+fn dispatch_binding_keeps_a_live_owner_after_a_cancelled_owner() {
+    bind_with_a_cancelled_owner(true);
+}

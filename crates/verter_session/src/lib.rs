@@ -121,6 +121,8 @@ mod lower_locator_tests;
 #[cfg(test)]
 mod narrowed_scope_snapshot_generation_tests;
 #[cfg(test)]
+mod nextest_tier_policy_tests;
+#[cfg(test)]
 mod overlay_promotion_isolation_tests;
 #[cfg(test)]
 mod overlay_resolution_snapshot_tests;
@@ -132,6 +134,8 @@ mod prepared_decl_import_route_witness_tests;
 mod raw_snapshot_template_source_move_tests;
 #[cfg(test)]
 mod request_store_view_derived_hash_tests;
+#[cfg(test)]
+mod scale_gate;
 #[cfg(test)]
 mod template_slot_generation_rail_tests;
 #[cfg(test)]
@@ -222,6 +226,8 @@ mod value_symbol_depth_equivalence_tests;
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector
 // `compile_slot_fact_dep_signature` — selectively re-exported below.
+#[cfg(test)]
+mod fact_policy_test_support;
 #[cfg(test)]
 mod fact_signature_helpers_host_tests;
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;

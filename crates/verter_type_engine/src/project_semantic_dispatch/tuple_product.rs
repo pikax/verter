@@ -929,9 +929,10 @@ mod credit_tests {
         let token = verter_execution::cancellation::CancellationToken::new();
         let _job =
             verter_execution::cancellation::JobCancellationGuard::replace(Some(token.clone()));
-        let flags = RequestFlags::new(ProjectGenerationClock::new(Arc::new(
-            std::sync::atomic::AtomicU64::new(0),
-        )));
+        let flags = RequestFlags::new(
+            ProjectGenerationClock::new(Arc::new(std::sync::atomic::AtomicU64::new(0))),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         ledger.set_limits_for_tests(1_000, 24);
         let (_demand, trip) = ledger.enter(false);

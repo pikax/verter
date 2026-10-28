@@ -129,23 +129,39 @@ impl ProjectGenerationClock {
     }
 }
 
-/// The cancellation and project-generation handles of one request.
+/// The cancellation and project-generation handles of one request, and the
+/// fact policy of the host that admitted it.
 ///
-/// Both are handles, never sampled values: capturing them is constant-cost,
-/// and every read observes the live state.
+/// The handles are never sampled values: capturing them is constant-cost,
+/// and every read observes the live state. The policy is immutable host
+/// state, copied here so every computation of the request — a suspended
+/// one resumed on another worker included — seals its evidence under the
+/// host's widths.
 #[derive(Clone)]
 pub struct RequestFlags {
     cancellation: CancellationCheckpoint,
     project_generation: ProjectGenerationClock,
+    fact_policy: verter_session_query::facts::policy::FactPolicy,
 }
 
 impl RequestFlags {
     #[must_use]
-    pub fn new(project_generation: ProjectGenerationClock) -> Self {
+    pub fn new(
+        project_generation: ProjectGenerationClock,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
+    ) -> Self {
         Self {
             cancellation: CancellationCheckpoint::new(),
             project_generation,
+            fact_policy,
         }
+    }
+
+    /// The fact policy of the host that admitted the request.
+    #[inline]
+    #[must_use]
+    pub fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.fact_policy
     }
 
     /// The request's cancellation checkpoint.
@@ -192,8 +208,9 @@ impl<W> RequestSnapshot<W> {
     pub fn new(
         project_generation: ProjectGenerationClock,
         clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
-        Self::new_in::<verter_audit::observe::Uncaptured>(project_generation, clocks)
+        Self::new_in::<verter_audit::observe::Uncaptured>(project_generation, clocks, fact_policy)
     }
 
     /// Admit receivers once, for the execution mode selected by the root.
@@ -201,9 +218,10 @@ impl<W> RequestSnapshot<W> {
     pub fn new_in<M: verter_audit::observe::ObserveExec>(
         project_generation: ProjectGenerationClock,
         clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
         Self {
-            flags: RequestFlags::new(project_generation),
+            flags: RequestFlags::new(project_generation, fact_policy),
             clocks,
             #[cfg(feature = "semantic-observe")]
             observation: crate::request_observers::CaptureTargets::installed::<M>(),
@@ -248,6 +266,13 @@ impl<W> RequestSnapshot<W> {
     #[must_use]
     pub fn flags(&self) -> &RequestFlags {
         &self.flags
+    }
+
+    /// The fact policy of the host that admitted the request.
+    #[inline]
+    #[must_use]
+    pub fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.flags.fact_policy()
     }
 
     /// The request's live aggregate clock reader.
@@ -426,8 +451,10 @@ pub fn observe_program_file_order(
 /// `bubble_fact_signature_via_tls` and other warm-hit bubble-up paths.
 /// No-op when the stack is empty or `sig` is empty.
 #[inline]
-pub fn observe_fan_out_borrowed(sig: &[verter_session_query::facts::fact_cache::FactVersionRef]) {
-    tracer_stack::observe_fan_out_borrowed(sig);
+pub fn observe_fan_out_borrowed<'s>(
+    sig: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
+) {
+    tracer_stack::observe_fan_out_facts(sig.into());
 }
 
 /// Whether any fact tracer is installed on the current thread's stack.
@@ -441,13 +468,22 @@ pub fn fact_tracer_installed() -> bool {
     tracer_stack::current_tracer().is_some()
 }
 
+/// The fact policy of the innermost installed tracer, or none when none is
+/// installed. A recording made under that tracer seals what it recorded
+/// under the same policy, so replaying it into the tracer is compatible.
+#[inline]
+pub fn installed_fact_policy() -> Option<verter_session_query::facts::policy::FactPolicy> {
+    tracer_stack::current_tracer()
+        .map(verter_session_query::facts::fact_read_set::FactReadSetCell::policy)
+}
+
 /// The fact reads a computation made, for replay into scopes that were
 /// not live while it ran.
 #[derive(Debug, Clone)]
 pub struct RecordedFactReads {
     /// Every distinct fact fanned out while the computation ran: its own
     /// reads, and the receipt of each completed result it consumed.
-    pub facts: std::sync::Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+    pub facts: verter_session_query::facts::fact_set::FactSet,
     /// Whether any non-cacheable read was marked, local-only included.
     pub non_cacheable: bool,
 }
@@ -486,7 +522,9 @@ pub(crate) fn complete_with_receipt(
     reads: &RecordedFactReads,
 ) -> verter_session_query::facts::fact_cache::FactVersionRef {
     let receipt = verter_session_query::facts::fact_cache::FactVersionRef::Receipt(
-        verter_session_query::facts::fact_cache::ResultReceipt::new(reads.facts.to_vec()),
+        verter_session_query::facts::fact_cache::ResultReceipt::new(
+            reads.facts.iter().cloned().collect(),
+        ),
     );
     tracer_stack::collapse_evidence(start, end, &receipt);
     receipt
@@ -499,8 +537,11 @@ pub(crate) fn complete_with_receipt(
 /// observation when no tracer is installed, so a recording is complete only
 /// if a tracer was installed throughout — the caller checks
 /// [`fact_tracer_installed`] first.
-pub(crate) fn record_fact_reads<R>(work: impl FnOnce() -> R) -> (R, RecordedFactReads) {
-    let recording = FactReadRecording::begin();
+pub(crate) fn record_fact_reads<R>(
+    policy: verter_session_query::facts::policy::FactPolicy,
+    work: impl FnOnce() -> R,
+) -> (R, RecordedFactReads) {
+    let recording = FactReadRecording::begin(policy);
     let result = work();
     (result, recording.finish())
 }
@@ -514,16 +555,20 @@ pub(crate) struct FactReadRecording {
     // before the recorder is freed.
     scope: Option<tracer_stack::RecorderScope>,
     recorder: Box<tracer_stack::FactReadRecorder>,
+    /// The policy the recorded facts are sealed under: the installed
+    /// tracer's, which they are replayed into.
+    policy: verter_session_query::facts::policy::FactPolicy,
 }
 
 impl FactReadRecording {
     /// Install a fresh recorder until [`Self::finish`] (or the drop).
-    pub(crate) fn begin() -> Self {
+    pub(crate) fn begin(policy: verter_session_query::facts::policy::FactPolicy) -> Self {
         let recorder = Box::new(tracer_stack::FactReadRecorder::default());
         let scope = tracer_stack::install_recorder(&recorder);
         Self {
             scope: Some(scope),
             recorder,
+            policy,
         }
     }
 
@@ -532,7 +577,7 @@ impl FactReadRecording {
         drop(self.scope.take());
         let (facts, non_cacheable) = std::mem::take(&mut *self.recorder).into_parts();
         RecordedFactReads {
-            facts: facts.into(),
+            facts: self.policy.set_of(facts),
             non_cacheable,
         }
     }
@@ -601,21 +646,25 @@ pub(crate) struct OwnedFactTracer {
 impl OwnedFactTracer {
     pub(crate) fn new(
         basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
-        Self::with_installation(basis, true)
+        Self::with_installation(basis, policy, true)
     }
 
     pub(crate) fn fanning_out(
         basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+        policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
-        Self::with_installation(basis, false)
+        Self::with_installation(basis, policy, false)
     }
 
     fn with_installation(
         basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+        policy: verter_session_query::facts::policy::FactPolicy,
         delivers: bool,
     ) -> Self {
-        let cell = Box::new(verter_session_query::facts::fact_read_set::FactReadSetCell::new());
+        let cell =
+            Box::new(verter_session_query::facts::fact_read_set::FactReadSetCell::new(policy));
         cell.set_aggregate_basis(basis);
         Self { cell, delivers }
     }
@@ -652,12 +701,13 @@ impl Drop for OwnedTracerScope<'_> {
 /// Install a request-owned basis without granting host access to the compute.
 pub fn with_fact_tracer_cell<F, R>(
     basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    policy: verter_session_query::facts::policy::FactPolicy,
     f: F,
 ) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
 where
     F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
 {
-    with_fact_tracer_cell_scope(basis, false, f)
+    with_fact_tracer_cell_scope(basis, policy, false, f)
 }
 
 /// [`with_fact_tracer_cell`] for a scope whose owner delivers its whole
@@ -666,23 +716,25 @@ where
 /// not also fan out to the scopes below it.
 pub(crate) fn with_delivering_fact_tracer_cell<F, R>(
     basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    policy: verter_session_query::facts::policy::FactPolicy,
     f: F,
 ) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
 where
     F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
 {
-    with_fact_tracer_cell_scope(basis, true, f)
+    with_fact_tracer_cell_scope(basis, policy, true, f)
 }
 
 fn with_fact_tracer_cell_scope<F, R>(
     basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    policy: verter_session_query::facts::policy::FactPolicy,
     delivers: bool,
     f: F,
 ) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
 where
     F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
 {
-    let cell = verter_session_query::facts::fact_read_set::FactReadSetCell::new();
+    let cell = verter_session_query::facts::fact_read_set::FactReadSetCell::new(policy);
     cell.set_aggregate_basis(basis);
     // Push onto the tracer stack. The RAII guard pops on drop
     // (including on panic unwind) so no dangling pointer remains.
@@ -740,6 +792,7 @@ mod request_snapshot_tests {
                 BracketedGenerationRead::new(imports),
                 BracketedGenerationRead::new(routes),
             ),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         assert_eq!(snapshot.current_project_generation(), 3);
         assert_eq!(snapshot.clocks().live().content, 10);

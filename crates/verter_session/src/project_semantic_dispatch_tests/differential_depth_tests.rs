@@ -509,6 +509,55 @@ fn an_80_deep_nested_generic_application_relates_on_the_default_stack() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Each declaration of an alias chain is handed to the declaration-lowering
+/// workers once: the lowering that registers its facts also serves the
+/// body read that follows, so every link the chain grows by adds one
+/// worker rendezvous and one statement lowering.
+#[test]
+fn an_alias_chain_hands_each_declaration_to_the_lowering_workers_once() {
+    let mut work = Vec::new();
+    #[cfg(feature = "semantic-observe")]
+    let mut lowered = Vec::new();
+    for links in [32, 64] {
+        let mut source = String::from("type A0<T> = T | undefined;\n");
+        for i in 0..links {
+            source.push_str(&format!("type A{}<T> = A{i}<T>;\n", i + 1));
+        }
+        let probe = format!("[A{links}<\"ok\">] extends [\"ok\" | undefined] ? 1 : 2");
+        let matrix = Matrix::new(&source).settings(&[STRICT]);
+        let rows = [(Read::Type(&probe), vec!["1"])];
+        let host = matrix.host(&rows);
+        let before = host.decl_lowering.handoff_count();
+        #[cfg(feature = "semantic-observe")]
+        let statements_before = host.provenance().snapshot().decl_statements_lowered;
+        let verdict = &matrix.verdicts_on(&host, &rows)[0][0];
+        assert!(verdict.matched, "links={links}: {}", verdict.lane);
+        let after = host.decl_lowering.handoff_count();
+        assert!(after >= before, "the rendezvous count never falls");
+        work.push(after - before);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let statements_after = host.provenance().snapshot().decl_statements_lowered;
+            assert!(statements_after >= statements_before);
+            lowered.push(statements_after - statements_before);
+        }
+    }
+    eprintln!("alias chain rendezvous: {work:?}");
+    #[cfg(feature = "semantic-observe")]
+    {
+        eprintln!("alias chain statements lowered: {lowered:?}");
+        assert!(
+            lowered[1] <= lowered[0] + 32 + 4,
+            "32 more links must add one statement lowering each: {lowered:?}"
+        );
+    }
+    let (shorter, longer) = (work[0], work[1]);
+    assert!(
+        longer <= shorter + 32 + 4,
+        "32 more links must add one rendezvous each: {work:?}"
+    );
+}
+
 /// An 800-member literal union.
 const WIDE_UNION_800: &str = r##"type W = "m0" | "m1" | "m2" | "m3" | "m4" | "m5" | "m6" | "m7" | "m8" | "m9" | "m10" | "m11" | "m12" | "m13" | "m14" | "m15" | "m16" | "m17" | "m18" | "m19" | "m20" | "m21" | "m22" | "m23" | "m24" | "m25" | "m26" | "m27" | "m28" | "m29" | "m30" | "m31" | "m32" | "m33" | "m34" | "m35" | "m36" | "m37" | "m38" | "m39" | "m40" | "m41" | "m42" | "m43" | "m44" | "m45" | "m46" | "m47" | "m48" | "m49" | "m50" | "m51" | "m52" | "m53" | "m54" | "m55" | "m56" | "m57" | "m58" | "m59" | "m60" | "m61" | "m62" | "m63" | "m64" | "m65" | "m66" | "m67" | "m68" | "m69" | "m70" | "m71" | "m72" | "m73" | "m74" | "m75" | "m76" | "m77" | "m78" | "m79" | "m80" | "m81" | "m82" | "m83" | "m84" | "m85" | "m86" | "m87" | "m88" | "m89" | "m90" | "m91" | "m92" | "m93" | "m94" | "m95" | "m96" | "m97" | "m98" | "m99" | "m100" | "m101" | "m102" | "m103" | "m104" | "m105" | "m106" | "m107" | "m108" | "m109" | "m110" | "m111" | "m112" | "m113" | "m114" | "m115" | "m116" | "m117" | "m118" | "m119" | "m120" | "m121" | "m122" | "m123" | "m124" | "m125" | "m126" | "m127" | "m128" | "m129" | "m130" | "m131" | "m132" | "m133" | "m134" | "m135" | "m136" | "m137" | "m138" | "m139" | "m140" | "m141" | "m142" | "m143" | "m144" | "m145" | "m146" | "m147" | "m148" | "m149" | "m150" | "m151" | "m152" | "m153" | "m154" | "m155" | "m156" | "m157" | "m158" | "m159" | "m160" | "m161" | "m162" | "m163" | "m164" | "m165" | "m166" | "m167" | "m168" | "m169" | "m170" | "m171" | "m172" | "m173" | "m174" | "m175" | "m176" | "m177" | "m178" | "m179" | "m180" | "m181" | "m182" | "m183" | "m184" | "m185" | "m186" | "m187" | "m188" | "m189" | "m190" | "m191" | "m192" | "m193" | "m194" | "m195" | "m196" | "m197" | "m198" | "m199" | "m200" | "m201" | "m202" | "m203" | "m204" | "m205" | "m206" | "m207" | "m208" | "m209" | "m210" | "m211" | "m212" | "m213" | "m214" | "m215" | "m216" | "m217" | "m218" | "m219" | "m220" | "m221" | "m222" | "m223" | "m224" | "m225" | "m226" | "m227" | "m228" | "m229" | "m230" | "m231" | "m232" | "m233" | "m234" | "m235" | "m236" | "m237" | "m238" | "m239" | "m240" | "m241" | "m242" | "m243" | "m244" | "m245" | "m246" | "m247" | "m248" | "m249" | "m250" | "m251" | "m252" | "m253" | "m254" | "m255" | "m256" | "m257" | "m258" | "m259" | "m260" | "m261" | "m262" | "m263" | "m264" | "m265" | "m266" | "m267" | "m268" | "m269" | "m270" | "m271" | "m272" | "m273" | "m274" | "m275" | "m276" | "m277" | "m278" | "m279" | "m280" | "m281" | "m282" | "m283" | "m284" | "m285" | "m286" | "m287" | "m288" | "m289" | "m290" | "m291" | "m292" | "m293" | "m294" | "m295" | "m296" | "m297" | "m298" | "m299" | "m300" | "m301" | "m302" | "m303" | "m304" | "m305" | "m306" | "m307" | "m308" | "m309" | "m310" | "m311" | "m312" | "m313" | "m314" | "m315" | "m316" | "m317" | "m318" | "m319" | "m320" | "m321" | "m322" | "m323" | "m324" | "m325" | "m326" | "m327" | "m328" | "m329" | "m330" | "m331" | "m332" | "m333" | "m334" | "m335" | "m336" | "m337" | "m338" | "m339" | "m340" | "m341" | "m342" | "m343" | "m344" | "m345" | "m346" | "m347" | "m348" | "m349" | "m350" | "m351" | "m352" | "m353" | "m354" | "m355" | "m356" | "m357" | "m358" | "m359" | "m360" | "m361" | "m362" | "m363" | "m364" | "m365" | "m366" | "m367" | "m368" | "m369" | "m370" | "m371" | "m372" | "m373" | "m374" | "m375" | "m376" | "m377" | "m378" | "m379" | "m380" | "m381" | "m382" | "m383" | "m384" | "m385" | "m386" | "m387" | "m388" | "m389" | "m390" | "m391" | "m392" | "m393" | "m394" | "m395" | "m396" | "m397" | "m398" | "m399" | "m400" | "m401" | "m402" | "m403" | "m404" | "m405" | "m406" | "m407" | "m408" | "m409" | "m410" | "m411" | "m412" | "m413" | "m414" | "m415" | "m416" | "m417" | "m418" | "m419" | "m420" | "m421" | "m422" | "m423" | "m424" | "m425" | "m426" | "m427" | "m428" | "m429" | "m430" | "m431" | "m432" | "m433" | "m434" | "m435" | "m436" | "m437" | "m438" | "m439" | "m440" | "m441" | "m442" | "m443" | "m444" | "m445" | "m446" | "m447" | "m448" | "m449" | "m450" | "m451" | "m452" | "m453" | "m454" | "m455" | "m456" | "m457" | "m458" | "m459" | "m460" | "m461" | "m462" | "m463" | "m464" | "m465" | "m466" | "m467" | "m468" | "m469" | "m470" | "m471" | "m472" | "m473" | "m474" | "m475" | "m476" | "m477" | "m478" | "m479" | "m480" | "m481" | "m482" | "m483" | "m484" | "m485" | "m486" | "m487" | "m488" | "m489" | "m490" | "m491" | "m492" | "m493" | "m494" | "m495" | "m496" | "m497" | "m498" | "m499" | "m500" | "m501" | "m502" | "m503" | "m504" | "m505" | "m506" | "m507" | "m508" | "m509" | "m510" | "m511" | "m512" | "m513" | "m514" | "m515" | "m516" | "m517" | "m518" | "m519" | "m520" | "m521" | "m522" | "m523" | "m524" | "m525" | "m526" | "m527" | "m528" | "m529" | "m530" | "m531" | "m532" | "m533" | "m534" | "m535" | "m536" | "m537" | "m538" | "m539" | "m540" | "m541" | "m542" | "m543" | "m544" | "m545" | "m546" | "m547" | "m548" | "m549" | "m550" | "m551" | "m552" | "m553" | "m554" | "m555" | "m556" | "m557" | "m558" | "m559" | "m560" | "m561" | "m562" | "m563" | "m564" | "m565" | "m566" | "m567" | "m568" | "m569" | "m570" | "m571" | "m572" | "m573" | "m574" | "m575" | "m576" | "m577" | "m578" | "m579" | "m580" | "m581" | "m582" | "m583" | "m584" | "m585" | "m586" | "m587" | "m588" | "m589" | "m590" | "m591" | "m592" | "m593" | "m594" | "m595" | "m596" | "m597" | "m598" | "m599" | "m600" | "m601" | "m602" | "m603" | "m604" | "m605" | "m606" | "m607" | "m608" | "m609" | "m610" | "m611" | "m612" | "m613" | "m614" | "m615" | "m616" | "m617" | "m618" | "m619" | "m620" | "m621" | "m622" | "m623" | "m624" | "m625" | "m626" | "m627" | "m628" | "m629" | "m630" | "m631" | "m632" | "m633" | "m634" | "m635" | "m636" | "m637" | "m638" | "m639" | "m640" | "m641" | "m642" | "m643" | "m644" | "m645" | "m646" | "m647" | "m648" | "m649" | "m650" | "m651" | "m652" | "m653" | "m654" | "m655" | "m656" | "m657" | "m658" | "m659" | "m660" | "m661" | "m662" | "m663" | "m664" | "m665" | "m666" | "m667" | "m668" | "m669" | "m670" | "m671" | "m672" | "m673" | "m674" | "m675" | "m676" | "m677" | "m678" | "m679" | "m680" | "m681" | "m682" | "m683" | "m684" | "m685" | "m686" | "m687" | "m688" | "m689" | "m690" | "m691" | "m692" | "m693" | "m694" | "m695" | "m696" | "m697" | "m698" | "m699" | "m700" | "m701" | "m702" | "m703" | "m704" | "m705" | "m706" | "m707" | "m708" | "m709" | "m710" | "m711" | "m712" | "m713" | "m714" | "m715" | "m716" | "m717" | "m718" | "m719" | "m720" | "m721" | "m722" | "m723" | "m724" | "m725" | "m726" | "m727" | "m728" | "m729" | "m730" | "m731" | "m732" | "m733" | "m734" | "m735" | "m736" | "m737" | "m738" | "m739" | "m740" | "m741" | "m742" | "m743" | "m744" | "m745" | "m746" | "m747" | "m748" | "m749" | "m750" | "m751" | "m752" | "m753" | "m754" | "m755" | "m756" | "m757" | "m758" | "m759" | "m760" | "m761" | "m762" | "m763" | "m764" | "m765" | "m766" | "m767" | "m768" | "m769" | "m770" | "m771" | "m772" | "m773" | "m774" | "m775" | "m776" | "m777" | "m778" | "m779" | "m780" | "m781" | "m782" | "m783" | "m784" | "m785" | "m786" | "m787" | "m788" | "m789" | "m790" | "m791" | "m792" | "m793" | "m794" | "m795" | "m796" | "m797" | "m798" | "m799";
 "##;
@@ -1338,26 +1387,6 @@ fn an_800_guard_narrowing_chain_answers_in(setting: Setting) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[test]
-fn an_800_guard_narrowing_chain_answers_strict() {
-    an_800_guard_narrowing_chain_answers_in(STRICT);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
-    an_800_guard_narrowing_chain_answers_in(LOOSE);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
-    an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_with_both_off() {
-    an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
-}
-
 /// 800 returning guards.
 const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
   if (x === 0) return "r0" as const;
@@ -2169,13 +2198,59 @@ const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
 /// connected demand pays for, and the work each guard costs is constant: the
 /// relation checks and guard applications grow linearly with the guards.
 /// TypeScript 7.0.2 answers the union below, under every setting.
+/// A function of `guards` `if (x === i) return "r<i>" as const;` statements
+/// ending in `return "none" as const;`, and the union the checker prints for
+/// its return.
+fn return_if_chain(guards: usize) -> (String, String) {
+    let mut source = String::from("export function chain(x: number) {\n");
+    for i in 0..guards {
+        source.push_str(&format!("  if (x === {i}) return \"r{i}\" as const;\n"));
+    }
+    source.push_str("  return \"none\" as const;\n}\n");
+    let mut literals: Vec<String> = (0..guards).map(|i| format!("\"r{i}\"")).collect();
+    literals.push("\"none\"".to_owned());
+    literals.sort();
+    (source, literals.join(" | "))
+}
+
+/// The fixture is the generator's chain, so the gate guard counts are the
+/// same shape as the full-size chain.
 #[test]
-fn an_800_return_if_chain_answers_within_the_work_budget() {
-    let matrix = Matrix::new(RETURN_CHAIN_800);
-    let failures = matrix.returns(&[
-        ("chain", "\"none\" | \"r0\" | \"r1\" | \"r10\" | \"r100\" | \"r101\" | \"r102\" | \"r103\" | \"r104\" | \"r105\" | \"r106\" | \"r107\" | \"r108\" | \"r109\" | \"r11\" | \"r110\" | \"r111\" | \"r112\" | \"r113\" | \"r114\" | \"r115\" | \"r116\" | \"r117\" | \"r118\" | \"r119\" | \"r12\" | \"r120\" | \"r121\" | \"r122\" | \"r123\" | \"r124\" | \"r125\" | \"r126\" | \"r127\" | \"r128\" | \"r129\" | \"r13\" | \"r130\" | \"r131\" | \"r132\" | \"r133\" | \"r134\" | \"r135\" | \"r136\" | \"r137\" | \"r138\" | \"r139\" | \"r14\" | \"r140\" | \"r141\" | \"r142\" | \"r143\" | \"r144\" | \"r145\" | \"r146\" | \"r147\" | \"r148\" | \"r149\" | \"r15\" | \"r150\" | \"r151\" | \"r152\" | \"r153\" | \"r154\" | \"r155\" | \"r156\" | \"r157\" | \"r158\" | \"r159\" | \"r16\" | \"r160\" | \"r161\" | \"r162\" | \"r163\" | \"r164\" | \"r165\" | \"r166\" | \"r167\" | \"r168\" | \"r169\" | \"r17\" | \"r170\" | \"r171\" | \"r172\" | \"r173\" | \"r174\" | \"r175\" | \"r176\" | \"r177\" | \"r178\" | \"r179\" | \"r18\" | \"r180\" | \"r181\" | \"r182\" | \"r183\" | \"r184\" | \"r185\" | \"r186\" | \"r187\" | \"r188\" | \"r189\" | \"r19\" | \"r190\" | \"r191\" | \"r192\" | \"r193\" | \"r194\" | \"r195\" | \"r196\" | \"r197\" | \"r198\" | \"r199\" | \"r2\" | \"r20\" | \"r200\" | \"r201\" | \"r202\" | \"r203\" | \"r204\" | \"r205\" | \"r206\" | \"r207\" | \"r208\" | \"r209\" | \"r21\" | \"r210\" | \"r211\" | \"r212\" | \"r213\" | \"r214\" | \"r215\" | \"r216\" | \"r217\" | \"r218\" | \"r219\" | \"r22\" | \"r220\" | \"r221\" | \"r222\" | \"r223\" | \"r224\" | \"r225\" | \"r226\" | \"r227\" | \"r228\" | \"r229\" | \"r23\" | \"r230\" | \"r231\" | \"r232\" | \"r233\" | \"r234\" | \"r235\" | \"r236\" | \"r237\" | \"r238\" | \"r239\" | \"r24\" | \"r240\" | \"r241\" | \"r242\" | \"r243\" | \"r244\" | \"r245\" | \"r246\" | \"r247\" | \"r248\" | \"r249\" | \"r25\" | \"r250\" | \"r251\" | \"r252\" | \"r253\" | \"r254\" | \"r255\" | \"r256\" | \"r257\" | \"r258\" | \"r259\" | \"r26\" | \"r260\" | \"r261\" | \"r262\" | \"r263\" | \"r264\" | \"r265\" | \"r266\" | \"r267\" | \"r268\" | \"r269\" | \"r27\" | \"r270\" | \"r271\" | \"r272\" | \"r273\" | \"r274\" | \"r275\" | \"r276\" | \"r277\" | \"r278\" | \"r279\" | \"r28\" | \"r280\" | \"r281\" | \"r282\" | \"r283\" | \"r284\" | \"r285\" | \"r286\" | \"r287\" | \"r288\" | \"r289\" | \"r29\" | \"r290\" | \"r291\" | \"r292\" | \"r293\" | \"r294\" | \"r295\" | \"r296\" | \"r297\" | \"r298\" | \"r299\" | \"r3\" | \"r30\" | \"r300\" | \"r301\" | \"r302\" | \"r303\" | \"r304\" | \"r305\" | \"r306\" | \"r307\" | \"r308\" | \"r309\" | \"r31\" | \"r310\" | \"r311\" | \"r312\" | \"r313\" | \"r314\" | \"r315\" | \"r316\" | \"r317\" | \"r318\" | \"r319\" | \"r32\" | \"r320\" | \"r321\" | \"r322\" | \"r323\" | \"r324\" | \"r325\" | \"r326\" | \"r327\" | \"r328\" | \"r329\" | \"r33\" | \"r330\" | \"r331\" | \"r332\" | \"r333\" | \"r334\" | \"r335\" | \"r336\" | \"r337\" | \"r338\" | \"r339\" | \"r34\" | \"r340\" | \"r341\" | \"r342\" | \"r343\" | \"r344\" | \"r345\" | \"r346\" | \"r347\" | \"r348\" | \"r349\" | \"r35\" | \"r350\" | \"r351\" | \"r352\" | \"r353\" | \"r354\" | \"r355\" | \"r356\" | \"r357\" | \"r358\" | \"r359\" | \"r36\" | \"r360\" | \"r361\" | \"r362\" | \"r363\" | \"r364\" | \"r365\" | \"r366\" | \"r367\" | \"r368\" | \"r369\" | \"r37\" | \"r370\" | \"r371\" | \"r372\" | \"r373\" | \"r374\" | \"r375\" | \"r376\" | \"r377\" | \"r378\" | \"r379\" | \"r38\" | \"r380\" | \"r381\" | \"r382\" | \"r383\" | \"r384\" | \"r385\" | \"r386\" | \"r387\" | \"r388\" | \"r389\" | \"r39\" | \"r390\" | \"r391\" | \"r392\" | \"r393\" | \"r394\" | \"r395\" | \"r396\" | \"r397\" | \"r398\" | \"r399\" | \"r4\" | \"r40\" | \"r400\" | \"r401\" | \"r402\" | \"r403\" | \"r404\" | \"r405\" | \"r406\" | \"r407\" | \"r408\" | \"r409\" | \"r41\" | \"r410\" | \"r411\" | \"r412\" | \"r413\" | \"r414\" | \"r415\" | \"r416\" | \"r417\" | \"r418\" | \"r419\" | \"r42\" | \"r420\" | \"r421\" | \"r422\" | \"r423\" | \"r424\" | \"r425\" | \"r426\" | \"r427\" | \"r428\" | \"r429\" | \"r43\" | \"r430\" | \"r431\" | \"r432\" | \"r433\" | \"r434\" | \"r435\" | \"r436\" | \"r437\" | \"r438\" | \"r439\" | \"r44\" | \"r440\" | \"r441\" | \"r442\" | \"r443\" | \"r444\" | \"r445\" | \"r446\" | \"r447\" | \"r448\" | \"r449\" | \"r45\" | \"r450\" | \"r451\" | \"r452\" | \"r453\" | \"r454\" | \"r455\" | \"r456\" | \"r457\" | \"r458\" | \"r459\" | \"r46\" | \"r460\" | \"r461\" | \"r462\" | \"r463\" | \"r464\" | \"r465\" | \"r466\" | \"r467\" | \"r468\" | \"r469\" | \"r47\" | \"r470\" | \"r471\" | \"r472\" | \"r473\" | \"r474\" | \"r475\" | \"r476\" | \"r477\" | \"r478\" | \"r479\" | \"r48\" | \"r480\" | \"r481\" | \"r482\" | \"r483\" | \"r484\" | \"r485\" | \"r486\" | \"r487\" | \"r488\" | \"r489\" | \"r49\" | \"r490\" | \"r491\" | \"r492\" | \"r493\" | \"r494\" | \"r495\" | \"r496\" | \"r497\" | \"r498\" | \"r499\" | \"r5\" | \"r50\" | \"r500\" | \"r501\" | \"r502\" | \"r503\" | \"r504\" | \"r505\" | \"r506\" | \"r507\" | \"r508\" | \"r509\" | \"r51\" | \"r510\" | \"r511\" | \"r512\" | \"r513\" | \"r514\" | \"r515\" | \"r516\" | \"r517\" | \"r518\" | \"r519\" | \"r52\" | \"r520\" | \"r521\" | \"r522\" | \"r523\" | \"r524\" | \"r525\" | \"r526\" | \"r527\" | \"r528\" | \"r529\" | \"r53\" | \"r530\" | \"r531\" | \"r532\" | \"r533\" | \"r534\" | \"r535\" | \"r536\" | \"r537\" | \"r538\" | \"r539\" | \"r54\" | \"r540\" | \"r541\" | \"r542\" | \"r543\" | \"r544\" | \"r545\" | \"r546\" | \"r547\" | \"r548\" | \"r549\" | \"r55\" | \"r550\" | \"r551\" | \"r552\" | \"r553\" | \"r554\" | \"r555\" | \"r556\" | \"r557\" | \"r558\" | \"r559\" | \"r56\" | \"r560\" | \"r561\" | \"r562\" | \"r563\" | \"r564\" | \"r565\" | \"r566\" | \"r567\" | \"r568\" | \"r569\" | \"r57\" | \"r570\" | \"r571\" | \"r572\" | \"r573\" | \"r574\" | \"r575\" | \"r576\" | \"r577\" | \"r578\" | \"r579\" | \"r58\" | \"r580\" | \"r581\" | \"r582\" | \"r583\" | \"r584\" | \"r585\" | \"r586\" | \"r587\" | \"r588\" | \"r589\" | \"r59\" | \"r590\" | \"r591\" | \"r592\" | \"r593\" | \"r594\" | \"r595\" | \"r596\" | \"r597\" | \"r598\" | \"r599\" | \"r6\" | \"r60\" | \"r600\" | \"r601\" | \"r602\" | \"r603\" | \"r604\" | \"r605\" | \"r606\" | \"r607\" | \"r608\" | \"r609\" | \"r61\" | \"r610\" | \"r611\" | \"r612\" | \"r613\" | \"r614\" | \"r615\" | \"r616\" | \"r617\" | \"r618\" | \"r619\" | \"r62\" | \"r620\" | \"r621\" | \"r622\" | \"r623\" | \"r624\" | \"r625\" | \"r626\" | \"r627\" | \"r628\" | \"r629\" | \"r63\" | \"r630\" | \"r631\" | \"r632\" | \"r633\" | \"r634\" | \"r635\" | \"r636\" | \"r637\" | \"r638\" | \"r639\" | \"r64\" | \"r640\" | \"r641\" | \"r642\" | \"r643\" | \"r644\" | \"r645\" | \"r646\" | \"r647\" | \"r648\" | \"r649\" | \"r65\" | \"r650\" | \"r651\" | \"r652\" | \"r653\" | \"r654\" | \"r655\" | \"r656\" | \"r657\" | \"r658\" | \"r659\" | \"r66\" | \"r660\" | \"r661\" | \"r662\" | \"r663\" | \"r664\" | \"r665\" | \"r666\" | \"r667\" | \"r668\" | \"r669\" | \"r67\" | \"r670\" | \"r671\" | \"r672\" | \"r673\" | \"r674\" | \"r675\" | \"r676\" | \"r677\" | \"r678\" | \"r679\" | \"r68\" | \"r680\" | \"r681\" | \"r682\" | \"r683\" | \"r684\" | \"r685\" | \"r686\" | \"r687\" | \"r688\" | \"r689\" | \"r69\" | \"r690\" | \"r691\" | \"r692\" | \"r693\" | \"r694\" | \"r695\" | \"r696\" | \"r697\" | \"r698\" | \"r699\" | \"r7\" | \"r70\" | \"r700\" | \"r701\" | \"r702\" | \"r703\" | \"r704\" | \"r705\" | \"r706\" | \"r707\" | \"r708\" | \"r709\" | \"r71\" | \"r710\" | \"r711\" | \"r712\" | \"r713\" | \"r714\" | \"r715\" | \"r716\" | \"r717\" | \"r718\" | \"r719\" | \"r72\" | \"r720\" | \"r721\" | \"r722\" | \"r723\" | \"r724\" | \"r725\" | \"r726\" | \"r727\" | \"r728\" | \"r729\" | \"r73\" | \"r730\" | \"r731\" | \"r732\" | \"r733\" | \"r734\" | \"r735\" | \"r736\" | \"r737\" | \"r738\" | \"r739\" | \"r74\" | \"r740\" | \"r741\" | \"r742\" | \"r743\" | \"r744\" | \"r745\" | \"r746\" | \"r747\" | \"r748\" | \"r749\" | \"r75\" | \"r750\" | \"r751\" | \"r752\" | \"r753\" | \"r754\" | \"r755\" | \"r756\" | \"r757\" | \"r758\" | \"r759\" | \"r76\" | \"r760\" | \"r761\" | \"r762\" | \"r763\" | \"r764\" | \"r765\" | \"r766\" | \"r767\" | \"r768\" | \"r769\" | \"r77\" | \"r770\" | \"r771\" | \"r772\" | \"r773\" | \"r774\" | \"r775\" | \"r776\" | \"r777\" | \"r778\" | \"r779\" | \"r78\" | \"r780\" | \"r781\" | \"r782\" | \"r783\" | \"r784\" | \"r785\" | \"r786\" | \"r787\" | \"r788\" | \"r789\" | \"r79\" | \"r790\" | \"r791\" | \"r792\" | \"r793\" | \"r794\" | \"r795\" | \"r796\" | \"r797\" | \"r798\" | \"r799\" | \"r8\" | \"r80\" | \"r81\" | \"r82\" | \"r83\" | \"r84\" | \"r85\" | \"r86\" | \"r87\" | \"r88\" | \"r89\" | \"r9\" | \"r90\" | \"r91\" | \"r92\" | \"r93\" | \"r94\" | \"r95\" | \"r96\" | \"r97\" | \"r98\" | \"r99\""),
-    ]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+fn the_800_return_if_fixture_is_the_generated_chain() {
+    assert_eq!(RETURN_CHAIN_800, return_if_chain(800).0);
+}
+
+/// The return-if chain at 10, 20 and 30 guards: the gate version of the
+/// 800-guard chain in the nightly scale tier. Each answers the union of its
+/// literals in every setting; its relation checks, cold builds, connected
+/// work and charged operations grow by the same amount per step, so they are
+/// affine in the guards, and at 800 guards the work stays within the
+/// request's connected-work budget and operation fuse.
+#[test]
+fn a_return_if_chain_does_affine_work_and_fits_eight_hundred_guards() {
+    use crate::scale_gate::{affine, counters};
+    let sizes = [10, 20, 30];
+    let work: Vec<_> = sizes
+        .iter()
+        .map(|&guards| {
+            let (source, union) = return_if_chain(guards);
+            let matrix = Matrix::new(&source);
+            let failures = matrix.returns(&[("chain", &union)]);
+            assert!(failures.is_empty(), "{guards}: {}", failures.join("\n"));
+            matrix.return_work_counters("chain")
+        })
+        .collect();
+    let work = affine("the return-if chain", sizes, counters(&work));
+    let connected = work.at("connected work", 800);
+    assert!(
+        connected <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK as u64,
+        "800 guards would spend {connected} connected work"
+    );
+    let operations = work.at("charged operations", 800);
+    assert!(
+        operations <= verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET as u64,
+        "800 guards would charge {operations} operations"
+    );
 }
 
 /// A conditional alias with 160 nested `T extends i ? … :` branches.
@@ -2453,4 +2528,118 @@ fn a_conditional_over_an_infer_bound_union_distributes() {
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The 799-guard chain's shape at 10, 20, 30 and 40 members, in `setting`:
+/// the gate version of the 800-member chains in the nightly scale tier
+/// (`NARROW_CHAIN_800` is this generator's 800-member chain). Each width
+/// narrows to its last literal. Every guard filters the arms left, as the
+/// checker's `filterType` does, so the relations the chain asks grow exactly
+/// as its length times its width, a quadratic of the width, and the other
+/// counters at most that fast; any faster term changes the third step's
+/// growth. At 800 members the work stays within the request's connected-work
+/// budget and operation fuse.
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(setting: Setting) {
+    use crate::scale_gate::{quadratic, Counter};
+    let widths = [10, 20, 30, 40];
+    let settings = [setting];
+    let work = widths.map(|width| {
+        let source = super::wide_union_relation_tests::equality_guard_chain(width);
+        let matrix = Matrix::new(&source).settings(&settings);
+        let last = format!("\"k{}\"", width - 1);
+        let failures = matrix.returns(&[("last", &last)]);
+        assert!(failures.is_empty(), "{width}: {}", failures.join("\n"));
+        matrix.return_work_counters("last")
+    });
+    let counters = (0..work[0].len())
+        .map(|index| Counter {
+            name: work[0][index].0,
+            values: work.iter().map(|counts| counts[index].1).collect(),
+        })
+        .collect();
+    // The harness read runs in a request of its own, so its charged
+    // operations are counted: a flow return charges one.
+    assert!(
+        work[0]
+            .iter()
+            .any(|(name, count)| *name == "charged operations" && *count > 0),
+        "the harness counts the operations its read charges: {:?}",
+        work[0]
+    );
+    let work = quadratic("the guard chain", widths, counters);
+    let connected = work.at("connected work", 800);
+    assert!(
+        connected <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK as u64,
+        "800 members would spend {connected} connected work"
+    );
+    let operations = work.at("charged operations", 800);
+    assert!(
+        operations <= verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET as u64,
+        "800 members would charge {operations} operations"
+    );
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_strict() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(STRICT);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_without_strict_null_checks() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(LOOSE);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_without_no_implicit_any() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(STRICT_IMPLICIT);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_with_both_off() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(LOOSE_IMPLICIT);
+}
+
+/// The fixture is the generator's chain, so the gate widths are the same
+/// shape as the full-size chains.
+#[test]
+fn the_800_guard_fixture_is_the_generated_chain() {
+    assert_eq!(
+        NARROW_CHAIN_800,
+        super::wide_union_relation_tests::equality_guard_chain(800)
+    );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_strict() {
+        an_800_guard_narrowing_chain_answers_in(STRICT);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
+        an_800_guard_narrowing_chain_answers_in(LOOSE);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
+        an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_with_both_off() {
+        an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
+    }
+
+    #[test]
+    fn an_800_return_if_chain_answers_within_the_work_budget() {
+        let matrix = Matrix::new(RETURN_CHAIN_800);
+        let failures = matrix.returns(&[
+            ("chain", "\"none\" | \"r0\" | \"r1\" | \"r10\" | \"r100\" | \"r101\" | \"r102\" | \"r103\" | \"r104\" | \"r105\" | \"r106\" | \"r107\" | \"r108\" | \"r109\" | \"r11\" | \"r110\" | \"r111\" | \"r112\" | \"r113\" | \"r114\" | \"r115\" | \"r116\" | \"r117\" | \"r118\" | \"r119\" | \"r12\" | \"r120\" | \"r121\" | \"r122\" | \"r123\" | \"r124\" | \"r125\" | \"r126\" | \"r127\" | \"r128\" | \"r129\" | \"r13\" | \"r130\" | \"r131\" | \"r132\" | \"r133\" | \"r134\" | \"r135\" | \"r136\" | \"r137\" | \"r138\" | \"r139\" | \"r14\" | \"r140\" | \"r141\" | \"r142\" | \"r143\" | \"r144\" | \"r145\" | \"r146\" | \"r147\" | \"r148\" | \"r149\" | \"r15\" | \"r150\" | \"r151\" | \"r152\" | \"r153\" | \"r154\" | \"r155\" | \"r156\" | \"r157\" | \"r158\" | \"r159\" | \"r16\" | \"r160\" | \"r161\" | \"r162\" | \"r163\" | \"r164\" | \"r165\" | \"r166\" | \"r167\" | \"r168\" | \"r169\" | \"r17\" | \"r170\" | \"r171\" | \"r172\" | \"r173\" | \"r174\" | \"r175\" | \"r176\" | \"r177\" | \"r178\" | \"r179\" | \"r18\" | \"r180\" | \"r181\" | \"r182\" | \"r183\" | \"r184\" | \"r185\" | \"r186\" | \"r187\" | \"r188\" | \"r189\" | \"r19\" | \"r190\" | \"r191\" | \"r192\" | \"r193\" | \"r194\" | \"r195\" | \"r196\" | \"r197\" | \"r198\" | \"r199\" | \"r2\" | \"r20\" | \"r200\" | \"r201\" | \"r202\" | \"r203\" | \"r204\" | \"r205\" | \"r206\" | \"r207\" | \"r208\" | \"r209\" | \"r21\" | \"r210\" | \"r211\" | \"r212\" | \"r213\" | \"r214\" | \"r215\" | \"r216\" | \"r217\" | \"r218\" | \"r219\" | \"r22\" | \"r220\" | \"r221\" | \"r222\" | \"r223\" | \"r224\" | \"r225\" | \"r226\" | \"r227\" | \"r228\" | \"r229\" | \"r23\" | \"r230\" | \"r231\" | \"r232\" | \"r233\" | \"r234\" | \"r235\" | \"r236\" | \"r237\" | \"r238\" | \"r239\" | \"r24\" | \"r240\" | \"r241\" | \"r242\" | \"r243\" | \"r244\" | \"r245\" | \"r246\" | \"r247\" | \"r248\" | \"r249\" | \"r25\" | \"r250\" | \"r251\" | \"r252\" | \"r253\" | \"r254\" | \"r255\" | \"r256\" | \"r257\" | \"r258\" | \"r259\" | \"r26\" | \"r260\" | \"r261\" | \"r262\" | \"r263\" | \"r264\" | \"r265\" | \"r266\" | \"r267\" | \"r268\" | \"r269\" | \"r27\" | \"r270\" | \"r271\" | \"r272\" | \"r273\" | \"r274\" | \"r275\" | \"r276\" | \"r277\" | \"r278\" | \"r279\" | \"r28\" | \"r280\" | \"r281\" | \"r282\" | \"r283\" | \"r284\" | \"r285\" | \"r286\" | \"r287\" | \"r288\" | \"r289\" | \"r29\" | \"r290\" | \"r291\" | \"r292\" | \"r293\" | \"r294\" | \"r295\" | \"r296\" | \"r297\" | \"r298\" | \"r299\" | \"r3\" | \"r30\" | \"r300\" | \"r301\" | \"r302\" | \"r303\" | \"r304\" | \"r305\" | \"r306\" | \"r307\" | \"r308\" | \"r309\" | \"r31\" | \"r310\" | \"r311\" | \"r312\" | \"r313\" | \"r314\" | \"r315\" | \"r316\" | \"r317\" | \"r318\" | \"r319\" | \"r32\" | \"r320\" | \"r321\" | \"r322\" | \"r323\" | \"r324\" | \"r325\" | \"r326\" | \"r327\" | \"r328\" | \"r329\" | \"r33\" | \"r330\" | \"r331\" | \"r332\" | \"r333\" | \"r334\" | \"r335\" | \"r336\" | \"r337\" | \"r338\" | \"r339\" | \"r34\" | \"r340\" | \"r341\" | \"r342\" | \"r343\" | \"r344\" | \"r345\" | \"r346\" | \"r347\" | \"r348\" | \"r349\" | \"r35\" | \"r350\" | \"r351\" | \"r352\" | \"r353\" | \"r354\" | \"r355\" | \"r356\" | \"r357\" | \"r358\" | \"r359\" | \"r36\" | \"r360\" | \"r361\" | \"r362\" | \"r363\" | \"r364\" | \"r365\" | \"r366\" | \"r367\" | \"r368\" | \"r369\" | \"r37\" | \"r370\" | \"r371\" | \"r372\" | \"r373\" | \"r374\" | \"r375\" | \"r376\" | \"r377\" | \"r378\" | \"r379\" | \"r38\" | \"r380\" | \"r381\" | \"r382\" | \"r383\" | \"r384\" | \"r385\" | \"r386\" | \"r387\" | \"r388\" | \"r389\" | \"r39\" | \"r390\" | \"r391\" | \"r392\" | \"r393\" | \"r394\" | \"r395\" | \"r396\" | \"r397\" | \"r398\" | \"r399\" | \"r4\" | \"r40\" | \"r400\" | \"r401\" | \"r402\" | \"r403\" | \"r404\" | \"r405\" | \"r406\" | \"r407\" | \"r408\" | \"r409\" | \"r41\" | \"r410\" | \"r411\" | \"r412\" | \"r413\" | \"r414\" | \"r415\" | \"r416\" | \"r417\" | \"r418\" | \"r419\" | \"r42\" | \"r420\" | \"r421\" | \"r422\" | \"r423\" | \"r424\" | \"r425\" | \"r426\" | \"r427\" | \"r428\" | \"r429\" | \"r43\" | \"r430\" | \"r431\" | \"r432\" | \"r433\" | \"r434\" | \"r435\" | \"r436\" | \"r437\" | \"r438\" | \"r439\" | \"r44\" | \"r440\" | \"r441\" | \"r442\" | \"r443\" | \"r444\" | \"r445\" | \"r446\" | \"r447\" | \"r448\" | \"r449\" | \"r45\" | \"r450\" | \"r451\" | \"r452\" | \"r453\" | \"r454\" | \"r455\" | \"r456\" | \"r457\" | \"r458\" | \"r459\" | \"r46\" | \"r460\" | \"r461\" | \"r462\" | \"r463\" | \"r464\" | \"r465\" | \"r466\" | \"r467\" | \"r468\" | \"r469\" | \"r47\" | \"r470\" | \"r471\" | \"r472\" | \"r473\" | \"r474\" | \"r475\" | \"r476\" | \"r477\" | \"r478\" | \"r479\" | \"r48\" | \"r480\" | \"r481\" | \"r482\" | \"r483\" | \"r484\" | \"r485\" | \"r486\" | \"r487\" | \"r488\" | \"r489\" | \"r49\" | \"r490\" | \"r491\" | \"r492\" | \"r493\" | \"r494\" | \"r495\" | \"r496\" | \"r497\" | \"r498\" | \"r499\" | \"r5\" | \"r50\" | \"r500\" | \"r501\" | \"r502\" | \"r503\" | \"r504\" | \"r505\" | \"r506\" | \"r507\" | \"r508\" | \"r509\" | \"r51\" | \"r510\" | \"r511\" | \"r512\" | \"r513\" | \"r514\" | \"r515\" | \"r516\" | \"r517\" | \"r518\" | \"r519\" | \"r52\" | \"r520\" | \"r521\" | \"r522\" | \"r523\" | \"r524\" | \"r525\" | \"r526\" | \"r527\" | \"r528\" | \"r529\" | \"r53\" | \"r530\" | \"r531\" | \"r532\" | \"r533\" | \"r534\" | \"r535\" | \"r536\" | \"r537\" | \"r538\" | \"r539\" | \"r54\" | \"r540\" | \"r541\" | \"r542\" | \"r543\" | \"r544\" | \"r545\" | \"r546\" | \"r547\" | \"r548\" | \"r549\" | \"r55\" | \"r550\" | \"r551\" | \"r552\" | \"r553\" | \"r554\" | \"r555\" | \"r556\" | \"r557\" | \"r558\" | \"r559\" | \"r56\" | \"r560\" | \"r561\" | \"r562\" | \"r563\" | \"r564\" | \"r565\" | \"r566\" | \"r567\" | \"r568\" | \"r569\" | \"r57\" | \"r570\" | \"r571\" | \"r572\" | \"r573\" | \"r574\" | \"r575\" | \"r576\" | \"r577\" | \"r578\" | \"r579\" | \"r58\" | \"r580\" | \"r581\" | \"r582\" | \"r583\" | \"r584\" | \"r585\" | \"r586\" | \"r587\" | \"r588\" | \"r589\" | \"r59\" | \"r590\" | \"r591\" | \"r592\" | \"r593\" | \"r594\" | \"r595\" | \"r596\" | \"r597\" | \"r598\" | \"r599\" | \"r6\" | \"r60\" | \"r600\" | \"r601\" | \"r602\" | \"r603\" | \"r604\" | \"r605\" | \"r606\" | \"r607\" | \"r608\" | \"r609\" | \"r61\" | \"r610\" | \"r611\" | \"r612\" | \"r613\" | \"r614\" | \"r615\" | \"r616\" | \"r617\" | \"r618\" | \"r619\" | \"r62\" | \"r620\" | \"r621\" | \"r622\" | \"r623\" | \"r624\" | \"r625\" | \"r626\" | \"r627\" | \"r628\" | \"r629\" | \"r63\" | \"r630\" | \"r631\" | \"r632\" | \"r633\" | \"r634\" | \"r635\" | \"r636\" | \"r637\" | \"r638\" | \"r639\" | \"r64\" | \"r640\" | \"r641\" | \"r642\" | \"r643\" | \"r644\" | \"r645\" | \"r646\" | \"r647\" | \"r648\" | \"r649\" | \"r65\" | \"r650\" | \"r651\" | \"r652\" | \"r653\" | \"r654\" | \"r655\" | \"r656\" | \"r657\" | \"r658\" | \"r659\" | \"r66\" | \"r660\" | \"r661\" | \"r662\" | \"r663\" | \"r664\" | \"r665\" | \"r666\" | \"r667\" | \"r668\" | \"r669\" | \"r67\" | \"r670\" | \"r671\" | \"r672\" | \"r673\" | \"r674\" | \"r675\" | \"r676\" | \"r677\" | \"r678\" | \"r679\" | \"r68\" | \"r680\" | \"r681\" | \"r682\" | \"r683\" | \"r684\" | \"r685\" | \"r686\" | \"r687\" | \"r688\" | \"r689\" | \"r69\" | \"r690\" | \"r691\" | \"r692\" | \"r693\" | \"r694\" | \"r695\" | \"r696\" | \"r697\" | \"r698\" | \"r699\" | \"r7\" | \"r70\" | \"r700\" | \"r701\" | \"r702\" | \"r703\" | \"r704\" | \"r705\" | \"r706\" | \"r707\" | \"r708\" | \"r709\" | \"r71\" | \"r710\" | \"r711\" | \"r712\" | \"r713\" | \"r714\" | \"r715\" | \"r716\" | \"r717\" | \"r718\" | \"r719\" | \"r72\" | \"r720\" | \"r721\" | \"r722\" | \"r723\" | \"r724\" | \"r725\" | \"r726\" | \"r727\" | \"r728\" | \"r729\" | \"r73\" | \"r730\" | \"r731\" | \"r732\" | \"r733\" | \"r734\" | \"r735\" | \"r736\" | \"r737\" | \"r738\" | \"r739\" | \"r74\" | \"r740\" | \"r741\" | \"r742\" | \"r743\" | \"r744\" | \"r745\" | \"r746\" | \"r747\" | \"r748\" | \"r749\" | \"r75\" | \"r750\" | \"r751\" | \"r752\" | \"r753\" | \"r754\" | \"r755\" | \"r756\" | \"r757\" | \"r758\" | \"r759\" | \"r76\" | \"r760\" | \"r761\" | \"r762\" | \"r763\" | \"r764\" | \"r765\" | \"r766\" | \"r767\" | \"r768\" | \"r769\" | \"r77\" | \"r770\" | \"r771\" | \"r772\" | \"r773\" | \"r774\" | \"r775\" | \"r776\" | \"r777\" | \"r778\" | \"r779\" | \"r78\" | \"r780\" | \"r781\" | \"r782\" | \"r783\" | \"r784\" | \"r785\" | \"r786\" | \"r787\" | \"r788\" | \"r789\" | \"r79\" | \"r790\" | \"r791\" | \"r792\" | \"r793\" | \"r794\" | \"r795\" | \"r796\" | \"r797\" | \"r798\" | \"r799\" | \"r8\" | \"r80\" | \"r81\" | \"r82\" | \"r83\" | \"r84\" | \"r85\" | \"r86\" | \"r87\" | \"r88\" | \"r89\" | \"r9\" | \"r90\" | \"r91\" | \"r92\" | \"r93\" | \"r94\" | \"r95\" | \"r96\" | \"r97\" | \"r98\" | \"r99\""),
+        ]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }

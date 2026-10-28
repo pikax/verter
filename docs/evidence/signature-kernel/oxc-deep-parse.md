@@ -68,9 +68,13 @@ rustc 1.97.1, oxc 0.151.0. The deepest depth that parses, by bisection
 So a level costs oxc's parser up to 2.4 KiB optimized and 3.4 KiB
 unoptimized (an object literal; 0.126 spent 1.9 and 3.7 KiB). With a 2 GiB
 stack the parentheses, type-argument and object forms parse at 10,000 and
-200,000 levels. TypeScript 7.0.2 checks each of these forms at 10,000
-levels, and the parentheses, type-argument and `!` forms at 50,000 and
-200,000.
+200,000 levels. TypeScript 7.1.0-beta (`tsc --noEmit --strict` over the
+reproducer's sources) checks each of these forms to completion at 10,000
+levels (the conditional form with TS2563, the type-argument form with TS2304
+for its undeclared `Box`), the parentheses and `!` forms at 50,000 and
+200,000, and the type-argument form at 50,000, as 7.0.2 did. The
+type-argument form at 200,000 levels did not finish within 20 minutes on a
+shared worker under either version, so that cell is unavailable here.
 
 oxc's walks, the deepest depth each finishes on a 1 MiB thread:
 

@@ -2376,7 +2376,7 @@ fn every_consumer_has_production_call_site() {
         variant_set: &'a std::collections::HashSet<String>,
         hits: BTreeMap<String, Vec<String>>,
         rel_path: String,
-        // Depth counter for pattern context. syn 2.x dispatches
+        // Depth counter for pattern context. syn dispatches
         // `Pat::Path` (unit-variant patterns like
         // `RequestKind::ComponentMeta` in `match` arms) to
         // `visit_expr_path` — see `syn::visit::visit_pat` source.
@@ -2404,6 +2404,13 @@ fn every_consumer_has_production_call_site() {
             syn::visit::visit_item_fn(self, item);
         }
         fn visit_pat(&mut self, pat: &'ast syn::Pat) {
+            // A match-arm guard is an expression evaluated by the arm, not
+            // pattern context: only the guarded pattern counts as a pattern.
+            if let syn::Pat::Guard(guarded) = pat {
+                self.visit_pat(&guarded.pat);
+                self.visit_expr(&guarded.guard);
+                return;
+            }
             self.pat_depth = self.pat_depth.saturating_add(1);
             syn::visit::visit_pat(self, pat);
             self.pat_depth = self.pat_depth.saturating_sub(1);
@@ -5003,7 +5010,7 @@ fn session_graph_lowerer_makes_no_query() {
         "tsserver",
         // Assembled at compile time so this needle list does not itself carry
         // the literal identifier and trip the
-        // `no_session_solver_host_in_production_code` retired-symbol scanner,
+        // `no_session_solver_host_in_production_code` retired-symbol rule,
         // which greps non-`*_tests.rs` `crates/**` source for `SessionSolverHost`.
         // The scan against `structural_carrier_producer/macro_arg_producer.rs` is
         // unchanged — it still looks for the full assembled identifier.
@@ -6403,4 +6410,147 @@ fn component_meta_hot_paths_self_test_non_canonical_engine_scrutinee_fires() {
     assert!(v
         .iter()
         .all(|x| x.fn_name == "project_expr_class_a_via_dispatch_threaded"));
+}
+
+/// Mentions of the production fact policy in the production code under
+/// `root`, per file (`#[cfg(test)]` items, comment lines and test sources
+/// skipped), and how many production files were read.
+fn production_fact_policy_mentions(
+    root: &std::path::Path,
+) -> (std::collections::BTreeMap<String, usize>, usize) {
+    const NEEDLE: &str = "FactPolicy::production()";
+    let mut found = std::collections::BTreeMap::new();
+    let mut scanned = 0usize;
+    for crate_src in [
+        "crates/verter_session_query/src",
+        "crates/verter_type_engine/src",
+        "crates/verter_session/src",
+        "crates/verter_workspace/src",
+        "crates/verter_lsp/src",
+    ] {
+        let dir = root.join(crate_src);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_file())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = rel_path_under(root, path);
+            if rel.ends_with("_tests.rs")
+                || rel.ends_with("/tests.rs")
+                || rel.contains("/tests/")
+                || rel.contains("/typeinfo_tests/")
+                || is_src_test_module_path(&rel)
+            {
+                continue;
+            }
+            let body = std::fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("could not read {rel}: {err}"));
+            scanned += 1;
+            let mentions = ident_hits_in_production_body(&body, &[NEEDLE])
+                .into_iter()
+                .map(|(lineno, _)| {
+                    body.lines()
+                        .nth(lineno - 1)
+                        .unwrap_or_default()
+                        .matches(NEEDLE)
+                        .count()
+                })
+                .sum::<usize>();
+            if mentions > 0 {
+                found.insert(rel, mentions);
+            }
+        }
+    }
+    (found, scanned)
+}
+
+/// Every fact set is built under the policy its host chose at composition:
+/// production code names the production policy only where a workspace or
+/// the project store is composed, in the policy's own definition, and in
+/// test-support fixtures. Anywhere else a set takes the policy of the host,
+/// request, tracer or set it is built from, so a forgotten propagation
+/// cannot silently fall back to production widths in a host composed with
+/// other ones.
+#[test]
+fn production_fact_policy_is_named_only_where_a_host_is_composed() {
+    // (file, production-code mentions, why).
+    let allowed: &[(&str, usize, &str)] = &[
+        (
+            "crates/verter_session_query/src/facts/policy.rs",
+            4,
+            "the definition's compile-time proof that shipped builds use the constants",
+        ),
+        (
+            "crates/verter_workspace/src/memory.rs",
+            1,
+            "a memory workspace composed without a policy uses production widths",
+        ),
+        (
+            "crates/verter_workspace/src/filesystem.rs",
+            1,
+            "a filesystem workspace composed without a policy uses production widths",
+        ),
+        (
+            "crates/verter_session/src/project_type_store.rs",
+            1,
+            "the hostless test-support store constructor",
+        ),
+        (
+            "crates/verter_type_engine/src/component_meta_caches.rs",
+            2,
+            "test-support schema-eviction fixtures",
+        ),
+        (
+            "crates/verter_type_engine/src/component_meta_result_db.rs",
+            1,
+            "a test-support synthetic entry",
+        ),
+        (
+            "crates/verter_session/src/owner_import_surface.rs",
+            1,
+            "a test-support synthetic entry",
+        ),
+    ];
+    let (found, scanned) = production_fact_policy_mentions(&workspace_root());
+    assert!(
+        scanned > 500,
+        "the scan reached only {scanned} production files"
+    );
+    let expected: std::collections::BTreeMap<String, usize> = allowed
+        .iter()
+        .map(|(file, count, _)| ((*file).to_string(), *count))
+        .collect();
+    assert_eq!(
+        found, expected,
+        "production code names the production fact policy outside a composition root; \
+         take the policy of the host, request, tracer or set instead"
+    );
+}
+
+/// The scan behind [`production_fact_policy_is_named_only_where_a_host_is_composed`]
+/// counts a production mention and skips one in a `#[cfg(test)]` item or a
+/// comment.
+#[test]
+fn production_fact_policy_scan_counts_only_production_mentions() {
+    let planted = PlantedWorkspace::new();
+    planted.plant(
+        "crates/verter_session/src/planted.rs",
+        "fn composed() -> FactPolicy { FactPolicy::production() }\n\
+         // FactPolicy::production() in a comment\n\
+         #[cfg(test)]\n\
+         mod tests { fn t() { let _ = FactPolicy::production(); } }\n",
+    );
+    let (found, scanned) = production_fact_policy_mentions(planted.root());
+    assert_eq!(scanned, 1);
+    assert_eq!(
+        found,
+        std::collections::BTreeMap::from([("crates/verter_session/src/planted.rs".to_string(), 1)])
+    );
 }

@@ -46,7 +46,9 @@ use verter_type_expr::{MemberVisibility, TypeExpr};
 /// The symbol space a declaration contributes to. Type declarations
 /// (interface / type-alias / class / enum) live in `Type`; value declarations
 /// (`const`/`let`/`var`, `function`) live in `Value`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub enum SymbolSpace {
     Type,
     Value,
@@ -57,7 +59,7 @@ pub enum SymbolSpace {
 /// `verter_type_expr_oxc/src/lib.rs:921` — so the member is silently elided at
 /// `oxc/lib.rs:99`). A computed / `symbol` / `unique symbol` key must be visible
 /// as such, not silently dropped.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum RawKey {
     /// `name: T` — a static (identifier / string / numeric) key.
     Static(String),
@@ -72,7 +74,7 @@ pub enum RawKey {
 /// The kind of an object/class member, before OXC collapses an accessor to a
 /// plain property (an accessor is not even an `ObjectMember` variant —
 /// `verter_type_expr/src/lib.rs:426`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum RawMemberKind {
     Property,
     IndexSignature,
@@ -85,7 +87,7 @@ pub enum RawMemberKind {
 
 /// A type parameter's RAW modifiers, before lowering drops them (`TypeParam` has
 /// no `const` modifier and no variance field — `lib.rs:1018`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, verter_retention::heap_size::HeapSize)]
 pub struct TypeParamModifiers {
     /// The `const` modifier on a `const T` type parameter.
     pub is_const: bool,
@@ -104,7 +106,7 @@ impl TypeParamModifiers {
 
 /// The RAW shape of a tuple element, before TS/lowering collapse the
 /// optional-element vs `| undefined` distinction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum TupleElementShape {
     /// `[A, B]` — a plain, required, unlabeled element (the ONLY admissible
     /// shape).
@@ -118,7 +120,7 @@ pub enum TupleElementShape {
 }
 
 /// The declaration kind of a contributor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum RawDeclKind {
     TypeAlias,
     Interface,
@@ -130,19 +132,19 @@ pub enum RawDeclKind {
 
 /// A single `unique symbol` type-operator occurrence (opaque — its presence is
 /// the reject trigger).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct UniqueSymbolOp;
 
 /// One raw signature in an overload group (opaque — the GROUP's arity is the
 /// reject trigger).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct OverloadSignature;
 
 /// A `typeof`/`ReturnType`/`Parameters` next-hop locator. `reference_canonical`
 /// is left empty at parse time (the file context is unknown to the pure walk)
 /// and is resolved by the live transitive walk that re-enters the shared
 /// resolver for each hop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TransitiveReferent {
     pub reference_canonical: String,
     pub reference_name: String,
@@ -151,7 +153,7 @@ pub struct TransitiveReferent {
 /// The retained parse-time raw-fact record for ONE contributor declaration. The
 /// closed set of pre-lowering admission facts §Q2 enumerates — captured at the
 /// file's initial parse, before lowering erases them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct RawSourceSurface {
     /// Leading-slash file id of THIS contributor. Empty at capture; stamped by
     /// the file-aware storage layer.

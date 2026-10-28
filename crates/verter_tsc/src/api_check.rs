@@ -28,7 +28,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use verter_tsgo_api::proto::types::{Diagnostic as ApiDiagnostic, UpdateSnapshotParams};
+pub use verter_tsgo_api::client::PreparedEngine;
+use verter_tsgo_api::client::SpawnedEngine;
+use verter_tsgo_api::proto::types::{Diagnostic as ApiDiagnostic, SnapshotChanges};
 use verter_tsgo_api::snapshot::{AccessibleEntries, RealDirSource};
 use verter_tsgo_api::TsgoClient;
 use verter_workspace::native_fs::NativeFs;
@@ -45,7 +47,7 @@ use crate::error_map::map_tsc_position;
 use crate::reporter::{Diagnostic, Severity};
 
 /// The hard deadline on every standalone `--api` request (initialize /
-/// updateSnapshot / diagnostics). On expiry the request fails with a bounded
+/// createSnapshot / diagnostics). On expiry the request fails with a bounded
 /// error and the engine is terminated (process-tree kill), so a hung engine
 /// can never block the one-shot CLI. Matches the declaration invocation bound.
 const API_REQUEST_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
@@ -53,7 +55,7 @@ const API_REQUEST_BOUND: std::time::Duration = std::time::Duration::from_secs(30
 /// A hard failure of the in-memory `--api` typecheck path.
 ///
 /// The `--noEmit` typecheck backend is tsgo-`--api`-only with NO tsc fallback, so
-/// an absent / wire-diverged engine or a connect/init/updateSnapshot/protocol/
+/// an absent / wire-diverged engine or a connect/init/createSnapshot/protocol/
 /// project-not-found failure means the typecheck genuinely could not run. This
 /// error is SURFACED (the caller exits non-zero + prints the message to stderr)
 /// rather than swallowed into an empty diagnostic set — an empty set + exit 0
@@ -163,6 +165,7 @@ pub struct OriginDiagnostic<'a> {
 }
 
 /// How a carrier file's diagnostics map back to user-visible positions.
+#[derive(Clone)]
 pub enum RemapKind {
     /// A generated validation TSX carrier: remap the converted `(line, col)`
     /// through the carrier's inline source map to its `.vue` source. When the
@@ -176,6 +179,7 @@ pub enum RemapKind {
 }
 
 /// One in-memory overlay carrier fed to the engine.
+#[derive(Clone)]
 pub struct OverlayFile {
     /// The virtual absolute path (forward-slashed) the carrier is served at —
     /// the overlay key AND the `files` entry the synthetic tsconfig lists.
@@ -203,7 +207,7 @@ pub struct TypecheckInputs<'a> {
 
 /// Run the in-memory `--api` typecheck and return the remapped diagnostics.
 ///
-/// Fail-closed = SURFACE the failure: on any engine/connect/init/updateSnapshot/
+/// Fail-closed = SURFACE the failure: on any engine/connect/init/createSnapshot/
 /// protocol/project-not-found failure this returns [`Err`] (the caller exits
 /// non-zero + prints the message). It NEVER returns an empty `Ok` for a failed
 /// run — that would falsely advertise a clean typecheck. There is no tsc fallback.
@@ -215,7 +219,46 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
         tsconfig_bytes,
         files,
     } = inputs;
+    let runtime = session_runtime()?;
+    runtime.block_on(session(
+        SessionEngine::Spawn { engine, cwd },
+        tsconfig_path,
+        tsconfig_bytes,
+        files,
+    ))
+}
 
+/// The multi-thread runtime one engine session runs on.
+fn session_runtime() -> Result<tokio::runtime::Runtime, TypecheckError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            TypecheckError::new(format!(
+                "verter-tsc: failed to start async runtime for tsgo --api: {e}"
+            ))
+        })
+}
+
+/// How a session reaches its engine.
+enum SessionEngine<'a> {
+    /// Probe, gate and spawn the engine at `engine` now.
+    Spawn { engine: &'a Path, cwd: &'a Path },
+    /// An engine spawned ahead of time, gated on its probed version.
+    Spawned {
+        engine: Box<SpawnedEngine>,
+        probed_version: String,
+    },
+}
+
+/// Run one engine session over the overlay carriers and collect the whole
+/// program's diagnostics.
+async fn session(
+    engine: SessionEngine<'_>,
+    tsconfig_path: String,
+    tsconfig_bytes: String,
+    files: Vec<OverlayFile>,
+) -> Result<Vec<Diagnostic>, TypecheckError> {
     // Path → carrier lookup, keyed by the shared filesystem-identity key
     // ([`InjectedPathKey`]) so the engine's reported path form hits the right
     // carrier regardless of separator / drive-letter case / extended-length prefix /
@@ -244,35 +287,52 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
     let snapshot =
         build_virtual_overlay_snapshot(&tsconfig_path, &tsconfig_bytes, &companions, real);
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
+    // The wire gate runs before the actor starts (fail-closed on a diverged
+    // engine). Every request carries a hard deadline: a hung engine fails
+    // bounded and is torn down (never a blocked one-shot CLI).
+    let connected = match engine {
+        SessionEngine::Spawn { engine, cwd } => {
+            TsgoClient::connect(engine, cwd, snapshot, 16).await
+        }
+        SessionEngine::Spawned {
+            engine,
+            probed_version,
+        } => TsgoClient::connect_spawned(*engine, &probed_version, snapshot, 16),
+    };
+    let client = match connected {
+        Ok(c) => c.with_request_deadline(API_REQUEST_BOUND),
         Err(e) => {
             return Err(TypecheckError::new(format!(
-                "verter-tsc: failed to start async runtime for tsgo --api: {e}"
+                "verter-tsc: tsgo --api unavailable ({e}); the --noEmit typecheck cannot run \
+                 (there is no tsc fallback for the typecheck path)"
             )));
         }
     };
+    // Always close the client, then surface the collected result (Ok or Err).
+    let result = collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths).await;
+    let _ = client.close().await;
+    result
+}
 
-    runtime.block_on(async move {
-        // The wire gate runs inside `connect` (fail-closed on a diverged engine).
-        // Every request carries a hard deadline: a hung engine fails bounded
-        // and is torn down (never a blocked one-shot CLI).
-        let client = match TsgoClient::connect(engine, cwd, snapshot, 16).await {
-            Ok(c) => c.with_request_deadline(API_REQUEST_BOUND),
-            Err(e) => {
-                return Err(TypecheckError::new(format!(
-                    "verter-tsc: tsgo --api unavailable ({e}); the --noEmit typecheck cannot run \
-                     (there is no tsc fallback for the typecheck path)"
-                )));
-            }
-        };
-        // Always close the client, then surface the collected result (Ok or Err).
-        let result = collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths).await;
-        let _ = client.close().await;
-        result
+/// Check the overlay carriers on `prepared`'s engine. `None` when the
+/// preparation failed or its capability cross-check did not pass: the caller
+/// then resolves the engine in full and checks again.
+pub fn typecheck_prepared(
+    prepared: PreparedEngine,
+    tsconfig_path: String,
+    tsconfig_bytes: String,
+    files: Vec<OverlayFile>,
+) -> Option<Result<Vec<Diagnostic>, TypecheckError>> {
+    prepared.run(|engine, probed_version| {
+        session(
+            SessionEngine::Spawned {
+                engine: Box::new(engine),
+                probed_version,
+            },
+            tsconfig_path,
+            tsconfig_bytes,
+            files,
+        )
     })
 }
 
@@ -316,15 +376,15 @@ async fn collect_diagnostics(
         )));
     }
 
-    // OWNED one-shot: connect → 1×updateSnapshot → diagnostics → drop. A single
-    // `open_projects: [tsconfig]` is correct (the client is torn down after, so
-    // no lease bookkeeping is required).
-    let params = UpdateSnapshotParams::single_project(tsconfig_path.to_string());
-    let snap = match client.update_snapshot(&params).await {
+    // OWNED one-shot: connect → 1×createSnapshot → diagnostics → drop. A single
+    // `open_projects: [tsconfig]` is correct (the client and its engine are torn
+    // down after, which frees the snapshot, so no lease bookkeeping is required).
+    let params = SnapshotChanges::single_project(tsconfig_path.to_string());
+    let snap = match client.create_snapshot(&params).await {
         Ok(s) => s,
         Err(e) => {
             return Err(TypecheckError::new(format!(
-                "verter-tsc: tsgo --api updateSnapshot failed: {e}"
+                "verter-tsc: tsgo --api createSnapshot failed: {e}"
             )));
         }
     };
@@ -334,7 +394,7 @@ async fn collect_diagnostics(
     let project = match snap
         .projects
         .iter()
-        .find(|p| fs_paths_equal(&p.config_file_name, tsconfig_path))
+        .find(|p| p.config_matches(|config| fs_paths_equal(config, tsconfig_path)))
     {
         Some(p) => p,
         None => {
@@ -345,7 +405,7 @@ async fn collect_diagnostics(
     };
 
     // ONE whole-program semantic call + ONE whole-program syntactic call: the
-    // `file` argument is omitted, so the engine returns diagnostics for EVERY file
+    // `files` argument is omitted, so the engine returns diagnostics for EVERY file
     // in the program (root carriers AND non-root imported sources).
     let semantic = client
         .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)

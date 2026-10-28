@@ -178,7 +178,14 @@ impl CrossDeclLens for UnresolvedLens {
 }
 
 /// Outcome of a hashing call.
-#[derive(Debug, Clone, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct HashOutcome {
     /// The structural fingerprint.
     pub hash: FactHash,

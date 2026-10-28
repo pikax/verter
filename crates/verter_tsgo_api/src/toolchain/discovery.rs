@@ -28,7 +28,10 @@ use std::path::{Path, PathBuf};
 use super::bundle::bundled_tsgo_path;
 use super::platform::{host_platform, TsgoPlatform};
 use super::policy::{TsgoVersion, VersionPolicy, SUPPORTED_POLICY_ID};
-use super::validation::{CandidateValidator, Capability, ProcessValidator, RejectionReason};
+use super::validation::{
+    CandidateValidator, Capability, ProbeStage, ProcessValidator, RejectionReason,
+    ValidatedCandidate,
+};
 
 /// The explicit engine-override environment variable (tier 1).
 pub const ENV_OVERRIDE_VAR: &str = "VERTER_TSGO_BIN";
@@ -165,10 +168,82 @@ pub struct Resolution {
     pub path: PathBuf,
     /// Its probed, policy-accepted version.
     pub version: TsgoVersion,
+    /// The raw version string its `--version` probe reported.
+    pub version_string: String,
     /// The tier that supplied it.
     pub provenance: Provenance,
     /// The candidates that failed validation before this one (actionable).
     pub rejections: Vec<CandidateRejection>,
+}
+
+/// The first candidate whose `--version` probe passed the support policy,
+/// before its capability cross-check has run.
+///
+/// It lets a caller start its own session on the engine while the
+/// cross-check runs alongside. It is not a [`Resolution`]: only
+/// [`Self::confirm`] turns it into one, and only when the cross-check
+/// passes, in which case it is exactly the resolution [`resolve_with`] with
+/// the same validator would have selected — every candidate before it failed
+/// the probe stage, which the full walk runs first. When the cross-check
+/// fails, the full walk would have moved past this candidate, so the caller
+/// discards everything it built on it and resolves again in full.
+#[derive(Debug)]
+pub struct ProvisionalResolution {
+    candidate: ValidatedCandidate,
+    provenance: Provenance,
+    rejections: Vec<CandidateRejection>,
+    requirement: Capability,
+}
+
+impl ProvisionalResolution {
+    /// The candidate engine binary path.
+    pub fn path(&self) -> &Path {
+        &self.candidate.path
+    }
+
+    /// The raw version string the candidate's `--version` probe reported.
+    pub fn probed_version(&self) -> &str {
+        &self.candidate.version_string
+    }
+
+    /// Run the capability cross-check on this candidate. `Ok` is the
+    /// resolution the full validated walk selects; `Err` is the rejection
+    /// the full walk records for this candidate.
+    pub async fn confirm(
+        self,
+        validator: &ProcessValidator,
+    ) -> Result<Resolution, RejectionReason> {
+        validator
+            .cross_check(&self.candidate, self.requirement)
+            .await?;
+        Ok(Resolution {
+            path: self.candidate.path,
+            version: self.candidate.version,
+            version_string: self.candidate.version_string,
+            provenance: self.provenance,
+            rejections: self.rejections,
+        })
+    }
+}
+
+/// Walk the candidates through `validator`'s probe stage only and return the
+/// first that passes it, provisionally: see [`ProvisionalResolution`]. An
+/// `Err` is never final for the caller, which resolves again in full.
+pub async fn resolve_provisional(
+    request: &ResolutionRequest,
+    validator: &ProcessValidator,
+) -> Result<ProvisionalResolution, ResolveError> {
+    let probed = resolve_with(request, &ProbeStage(validator)).await?;
+    Ok(ProvisionalResolution {
+        candidate: ValidatedCandidate {
+            path: probed.path,
+            version: probed.version,
+            version_string: probed.version_string,
+        },
+        provenance: probed.provenance,
+        rejections: probed.rejections,
+        requirement: request.requirement,
+    })
 }
 
 /// Why a resolution failed.
@@ -210,7 +285,7 @@ impl fmt::Display for ResolveError {
                 )?;
                 writeln!(
                     f,
-                    "Verter supports tsgo (TypeScript 7 native) stable {}.",
+                    "Verter supports tsgo (TypeScript 7 native) {}.",
                     super::policy::SUPPORTED_TSGO_RANGE_LABEL
                 )?;
                 writeln!(
@@ -228,7 +303,7 @@ impl fmt::Display for ResolveError {
                     f,
                     "install a supported engine (e.g. `npm install -D typescript@{}`) or point \
                      {ENV_OVERRIDE_VAR} at one",
-                    super::policy::BUNDLED_TSGO_VERSION
+                    super::policy::TYPESCRIPT_PIN
                 )
             }
             Self::ProductIntegrity { path, reason } => write!(
@@ -247,7 +322,7 @@ impl std::error::Error for ResolveError {}
 /// Resolve the first WORKING tsgo engine for `request` with the production
 /// validator (real process probes + capability smokes).
 pub async fn resolve(request: &ResolutionRequest) -> Result<Resolution, ResolveError> {
-    resolve_with(request, &ProcessValidator::from_env()).await
+    resolve_with(request, &ProcessValidator::production()).await
 }
 
 /// Resolve with an explicit validator (the seam ordering tests drive).
@@ -266,6 +341,7 @@ pub async fn resolve_with(
                 return Ok(Resolution {
                     path: validated.path,
                     version: validated.version,
+                    version_string: validated.version_string,
                     provenance: candidate.provenance,
                     rejections,
                 });
@@ -408,12 +484,10 @@ pub fn enumerate_candidates(request: &ResolutionRequest) -> CandidateEnumeration
             if nested.is_file() {
                 push(&mut out, &mut seen, nested, Provenance::ProjectLocal);
             }
-            // (d) The `.bin` shims (native first, then the legacy name).
-            for shim in [platform.bin_shim, platform.legacy_bin_shim()] {
-                let candidate = node_modules.join(".bin").join(shim);
-                if candidate.is_file() {
-                    push(&mut out, &mut seen, candidate, Provenance::ProjectLocal);
-                }
+            // (d) The `.bin` shim.
+            let candidate = node_modules.join(".bin").join(platform.bin_shim);
+            if candidate.is_file() {
+                push(&mut out, &mut seen, candidate, Provenance::ProjectLocal);
             }
         }
     }
@@ -642,7 +716,7 @@ fn push(
 mod tests {
     use super::*;
     use crate::toolchain::platform::host_platform;
-    use crate::toolchain::policy::{TsgoVersion, VersionPolicy};
+    use crate::toolchain::policy::VersionPolicy;
     use crate::toolchain::validation::{Capability, RejectionReason, ValidatedCandidate};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -748,8 +822,10 @@ mod tests {
         let local_pnpm = fixture.file(
             &nm.join(".pnpm")
                 .join(format!(
-                    "@typescript+typescript-{}-{}@7.0.2",
-                    host.npm_os, host.npm_arch
+                    "@typescript+typescript-{}-{}@{}",
+                    host.npm_os,
+                    host.npm_arch,
+                    crate::toolchain::policy::TYPESCRIPT_PIN
                 ))
                 .join("node_modules")
                 .join(&pkg_rel),
@@ -766,37 +842,37 @@ mod tests {
                 .join(version)
         };
         let cache_new = fixture.file(
-            &cache_dir("7.0.9")
+            &cache_dir("7.1.9")
                 .join("package")
                 .join("lib")
                 .join(host.executable),
         );
-        fixture.file(&cache_dir("7.0.9").join(READY_MARKER));
+        fixture.file(&cache_dir("7.1.9").join(READY_MARKER));
         let cache_old = fixture.file(
-            &cache_dir("7.0.3")
+            &cache_dir("7.1.3")
                 .join("package")
                 .join("lib")
                 .join(host.executable),
         );
-        fixture.file(&cache_dir("7.0.3").join(READY_MARKER));
-        // Traps: an out-of-range version and a prerelease must be skipped.
+        fixture.file(&cache_dir("7.1.3").join(READY_MARKER));
+        // Traps: an out-of-range version and a nightly must be skipped.
         fixture.file(
-            &cache_dir("7.1.0")
+            &cache_dir("7.2.0")
                 .join("package")
                 .join("lib")
                 .join(host.executable),
         );
-        fixture.file(&cache_dir("7.1.0").join(READY_MARKER));
+        fixture.file(&cache_dir("7.2.0").join(READY_MARKER));
         fixture.file(
-            &cache_dir("7.0.2-rc.1")
+            &cache_dir("7.1.0-dev.20261022.1")
                 .join("package")
                 .join("lib")
                 .join(host.executable),
         );
-        fixture.file(&cache_dir("7.0.2-rc.1").join(READY_MARKER));
+        fixture.file(&cache_dir("7.1.0-dev.20261022.1").join(READY_MARKER));
         // Trap: a supported version WITHOUT the ready marker is not complete.
         fixture.file(
-            &cache_dir("7.0.4")
+            &cache_dir("7.1.4")
                 .join("package")
                 .join("lib")
                 .join(host.executable),
@@ -1009,30 +1085,6 @@ mod tests {
         );
     }
 
-    // ── DISCRIMINATING (H10): the legacy `.bin` shim is found via the
-    //    manifest's legacy name (no duplicated OS branch in discovery). ────────
-    #[test]
-    fn legacy_bin_shim_is_found_via_the_manifest_name() {
-        let fixture = Fixture::new("legacyshim");
-        let host = host_platform().unwrap();
-        let shim = fixture.file(&Path::new("proj/node_modules/.bin").join(host.legacy_bin_shim()));
-        let enumeration = enumerate_candidates(&request(
-            Some(fixture.path("proj")),
-            None,
-            vec![],
-            None,
-            None,
-        ));
-        assert!(
-            enumeration
-                .candidates
-                .iter()
-                .any(|c| c.path == shim && c.provenance == Provenance::ProjectLocal),
-            "the legacy shim at the manifest's name must be enumerated: {:?}",
-            enumeration.candidates
-        );
-    }
-
     // ── DISCRIMINATING (B7): the full fixture's `.bin` candidate IS the
     //    platform `bin_shim` name — production enumerates `bin_shim`, so a
     //    fixture planting any other name (e.g. the package executable)
@@ -1166,7 +1218,7 @@ mod tests {
     #[test]
     fn a_cache_binary_with_a_symlinked_component_escaping_the_root_is_rejected() {
         let f = full_fixture("cacheescape");
-        // <cache>/…/<policy>/7.0.9/package → symlink to a tree OUTSIDE the cache.
+        // <cache>/…/<policy>/7.1.9/package → symlink to a tree OUTSIDE the cache.
         let version_dir = f
             .cache_new
             .parent() // lib
@@ -1190,7 +1242,7 @@ mod tests {
             "a cache binary reached through a symlinked `package` must be rejected: {:?}",
             enumeration.candidates
         );
-        // The clean 7.0.3 entry still resolves (per-entry rejection, not a
+        // The clean 7.1.3 entry still resolves (per-entry rejection, not a
         // whole-tier skip).
         assert!(
             enumeration.candidates.iter().any(|c| c.path == f.cache_old),
@@ -1284,8 +1336,8 @@ mod tests {
                 if accepted {
                     Ok(ValidatedCandidate {
                         path: path.to_path_buf(),
-                        version: TsgoVersion::new(7, 0, 2),
-                        version_string: "7.0.2".to_string(),
+                        version: crate::toolchain::policy::pinned_version().clone(),
+                        version_string: crate::toolchain::policy::TYPESCRIPT_PIN.to_string(),
                     })
                 } else {
                     Err(RejectionReason::VersionProbeFailed {
@@ -1307,7 +1359,7 @@ mod tests {
             ("override", |f| &f.env, Provenance::EnvOverride),
             ("sharedbin", |f| &f.path_tier, Provenance::SharedPath),
             ("node_modules", |f| &f.local_flat, Provenance::ProjectLocal),
-            ("7.0.9", |f| &f.cache_new, Provenance::TempCache),
+            ("7.1.9", |f| &f.cache_new, Provenance::TempCache),
             ("exedir", |f| &f.bundled, Provenance::Bundled),
         ];
         for (accept, pick, provenance) in cases {
@@ -1368,7 +1420,7 @@ mod tests {
     #[tokio::test]
     async fn cache_entries_are_tried_newest_first() {
         let f = full_fixture("cacheorder");
-        let validator = ScriptedValidator::accepting(&["7.0.3"]);
+        let validator = ScriptedValidator::accepting(&["7.1.3"]);
         let resolution = resolve_with(&f.request(), &validator)
             .await
             .expect("the older cache entry must win when the newer fails");
@@ -1376,11 +1428,11 @@ mod tests {
         let calls = validator.calls();
         let new_pos = calls.iter().position(|p| *p == f.cache_new).unwrap();
         let old_pos = calls.iter().position(|p| *p == f.cache_old).unwrap();
-        assert!(new_pos < old_pos, "7.0.9 must be tried before 7.0.3");
-        // The out-of-range and prerelease cache entries were NEVER candidates.
-        assert!(!calls.iter().any(|p| p.to_string_lossy().contains("7.1.0")));
-        assert!(!calls.iter().any(|p| p.to_string_lossy().contains("rc.1")));
-        assert!(!calls.iter().any(|p| p.to_string_lossy().contains("7.0.4")));
+        assert!(new_pos < old_pos, "7.1.9 must be tried before 7.1.3");
+        // The out-of-range and nightly cache entries were NEVER candidates.
+        assert!(!calls.iter().any(|p| p.to_string_lossy().contains("7.2.0")));
+        assert!(!calls.iter().any(|p| p.to_string_lossy().contains("dev.")));
+        assert!(!calls.iter().any(|p| p.to_string_lossy().contains("7.1.4")));
     }
 
     // ── DISCRIMINATING: an existing-but-invalid bundled sidecar is a
@@ -1434,7 +1486,10 @@ mod tests {
         }
         let rendered = err.to_string();
         assert!(rendered.contains("no usable tsgo engine"), "{rendered}");
-        assert!(rendered.contains(">=7.0.2, <7.1.0"), "{rendered}");
+        assert!(
+            rendered.contains(crate::toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL),
+            "{rendered}"
+        );
         assert!(rendered.contains("VERTER_TSGO_BIN"), "{rendered}");
         assert!(rendered.contains("typescript@"), "{rendered}");
         assert!(rendered.contains("scripted rejection"), "{rendered}");
@@ -1483,6 +1538,6 @@ mod tests {
                     .into_owned()
             })
             .collect();
-        assert_eq!(cache_versions, vec!["7.0.9", "7.0.3"]);
+        assert_eq!(cache_versions, vec!["7.1.9", "7.1.3"]);
     }
 }

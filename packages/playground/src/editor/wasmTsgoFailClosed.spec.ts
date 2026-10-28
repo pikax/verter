@@ -31,7 +31,7 @@ describe("wasm_tsgo_unavailable_fail_closed (#2)", () => {
     }
     // TS>=7 in WASM: carrier-gen + Verter-native only — NO engine of any kind.
     expect(capabilityForWasm(7)).toEqual({ inContextLS: false, tsgo: false });
-    expect(capabilityForWasm(tsMajorOf("7.0.1-rc"))).toEqual({ inContextLS: false, tsgo: false });
+    expect(capabilityForWasm(tsMajorOf("7.1.0-beta"))).toEqual({ inContextLS: false, tsgo: false });
     expect(capabilityForWasm(8)).toEqual({ inContextLS: false, tsgo: false });
   });
 

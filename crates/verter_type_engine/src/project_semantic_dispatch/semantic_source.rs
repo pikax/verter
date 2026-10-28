@@ -1252,10 +1252,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .ctx
                 .observe_materialize_scope(key.scope_canonical_id.as_ref());
             let reduced_for_closure = reduced.clone();
+            let policy = self.ctx.request_flags().fact_policy();
             let _ = scope.get_or_compute(&cache_key, move || {
                 let scope_obs = observed_scope?;
                 let parse_fact = scope_obs.syntactic_export_set.clone()?;
                 match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+                    policy,
                     &scope_obs,
                     parse_fact,
                     reduced_for_closure.dep_signature(),
@@ -1632,7 +1634,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         owner_canonical: &str,
         macro_index: usize,
-    ) -> Option<crate::structural_carrier_producer::MacroHotProduct> {
+    ) -> Option<std::sync::Arc<crate::structural_carrier_producer::MacroHotProduct>> {
         crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             self.graph(),

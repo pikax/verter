@@ -59,7 +59,10 @@ fn component_meta_signature_carries_member_presence() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        read_set_signature: ReadSetSignature::new(Arc::clone(&signature)),
+        read_set_signature: ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of_shared(Arc::clone(&signature)),
+        ),
         validated_at_generation: 0,
     };
     assert!(
@@ -71,7 +74,7 @@ fn component_meta_signature_carries_member_presence() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.read_set_signature.facts),
+        view.validates_fact_signature((&entry.read_set_signature.facts).into()),
         "component_meta matrix slice: the permissive view MUST accept \
          a `MemberPresence` fact in the entry's `read_set_signature.facts`."
     );

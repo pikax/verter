@@ -7,7 +7,7 @@
 //! [`family_key_heap_bytes`] walks every one of those allocations under the
 //! conventions of [`verter_session_query::retention::allocation`]: a `Box`
 //! costs its pointee's block plus the pointee's own heap, each `Arc`
-//! allocation (slices, names, interned records, root owners) is counted
+//! allocation (slices, names, interned records, root attachments) is counted
 //! once per [`AliasSet`], and a field whose type is `Copy` owns no heap —
 //! [`inline`] holds that as a bound, so a field that gains an allocation
 //! stops compiling here instead of going uncounted.
@@ -29,7 +29,8 @@
 use std::sync::Arc;
 
 use verter_session_query::retention::allocation::{
-    arc_slice_block_bytes, arc_str_bytes, arc_str_list_bytes, box_bytes, heap_block_bytes, AliasSet,
+    arc_slice_block_bytes, arc_str_bytes, arc_str_list_bytes, box_bytes, shared_encoding_bytes,
+    AliasSet,
 };
 use verter_type_expr::locators::{AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator};
 
@@ -915,7 +916,9 @@ fn flow_return_key_heap_bytes(key: &FlowReturnKey, aliases: &mut AliasSet) -> us
         + projection_demand_heap_bytes(projection, aliases)
         + eval_policy_heap_bytes(demand_policy)
         + copy_slice_bytes(contextual_parameters, aliases)
-        + heap_block_bytes(result_contract.canonical_bytes().len())
+        // The result contract's canonical bytes: one `Arc` block every
+        // clone of the contract shares, counted once per `aliases`.
+        + shared_encoding_bytes(result_contract.canonical_shared_bytes(), aliases)
         + inline(parse_env_hash)
         + inline(resolve_env_hash)
         + inline(type_env_hash)

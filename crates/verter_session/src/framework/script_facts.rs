@@ -554,7 +554,7 @@ pub struct StoredResolvedFact {
 #[derive(Default)]
 pub struct FrameworkScriptFactStore {
     entries: DashMap<ResolvedFactKey, Arc<StoredResolvedFact>>,
-    /// The account an admitted entry's evidence pages are claimed into.
+    /// The account an admitted entry's shared storage is claimed into.
     retention_account: verter_session_query::retention::StoreAccount,
 }
 
@@ -573,7 +573,7 @@ impl FrameworkScriptFactStore {
         Self::default()
     }
 
-    /// A store whose admissions claim their evidence pages into `account`.
+    /// A store whose admissions claim their shared storage into `account`.
     #[cfg(test)]
     fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
         Self {
@@ -597,26 +597,28 @@ impl FrameworkScriptFactStore {
     /// The returned `Arc` lets a non-admitting caller still hand back the
     /// computed payload without a store entry.
     ///
-    /// A cacheable entry retains its signature's evidence pages, so its
-    /// admission claims them into a refusable reservation; a refused claim
-    /// returns the complete payload, with its signature, uncached.
+    /// A cacheable entry retains its signature's shared storage (receipts
+    /// and tree nodes), so its admission claims it into a refusable
+    /// reservation; a refused claim returns the complete payload, with its
+    /// signature, uncached.
     pub(crate) fn publish_if_cacheable(
         &self,
         key: ResolvedFactKey,
         payload: ExactScriptFacts<dyn FrameworkScriptFactPayload>,
         admission: &SignatureAdmission,
         generation: u64,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Arc<StoredResolvedFact> {
         let stored = Arc::new(StoredResolvedFact {
             payload,
             read_set_signature: admission
                 .cacheable()
                 .cloned()
-                .unwrap_or_else(ReadSetSignature::empty),
+                .unwrap_or_else(|| ReadSetSignature::empty(fact_policy)),
             validated_at_generation: generation,
         });
         if admission.cacheable().is_some() {
-            match verter_session_query::facts::receipt::claim_evidence_pages(
+            match verter_session_query::facts::receipt::claim_retained_storage(
                 self.retention_account.get(),
                 &stored.read_set_signature.facts,
             ) {
@@ -1268,9 +1270,7 @@ fn resolve_script_facts_inner<
                 facts,
             ) = &finalise
             {
-                verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(
-                    facts.as_ref(),
-                );
+                verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(facts);
             }
             let Some(facts) = payload.as_any_arc().downcast::<T>().ok() else {
                 return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
@@ -1289,9 +1289,7 @@ fn resolve_script_facts_inner<
                 facts,
             ) = &finalise
             {
-                verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(
-                    facts.as_ref(),
-                );
+                verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(facts);
             }
             let Some(facts) = payload.as_any_arc().downcast::<T>().ok() else {
                 return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
@@ -1326,7 +1324,7 @@ fn resolve_script_facts_inner<
     | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) =
         &finalise
     {
-        verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
+        verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(facts);
     }
     let validate_non_cacheable = matches!(
         &finalise,
@@ -1368,6 +1366,7 @@ fn resolve_script_facts_inner<
         exact_payload,
         &admission,
         generation,
+        host.project_type_store().fact_policy(),
     );
     match stored.payload.clone().downcast::<T>() {
         Some(exact) => ScriptFactEvidence::Exact(exact),
@@ -1685,7 +1684,7 @@ pub(crate) fn read_script_fact<V: StoreView + ?Sized>(
     if candidate.validated_at_generation != generation {
         return None;
     }
-    if !view.validates_fact_signature(&candidate.read_set_signature.facts) {
+    if !view.validates_fact_signature((&candidate.read_set_signature.facts).into()) {
         return None;
     }
     Some(candidate)

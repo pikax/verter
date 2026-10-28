@@ -62,11 +62,11 @@
     "@jridgewell/trace-mapping": "^0.3.31"
   },
   "devDependencies": {
-    "@jridgewell/sourcemap-codec": "^1.5.5",
+    "@jridgewell/sourcemap-codec": "^1.6.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.14",
-    "vite-plugin-dts": "^5.0.1",
-    "vitest": "^4.1.7"
+    "vite": "^8.3.5",
+    "vite-plugin-dts": "^5.1.2",
+    "vitest": "^5.0.5"
   },
   "engines": {
     "node": ">=22"

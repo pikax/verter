@@ -58,6 +58,10 @@ pub use verter_session_query::resolution::ProjectIdentity;
 
 // ── FileArtifactKey ──
 
+#[path = "file_artifact_storage.rs"]
+mod storage;
+use storage::{chain_entry, PinnedChain};
+
 // ── FileFacts ──
 
 /// Per-file fact registry payload.
@@ -80,8 +84,13 @@ pub use verter_session_query::resolution::ProjectIdentity;
 ///
 /// Resolve-domain facts are NOT populated here — they emit from the
 /// resolver / `RouteDb` producers downstream.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct FileFacts {
+    /// The registry's own charge: readers clone the published `Arc` out of
+    /// its artifact, so the charge travels with the allocation, not with
+    /// the artifact that first published it.
+    storage: verter_retention::pinned_heap::StoragePin,
     registry: fact_registry::FactRegistry,
     /// Lazy body-sensitive fact source: `Export` / `LocalDecl` body
     /// fingerprints are NOT emitted at publish (publishing lowers zero
@@ -92,6 +101,16 @@ pub struct FileFacts {
     /// EXCLUDED from equality — the eager registry is the artifact's
     /// fact identity.
     lazy: Option<crate::fact_emission::LazyBodyFactSource>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for FileFacts {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 impl PartialEq for FileFacts {
@@ -114,6 +133,7 @@ impl FileFacts {
     #[must_use]
     pub fn from_registry(registry: fact_registry::FactRegistry) -> Self {
         Self {
+            storage: Default::default(),
             registry,
             lazy: None,
         }
@@ -127,6 +147,7 @@ impl FileFacts {
         lazy: crate::fact_emission::LazyBodyFactSource,
     ) -> Self {
         Self {
+            storage: Default::default(),
             registry,
             lazy: Some(lazy),
         }
@@ -171,8 +192,11 @@ impl FileFacts {
     }
 
     /// Borrow the registry mutably — used by the parse-time
-    /// producer during construction.
+    /// producer during construction. A mutated registry is new content, so
+    /// any charge sealed over the old content is released and measured
+    /// again at the next publication.
     pub fn registry_mut(&mut self) -> &mut fact_registry::FactRegistry {
+        self.storage.invalidate();
         &mut self.registry
     }
 
@@ -239,7 +263,7 @@ pub(crate) struct AugmenterCandidate {
     pub(crate) parse_stable_hash: Hash16,
     /// The candidate's augmentation facts. Cloned `Arc` — a cheap
     /// refcount bump, not a deep copy.
-    pub(crate) augmentations: Arc<Vec<ModuleAugmentationFact>>,
+    pub(crate) augmentations: verter_session_query::source::augmentation::ArtifactAugmentations,
 }
 
 // ── FileArtifacts ──
@@ -253,13 +277,43 @@ pub(crate) struct AugmenterCandidate {
 /// [`verter_workspace::ParsedEdge`].
 #[derive(Debug, Clone)]
 pub struct FileArtifacts {
+    #[doc(hidden)]
+    pub storage: verter_retention::pinned_heap::StoragePin,
     pub indexed: Arc<IndexedReady>,
     pub facts: Arc<FileFacts>,
     pub parse_stable_hash: Hash16,
-    pub augmentations: Arc<Vec<ModuleAugmentationFact>>,
+    pub augmentations: verter_session_query::source::augmentation::ArtifactAugmentations,
+}
+
+impl verter_retention::heap_size::HeapSize for FileArtifacts {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            storage: _,
+            indexed,
+            facts,
+            parse_stable_hash: _,
+            augmentations,
+        } = self;
+        indexed.heap_size(meter) + facts.heap_size(meter) + augmentations.heap_size(meter)
+    }
+    fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
+        self.pin_storage();
+        true
+    }
 }
 
 impl FileArtifacts {
+    fn pin_storage(&self) {
+        self.indexed.pin_storage();
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            &Default::default(),
+        );
+    }
     /// Construct a `FileArtifacts` carrying only an `IndexedReady`.
     ///
     /// **Parse-time fact emission runs here** — the constructed
@@ -278,15 +332,39 @@ impl FileArtifacts {
     /// augmentation-sensitive query.
     #[must_use]
     pub fn with_indexed(indexed: Arc<IndexedReady>) -> Self {
+        indexed.pin_storage();
         let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash(&indexed);
         let emission = crate::fact_emission::emit_parse_facts(&indexed);
-        Self {
+        let result = Self {
+            storage: Default::default(),
             indexed,
             facts: Arc::new(emission.facts),
             parse_stable_hash,
-            augmentations: Arc::new(emission.augmentations),
-        }
+            augmentations: Arc::new(verter_retention::pinned_heap::SelfPinned::new(
+                emission.augmentations,
+            )),
+        };
+        result.pin_storage();
+        result
     }
+}
+
+fn freshness_heap<'t>(
+    value: &'t Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
+    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    // The workspace owns the transition rail; the artifact owns this lease
+    // block, which keeps that independently owned history reachable.
+    value
+        .as_ref()
+        .map_or(0, |lease| meter.shared_arc(lease, |_, _| 0))
+}
+
+#[derive(verter_retention::heap_size::HeapSize)]
+struct StoredArtifactMetadata<'a> {
+    key: &'a FileArtifactKey,
+    #[heap_size(with = "freshness_heap")]
+    freshness: &'a Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
 }
 
 /// `true` when `prev` and `next` are indistinguishable in every dimension a
@@ -475,7 +553,7 @@ const RECLAIM_TRIGGER_CHAIN_LENGTH: usize = 2;
 /// from the CURRENT root while leaving it reachable from every root
 /// captured before the retirement. Physical reclamation is a separate,
 /// root-gated decision ([`FileArtifactStore::reclaim_retired_versions`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 struct VersionSpan {
     birth: u64,
     retirement: Option<u64>,
@@ -615,6 +693,10 @@ struct RootRegistryState {
     /// `epoch -> number of reserved-but-unapplied mutations at that
     /// epoch`. Its first key bounds the newest fully-applied epoch.
     in_flight: std::collections::BTreeMap<u64, usize>,
+    /// The newest epoch whose mutation has finished applying. It can lie
+    /// above [`Self::stable_epoch`] while an older mutation is still in
+    /// flight.
+    newest_completed: u64,
 }
 
 impl RootRegistryState {
@@ -652,6 +734,7 @@ impl LiveRootRegistry {
     /// [`EpochReservation::drop`].
     fn complete(&self, epoch: u64) {
         let mut state = self.state.lock();
+        state.newest_completed = state.newest_completed.max(epoch);
         if let std::collections::btree_map::Entry::Occupied(mut slot) = state.in_flight.entry(epoch)
         {
             let count = slot.get_mut();
@@ -709,6 +792,7 @@ impl Drop for EpochReservation<'_> {
 /// released once, when the last `Arc` drops.
 pub struct FileArtifactRoot {
     epoch: u64,
+    settled: bool,
     registry: Arc<LiveRootRegistry>,
 }
 
@@ -729,6 +813,21 @@ impl FileArtifactRoot {
     pub fn is_exhausted(&self) -> bool {
         self.epoch == EXHAUSTED_EPOCH
     }
+
+    /// Does this root hold every mutation that had finished when it was
+    /// captured?
+    ///
+    /// A mutation in flight holds a capture back to the epoch before it,
+    /// and a newer mutation may already have finished above it. Such a
+    /// root omits that finished mutation even though a generation read
+    /// before the capture may already count it, so a view pairing the two
+    /// would describe a world no generation names. A mutation still in
+    /// flight unsettles nothing: it advances the generation only after it
+    /// finishes, so no generation read before the capture counts it.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.settled
+    }
 }
 
 impl std::fmt::Debug for FileArtifactRoot {
@@ -747,12 +846,14 @@ impl Drop for FileArtifactRoot {
 
 /// One retired version of an exact artifact key, retained for the roots
 /// that still see it.
+#[derive(verter_retention::heap_size::HeapSize)]
 struct RetiredArtifactVersion {
     span: VersionSpan,
     payload: Arc<FileArtifacts>,
     /// The version's freshness evidence, shared with the live entry it was
     /// copied from: a root that still reaches this payload keeps its
     /// canonical's transition evidence owned.
+    #[heap_size(with = "freshness_heap")]
     _freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
 }
 
@@ -761,15 +862,16 @@ struct RetiredArtifactVersion {
 /// The index is versioned alongside the artifacts themselves: a root
 /// enumerating a canonical's keys must see exactly the keys that were
 /// live at its epoch, not the current live set.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 struct CanonicalKeyVersion {
     key: FileArtifactKey,
     span: VersionSpan,
 }
 
 /// One version of an augmentation-index entry.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 struct AugmenterVersion {
+    storage: verter_retention::pinned_heap::StoragePin,
     span: VersionSpan,
     set: Arc<AugmenterSet>,
 }
@@ -793,6 +895,7 @@ struct AugmenterVersion {
 /// fresh value has not yet proven warm demand; the promotion-aware LRU
 /// floor treats it as new).
 struct StoredArtifact {
+    key_storage: verter_retention::pinned_heap::StoragePin,
     payload: Arc<FileArtifacts>,
     /// Membership epoch this version was published at. A root captured
     /// BEFORE the publication (`root.epoch < birth_epoch`) does not see
@@ -822,14 +925,25 @@ impl StoredArtifact {
         tick: u64,
         birth_epoch: u64,
         freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
+        key: &FileArtifactKey,
     ) -> Self {
-        Self {
+        let result = Self {
+            key_storage: Default::default(),
             payload,
             birth_epoch,
             hits: AtomicU32::new(0),
             last_access_tick: AtomicU64::new(tick),
             freshness,
-        }
+        };
+        result.key_storage.ensure(
+            &StoredArtifactMetadata {
+                key,
+                freshness: &result.freshness,
+            },
+            0,
+            &Default::default(),
+        );
+        result
     }
 
     /// Bump the warm-hit counter (saturating at `u32::MAX`).
@@ -870,6 +984,7 @@ type ReclaimSweepHook = Box<dyn FnOnce(&FileArtifactStore) + Send>;
 /// and the new content-addressed surface (`get_artifacts(&key) ->
 /// Arc<FileArtifacts>`).
 pub struct FileArtifactStore {
+    table_storage: [storage::TableStorage; 5],
     /// Per-(canonical, content_hash, parse_env_hash, parse_key)
     /// payloads, each carried in a [`StoredArtifact`] alongside its
     /// entry-embedded warm-read bookkeeping. Keys with the same
@@ -915,7 +1030,7 @@ pub struct FileArtifactStore {
     ///   dangling keys by construction — they try every candidate key
     ///   and skip ones whose exact read misses — so a dangling key
     ///   costs one extra exact lookup, never a wrong result.
-    canonical_keys: DashMap<Arc<str>, SmallVec<[CanonicalKeyVersion; 2]>>,
+    canonical_keys: DashMap<Arc<str>, PinnedChain<[CanonicalKeyVersion; 2]>>,
     /// Retired (logically removed / superseded) artifact versions,
     /// retained for the [`FileArtifactRoot`]s that still address them.
     ///
@@ -928,11 +1043,11 @@ pub struct FileArtifactStore {
     /// The chain is drained ONLY by
     /// [`Self::reclaim_retired_versions`], and only for versions no
     /// live root can see.
-    retired_artifacts: DashMap<FileArtifactKey, SmallVec<[RetiredArtifactVersion; 1]>>,
+    retired_artifacts: DashMap<FileArtifactKey, PinnedChain<[RetiredArtifactVersion; 1]>>,
     /// Retired augmentation-index versions — same contract as
     /// `retired_artifacts`, for the augmentation-index membership
     /// domain.
-    retired_augmenters: DashMap<AugmentationTargetKey, SmallVec<[AugmenterVersion; 1]>>,
+    retired_augmenters: DashMap<AugmentationTargetKey, PinnedChain<[AugmenterVersion; 1]>>,
     /// Monotonic MEMBERSHIP epoch — the identity of the current
     /// [`FileArtifactRoot`].
     ///
@@ -1109,7 +1224,8 @@ impl FileArtifactStore {
         stale: verter_type_engine::cache_runtime::OccupancyCounter,
         schema_version: u32,
     ) -> Self {
-        Self {
+        let store = Self {
+            table_storage: std::array::from_fn(|_| Default::default()),
             artifacts: DashMap::new(),
             canonical_keys: DashMap::new(),
             retired_artifacts: DashMap::new(),
@@ -1138,7 +1254,13 @@ impl FileArtifactStore {
             reclaim_sweep_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
-        }
+        };
+        store.table_storage[0].initialize(&store.artifacts);
+        store.table_storage[1].initialize(&store.canonical_keys);
+        store.table_storage[2].initialize(&store.retired_artifacts);
+        store.table_storage[3].initialize(&store.retired_augmenters);
+        store.table_storage[4].initialize(&store.augmentation_index);
+        store
     }
 
     /// Install the content-transition history of the workspace this store's
@@ -1259,18 +1381,36 @@ impl FileArtifactStore {
     /// the capture back to its predecessor, so no root can observe a
     /// half-applied transition (and then observe the other half through
     /// the same, supposedly immutable, root).
+    ///
+    /// Held back that way, a root can predate a NEWER mutation that has
+    /// already finished — and that has already advanced
+    /// [`Self::artifact_generation`]. The root records whether any epoch
+    /// above its own had finished when it was captured
+    /// ([`FileArtifactRoot::is_settled`]); only a settled root is known to
+    /// hold every mutation an earlier generation read accounts for. Every
+    /// mutation advances the generation after its reservation is released,
+    /// which is what makes a finished epoch the only one a generation read
+    /// can count.
     #[must_use]
     pub fn capture_root(&self) -> Arc<FileArtifactRoot> {
-        let epoch = {
+        let (epoch, settled) = {
             let mut state = self.live_roots.state.lock();
             let epoch = state.stable_epoch(self.membership_epoch.load(Ordering::Acquire));
             *state.roots.entry(epoch).or_insert(0) += 1;
-            epoch
+            (epoch, state.newest_completed <= epoch)
         };
         Arc::new(FileArtifactRoot {
             epoch,
+            settled,
             registry: Arc::clone(&self.live_roots),
         })
+    }
+
+    /// Reserve a membership epoch and hold it until the returned guard
+    /// drops, as a mutation that has not finished applying does.
+    #[cfg(test)]
+    pub(crate) fn hold_membership_epoch_for_test(&self) -> impl Drop + '_ {
+        self.reserve_membership_epoch()
     }
 
     /// Does `root` address THIS store's membership?
@@ -1511,6 +1651,19 @@ impl FileArtifactStore {
         });
         reconcile_unreclaimed_retirements(&self.unreclaimed_retirements, noted_before_walk, kept);
         reclaimed
+    }
+
+    /// Give back the table capacity removals and reclaimed versions left
+    /// behind, lowering each table's backing charge to what it still holds.
+    /// For release boundaries (host close, a release-completion boundary):
+    /// a live store regrows what it needs on its next publication.
+    pub fn reclaim_table_storage(&self) {
+        let _sweep = self.reclaim_sweep.lock();
+        self.table_storage[0].reclaim(&self.artifacts);
+        self.table_storage[1].reclaim(&self.canonical_keys);
+        self.table_storage[2].reclaim(&self.retired_artifacts);
+        self.table_storage[3].reclaim(&self.retired_augmenters);
+        self.table_storage[4].reclaim(&self.augmentation_index);
     }
 
     /// Reclaim what a released root kept reachable.
@@ -2039,10 +2192,8 @@ impl FileArtifactStore {
     ) -> Option<Arc<FileArtifacts>> {
         let reservation = self.reserve_membership_epoch();
         let epoch = reservation.epoch();
-        let mut slot = self
-            .canonical_keys
-            .entry(Arc::clone(&key.canonical))
-            .or_default();
+        let canonical = Arc::clone(&key.canonical);
+        let mut slot = chain_entry(self.canonical_keys.entry(Arc::clone(&canonical)));
         // Retain the superseded version for the roots that still address
         // it — the legacy behaviour dropped it here, which is exactly how
         // a captured `(canonical, whole_hash)` came to name an artifact
@@ -2061,15 +2212,16 @@ impl FileArtifactStore {
         }
         self.global_contributors.note_live(key.clone(), &payload);
         let freshness = self.lease_freshness(&key.canonical);
-        self.artifacts.insert(
-            key.clone(),
-            StoredArtifact::new(payload, tick, epoch, freshness),
-        );
+        let stored_key = key.clone();
+        let stored = StoredArtifact::new(payload, tick, epoch, freshness, &stored_key);
+        self.artifacts.insert(stored_key, stored);
+        self.table_storage[0].settle(&self.artifacts, &key);
         slot.push(CanonicalKeyVersion {
             key,
             span: VersionSpan::born(epoch),
         });
         drop(slot);
+        self.table_storage[1].settle(&self.canonical_keys, &canonical);
         // The transition has landed: release the epoch so captures may
         // name it, BEFORE the (possibly reclaiming) retirement accounting.
         drop(reservation);
@@ -2115,17 +2267,15 @@ impl FileArtifactStore {
                 entry.value().freshness.clone(),
             )
         };
-        self.retired_artifacts
-            .entry(key.clone())
-            .or_default()
-            .push(RetiredArtifactVersion {
-                span: VersionSpan {
-                    birth,
-                    retirement: Some(epoch),
-                },
-                payload: Arc::clone(&payload),
-                _freshness: freshness,
-            });
+        chain_entry(self.retired_artifacts.entry(key.clone())).push(RetiredArtifactVersion {
+            span: VersionSpan {
+                birth,
+                retirement: Some(epoch),
+            },
+            payload: Arc::clone(&payload),
+            _freshness: freshness,
+        });
+        self.table_storage[2].settle(&self.retired_artifacts, key);
         Some(payload)
     }
 
@@ -2245,13 +2395,18 @@ impl FileArtifactStore {
                     drop(vacant);
                 }
             }
+            self.table_storage[1].settle(&self.canonical_keys, &key.canonical);
         }
         // Demand-driven coherence: every retired augmenter retires every index
         // entry it contributed to so the next cold-rescan rebuilds without it.
         // Same epoch as the artifact retirements above — one membership
         // transition, not two.
-        self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
+        let retired_index =
+            self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
         drop(reservation);
+        if retired_index > 0 {
+            self.bump_artifact_generation();
+        }
         self.publish_global_contributors();
         self.note_retirements(removed.len());
         removed
@@ -3003,6 +3158,7 @@ impl FileArtifactStore {
         key: FileArtifactKey,
         artifacts: Arc<FileArtifacts>,
     ) -> Option<Arc<FileArtifacts>> {
+        artifacts.pin_storage();
         let canonical = Arc::clone(&key.canonical);
         let content_hash = key.content_hash;
         let parse_env_hash = key.parse_env_hash;
@@ -3198,6 +3354,12 @@ impl FileArtifactStore {
             .map(|entry| entry.key().clone())
             .collect();
         let removed_pairs = self.retire_artifact_keys(&to_remove);
+        // Rows the artifact facts did not cover (a target's published
+        // absence of augmenters) describe a world with no artifacts left:
+        // retire them too, so the reset is total.
+        if !self.augmentation_index.is_empty() {
+            self.clear_augmentation_index();
+        }
         let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter
@@ -3329,9 +3491,13 @@ impl FileArtifactStore {
         let reservation = self.reserve_membership_epoch();
         let epoch = reservation.epoch();
         let version = AugmenterVersion {
+            storage: Default::default(),
             span: VersionSpan::born(epoch),
             set,
         };
+        version
+            .storage
+            .ensure(&(&key, &version.set), 0, &Default::default());
         // The whole read-retire-publish sequence runs under ONE entry
         // guard. Two reasons, both load-bearing:
         //
@@ -3353,6 +3519,7 @@ impl FileArtifactStore {
         };
         if !admitted {
             drop(entry);
+            self.table_storage[4].settle(&self.augmentation_index, &key);
             drop(reservation);
             // A rejection still completes a reserved transition: a mutation
             // that landed while this epoch was in flight skipped its publish.
@@ -3362,16 +3529,14 @@ impl FileArtifactStore {
         let retired = match entry {
             AugmentationIndexEntry::Occupied(mut slot) => {
                 let previous = slot.get();
-                self.retired_augmenters
-                    .entry(key)
-                    .or_default()
-                    .push(AugmenterVersion {
-                        span: VersionSpan {
-                            birth: previous.span.birth,
-                            retirement: Some(epoch),
-                        },
-                        set: Arc::clone(&previous.set),
-                    });
+                chain_entry(self.retired_augmenters.entry(key.clone())).push(AugmenterVersion {
+                    storage: Default::default(),
+                    span: VersionSpan {
+                        birth: previous.span.birth,
+                        retirement: Some(epoch),
+                    },
+                    set: Arc::clone(&previous.set),
+                });
                 Some(slot.insert(version).set)
             }
             AugmentationIndexEntry::Vacant(slot) => {
@@ -3384,6 +3549,8 @@ impl FileArtifactStore {
         if retired.is_some() {
             self.note_retirements(1);
         }
+        self.table_storage[3].settle(&self.retired_augmenters, &key);
+        self.table_storage[4].settle(&self.augmentation_index, &key);
         Some(retired)
     }
 
@@ -3401,19 +3568,19 @@ impl FileArtifactStore {
                 self.augmentation_index.entry(key.clone())
             {
                 let previous = slot.get();
-                self.retired_augmenters
-                    .entry(key.clone())
-                    .or_default()
-                    .push(AugmenterVersion {
-                        span: VersionSpan {
-                            birth: previous.span.birth,
-                            retirement: Some(epoch),
-                        },
-                        set: Arc::clone(&previous.set),
-                    });
+                chain_entry(self.retired_augmenters.entry(key.clone())).push(AugmenterVersion {
+                    storage: Default::default(),
+                    span: VersionSpan {
+                        birth: previous.span.birth,
+                        retirement: Some(epoch),
+                    },
+                    set: Arc::clone(&previous.set),
+                });
                 slot.remove();
                 retired += 1;
             }
+            self.table_storage[3].settle(&self.retired_augmenters, key);
+            self.table_storage[4].settle(&self.augmentation_index, key);
         }
         self.note_retirements(retired);
         retired
@@ -3687,6 +3854,9 @@ impl FileArtifactStore {
         let epoch = reservation.epoch();
         let retired = self.invalidate_augmentation_index_at_epoch(augmenter_facts, epoch);
         drop(reservation);
+        if retired > 0 {
+            self.bump_artifact_generation();
+        }
         self.publish_global_contributors();
         retired
     }
@@ -3694,7 +3864,9 @@ impl FileArtifactStore {
     /// [`Self::invalidate_augmentation_index_for_augmenter`] under a
     /// caller-supplied membership epoch — the form the artifact
     /// retirement chokepoint uses so both halves of one removal share a
-    /// single epoch and no root can observe them split.
+    /// single epoch and no root can observe them split. Returns how many
+    /// entries it retired; the caller advances the artifact generation for
+    /// them once its reservation is released.
     fn invalidate_augmentation_index_at_epoch(
         &self,
         augmenter_facts: &[ModuleAugmentationFact],
@@ -3720,14 +3892,10 @@ impl FileArtifactStore {
         // Retirement removes index contributors, which IS a change to the
         // augmentation world — so it advances the route-surface clock,
         // inside the same bracket, unlike the publication cases above.
-        let removed = self.route_surface_generation.mutate(|| {
+        self.route_surface_generation.mutate(|| {
             let removed = self.retire_augmenter_keys(&retire_keys, epoch);
             (removed, removed > 0)
-        });
-        if removed > 0 {
-            self.bump_artifact_generation();
-        }
-        removed
+        })
     }
 
     /// Retire every entry from the augmentation index.

@@ -145,6 +145,9 @@ impl WorkspaceRead for ConcurrentReader {
 }
 
 impl WorkspaceAccess for ConcurrentReader {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        verter_session_query::facts::policy::FactPolicy::production()
+    }
     fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {}
 
     fn set_exact_resolutions(
@@ -563,7 +566,10 @@ fn conditional_commit_restarts_share_one_churn_ledger_and_a_new_request_resets_i
     const SPECIFIER: &str = "./ordinary";
     let budgets =
         InputResolutionBudgets::try_tightened(32, 128, 32_768, 16, 1).expect("test policy");
-    let engine = Arc::new(Engine::new_with_input_resolution_budgets(budgets));
+    let engine = Arc::new(Engine::new_with_input_resolution_budgets(
+        budgets,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    ));
     let reader = ConcurrentReader::new(&["/p/ordinary.ts"]);
     let mutations = Arc::new(AtomicUsize::new(0));
     let mutate_engine = Arc::clone(&engine);
@@ -712,7 +718,10 @@ fn parsed_edge_commit_restarts_share_one_churn_ledger_and_discard_stale_edges() 
     const IMPORTER: &str = "/p/main.ts";
     let budgets =
         InputResolutionBudgets::try_tightened(32, 128, 32_768, 16, 1).expect("test policy");
-    let engine = Arc::new(Engine::new_with_input_resolution_budgets(budgets));
+    let engine = Arc::new(Engine::new_with_input_resolution_budgets(
+        budgets,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    ));
     let reader = ConcurrentReader::new(&["/p/ordinary.ts"]);
     let mutations = Arc::new(AtomicUsize::new(0));
     let mutate_engine = Arc::clone(&engine);
@@ -809,7 +818,10 @@ fn parsed_edge_exact_companion_rejects_the_ninth_restart_after_running_nine_atte
 fn explicit_project_churn_rejection_discards_the_superseded_result() {
     let budgets =
         InputResolutionBudgets::try_tightened(32, 128, 32_768, 16, 1).expect("test policy");
-    let engine = Arc::new(Engine::new_with_input_resolution_budgets(budgets));
+    let engine = Arc::new(Engine::new_with_input_resolution_budgets(
+        budgets,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    ));
     publish_alias(&engine, "/p", "/p/old");
     let reader = ConcurrentReader::new(&["/p/old.ts", "/p/new.ts"]);
     let owner = ProjectOwnership {

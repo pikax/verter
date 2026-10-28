@@ -127,7 +127,7 @@ async function resolveTypeScript7Compiler(): Promise<{ compiler: string; version
   return { compiler, version: versionText };
 }
 
-describe.sequential("TypeScript >=7 authority control", () => {
+describe("TypeScript >=7 authority control", { concurrent: false }, () => {
   for (const extension of ["jsx", "tsx"] as const) {
     it(`contextually types the plain .${extension} handler as PointerEvent`, async () => {
       try {
@@ -165,7 +165,9 @@ describe.sequential("TypeScript >=7 authority control", () => {
           diagnosticCodes,
           output,
         };
-        expect(control.status, "the deliberate invalid-member control must fail typecheck").toBe(1);
+        // TypeScript 7.1 exits 2 (diagnostics present) for a `--noEmit` run that
+        // reports errors. Re-measured on typescript@7.1.0-beta.
+        expect(control.status, "the deliberate invalid-member control must fail typecheck").toBe(2);
         expect(diagnosticCodes, "the control must report exactly the anti-any diagnostic").toEqual([
           2339,
         ]);
@@ -254,7 +256,8 @@ describe.sequential("TypeScript >=7 authority control", () => {
         diagnosticCodes,
         output,
       };
-      expect(control.status, "the authored directive must re-enable JavaScript checking").toBe(1);
+      // TypeScript 7.1 exits 2 for a `--noEmit` run with diagnostics (see above).
+      expect(control.status, "the authored directive must re-enable JavaScript checking").toBe(2);
       expect(diagnosticCodes).toEqual([2339]);
     } catch (error) {
       authoredCheckJavaScriptPolicyControl = {
@@ -282,7 +285,7 @@ for (const route of ROUTES) {
     );
     if (profileCases.length === 0) continue;
 
-    describe.sequential(`editor-neutral LSP contract [${route}] (${profile})`, () => {
+    describe(`editor-neutral LSP contract [${route}] (${profile})`, { concurrent: false }, () => {
       let driver: RawEditorNeutralLspDriver;
 
       beforeAll(async () => {

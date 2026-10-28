@@ -525,7 +525,10 @@ describe("CI Rust path eligibility", () => {
 
     const core = workflowJobs(ci).get("rust-test") ?? "";
     expect(core, "the core lane must consume the shared archive").toContain(
-      "cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst",
+      "nextest_argv=(nextest run --archive-file artifacts/rust-nextest-archive.tar.zst",
+    );
+    expect(core, "the core lane must run the recorded nextest argv").toContain(
+      'cargo "${nextest_argv[@]}"',
     );
     expect(core, "the core lane must not pay for another workspace compile").not.toContain(
       "cargo nextest archive",

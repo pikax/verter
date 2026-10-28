@@ -1173,7 +1173,7 @@ fn merged_enum_declaration_anchors(source: &str) -> std::collections::HashMap<u3
 }
 
 /// The merged-enum diagnostics contract: the merged-enum controls must match
-/// tsc 7.0.2's DIAGNOSTICS as well as its types, through the real tsgo
+/// tsc's DIAGNOSTICS as well as its types, through the real tsgo
 /// provider lane (tsgo is the tsc 7 native engine). The fixture is the
 /// engine test's own three global-script files (`verter_session::for_tests`
 /// MERGED_A/B/C — shared, never copied), opened through the Verter LSP; per
@@ -1204,6 +1204,16 @@ fn merged_enum_declaration_anchors(source: &str) -> std::collections::HashMap<u3
 /// and tsgo both report it, and `reloadProjects` does not repair it). The
 /// LSP faithfully surfaces what tsserver returns, so no production change
 /// applies here; the divergence is upstream of the merge this lane pins.
+///
+/// Placement: TS2432 lands on whichever `Two` block comes second in program
+/// order, which tsc puts on b.ts. A bare tsgo 7.1.0-beta LSP, no Verter in
+/// the loop, places it out of program order on the file whose `didOpen`
+/// creates the configured project. The tsgo
+/// transport therefore asks for a document's project in front of its first
+/// open (`project_load_frame` in `verter_type_runtime::tsgo::ipc`), and the
+/// LSP forwards watched-file creations to the provider before anything else
+/// can publish the created files, so placement is tsc's whatever order the
+/// editor opens files in.
 #[tokio::test(flavor = "multi_thread")]
 async fn diagnostics_merged_enum_blocks_match_tsc_codes_tsgo() {
     use tower_lsp_server::ls_types::{DidChangeWatchedFilesParams, FileChangeType, FileEvent};
@@ -1241,8 +1251,8 @@ async fn diagnostics_merged_enum_blocks_match_tsc_codes_tsgo() {
         })
         .await;
 
-    // The exact per-anchor code sets tsc 7.0.2 reports over the three
-    // files (measured with `tsc --strict --noEmit` on the fixture).
+    // The exact per-anchor code sets tsc reports over the three files
+    // (measured with `tsc --strict --noEmit` on the fixture, 7.1.0-beta).
     let expected = [
         ("a", "AutoInc", &[] as &[&str]),
         ("a", "Str", &[]),
@@ -1367,7 +1377,7 @@ async fn diagnostics_merged_enum_blocks_match_tsc_codes_tsgo() {
         assert_eq!(
             got, want,
             "the {anchor} block in the {stem} fixture file must report exactly \
-             tsc 7.0.2's diagnostic codes"
+             tsc's diagnostic codes"
         );
     }
     assert!(

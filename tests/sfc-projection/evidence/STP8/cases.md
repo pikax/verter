@@ -4,7 +4,7 @@ Input context: "test(compiler): prove early Svelte and heterogeneous-context bou
 
 Ratification context: "test(compiler): ratify Vue constructor ABI and topology matrix (STP8)" (2026-09-19). Titles and dates are descriptive references only; validation checks the current products and engine inputs without requiring historical commit identities.
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.0.2` (`typescript/unstable/sync`). Vue pin: `vue@3.6.0-rc.5` (root `package.json` devDependencies, matrix-admitted lane `vue-3.6`).
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.1.0-beta` (`typescript/sync`). Vue pin: `vue@3.6.0-rc.5` (root `package.json` devDependencies, matrix-admitted lane `vue-3.6`).
 
 Selected case IDs: `STP8-complete-evidence`, `STP8-partial-ratify`, `STP8-abi-contamination`, `STP8-inference-contract`.
 

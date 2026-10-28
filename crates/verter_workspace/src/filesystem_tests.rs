@@ -3319,3 +3319,417 @@ fn snapshot_change_tombstone_on_close_preserves_the_backing_file() {
         }]
     );
 }
+
+/// A replay that settles before admission returns its own outcome, even
+/// when a file it observed changed on disk meanwhile: only an admission
+/// re-reads the sealed evidence live. Here the replay finds the workspace
+/// republished under it and refuses as superseded; that refusal is the
+/// answer, not a restart that could spend the restart budget.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_replay_refused_before_admission_returns_its_refusal_across_a_watched_file_change() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(1);
+    let workspace = Arc::new(workspace);
+    let published = workspace.load_published().expect("published root");
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let hook_attempts = Arc::clone(&attempts);
+    let hook_workspace = Arc::clone(&workspace);
+    let manifest_path = std::path::PathBuf::from(&manifest);
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::AttemptStart,
+        move || {
+            // The first attempt discovers; the second is the replay over the
+            // sealed evidence.
+            if hook_attempts.fetch_add(1, Ordering::AcqRel) != 1 {
+                return;
+            }
+            std::fs::write(&manifest_path, r#"{"name":"pkg","types":"./b.d.ts"}"#)
+                .expect("rewrite the observed manifest");
+            WorkspaceAccess::configure_resolver(
+                &*hook_workspace,
+                vec![crate::resolver::ide_project_config(
+                    root.clone(),
+                    root.clone(),
+                    Some(format!("{root}/jsconfig.json")),
+                )],
+            );
+        },
+        || {
+            WorkspaceRead::resolve_import_at_published(
+                &*workspace,
+                &published,
+                &importer,
+                "pkg",
+                CONTEXT,
+            )
+        },
+    );
+    assert!(
+        attempts.load(Ordering::Acquire) >= 2,
+        "the resolution reached its replay"
+    );
+    assert_eq!(
+        outcome.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::ResolutionViewSuperseded),
+        "the replay's refusal is returned as it is: {:?}",
+        outcome.result()
+    );
+    assert_eq!(
+        crate::resolver::take_outer_restarts_for_test(),
+        0,
+        "returning the refusal charges no restart"
+    );
+}
+
+/// Live disk reads as `(kind, path)`, in order.
+#[cfg(not(target_arch = "wasm32"))]
+type LiveReads = Vec<(&'static str, String)>;
+
+/// Resolve `pkg` from the package fixture, splitting the workspace's live
+/// disk reads into the ones the attempt makes (discovery, preflight, load
+/// and freeze) and the ones the admission's final validation makes.
+#[cfg(not(target_arch = "wasm32"))]
+fn live_reads_of_one_resolution(
+    workspace: &Arc<FilesystemWorkspace>,
+    importer: &str,
+    on_phase: impl FnMut(crate::engine::resolution_test_hooks::ResolutionPhase) + 'static,
+) -> (
+    crate::resolution_currency::ResolutionOutcome,
+    LiveReads,
+    LiveReads,
+) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let published = workspace.load_published().expect("published root");
+    let _ = workspace.native_fs.take_live_reads_for_test();
+    let segments = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let hooked = Arc::clone(workspace);
+    let recorded = Arc::clone(&segments);
+    let mut on_phase = on_phase;
+    let outcome = resolution_test_hooks::with_every_phase_hook(
+        move |phase| {
+            recorded
+                .lock()
+                .push((Some(phase), hooked.native_fs.take_live_reads_for_test()));
+            on_phase(phase);
+        },
+        || {
+            WorkspaceRead::resolve_import_at_published(
+                &**workspace,
+                &published,
+                importer,
+                "pkg",
+                CONTEXT,
+            )
+        },
+    );
+    let mut segments = std::mem::take(&mut *segments.lock());
+    segments.push((None, workspace.native_fs.take_live_reads_for_test()));
+    // The last publication-gate wait is the admitting replay's; every read
+    // after it is the admission's final validation.
+    let admission_starts = segments
+        .iter()
+        .rposition(|(phase, _)| *phase == Some(ResolutionPhase::PublicationGateWait))
+        .expect("the resolution reached its admission")
+        + 1;
+    let admission = segments
+        .split_off(admission_starts)
+        .into_iter()
+        .flat_map(|(_, reads)| reads)
+        .collect();
+    let attempts = segments.into_iter().flat_map(|(_, reads)| reads).collect();
+    (outcome, attempts, admission)
+}
+
+/// One resolution attempt reads each path from disk once per kind of read:
+/// the freeze reuses what the discovery's probes and the bounded preflight
+/// and load already read live in the same content generation, instead of
+/// reading it again. The admission's final validation still reads every
+/// path it checks live, once.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn one_resolution_attempt_reads_each_path_from_disk_once() {
+    let (_temp, _root, importer, _manifest, workspace) = filesystem_package_fixture(8);
+    let workspace = Arc::new(workspace);
+    let (outcome, attempt, admission) = live_reads_of_one_resolution(&workspace, &importer, |_| {});
+    assert!(outcome.is_cacheable(), "the fixture resolves and admits");
+
+    let distinct = |reads: &[(&'static str, String)]| {
+        reads.iter().collect::<std::collections::HashSet<_>>().len()
+    };
+    assert!(
+        attempt.iter().any(|(kind, _)| *kind == "probe")
+            && attempt.iter().any(|(kind, _)| *kind == "file"),
+        "the attempt reads the disk at all: {attempt:?}"
+    );
+    assert_eq!(
+        attempt.len(),
+        distinct(&attempt),
+        "every disk read of the attempt is of a distinct path: {attempt:?}"
+    );
+    assert!(!admission.is_empty(), "the admission re-checks live");
+    assert_eq!(
+        admission.len(),
+        distinct(&admission),
+        "the admission re-checks each path once: {admission:?}"
+    );
+}
+
+/// A file that changes on disk after the attempt read it, before the attempt
+/// seals its evidence, is never admitted: the freeze reuses the attempt's
+/// read, so the admission's final validation is what sees the change, and it
+/// refuses and restarts. The restarted attempt reads the disk afresh and
+/// admits the new answer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_file_changed_mid_attempt_is_refused_at_admission_and_retried() {
+    use crate::engine::resolution_test_hooks::ResolutionPhase;
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(8);
+    let workspace = Arc::new(workspace);
+    let manifest_path = std::path::PathBuf::from(&manifest);
+    let mut rewritten = false;
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let _ = take_admission_revalidation_refusals_for_test();
+    let (outcome, attempts, _) =
+        live_reads_of_one_resolution(&workspace, &importer, move |phase| {
+            // The first completed provider attempt is the discovery's: the
+            // manifest has been read live and the freeze has not run yet.
+            if phase == ResolutionPhase::ProviderProjection && !rewritten {
+                rewritten = true;
+                std::fs::write(&manifest_path, r#"{"name":"pkg","types":"./b.d.ts"}"#)
+                    .expect("rewrite the manifest mid-attempt");
+            }
+        });
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    let refusals = take_admission_revalidation_refusals_for_test();
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some(format!("{root}/node_modules/pkg/b.d.ts").as_str()),
+        "the stale answer is never admitted"
+    );
+    assert!(outcome.is_cacheable(), "the restarted attempt admits");
+    assert_eq!(restarts, 1, "the change costs exactly one restart");
+    assert_eq!(
+        refusals, 1,
+        "the stale replay reached admission and its final validation refused it"
+    );
+    let manifest_reads = attempts
+        .iter()
+        .filter(|(kind, path)| *kind == "file" && *path == manifest)
+        .count();
+    // The first attempt's load, its refused admission's re-check, and the
+    // restarted attempt's own load: the restarted attempt reads the
+    // manifest afresh rather than reusing the first attempt's read.
+    assert_eq!(
+        manifest_reads, 3,
+        "the manifest is read once per attempt and once by the refused admission"
+    );
+}
+
+// ── node_modules pruning: one ancestor's missing `node_modules` (or missing
+//    `node_modules/<pkg>`) is the evidence for everything beneath it, and
+//    creating that directory later is noticed on the same rails as any other
+//    probe. ──────────────────────────────────────────────────────────────────
+
+/// A project whose `src/main.ts` imports `pkg`, with no package installed.
+/// With `with_node_modules`, the root `node_modules` exists but is empty.
+#[cfg(not(target_arch = "wasm32"))]
+fn uninstalled_package_fixture(
+    with_node_modules: bool,
+) -> (tempfile::TempDir, String, String, FilesystemWorkspace) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root_path = canonical_temp_root(&temp);
+    std::fs::create_dir_all(root_path.join("src")).expect("src dir");
+    std::fs::write(root_path.join("src/main.ts"), "import 'pkg';\n").expect("importer");
+    if with_node_modules {
+        std::fs::create_dir_all(root_path.join("node_modules")).expect("node_modules");
+    }
+    let root = temp_canonical_id(&root_path);
+    let importer = format!("{root}/src/main.ts");
+    let workspace = FilesystemWorkspace::new(FilesystemOptions {
+        roots: vec![root.clone()],
+        eager_preload: false,
+    });
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![crate::resolver::ide_project_config(
+            root.clone(),
+            root.clone(),
+            Some(format!("{root}/tsconfig.json")),
+        )],
+    );
+    (temp, root, importer, workspace)
+}
+
+/// Install `pkg` under the root `node_modules`, typed by `a.d.ts`.
+#[cfg(not(target_arch = "wasm32"))]
+fn install_package(root: &str) -> [String; 2] {
+    let package = std::path::PathBuf::from(format!("{root}/node_modules/pkg"));
+    std::fs::create_dir_all(&package).expect("package dir");
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"pkg","types":"./a.d.ts"}"#,
+    )
+    .expect("manifest");
+    std::fs::write(package.join("a.d.ts"), "export type A = 1;\n").expect("types");
+    [
+        format!("{root}/node_modules/pkg/package.json"),
+        format!("{root}/node_modules/pkg/a.d.ts"),
+    ]
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_pkg(
+    workspace: &FilesystemWorkspace,
+    importer: &str,
+) -> crate::resolution_currency::ResolutionOutcome {
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    let published = workspace.load_published().expect("published root");
+    WorkspaceRead::resolve_import_at_published(workspace, &published, importer, "pkg", CONTEXT)
+}
+
+/// The package directory, and in the second case `node_modules` itself,
+/// appears after the attempt observed it absent and before its admission:
+/// the admission's re-check of the pruned subtree's evidence refuses the
+/// stale miss, and the restarted attempt resolves the package.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_package_directory_created_before_admission_is_resolved() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    for with_node_modules in [true, false] {
+        let (_temp, root, importer, workspace) = uninstalled_package_fixture(with_node_modules);
+        let install_root = root.clone();
+        let mut installed = false;
+        let _ = take_admission_revalidation_refusals_for_test();
+        let outcome = resolution_test_hooks::with_every_phase_hook(
+            move |phase| {
+                // The first completed provider attempt is the discovery's: the
+                // absence has been observed and the attempt has not sealed.
+                if phase == ResolutionPhase::ProviderProjection && !installed {
+                    installed = true;
+                    install_package(&install_root);
+                }
+            },
+            || resolve_pkg(&workspace, &importer),
+        );
+        assert_eq!(
+            outcome.result().map(|result| result.source_id.as_str()),
+            Some(format!("{root}/node_modules/pkg/a.d.ts").as_str()),
+            "a package installed before admission is resolved (node_modules present \
+             beforehand: {with_node_modules})"
+        );
+        assert!(outcome.is_cacheable(), "the restarted attempt admits");
+        assert_eq!(
+            take_admission_revalidation_refusals_for_test(),
+            1,
+            "the admission's re-check refused the stale miss (node_modules present \
+             beforehand: {with_node_modules})"
+        );
+    }
+}
+
+/// The package directory, and in the second case `node_modules` itself,
+/// appears after the miss was admitted: once the watched change lands, the
+/// next resolution resolves the package instead of reusing the miss.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_package_directory_created_after_admission_is_resolved_after_the_watched_change() {
+    for with_node_modules in [true, false] {
+        let (_temp, root, importer, workspace) = uninstalled_package_fixture(with_node_modules);
+        let miss = resolve_pkg(&workspace, &importer);
+        assert!(
+            miss.result().is_none() && miss.is_cacheable(),
+            "nothing is installed yet, and the miss is admitted: {:?} {:?}",
+            miss.result(),
+            miss.non_admission_reason()
+        );
+
+        let [manifest, types] = install_package(&root);
+        workspace.apply_changes(vec![
+            WorkspaceChange::DirectoryTreeDirty {
+                prefix: format!("{root}/node_modules"),
+            },
+            WorkspaceChange::FileChanged {
+                canonical_id: manifest,
+                source: None,
+            },
+            WorkspaceChange::FileChanged {
+                canonical_id: types,
+                source: None,
+            },
+        ]);
+
+        let outcome = resolve_pkg(&workspace, &importer);
+        assert_eq!(
+            outcome.result().map(|result| result.source_id.as_str()),
+            Some(format!("{root}/node_modules/pkg/a.d.ts").as_str()),
+            "a package installed after the admitted miss is resolved once its change \
+             lands (node_modules present beforehand: {with_node_modules})"
+        );
+    }
+}
+
+/// Under an ancestor without `node_modules`, the attempt and the admission
+/// each read at most a couple of the paths beneath it: the first misses show
+/// the directories missing, and every other candidate beneath them is
+/// answered from that observation instead of read.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn candidates_beneath_a_missing_node_modules_are_not_read_one_by_one() {
+    let (_temp, root, importer, workspace) = uninstalled_package_fixture(false);
+    let _ = workspace.native_fs.take_live_reads_for_test();
+    let _ = take_admission_revalidation_refusals_for_test();
+    let outcome = resolve_pkg(&workspace, &importer);
+    assert!(
+        outcome.result().is_none() && outcome.is_cacheable(),
+        "the miss is admitted, so the admission re-check ran: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(take_admission_revalidation_refusals_for_test(), 0);
+    let reads = workspace.native_fs.take_live_reads_for_test();
+    for directory in [
+        format!("{root}/src/node_modules"),
+        format!("{root}/node_modules"),
+    ] {
+        let beneath = format!("{directory}/");
+        let under: Vec<_> = reads
+            .iter()
+            .filter(|(_, path)| path.starts_with(&beneath))
+            .collect();
+        // At most two misses per pass reveal the missing directories (the
+        // package directory, then node_modules itself), and there are two
+        // passes: the attempt and the admission re-check.
+        assert!(
+            !under.is_empty() && under.len() <= 4,
+            "candidates beneath the missing {directory} are answered from its observed absence, not read one by one: {under:?}"
+        );
+    }
+}
+
+/// A filesystem root never stands for its children: a miss at the root level
+/// must not answer every absolute path.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_root_is_never_a_prunable_parent() {
+    assert_eq!(prunable_parent("/missing"), None);
+    assert_eq!(prunable_parent("/missing/entry.ts"), Some("/missing"));
+    assert_eq!(prunable_parent("c:/missing"), None);
+    assert_eq!(
+        prunable_parent("c:/repo/node_modules/pkg.ts"),
+        Some("c:/repo/node_modules")
+    );
+    assert_eq!(prunable_parent("relative"), None);
+}

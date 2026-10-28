@@ -62,18 +62,28 @@ fn derivations_for(n: usize, exported: bool, cross_file: bool) -> (usize, String
     (derivations() - before, answer)
 }
 
-/// The derivations do not grow with the chain: 100, 200 and 400 exported
-/// links, in the probe module and imported from a sibling, derive the same
-/// number of times — each source revision once, in its source stage, which
-/// the count must see (it is never zero).
-#[test]
-fn an_exported_alias_chain_derives_its_source_parse_identity_a_fixed_number_of_times() {
-    in_a_fresh_process(test_path!(), exported_alias_chain_derivations_stay_fixed);
+fn exported_alias_chain_derivations_stay_fixed() {
+    assert_alias_chain_derivations_stay_fixed([100, 200, 400]);
 }
 
-fn exported_alias_chain_derivations_stay_fixed() {
+/// The chains at 25, 50 and 101 links: the gate version of the 100-, 200-
+/// and 400-link test in the nightly scale tier. A derivation per link shows
+/// at every length, so equal counts at these lengths are the full-size
+/// test's guarantee; the 101-link chain is still past the checker's
+/// instantiation depth of 100, so the longest gate chain answers where a
+/// depth-bound reading would refuse it.
+#[test]
+fn an_alias_chain_derives_its_source_parse_identity_a_fixed_number_of_times() {
+    in_a_fresh_process(test_path!(), || {
+        assert_alias_chain_derivations_stay_fixed([25, 50, 101])
+    });
+}
+
+/// Each layout's chain answers at each of `lengths` with the same, non-zero
+/// number of whole-source parse-identity derivations.
+fn assert_alias_chain_derivations_stay_fixed(lengths: [usize; 3]) {
     for (exported, cross_file) in [(true, false), (true, true), (false, false)] {
-        let counts: Vec<usize> = [100, 200, 400]
+        let counts: Vec<usize> = lengths
             .into_iter()
             .map(|n| {
                 let (derivations, answer) = derivations_for(n, exported, cross_file);
@@ -91,8 +101,8 @@ fn exported_alias_chain_derivations_stay_fixed() {
         );
         assert!(
             counts.windows(2).all(|pair| pair[0] == pair[1]),
-            "doubling the chain (exported: {exported}, cross-file: {cross_file}) must not \
-             add derivations: {counts:?} at 100, 200 and 400 links"
+            "lengthening the chain (exported: {exported}, cross-file: {cross_file}) must not \
+             add derivations: {counts:?} at {lengths:?} links"
         );
     }
 }
@@ -167,4 +177,19 @@ fn an_edit_to_an_exported_chain_rekeys_it_and_changes_the_answer() {
         evaluated(&host, project, &module, &probe),
         "Union(\"ok\" | undefined)"
     );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// The derivations do not grow with the chain: 100, 200 and 400 exported
+    /// links, in the probe module and imported from a sibling, derive the same
+    /// number of times — each source revision once, in its source stage, which
+    /// the count must see (it is never zero).
+    #[test]
+    fn an_exported_alias_chain_derives_its_source_parse_identity_a_fixed_number_of_times() {
+        in_a_fresh_process(test_path!(), exported_alias_chain_derivations_stay_fixed);
+    }
 }

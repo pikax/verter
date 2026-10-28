@@ -56,7 +56,7 @@ fn fallthrough_signature_carries_member() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "fallthrough matrix slice: the permissive view MUST accept a \
          `Member` fact in the Arc-stored fallthrough signature."
     );

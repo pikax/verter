@@ -38,7 +38,8 @@ fn a_deferred_memo_serve_roots_its_result_in_the_consuming_scope() {
                 Vec::new(),
             ),
             (
-                Arc::from([dependency.clone()]),
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of([dependency.clone()]),
                 Arc::from([Arc::from("/dependency.ts")]),
             ),
         );
@@ -49,6 +50,7 @@ fn a_deferred_memo_serve_roots_its_result_in_the_consuming_scope() {
         let _consumer = graph.enter_node_root_scope();
         let (read, facts) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
             Default::default(),
+            verter_session_query::facts::policy::FactPolicy::production(),
             |_| {
                 let _nested_read = graph.enter_node_root_scope();
                 graph
@@ -60,8 +62,8 @@ fn a_deferred_memo_serve_roots_its_result_in_the_consuming_scope() {
             panic!("a validated memo proof stays complete");
         };
         assert_eq!(
-            facts.as_ref(),
-            &[dependency],
+            facts,
+            verter_session_query::facts::policy::FactPolicy::production().set_of([dependency]),
             "a consumed memo must deliver its dependency proof"
         );
         assert_eq!(read.value, result);
@@ -117,7 +119,10 @@ fn deferred_publication_reuses_the_receipts_operand_owner() {
             demand,
             result,
             receipt,
-            (Arc::from([]), Arc::from([])),
+            (
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+                Arc::from([]),
+            ),
         );
         assert_eq!(
             graph.peek_evaluate_deferred_memo_for_tests(input, context),
@@ -130,8 +135,8 @@ fn deferred_publication_reuses_the_receipts_operand_owner() {
         );
         assert_eq!(
             super::super::node_roots::root_owner_constructions_for_tests() - before_owners,
-            usize::from(!same_result),
-            "an identical result shares the existing physical root owner"
+            0,
+            "a short result set allocates no owner"
         );
     }
 }
@@ -162,7 +167,10 @@ fn a_held_evaluation_receipt_does_not_keep_a_distinct_result_after_eviction() {
             demand,
             result,
             Arc::clone(&receipt),
-            (Arc::from([]), Arc::from([])),
+            (
+                verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+                Arc::from([]),
+            ),
         );
         (input, result, receipt)
     };
@@ -264,7 +272,11 @@ fn retained_topology_includes_an_unrelated_prerequisite_operand() {
                         demand,
                         nodes[1],
                         receipt,
-                        (Arc::from([]), Arc::from([])),
+                        (
+                            verter_session_query::facts::policy::FactPolicy::production()
+                                .empty_set(),
+                            Arc::from([]),
+                        ),
                     );
                 }
                 (nodes[0], nodes[1], nodes[2])

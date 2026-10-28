@@ -1568,7 +1568,7 @@ pub enum VirtualNodeKind {
 /// Produced during parsing when `<script src="...">`, `<template src="...">`,
 /// or `<style src="...">` is encountered. The host registers the external
 /// bytes as their own source artifact; it never merges them into a carrier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ExternalSourceRequest {
     /// Canonical ID of the SFC that contains the `src` attribute.
     pub owner_canonical_id: String,
@@ -1592,7 +1592,7 @@ pub struct ExternalSourceRequest {
 }
 
 /// Which SFC block kind an external `src` reference belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum ExternalBlockKind {
     Script,
     Template,
@@ -1925,7 +1925,7 @@ pub enum NativeExportRead {
 
 /// Descriptive content class. This is never block identity: callers correlate
 /// and apply content only through the sealed token and its captured stamps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum BlockContentClass {
     Template,
     Script,
@@ -2223,7 +2223,7 @@ pub struct PreprocessorRequest {
     pub custom_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct PendingPreprocessorRequest {
     pub(crate) content_class: BlockContentClass,
     pub(crate) block_ref: verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef,
@@ -2668,7 +2668,7 @@ pub(crate) struct ParsedRawId {
     pub(crate) was_lsp_like: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub(crate) struct DescriptorMin {
     pub(crate) script_count: usize,
     pub(crate) template_count: usize,
@@ -2681,7 +2681,7 @@ pub(crate) struct DescriptorMin {
     pub(crate) vapor: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub(crate) struct SliceHashes {
     pub(crate) script: Option<Hash16>,
     pub(crate) template: Option<Hash16>,
@@ -2689,7 +2689,7 @@ pub(crate) struct SliceHashes {
     pub(crate) custom: Vec<Hash16>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct FileMeta {
     pub has_script: bool,
     pub has_template: bool,
@@ -2730,7 +2730,7 @@ impl FileMeta {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 #[allow(dead_code)] // Geometry fields remain until the physical cleanup lands.
 pub(crate) struct SrcBlockInfo {
     pub(crate) tag_name: String,
@@ -2787,7 +2787,7 @@ pub(crate) struct VueTemplateInputs {
     pub(crate) source_version: Option<verter_scheduler::node::SourceVersion>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct ParseSnapshot {
     pub(crate) whole_hash: Hash16,
     pub(crate) semantic_hash: Hash16,
@@ -2818,6 +2818,7 @@ pub(crate) struct ParseSnapshot {
     /// refused: nothing in this snapshot was read from the script, and the
     /// source stage reports the refusal in its place
     /// ([`verter_scheduler::execution::executor::StageErrorKind::StackUnavailable`]).
+    #[heap_size(inline)]
     pub(crate) refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
@@ -3332,7 +3333,7 @@ pub(crate) struct CompileSlot {
     /// pre-filter.
     pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     /// The slot's own allocations — its map slot, its diagnostics, its
-    /// override text, its fact slice and the evidence pages it reaches —
+    /// override text, its fact set and the storage that set reaches —
     /// on one refusable reservation that also holds the products' cell.
     pub(crate) _retention: Arc<verter_session_query::retention::RetentionCharge>,
 }
@@ -3811,6 +3812,22 @@ pub struct DerivedRawState {
     /// cache across no-op reloads. `None` triggers the conservative bump that
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
+
+    /// How many times this file has been evicted. A reload clears
+    /// `evicted` only when no eviction has landed since it started, so an
+    /// eviction during a reload leaves the file evicted for the next reload.
+    pub(crate) eviction_epoch: u64,
+
+    /// The eviction whose pre-eviction scheduler snapshot a reload has
+    /// already reset. Below `eviction_epoch`, the next reload resets the
+    /// scheduler before loading; at it, a reload joins the reset one.
+    pub(crate) eviction_reset_epoch: u64,
+
+    /// Serialises this file's reload reset, so callers racing to reload one
+    /// eviction reset the scheduler once and every load request follows
+    /// that reset. Held only for the reset, never across the load, and never
+    /// for another file.
+    pub(crate) eviction_reset: Arc<parking_lot::Mutex<()>>,
 }
 
 impl DerivedRawState {
@@ -3860,7 +3877,7 @@ impl DerivedRawState {
             .as_ref()
             .is_none_or(|entry| entry.source_version <= source_version);
         if supersedes {
-            if verter_session_query::facts::receipt::claim_evidence_pages(
+            if verter_session_query::facts::receipt::claim_retained_storage(
                 account,
                 &template_class_signature.facts,
             )

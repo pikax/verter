@@ -60,11 +60,12 @@ impl IdeProjectCompilerOptions {
 /// lib env dimension through that derived name and never the type env
 /// dimension.
 ///
-/// Accepted spellings follow the 7.0.2 binary (`tsc --listFilesOnly`
-/// with a one-option `tsconfig.json`): `es5` (deprecated but still
-/// honoured), `es6`/`es2015`, `es2016`…`es2025`, `esnext`. `es3` and
-/// `es7` are rejected by the binary (`TS6046`) and fall back to the
-/// default target here, exactly as the rejected option falls back there.
+/// Accepted spellings follow the pinned binary (`tsc --listFilesOnly`
+/// with a one-option `tsconfig.json`, re-measured on 7.1.0-beta): `es5`
+/// (reported as removed, `TS5108`, yet its `lib.d.ts` still loads),
+/// `es6`/`es2015`, `es2016`…`es2026`, `esnext`. `es3` and `es7` are
+/// rejected by the binary (`TS6046`) and fall back to the default target
+/// here, exactly as the rejected option falls back there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ScriptTarget {
     Es5,
@@ -79,22 +80,24 @@ pub enum ScriptTarget {
     Es2023,
     Es2024,
     Es2025,
+    Es2026,
     EsNext,
 }
 
 impl Default for ScriptTarget {
-    /// TypeScript 7.0.2 default. Probe: `tsc --listFilesOnly` over an
-    /// empty `{}` tsconfig loads `lib.es2025.full.d.ts`, the default lib of
-    /// exactly this target (`--target es2025` loads the same file;
-    /// `--target esnext` loads `lib.esnext.full.d.ts`).
+    /// The pinned TypeScript's default (re-measured on 7.1.0-beta). Probe:
+    /// `tsc --listFilesOnly` over a tsconfig declaring no options loads
+    /// `lib.es2026.full.d.ts`, the default lib of exactly this target
+    /// (`--target es2026` loads the same file; `--target esnext` loads
+    /// `lib.esnext.full.d.ts`).
     fn default() -> Self {
-        Self::Es2025
+        Self::Es2026
     }
 }
 
 impl ScriptTarget {
     /// Parse a tsconfig `target` spelling (case-insensitive). `None` for a
-    /// spelling the 7.0.2 binary rejects (`es3`, `es7`, typos): the
+    /// spelling the pinned binary rejects (`es3`, `es7`, typos): the
     /// project then runs on the default target, as TypeScript does after
     /// reporting the rejected option.
     #[must_use]
@@ -112,15 +115,16 @@ impl ScriptTarget {
             "es2023" => Self::Es2023,
             "es2024" => Self::Es2024,
             "es2025" => Self::Es2025,
+            "es2026" => Self::Es2026,
             "esnext" => Self::EsNext,
             _ => return None,
         })
     }
 
     /// The lib file TypeScript loads for this target when `lib` is unset
-    /// and `noLib` is off. Pinned against the 7.0.2 binary
-    /// (`tsc --listFilesOnly` per target): `es5` → `lib.d.ts`,
-    /// `es2015` → `lib.es6.d.ts`, `es2016`…`es2025` →
+    /// and `noLib` is off. Pinned against the binary (`tsc --listFilesOnly`
+    /// per target, re-measured on 7.1.0-beta): `es5` → `lib.d.ts`,
+    /// `es2015` → `lib.es6.d.ts`, `es2016`…`es2026` →
     /// `lib.esYYYY.full.d.ts`, `esnext` → `lib.esnext.full.d.ts`.
     #[must_use]
     pub fn default_lib_file_name(self) -> &'static str {
@@ -137,27 +141,25 @@ impl ScriptTarget {
             Self::Es2023 => "lib.es2023.full.d.ts",
             Self::Es2024 => "lib.es2024.full.d.ts",
             Self::Es2025 => "lib.es2025.full.d.ts",
+            Self::Es2026 => "lib.es2026.full.d.ts",
             Self::EsNext => "lib.esnext.full.d.ts",
         }
     }
 }
 
 /// Canonicalise one tsconfig `lib` entry into the lib FILE name TypeScript
-/// loads for it: lowercase, the two historical aliases (`es6` → `es2015`,
-/// `es7` → `es2016`) resolved, then `lib.<name>.d.ts`. Pinned against the
-/// 7.0.2 binary: `["ES6", "DOM"]` loads `lib.es2015.d.ts` + `lib.dom.d.ts`;
-/// `["es7"]` loads `lib.es2016.d.ts`. A spelling the binary rejects
-/// (`TS6046`) still canonicalises by the same rule — it distinguishes the
-/// configuration without pretending to know the binary's accepted set.
+/// loads for it: the file TypeScript's library table maps the lowercased
+/// name to ([`crate::inputs::program_order::library_file_name`]). Pinned
+/// against the binary (re-measured on 7.1.0-beta): `["ES6", "DOM"]` loads
+/// `lib.es2015.d.ts` + `lib.dom.d.ts`; `["es7"]` loads `lib.es2016.d.ts`;
+/// `["esnext.array"]` loads `lib.es2026.array.d.ts`. A spelling the binary
+/// rejects (`TS6046`) canonicalises to `lib.<name>.d.ts` — it distinguishes
+/// the configuration without pretending to know the binary's accepted set.
 #[must_use]
 pub fn canonical_lib_file_name(spelling: &str) -> String {
     let lowered = spelling.trim().to_ascii_lowercase();
-    let name = match lowered.as_str() {
-        "es6" => "es2015",
-        "es7" => "es2016",
-        other => other,
-    };
-    format!("lib.{name}.d.ts")
+    crate::inputs::program_order::library_file_name(&lowered)
+        .map_or_else(|| format!("lib.{lowered}.d.ts"), str::to_owned)
 }
 
 /// The raw, spelling-level semantic options a single tsconfig (or an
@@ -222,8 +224,8 @@ impl RawSemanticCompilerOptions {
     /// Resolve the declared spellings into the effective option set.
     ///
     /// Each `strict`-family member takes its explicit value when declared,
-    /// otherwise the umbrella `strict` value, otherwise TypeScript 7.0.2's
-    /// default (`strict` ON — see [`SemanticCompilerOptions::default`]).
+    /// otherwise the umbrella `strict` value, otherwise the pinned
+    /// TypeScript's default (`strict` ON — see [`SemanticCompilerOptions::default`]).
     /// `exactOptionalPropertyTypes` / `noUncheckedIndexedAccess` / `noLib`
     /// default OFF and are not umbrella members. `lib` entries
     /// canonicalise through [`canonical_lib_file_name`], deduplicate and
@@ -279,8 +281,9 @@ impl RawSemanticCompilerOptions {
 /// exactly the type-meaning fields of this struct, the lib env dimension
 /// exactly the lib-selection fields ([`Self::effective_lib_file_names`]).
 ///
-/// [`Default`] is TypeScript 7.0.2's default configuration, pinned by
-/// running its `tsc.exe` over a file with no tsconfig options: `strict`
+/// [`Default`] is the pinned TypeScript's default configuration, pinned by
+/// running its `tsc.exe` over a file with no tsconfig options (re-measured
+/// on 7.1.0-beta): `strict`
 /// is ON (`let a: string = null` → TS2322, an unannotated parameter →
 /// TS7006, a `catch` binding → TS18046 `unknown`, an uninitialised class
 /// property → TS2564, a narrower callback parameter → the
@@ -288,7 +291,7 @@ impl RawSemanticCompilerOptions {
 /// (`{ a: undefined }` into `{ a?: number }` is accepted; ON reports
 /// TS2375), `noUncheckedIndexedAccess` is OFF (`arr[0]` types as `number`;
 /// ON reports TS2322 `number | undefined`), `noLib` is OFF, `lib` is unset
-/// and the default target loads `lib.es2025.full.d.ts`.
+/// and the default target loads `lib.es2026.full.d.ts`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SemanticCompilerOptions {
     /// `strictNullChecks`: `null` / `undefined` are their own types and

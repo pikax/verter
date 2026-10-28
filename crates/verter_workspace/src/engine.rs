@@ -485,6 +485,10 @@ impl BaselineFold {
 /// `resolution_world_write` rather than by a lock order of its own.
 pub(crate) struct Engine {
     pub(crate) input_resolution_budgets: verter_session_query::resolution::InputResolutionBudgets,
+    /// The fact policy every resolution witness this engine seals is built
+    /// under. Chosen with the workspace at its composition root and never
+    /// changed; a host bound to the workspace builds under the same policy.
+    pub(crate) fact_policy: verter_session_query::facts::policy::FactPolicy,
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
@@ -670,11 +674,13 @@ impl Engine {
     pub(crate) fn new() -> Self {
         Self::new_with_input_resolution_budgets(
             verter_session_query::resolution::InputResolutionBudgets::default(),
+            verter_session_query::facts::policy::FactPolicy::production(),
         )
     }
 
     pub(crate) fn new_with_input_resolution_budgets(
         input_resolution_budgets: verter_session_query::resolution::InputResolutionBudgets,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
         static NEXT_SESSION_FINGERPRINT: AtomicU64 = AtomicU64::new(1);
         let initial_extensions: Vec<String> = Self::merge_extensions(&[]);
@@ -691,6 +697,7 @@ impl Engine {
         let retention = Arc::new(crate::overlay_residency::RetentionHook::default());
         let engine = Self {
             input_resolution_budgets,
+            fact_policy,
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
@@ -2884,26 +2891,32 @@ impl Engine {
             .len()
     }
 
-    /// Subscribers waiting on the flight of one query slot and domain.
+    /// Wait until the flight for the given query has at least `count` subscribers, with a
+    /// 20-second hang guard.
     #[cfg(test)]
-    pub(crate) fn flight_subscribers_for_test(
+    pub(crate) fn wait_for_flight_subscribers_for_test(
         &self,
         importer_id: &str,
         specifier: &str,
         context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
         overlay_domain: bool,
-    ) -> usize {
-        self.flights.subscribers(&(
-            LazyResolutionCacheKey {
-                importer_id: importer_id.to_owned(),
-                specifier: specifier.to_owned(),
-                phase: context.phase,
-                kind: context.kind,
-                population,
-            },
-            overlay_domain,
-        ))
+        count: usize,
+    ) -> bool {
+        self.flights.wait_for_subscribers(
+            &(
+                LazyResolutionCacheKey {
+                    importer_id: importer_id.to_owned(),
+                    specifier: specifier.to_owned(),
+                    phase: context.phase,
+                    kind: context.kind,
+                    population,
+                },
+                overlay_domain,
+            ),
+            count,
+            std::time::Duration::from_secs(20),
+        )
     }
 
     /// Candidates the overlay lane holds, across every slot.
@@ -3989,7 +4002,10 @@ impl Engine {
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
 
-            let transaction = Mutex::new(ResolutionTransaction::new(Arc::clone(&captured.world)));
+            let transaction = Mutex::new(ResolutionTransaction::new(
+                Arc::clone(&captured.world),
+                self.fact_policy,
+            ));
             let exact_fact =
                 ResolutionFactKey::exact_importer(importer_id, specifier, ctx, population);
             transaction.lock().observe(exact_fact.clone());
@@ -4585,7 +4601,7 @@ impl Engine {
                         cache_key.clone(),
                         entry.clone(),
                         bytes,
-                        &entry.signature.facts,
+                        (&entry.signature.facts).into(),
                         overlay.authority(),
                     );
                     published = seq.is_some();
@@ -4623,7 +4639,7 @@ impl Engine {
                         Err(None)
                     } else {
                         self.retention
-                            .reserve_with_evidence(bytes, &entry.signature.facts)
+                            .reserve_with_evidence(bytes, (&entry.signature.facts).into())
                             .map_err(|crate::overlay_residency::RetentionRefused| {
                                 Some(verter_audit::NonAdmissionReason::RetentionPressure)
                             })
@@ -4720,7 +4736,7 @@ impl Engine {
                     let node = ResolutionFactKey::decision(query);
                     let version = captured.world.fact_version(&node);
                     admission =
-                        SignatureAdmission::Cacheable(verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
+                        SignatureAdmission::Cacheable(verter_session_query::facts::fact_cache::ReadSetSignature::new(self.fact_policy.set_of_shared(Arc::from([
                             verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
                                 verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(
                                     crate::resolution_currency::ResolutionFactRef {
@@ -4729,7 +4745,7 @@ impl Engine {
                                     },
                                 ),
                             ),
-                        ])));
+                        ]))));
                 }
             }
             // The workspace's own edge store records only what the
@@ -4850,7 +4866,10 @@ impl Engine {
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
 
-            let transaction = Mutex::new(ResolutionTransaction::new(Arc::clone(&captured.world)));
+            let transaction = Mutex::new(ResolutionTransaction::new(
+                Arc::clone(&captured.world),
+                self.fact_policy,
+            ));
             let selected = match explicit_context(captured.world.base.as_ref(), owner) {
                 Ok(context) => Some(context),
                 Err(_) => {
@@ -5113,7 +5132,10 @@ impl Engine {
         input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) -> ResolutionOutcome {
         let population = captured_world.population;
-        let transaction = Mutex::new(ResolutionTransaction::new(Arc::clone(captured_world)));
+        let transaction = Mutex::new(ResolutionTransaction::new(
+            Arc::clone(captured_world),
+            self.fact_policy,
+        ));
         let selected_context =
             match selected_context_for_path(captured_world.base.as_ref(), importer_id) {
                 Ok(context) => Some(context),
@@ -5210,7 +5232,10 @@ impl Engine {
         captured_world: &Arc<CapturedResolutionWorld>,
     ) -> ResolutionOutcome {
         let population = captured_world.population;
-        let transaction = Mutex::new(ResolutionTransaction::new(Arc::clone(captured_world)));
+        let transaction = Mutex::new(ResolutionTransaction::new(
+            Arc::clone(captured_world),
+            self.fact_policy,
+        ));
         let selected_context =
             match selected_context_for_path(captured_world.base.as_ref(), importer_id) {
                 Ok(context) => Some(context),

@@ -14,7 +14,8 @@
  * feature switched on. A crate that gains the feature joins the lane without a
  * hand-maintained list. The test selection is the provider-free core filter,
  * the same one the core shards use, so real-provider tests stay in their own
- * lifecycle jobs.
+ * lifecycle jobs. This full suite runs nightly; pull requests run `smoke`,
+ * a small host-backed compile that verifies real output and stored capture.
  *
  * Foreign-crate compile fixtures type-check against metadata staged from the
  * exact build under test, so `run` first prepares that metadata
@@ -22,6 +23,7 @@
  * package and feature selection — the same build the tests then run from.
  *
  * Usage:
+ *   node scripts/observe-lane.mjs smoke  # bounded host capture check
  *   node scripts/observe-lane.mjs args   # print the nextest arguments
  *   node scripts/observe-lane.mjs run [extra nextest args...]
  */
@@ -93,11 +95,31 @@ function readMetadata() {
 }
 
 function usage() {
-  return "Usage:\n  node scripts/observe-lane.mjs args\n  node scripts/observe-lane.mjs run [extra nextest args...]\n";
+  return "Usage:\n  node scripts/observe-lane.mjs smoke\n  node scripts/observe-lane.mjs args\n  node scripts/observe-lane.mjs run [extra nextest args...]\n";
 }
 
-export function main(argv) {
+export function main(argv, { spawn = spawnSync } = {}) {
   const [command, ...rest] = argv;
+  if (command === "smoke" && rest.length === 0) {
+    // A concrete executable cannot pass by selecting zero tests. Do not
+    // prepare the full suite's foreign-crate metadata for this host check.
+    const run = spawn(
+      "cargo",
+      [
+        "run",
+        "--locked",
+        "-p",
+        "verter_session",
+        "--features",
+        OBSERVE_FEATURE,
+        "--example",
+        "observe_smoke",
+      ],
+      { cwd: REPO_ROOT, stdio: "inherit" },
+    );
+    if (run.error) throw run.error;
+    return run.status ?? 1;
+  }
   if (command !== "args" && command !== "run") {
     process.stderr.write(usage());
     return 2;

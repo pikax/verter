@@ -668,14 +668,20 @@ impl SemanticGraphStore {
             }
             let inflight = {
                 let mut table = self.site_inflight(attempt.site).lock();
-                table
+                let inflight = table
                     .entry(prepared.clone())
                     .or_insert_with(|| {
                         let mut cell = FlightCell::charged(self.retention_account());
                         cell.site = attempt.site;
                         Arc::new(cell)
                     })
-                    .clone()
+                    .clone();
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    *self.inflight_referenced.0.lock() += 1;
+                    self.inflight_referenced.1.notify_all();
+                }
+                inflight
             };
             {
                 let mut state = inflight.state.lock();
@@ -795,6 +801,10 @@ impl Subscription<'_> {
                 .parked
                 .as_mut()
                 .expect("a waiting subscriber is parked");
+            #[cfg(any(test, feature = "test-support"))]
+            let mut announced = false;
+            #[cfg(any(test, feature = "test-support"))]
+            let store = self.store;
             verter_execution::blocking::block_on(
                 verter_execution::blocking::WaitFamily::SemanticFlight,
                 None,
@@ -807,6 +817,10 @@ impl Subscription<'_> {
                         return std::task::Poll::Ready(());
                     }
                     state.wakers.register(&mut parked.waker, waker);
+                    #[cfg(any(test, feature = "test-support"))]
+                    if !std::mem::replace(&mut announced, true) {
+                        store.announce_joiner_suspended();
+                    }
                     std::task::Poll::Pending
                 },
             );
@@ -850,6 +864,8 @@ impl Subscription<'_> {
                 self.resolve(state, ctx, flags, attempt, capture, wait_start),
             );
         }
+        #[cfg(any(test, feature = "test-support"))]
+        let first_registration = self.parked.is_none();
         if self.parked.is_none() {
             if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return std::task::Poll::Ready(Joined::Recursive(Recursion::WaitCycle));
@@ -860,6 +876,10 @@ impl Subscription<'_> {
             .as_mut()
             .expect("a pending subscriber is parked");
         state.wakers.register(&mut parked.waker, waker);
+        #[cfg(any(test, feature = "test-support"))]
+        if first_registration {
+            self.store.announce_joiner_suspended();
+        }
         std::task::Poll::Pending
     }
 
@@ -891,13 +911,6 @@ impl Subscription<'_> {
             Some(rendezvous) => rendezvous.note_subscriber(key, &self.inflight),
             None => super::inflight::SubscriberRegistration::inactive(),
         };
-        // Test-only: record that this subscriber is about to SUSPEND (it
-        // holds `state`, and either parks on the condvar, which atomically
-        // releases `state`, or returns pending with its waker registered).
-        #[cfg(any(test, feature = "test-support"))]
-        self.store
-            .joiner_on_condvar_count
-            .fetch_add(1, Ordering::SeqCst);
         self.parked = Some(Parked {
             _edge: edge,
             #[cfg(feature = "semantic-observe")]
@@ -1158,6 +1171,7 @@ fn settle_output(
     key: &SemanticQueryKey,
     output: BuildOutput,
     priced: bool,
+    policy: verter_session_query::facts::policy::FactPolicy,
 ) -> SettledOutput {
     let BuildOutput {
         result,
@@ -1198,9 +1212,7 @@ fn settle_output(
     // the result is admitted.
     let carrier = match graph_carrier {
         Some(boxed) => *boxed,
-        None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
-            crate::fact_signature_helpers::empty_fact_signature(),
-        ),
+        None => verter_session_query::facts::fact_cache::ReadSetSignature::empty(policy),
     };
     // §2 admission invariant: a partial result is never admissible, so
     // it must already be non-cacheable (`finalise_traced_build_output`
@@ -1315,7 +1327,13 @@ impl SemanticGraphStore {
         if flags.is_cancelled() {
             return (cancelled_cache_read(), None);
         }
-        let settled = settle_output(self, attempt.prepared.key(), output, cost_receipt.is_some());
+        let settled = settle_output(
+            self,
+            attempt.prepared.key(),
+            output,
+            cost_receipt.is_some(),
+            flags.fact_policy(),
+        );
         capture.deliver_carrier(&settled.carrier);
         let read = CacheRead {
             lease: self
@@ -1472,7 +1490,13 @@ impl<'s> ProducerLease<'s> {
             cache_suppress,
             fact_status,
             admissible,
-        } = settle_output(store, prepared.key(), output, cost_receipt.is_some());
+        } = settle_output(
+            store,
+            prepared.key(),
+            output,
+            cost_receipt.is_some(),
+            flags.fact_policy(),
+        );
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
         // …) records no path-walk hops, so its satisfied projection defaults
         // to the single terminal point the slot's mode denotes at the key's

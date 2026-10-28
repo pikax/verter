@@ -23,10 +23,14 @@ fn unbounded_account() -> Arc<SemanticRetentionAccount> {
 /// per-fact proxy would charge it like any short one.
 fn oversized_carrier() -> (ReadSetSignature, Arc<[Arc<str>]>) {
     let canonical = format!("/ws/{}.ts", "c".repeat(CANONICAL_LEN));
-    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone().into(),
-        hash: [7; 16],
-    }]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.clone().into(),
+                hash: [7; 16],
+            },
+        ]),
+    );
     let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
     (carrier, roots)
 }
@@ -164,7 +168,11 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     drop(members);
     drop((root, member));
     drop(receipt);
-    assert_eq!(account.snapshot().total_bytes(), 0, "every charge released");
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        store.project_dep_name_pinned_bytes(),
+        "every charge released but the store's own name"
+    );
     assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
 }
 
@@ -229,7 +237,7 @@ fn a_name_a_diagnostic_and_a_dependency_rail_share_is_charged_once() {
                 DepVersion::ProjectGeneration(1),
             )]);
         drop(name);
-        let facts = crate::fact_signature_helpers::empty_fact_signature();
+        let facts = verter_session_query::facts::policy::FactPolicy::production().empty_set();
         let roots: Arc<[Arc<str>]> = Arc::from(Vec::new());
         let result = QueryResult::Value(SemanticQueryValue::TypeNode(
             crate::semantic_query::SemanticNodeId(0),

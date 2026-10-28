@@ -42,7 +42,7 @@ use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
 /// seam.
-#[derive(Debug)]
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
 pub struct VueParseCarrier {
     parsed: Arc<ParsedSfc>,
     parse_options: ParseOptions,

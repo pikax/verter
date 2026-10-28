@@ -552,12 +552,13 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
 /// not starve the scheduler stage pool. The hard gate is "completes
 /// within the timeout".
 ///
-/// The input count stays deliberately small: every stage hand-off in the
-/// 1-thread-pool pipeline pays an inflated wake latency when the CI lane
-/// runs this beside the other lane tests (the nextest `ci` profile
-/// terminates at 20s), and the discrimination — completion under
-/// saturated pools — does not grow with the batch size. A naive
-/// submit→inline-wait deadlocks on the first item whatever N is.
+/// The batch also guards against lost driver wakes. While the only host
+/// worker waits on a transferred producer it runs the next batch item, whose
+/// cache node the ledger refuses until that producer's flight returns its
+/// CPU permit outside any pump. Without the driver wake on that release
+/// each such hand-off stalled for the driver's 5 s idle re-pump, so the run
+/// took 5 to 20 s instead of a fraction of a second. Every hand-off is a
+/// chance to lose a wake, so the batch keeps its full size.
 #[test]
 fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     use std::sync::mpsc;
@@ -577,7 +578,7 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     };
     let host = VerterHost::new_standalone_with_scheduler_config(config, scheduler_config);
 
-    const N: usize = 8;
+    const N: usize = 24;
     let inputs: Vec<CompileBatchInput> = (0..N)
         .map(|i| ok_input(&format!("/dl{i}.vue"), &good_template(&format!("d{i}"))))
         .collect();

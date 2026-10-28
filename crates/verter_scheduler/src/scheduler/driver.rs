@@ -343,6 +343,86 @@ pub(crate) struct DispatchPauseHook {
     pub(super) cv: parking_lot::Condvar,
 }
 
+/// TEST-ONLY: counts the native driver's completed passes — each one pumps
+/// until the pump reports no progress, right before the driver parks — so a
+/// test waits on the driver having acted instead of sampling on a timer.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Default)]
+pub(crate) struct DriverPasses {
+    count: Mutex<u64>,
+    passed: parking_lot::Condvar,
+    /// Replaces the driver's idle re-pump interval when set, so a test can
+    /// take that safety net out of play.
+    pub(crate) idle_repump_override: Mutex<Option<std::time::Duration>>,
+    /// How many times a cooperative pump has parked on its handle.
+    cooperative_parks: Mutex<u64>,
+    cooperative_parked: parking_lot::Condvar,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl DriverPasses {
+    pub(crate) fn record(&self) {
+        *self.count.lock() += 1;
+        self.passed.notify_all();
+    }
+
+    pub(crate) fn record_cooperative_park(&self) {
+        *self.cooperative_parks.lock() += 1;
+        self.cooperative_parked.notify_all();
+    }
+
+    pub(crate) fn cooperative_parks(&self) -> u64 {
+        *self.cooperative_parks.lock()
+    }
+
+    /// Wait until cooperative pumps have parked more than `after` times in
+    /// all. Returns whether that happened before `budget` ran out; the
+    /// budget is a hang guard only.
+    pub(crate) fn wait_for_cooperative_park(
+        &self,
+        after: u64,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut parks = self.cooperative_parks.lock();
+        while *parks <= after {
+            if self
+                .cooperative_parked
+                .wait_until(&mut parks, deadline)
+                .timed_out()
+            {
+                return *parks > after;
+            }
+        }
+        true
+    }
+
+    /// Wait until `ready` holds, re-checking it after every driver pass.
+    /// Returns whether it held before `budget` ran out; the budget is a hang
+    /// guard only.
+    pub(crate) fn wait_until(
+        &self,
+        mut ready: impl FnMut() -> bool,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut seen = *self.count.lock();
+        loop {
+            if ready() {
+                return true;
+            }
+            let mut count = self.count.lock();
+            while *count == seen {
+                if self.passed.wait_until(&mut count, deadline).timed_out() {
+                    drop(count);
+                    return ready();
+                }
+            }
+            seen = *count;
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub(super) struct DispatchPauseState {
@@ -360,6 +440,8 @@ pub(super) struct DispatchPauseState {
     pub(super) consumed: bool,
     /// `true` once the test has released the parked driver.
     pub(super) released: bool,
+    /// How many inbox re-drains the parked driver has completed.
+    pub(super) redrains: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -375,7 +457,7 @@ impl DispatchPauseHook {
     ///
     /// The single call site is in the native dispatch loop.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn()) {
+    pub(super) fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn(std::time::Duration)) {
         use std::time::{Duration, Instant};
         let mut state = self.state.lock();
         if !state.armed || state.consumed {
@@ -396,9 +478,14 @@ impl DispatchPauseHook {
             // Drop the lock around the re-drain so the test can observe
             // `paused`/`released` and so `redrain` (which locks the
             // scheduler DAG, not this state) cannot deadlock against it.
+            // The re-drain blocks until the next submission reaches the
+            // inbox; a release posts a wake there, so it never waits on a
+            // timer.
             drop(state);
-            redrain();
+            redrain(deadline.saturating_duration_since(Instant::now()));
             state = self.state.lock();
+            state.redrains += 1;
+            self.cv.notify_all();
             if state.released {
                 break;
             }
@@ -407,9 +494,6 @@ impl DispatchPauseHook {
                 "dispatch pause was never released within 10s — the test \
                  driver did not call test_release_dispatch_pause (deadlock)"
             );
-            // Park briefly on the condvar; a release wakes us promptly,
-            // otherwise we loop to re-drain and re-check the deadline.
-            let _ = self.cv.wait_for(&mut state, Duration::from_millis(2));
         }
     }
 }
@@ -518,6 +602,20 @@ impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn drain_inbox(&self) {
         let _ = self.drain_inbox_for_pump();
+    }
+
+    /// Test-only: wait up to `timeout` for the next submission, process it, then drain the
+    /// rest of the inbox.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    pub(super) fn drain_inbox_blocking(&self, timeout: std::time::Duration) {
+        if let Ok(submission) = self.inbox.receiver.recv_timeout(timeout) {
+            if self.shutdown.load(Ordering::Acquire) {
+                self.shutdown_drained_submission(submission);
+            } else {
+                self.process_submission(submission);
+            }
+        }
+        self.drain_inbox();
     }
 
     /// WASM build's drain_inbox (no cooperative-pump infrastructure
@@ -673,7 +771,7 @@ impl Scheduler {
             // unless a test has armed the hook; absent from release builds.
             #[cfg(any(test, feature = "test-support"))]
             self.dispatch_pause
-                .on_dispatch_and_maybe_pause(&|| self.drain_inbox());
+                .on_dispatch_and_maybe_pause(&|timeout| self.drain_inbox_blocking(timeout));
         }
         stats
     }
@@ -1139,6 +1237,7 @@ impl Scheduler {
         crate::execution::pool::SchedulerPoolSubmitResult,
         crate::execution::pool::SchedulerPoolSubmitError,
     > {
+        let task = self.stage_tasks.track(task);
         // Record the submit ATTEMPT before doing anything else: a test
         // that parks the single I/O worker asserts the driver reaches
         // every admitted submit attempt while the worker is stuck. The
@@ -1167,6 +1266,7 @@ impl Scheduler {
         crate::execution::pool::SchedulerPoolSubmitResult,
         crate::execution::pool::SchedulerPoolSubmitError,
     > {
+        let task = self.stage_tasks.track(task);
         #[cfg(test)]
         if let Some(err) = self.injected_pool_submit_fault() {
             drop(task);
@@ -1919,13 +2019,17 @@ impl Scheduler {
             // already signalled its waiters and terminalized the DAG
             // identity, so no further work is needed on the worker
             // side.
-            let mut guard = dag.lock();
             let identity = Self::dag_identity_for_task(
                 &canonical,
                 incarnation,
                 generation,
                 &TaskKind::Artifact { profile_hash },
             );
+            // Declared before the guard, so it is dropped after the lock on
+            // every exit below.
+            #[cfg(test)]
+            let _settled = dag.artifact_settled_receipt(identity.clone());
+            let mut guard = dag.lock();
             guard.token_for(&identity)?;
             if let Some(existing) = node.artifacts.get(&profile_hash) {
                 if existing.generation == generation {
@@ -2015,6 +2119,8 @@ impl Scheduler {
             } else {
                 std::time::Duration::from_millis(10)
             };
+            #[cfg(test)]
+            self.driver_passes.record_cooperative_park();
             if let Some(state) = handle.wait_timeout(timeout) {
                 return state;
             }

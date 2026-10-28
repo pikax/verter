@@ -8,8 +8,8 @@
 //! leaf set. Declaration-companion resolution drives two queries per authored
 //! chunk (the authored `.mjs` request and its resolved `.d.mts` target), so the
 //! measured 180-specifier fixture carries 360 decision facts. That stays within
-//! one evidence page (`FACT_PAGE_WIDTH`) — the anti-flattening bound, never a
-//! refusal threshold — roots the prepared declaration bundle, and lets
+//! `WIDE_SIGNATURE_WIDTH` — the anti-flattening bound, never a refusal
+//! threshold — roots the prepared declaration bundle, and lets
 //! component-meta reuse its warm result.
 //!
 //! The driver is NOT mass negative probing. In the measured nuxt-ui
@@ -192,10 +192,10 @@ fn large_positive_chunk_owner_is_compacted_and_warms() {
         "the owner witness must grow by the bounded post-DAG unit; observed {observed}"
     );
     assert!(
-        observed <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
+        observed <= verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max(),
         "Decision compaction must keep the {LARGE_SPECIFIERS}-specifier witness within \
-         one evidence page ({}); observed {observed}",
-        verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH
+         the wide signature width ({}); observed {observed}",
+        verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
     );
     let witness = host
         .owner_import_route_witness_for_tests(&owner)
@@ -272,10 +272,10 @@ fn below_cap_positive_chunk_owner_roots_and_admits() {
         .owner_import_route_observation_count_for_tests(&owner)
         .expect("the control owner's observation set must be built");
     assert!(
-        observed <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
+        observed <= verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max(),
         "control invariant: {SMALL_SPECIFIERS} chunk specifiers must stay within \
-         one evidence page ({}); observed {observed}",
-        verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH
+         the wide signature width ({}); observed {observed}",
+        verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
     );
     assert!(
         host.owner_import_route_witness_for_tests(&owner).is_some(),

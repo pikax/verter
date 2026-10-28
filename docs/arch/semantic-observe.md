@@ -169,16 +169,23 @@ Suites that read a captured record, a footprint or
 a measurement carry `#[cfg(feature = "semantic-observe")]` and run in the
 instrumentation lane: `node scripts/observe-lane.mjs run` tests every
 workspace member that declares `semantic-observe` with it switched on, under
-the same provider-free core filter (CI job `rust-observe`). The member set is
+the same provider-free core filter (nightly job `rust-observe`). The member set is
 read from `cargo metadata`, so a crate that declares the feature joins the
 lane without a list edit. A default-build test is kept for each public audit
 surface to prove it reports unavailable capture.
 
+The required pull-request `rust-observe` job runs
+`node scripts/observe-lane.mjs smoke` instead: a small host-backed compile
+checks useful output, a populated and stored audit record, and the
+audit-disabled control without building the full test harnesses or fixture
+metadata. Normal correctness tests remain in ordinary PR CI.
+
 Guards whose only evidence is an optional counter run there too: the
 lazy-lowering guards that count lowered declaration bodies, the fallthrough
 reuse guard and the one-native-call compat guard read provenance counters that
-a default build does not compile, so the instrumentation lane, a required CI
-job, is their primary gate. Optional state read only by tests stays under a
+a default build does not compile, so the full nightly instrumentation lane
+supplies their capture-enabled coverage. The PR smoke does not replace these
+counter guards. Optional state read only by tests stays under a
 test gate instead, and keeps running in the canonical gate.
 
 When optional state is consolidated, default builds compile away optional
@@ -374,7 +381,8 @@ where it also requires the audited host to have stored every record.
 
 Run `cargo nextest run -p verter_audit` both without and with
 `--features semantic-observe` for availability proof,
-`node scripts/observe-lane.mjs run` for the instrumentation lane, and
+`node scripts/observe-lane.mjs smoke` for the PR host-capture check,
+`node scripts/observe-lane.mjs run` for the full nightly instrumentation lane, and
 `cargo nextest run -p verter_source_policy_gate -E 'test(observe_feature_closure)'`
 for closure proof. Formatting,
 Clippy, docs build, production builds, and the canonical/shipped-cfg and WASM

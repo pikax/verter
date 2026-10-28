@@ -6,29 +6,40 @@
 //! test's allocations.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use verter_session_query::facts::receipt::ResultReceipt;
 use verter_session_query::facts::version::FactVersionRef;
 
 struct Counting;
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// The bytes this thread allocated and has not freed, for a measurement
+    /// the other tests of this binary cannot disturb.
+    static THREAD_LIVE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+fn thread_live() -> isize {
+    THREAD_LIVE.with(std::cell::Cell::get)
+}
+
+fn note(delta: isize) {
+    // `try_with`: the allocator runs during thread teardown too.
+    let _ = THREAD_LIVE.try_with(|live| live.set(live.get() + delta));
+}
 
 // SAFETY: every call forwards to the system allocator unchanged; the
 // counter only observes the sizes.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+        note(layout.size() as isize);
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        note(-(layout.size() as isize));
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        LIVE.fetch_add(new_size, Ordering::Relaxed);
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        note(new_size as isize - layout.size() as isize);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -45,9 +56,9 @@ fn whole(canonical: String, byte: u8) -> FactVersionRef {
 
 /// The bytes a shape of `n` levels keeps alive with every receipt held.
 fn retained(n: usize, build: fn(usize) -> Vec<ResultReceipt>) -> usize {
-    let before = LIVE.load(Ordering::Relaxed);
+    let before = thread_live();
     let held = build(n);
-    let bytes = LIVE.load(Ordering::Relaxed) - before;
+    let bytes = usize::try_from(thread_live() - before).expect("the shape allocated");
     drop(held);
     bytes
 }
@@ -132,4 +143,71 @@ fn receipt_summaries_grow_near_linearly_with_the_graph() {
         }
         eprintln!("{name}: bytes kept alive at {sizes:?} = {bytes:?}");
     }
+}
+
+/// A tree set's retention charge, compared with the real allocator: every
+/// node charges at least the bytes its allocations really take, and at most
+/// one allocator granule and header more per block (the declared allocation
+/// convention every charge uses), so the charge is exact under that
+/// convention and never an undercharge. When the last set holding a node
+/// drops, every byte comes back: the charge lives in the node and is
+/// released with it.
+#[test]
+fn a_fact_tree_charges_exactly_what_it_allocates() {
+    use verter_session_query::facts::fact_set::FactSet;
+    use verter_session_query::retention::allocation::{
+        ALLOCATION_GRANULE_BYTES, ALLOCATION_HEADER_BYTES,
+    };
+    // Facts that own no heap, so the bytes measured are the trees' alone.
+    let fact = |generation: u64| FactVersionRef::ProjectGeneration { generation };
+    let mut held: Vec<FactSet> = Vec::with_capacity(302);
+    // The process account the nodes pin on lives for the whole process: it
+    // is created before the baseline, so only the trees are measured.
+    drop(verter_session_query::retention::SemanticRetentionAccount::process_local());
+    let before = thread_live();
+    // A fresh wide seal is born in tree storage; each later link adds one
+    // fact and every seventh also removes one, sharing the rest.
+    let base = verter_session_query::facts::policy::FactPolicy::production()
+        .set_of((0..2_000).map(fact).collect::<Vec<_>>());
+    held.push(base.clone());
+    let mut set = base.union_with_facts(&[fact(1_000_000)]);
+    drop(base);
+    for link in 0..300u64 {
+        let mut edit = set.edit();
+        edit.insert(fact(2_000_000 + link));
+        if link % 7 == 0 {
+            edit.remove(&fact(link * 3));
+        }
+        set = edit.finish();
+        held.push(set.clone());
+    }
+    drop(set);
+    let allocated = usize::try_from(thread_live() - before).expect("the trees allocated");
+    let footprint = FactSet::tree_footprint_of(&held);
+    let headers = held.len() * FactSet::header_bytes();
+    // `held`'s own buffer was allocated before the measurement began.
+    let held_buffer = held.capacity() * std::mem::size_of::<FactSet>();
+    let real = allocated;
+    let charged = footprint.charged_bytes + headers;
+    let slack =
+        (footprint.blocks + held.len()) * (ALLOCATION_GRANULE_BYTES + ALLOCATION_HEADER_BYTES);
+    assert!(
+        charged >= real,
+        "never an undercharge: charged {charged} < allocated {real}"
+    );
+    assert!(
+        charged <= real + slack,
+        "exact within the allocation convention: charged {charged}, allocated {real},          slack {slack} over {} blocks",
+        footprint.blocks
+    );
+    drop(held);
+    assert_eq!(
+        thread_live(),
+        before - held_buffer as isize,
+        "every node's bytes, and so its charge, come back when the last set drops"
+    );
+    eprintln!(
+        "fact tree: allocated {real} bytes, charged {charged} over {} nodes",
+        footprint.nodes
+    );
 }

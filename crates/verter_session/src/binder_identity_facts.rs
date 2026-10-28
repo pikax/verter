@@ -298,7 +298,7 @@ pub struct BinderIdentityFactsEntry {
 #[derive(Debug, Default)]
 pub struct BinderIdentityFactsStore {
     entries: DashMap<BinderIdentityFactsKey, Arc<BinderIdentityFactsEntry>>,
-    /// The account an admitted entry's evidence pages are claimed into.
+    /// The account an admitted entry's shared storage is claimed into.
     retention_account: verter_session_query::retention::StoreAccount,
 }
 
@@ -308,7 +308,7 @@ impl BinderIdentityFactsStore {
         Self::default()
     }
 
-    /// A store whose admissions claim their evidence pages into `account`.
+    /// A store whose admissions claim their shared storage into `account`.
     #[cfg(test)]
     fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
         Self {
@@ -331,8 +331,8 @@ impl BinderIdentityFactsStore {
     /// first-admitted entry is preserved (`Arc` identity for shared
     /// consumers).
     ///
-    /// The entry retains its signature's evidence pages, so admission first
-    /// claims them into a refusable reservation. Answers `false` when that
+    /// The entry retains its signature's shared storage (receipts and tree
+    /// nodes), so admission first claims it into a refusable reservation. Answers `false` when that
     /// claim is refused: nothing is admitted and the caller keeps the entry
     /// as an uncached value.
     pub fn insert(
@@ -341,7 +341,7 @@ impl BinderIdentityFactsStore {
         entry: Arc<BinderIdentityFactsEntry>,
     ) -> bool {
         if let Some(signature) = entry.read_set_signature.as_ref() {
-            if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
+            if let Err(refusal) = verter_session_query::facts::receipt::claim_retained_storage(
                 self.retention_account.get(),
                 &signature.facts,
             ) {
@@ -1139,15 +1139,15 @@ pub(crate) mod tests {
         );
     }
 
-    /// An admitted entry owns its wide signature's pages as refusable
-    /// retained bytes; an account that refuses that footprint admits
-    /// nothing.
+    /// An admitted entry owns its wide signature's shared tree storage as
+    /// refusable retained bytes; an account that refuses that footprint
+    /// admits nothing, and the storage stays pinned by the live signature.
     #[test]
-    fn a_wide_entry_claims_its_pages_and_is_refused_for_them() {
+    fn a_wide_entry_claims_its_shared_storage_and_is_refused_for_it() {
         use super::{BinderIdentityFacts, BinderIdentityFactsEntry, BinderIdentityFactsKey};
         use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
         use verter_session_query::retention::{
-            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
         };
         let key = BinderIdentityFactsKey {
             canonical: Arc::from("/w/a.ts"),
@@ -1155,12 +1155,20 @@ pub(crate) mod tests {
             parse_env_hash: [2; 16],
         };
         let entry = || {
-            let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+            let facts: Vec<FactVersionRef> = (0..2
+                * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+                + 3)
                 .map(|index| FactVersionRef::FileWholeHash {
                     canonical_id: format!("/wide/{index:05}.ts").into(),
                     hash: [1u8; 16],
                 })
                 .collect();
+            // A set extended from another is held in shared tree storage.
+            let signature = verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                facts[..1].to_vec(),
+            )
+            .union_with_facts(&facts[1..]);
             Arc::new(BinderIdentityFactsEntry {
                 facts: Arc::new(BinderIdentityFacts {
                     canonical: Arc::from("/w/a.ts"),
@@ -1170,23 +1178,16 @@ pub(crate) mod tests {
                     overload_groups: Arc::from([]),
                     augmentation_contributions: Arc::from([]),
                 }),
-                read_set_signature: Some(ReadSetSignature::new(
-                    verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
-                )),
+                read_set_signature: Some(ReadSetSignature::new(signature)),
             })
         };
-        let pages_of = |entry: &BinderIdentityFactsEntry| -> Vec<_> {
+        let storage_of = |entry: &BinderIdentityFactsEntry| {
             entry
                 .read_set_signature
                 .as_ref()
                 .expect("the entry carries a signature")
                 .facts
-                .iter()
-                .filter_map(|fact| match fact {
-                    FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-                    _ => None,
-                })
-                .collect()
+                .tree_footprint()
         };
 
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
@@ -1194,17 +1195,22 @@ pub(crate) mod tests {
             Arc::clone(&account),
         ));
         assert!(store.insert(key.clone(), entry()));
-        let pages = pages_of(&store.get(&key).expect("the entry is admitted"));
-        assert!(!pages.is_empty(), "premise: the signature is paged");
-        assert!(pages
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
-        drop(pages);
+        let admitted = storage_of(&store.get(&key).expect("the entry is admitted"));
+        assert!(
+            admitted.nodes > 0,
+            "premise: the signature has shared storage"
+        );
+        assert_eq!(admitted.pinned_bytes, 0, "the admission claims every node");
+        assert_eq!(admitted.retained_bytes, admitted.charged_bytes);
+        assert!(
+            account.snapshot().retained_bytes >= admitted.retained_bytes,
+            "the claimed storage is part of the store's retained bytes"
+        );
         store.clear();
         assert_eq!(
             account.snapshot().retained_bytes,
             0,
-            "clearing the store drains its pages"
+            "clearing the store drains its storage"
         );
 
         let tight = SemanticRetentionAccount::new(RetentionLimits {
@@ -1220,9 +1226,12 @@ pub(crate) mod tests {
             "a refused claim admits nothing"
         );
         assert!(store.is_empty());
-        assert!(pages_of(&refused)
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(ChargeClass::Pinned)));
+        let refused_storage = storage_of(&refused);
+        assert_eq!(refused_storage.retained_bytes, 0);
+        assert_eq!(
+            refused_storage.pinned_bytes, refused_storage.charged_bytes,
+            "refused storage stays pinned by the live signature"
+        );
         assert_eq!(tight.snapshot().retained_bytes, 0);
     }
 }

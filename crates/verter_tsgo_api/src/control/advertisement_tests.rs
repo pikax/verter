@@ -116,15 +116,25 @@ fn advertisement_file_name_is_portable() {
     assert!(name.contains("-7."), "the pid keys the filename: {name:?}");
 }
 
+/// Set `path`'s modification time `secs` into the past, so mtime ordering is
+/// decided by the test rather than by how coarse the filesystem clock is.
+fn backdate(path: &std::path::Path, secs: u64) {
+    let at = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(at))
+        .expect("backdate the advertisement");
+}
+
 #[test]
 fn find_for_session_key_returns_newest_matching_advertisement() {
     let dir = scratch_dir("find");
     // Two shims under the SAME session key (different pids): discovery returns
     // the newest, and an unrelated session key is not matched.
     let older = sample("workspace-A", 100, "nonce-old");
-    older.write(&dir).unwrap();
-    // Ensure a strictly later mtime for the newer advertisement.
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    // A strictly earlier mtime for the older advertisement.
+    backdate(&older.write(&dir).unwrap(), 60);
     let newer = sample("workspace-A", 200, "nonce-new");
     newer.write(&dir).unwrap();
     // An unrelated session key must never be returned for "workspace-A".
@@ -163,8 +173,7 @@ fn distinct_session_keys_that_sanitize_alike_do_not_cross_match() {
 
     // `a-b` (pid 100) first, then a strictly-newer `a/b` (pid 200) — so a
     // newest-prefix-match selection would wrongly return `a/b` for the `a-b` query.
-    sample("a-b", 100, "nonce-dash").write(&dir).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    backdate(&sample("a-b", 100, "nonce-dash").write(&dir).unwrap(), 60);
     sample("a/b", 200, "nonce-slash").write(&dir).unwrap();
 
     // The `a-b` client gets EXACTLY the `a-b` advertisement — never `a/b`'s.

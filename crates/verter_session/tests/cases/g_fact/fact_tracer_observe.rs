@@ -163,14 +163,15 @@ fn observe_borrowed_signature_appends() {
 // ── Test 4 ─────────────────────────────────────────────────────────────
 //
 // `FactReadSet::finalise` never refuses a wide observation set: a tracer
-// that observes more distinct facts than one evidence page seals EVERY one
-// of them into a paged signature.
+// that observes more distinct facts than `WIDE_SIGNATURE_WIDTH` seals EVERY
+// one of them into its signature.
 
 #[test]
 fn a_wide_observation_set_seals_every_fact() {
     let host = make_host();
 
-    const N_WIDE: usize = verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1;
+    const N_WIDE: usize =
+        verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max() + 1;
 
     let ((), set) = host.with_fact_tracer(
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
@@ -198,7 +199,7 @@ fn a_wide_observation_set_seals_every_fact() {
             assert_eq!(
                 signature.entry_count(),
                 N_WIDE,
-                "every distinct fact survives into the paged signature"
+                "every distinct fact survives into the wide signature"
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
@@ -368,14 +369,14 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
 // ── Bonus discrimination assertion: trait-method short-circuit ────────
 //
 // `FactReadSet::is_empty()` returns true on a brand-new tracer, and
-// `FactReadSetCell::new()` is observably distinct from one that has
+// `FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production())` is observably distinct from one that has
 // recorded observations. These assertions catch a "default-returning"
 // stub that always responds with a non-empty set or always responds
 // with an empty set.
 
 #[test]
 fn empty_tracer_is_empty_and_records_change_state() {
-    let cell = FactReadSetCell::new();
+    let cell = FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production());
     assert!(cell.is_empty());
     assert_eq!(cell.len(), 0);
 

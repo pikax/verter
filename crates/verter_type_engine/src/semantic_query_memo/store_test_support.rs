@@ -568,6 +568,25 @@ impl SemanticGraphStore {
         )
     }
 
+    /// The counts `id`'s slot holds: one per root operand naming it and one
+    /// per live parent edge; zero once it is destroyed.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn node_owner_count_for_tests(&self, id: crate::semantic_query::SemanticNodeId) -> usize {
+        self.arena.owner_count(id)
+    }
+
+    /// A delivery rooting `roots` and holding no shared allocation, its own
+    /// metadata pinned to this store's account.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn deliver_roots_for_tests(
+        &self,
+        roots: super::node_roots::NodeRootSet,
+    ) -> super::delivery_lease::SemanticDeliveryLease {
+        super::delivery_lease::SemanticDeliveryLease::from_roots(roots, self.retention_account())
+    }
+
     /// Claim an inline member's family flight exactly as the relation
     /// drain does.
     #[doc(hidden)]

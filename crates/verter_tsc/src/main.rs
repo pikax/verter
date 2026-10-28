@@ -14,9 +14,11 @@
 //! validated like any other candidate and a failure is a hard user error —
 //! never a silent fall-through to a lower tier. (The shared resolver also
 //! knows update-cache and bundled-sidecar tiers, but verter-tsc ships
-//! neither, so they can never win here.) Verter supports tsgo STABLE
-//! `>=7.0.2, <7.1.0` only — RCs, nightlies, and newer minors are refused —
-//! and there is no fallback to the legacy TypeScript compiler.
+//! neither, so they can never win here.) Verter supports the pinned TypeScript
+//! release line only
+//! ([`verter_tsgo_api::toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL`]) —
+//! nightlies, earlier releases and newer minors are refused — and there is no
+//! fallback to the legacy TypeScript compiler.
 //!
 //! The `--noEmit` TYPECHECK path drives the gated tsgo `--api` engine IN-MEMORY
 //! (the generated carriers are fed as an in-memory overlay, no temp files).
@@ -42,19 +44,30 @@ use std::process;
 
 use clap::Parser;
 
+/// The process allocator (mimalloc on native targets): see `verter_alloc`.
+#[global_allocator]
+static GLOBAL: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
+
 #[derive(Parser)]
 #[command(
     name = "verter-tsc",
     version = env!("CARGO_PKG_VERSION"),
     about = "Vue SFC type checker — verter-native vue-tsc replacement",
-    long_about = "Generates ComponentPublicInstance declarations from Vue SFC macros\n\
-                  and type-checks them with the tsgo (TypeScript 7 native) engine.\n\
-                  Faster than vue-tsc for large projects.\n\n\
-                  The --noEmit typecheck path drives tsgo in-memory via --api (no temp files);\n\
-                  the --declaration emit path runs tsgo --project over temp files.\n\n\
-                  Engine: tsgo STABLE 7.0.x only (>=7.0.2, <7.1.0), resolved in order via\n\
-                  --tsgo-bin, VERTER_TSGO_BIN, PATH, or project-local node_modules.\n\
-                  Install one: npm install -D typescript@7.0.2"
+    long_about = concat!(
+        "Generates ComponentPublicInstance declarations from Vue SFC macros\n\
+         and type-checks them with the tsgo (TypeScript 7 native) engine.\n\
+         Faster than vue-tsc for large projects.\n\n\
+         The --noEmit typecheck path drives tsgo in-memory via --api (no temp files);\n\
+         the --declaration emit path runs tsgo --project over temp files.\n\n\
+         Engine: tsgo >=",
+        verter_tsgo_api::typescript_pin!(),
+        ", <",
+        verter_tsgo_api::typescript_line_ceiling!(),
+        ", resolved in order via\n\
+         --tsgo-bin, VERTER_TSGO_BIN, PATH, or project-local node_modules.\n\
+         Install one: npm install -D typescript@",
+        verter_tsgo_api::typescript_pin!()
+    )
 )]
 struct Cli {
     /// Path to tsconfig.json [default: tsconfig.json]
@@ -63,8 +76,8 @@ struct Cli {
 
     /// Path to a specific tsgo engine binary. Takes precedence over
     /// VERTER_TSGO_BIN, PATH, and project-local node_modules. Must be a
-    /// supported tsgo (stable >=7.0.2, <7.1.0) — an unusable path is a hard
-    /// error, never a silent fall-through.
+    /// supported tsgo (the pinned TypeScript release line) — an unusable path
+    /// is a hard error, never a silent fall-through.
     #[arg(long = "tsgo-bin", value_name = "PATH")]
     tsgo_bin: Option<PathBuf>,
 
@@ -120,6 +133,7 @@ struct Cli {
 }
 
 fn main() {
+    verter_alloc::configure();
     let cli = Cli::parse();
 
     // Resolve project path: -p takes precedence, then -b positional, then default
@@ -191,7 +205,7 @@ fn main() {
     );
 
     // The in-memory `--api` typecheck is tsgo-only with NO tsc fallback. A hard
-    // failure (engine absent, connect/init/updateSnapshot/protocol/project-not-found)
+    // failure (engine absent, connect/init/createSnapshot/protocol/project-not-found)
     // is SURFACED as a non-zero exit + a stderr note — it must NEVER be swallowed
     // into an empty diagnostic set that exits 0 (a broken engine masquerading as a
     // clean typecheck). Exit 2 distinguishes this infrastructure failure from a
@@ -245,7 +259,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     // ── DISCRIMINATING (H11): the public help text must describe the SHIPPED
-    //    toolchain policy (stable 7.0.x window, the --tsgo-bin → env → PATH →
+    //    toolchain policy (the pinned release line, the --tsgo-bin → env → PATH →
     //    project-local precedence) and must NOT point users at rejected channels
     //    (native-preview, npx, a tsc fallback) or at tiers that can never succeed
     //    for this binary (no downloader writes the update cache; verter-tsc
@@ -266,7 +280,11 @@ mod tests {
                 "the help text must not reference the rejected channel `{rejected}`:\n{help}"
             );
         }
-        for expected in ["7.0", "VERTER_TSGO_BIN", "--tsgo-bin"] {
+        for expected in [
+            verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
+            "VERTER_TSGO_BIN",
+            "--tsgo-bin",
+        ] {
             assert!(
                 help.contains(expected),
                 "the help text must describe the shipped policy (`{expected}`):\n{help}"
@@ -406,5 +424,15 @@ mod tests {
             "build_projects should contain the positional path"
         );
         assert_eq!(cli.build_projects[0].to_str().unwrap(), "tsconfig.app.json");
+    }
+
+    /// The binary runs on the allocator `verter_alloc` selects for it: mimalloc
+    /// on a native build, so a block from the global heap is mimalloc's.
+    #[test]
+    fn the_selected_global_allocator_serves_this_binary() {
+        assert_eq!(
+            verter_alloc::mimalloc_serves_global_allocations(),
+            verter_alloc::SELECTED == verter_alloc::AllocatorKind::Mimalloc
+        );
     }
 }

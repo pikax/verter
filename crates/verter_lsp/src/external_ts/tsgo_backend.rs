@@ -72,7 +72,7 @@ impl EngineBackend for TsgoEngineBackend {
     /// Mint the [`BoundProject`] witness from the [`EnsureProject`] request (itself
     /// mintable only from a resolved `ProjectBinding`). The OWNED tsgo provider
     /// holds no per-project on-disk store — the configured project is opened on the
-    /// `--api` checker via `updateSnapshot({openProjects})` and carriers ride `--lsp`
+    /// `--api` checker via `getCurrentLanguageServerSnapshot({openProjects})` and carriers ride `--lsp`
     /// didOpen overlays — so this materialises only the witness.
     fn ensure_project(&self, request: EnsureProject) -> Result<BoundProject, EngineError> {
         Ok(BoundProject::from_ensured(
@@ -82,7 +82,7 @@ impl EngineBackend for TsgoEngineBackend {
     }
 
     /// The OWNED tsgo publish has no on-disk store: membership is conferred by the
-    /// `--lsp` didOpen overlay + the configured-project `--api` `updateSnapshot`,
+    /// `--lsp` didOpen overlay + the configured-project `--api` `getCurrentLanguageServerSnapshot`,
     /// driven by the live `TsgoOwnedProvider`, NOT this witness authority. A publish
     /// call here is a wiring error — fail LOUDLY rather than silently no-op.
     fn publish_snapshot(
@@ -93,7 +93,7 @@ impl EngineBackend for TsgoEngineBackend {
         unimplemented!(
             "TsgoEngineBackend confers OWNED membership through the live TsgoOwnedProvider \
              (--lsp didOpen overlays on the shared session + the configured-project --api \
-             updateSnapshot), not through an on-disk publish store; there is nothing to \
+             getCurrentLanguageServerSnapshot), not through an on-disk publish store; there is nothing to \
              publish here."
         )
     }

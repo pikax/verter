@@ -2849,3 +2849,140 @@ fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
         "broken lease cannot parse again"
     );
 }
+
+/// The body parts a type demand keeps serve only that declaration in that
+/// scope of that source: a same-named `declare global` declaration, another
+/// declaration and another source each read their own body. A kept body is
+/// charged while it waits; the read that takes it holds its charge until
+/// the deref reading it returns, and the charge is released when the
+/// reader drops it.
+#[test]
+fn a_kept_type_body_serves_only_its_own_declaration_scope_and_source() {
+    let source = "type K = \"file\";
+type A = \"a\";
+declare global {
+  type K = \"global\";
+}
+export {};
+";
+    let (memo, _) = memo_for(source);
+    let (other, _) = memo_for_canonical("/other.ts", source);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let (outcome, kept) = memo.type_decl_outcome_keeping_in(owner, "K", true);
+    assert!(matches!(outcome, DemandOutcome::Ready(Some(_))));
+    let kept = kept.expect("the demand that lowered K keeps its body");
+    assert!(kept.serves(&memo, owner, "K", None));
+    assert!(!kept.serves(&memo, owner, "K", Some(&AugmentationScopeKind::Global)));
+    assert!(!kept.serves(&memo, owner, "A", None));
+    assert!(!kept.serves(&other, owner, "K", None));
+    let (_, again) = memo.type_decl_outcome_keeping_in(owner, "K", true);
+    assert!(again.is_none(), "a demand of lowered facts keeps nothing");
+
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let request = parking_lot::Mutex::new(
+        crate::resolver_core::request_store_view::KeptTypeBodies::default(),
+    );
+    request.lock().keep(kept, &account);
+    let waiting = account.snapshot().retained_bytes;
+    assert!(waiting > 0, "a kept body is charged while it waits");
+    let read = |locator: AuthoredBodyLocator| {
+        let (derefed, charges) = crate::resolver_core::request_store_view::deref_taking(
+            &memo,
+            &locator,
+            |owner, name, scope| request.lock().take(&memo, owner, name, scope),
+        );
+        (
+            format!("{:?}", single(&derefed.expect("the body derefs"))),
+            charges,
+        )
+    };
+    let (global, charges) = read(aug_type_locator(
+        "K",
+        AuthoredAugmentationScope::Global,
+        Vec::new(),
+    ));
+    assert!(
+        global.contains("global"),
+        "the global K reads its own body: {global}"
+    );
+    assert!(charges.is_empty(), "the global K took no kept body");
+    let (a, charges) = read(type_body_locator("A", Vec::new()));
+    assert!(a.contains("\"a\""), "A reads its own body: {a}");
+    assert!(charges.is_empty(), "A took no kept body");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        waiting,
+        "K's body still waits for its read"
+    );
+    let (k, charges) = read(type_body_locator("K", Vec::new()));
+    assert!(k.contains("file"), "the file's K reads its kept body: {k}");
+    assert_eq!(charges.len(), 1, "the read took K's body and its charge");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        waiting,
+        "the charge is held through the deref that read the body"
+    );
+    drop(charges);
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        0,
+        "the reader released the charge"
+    );
+}
+
+/// A declaration that names a JSDoc `@typedef` keeps no body parts: its
+/// typedef body is read by its own lowering.
+#[test]
+fn a_jsdoc_typedef_declaration_keeps_no_body() {
+    let (memo, _) = memo_for(
+        "/** @typedef {{ a: 1 }} T */
+export {};
+",
+    );
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let (_, kept) = memo.type_decl_outcome_keeping_in(owner, "T", true);
+    assert!(kept.is_none());
+}
+
+/// A request keeps a body only when the retention account admits it: one
+/// the account declines is not kept, and its read lowers its body again.
+/// Taken parts stay charged until their taker lets them go.
+#[test]
+fn a_kept_type_body_is_a_refusable_reservation() {
+    let (memo, _) = memo_for(
+        "type K = \"k\";
+type L = \"l\";
+export {};
+",
+    );
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let full = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits {
+            aggregate_ceiling_bytes: 1,
+            ..verter_session_query::retention::RetentionLimits::defaults()
+        },
+    );
+    let mut request = crate::resolver_core::request_store_view::KeptTypeBodies::default();
+    let (_, kept) = memo.type_decl_outcome_keeping_in(owner, "K", true);
+    request.keep(kept.expect("the demand lowered K"), &full);
+    assert_eq!(full.snapshot().retained_bytes, 0);
+    assert!(
+        request.take(&memo, owner, "K", None).is_none(),
+        "a declined body is not kept"
+    );
+
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let (_, kept) = memo.type_decl_outcome_keeping_in(owner, "L", true);
+    request.keep(kept.expect("the demand lowered L"), &account);
+    let taken = request.take(&memo, owner, "L", None).expect("L is kept");
+    assert!(
+        account.snapshot().retained_bytes > 0,
+        "taken parts stay charged while their taker holds them"
+    );
+    drop(taken);
+    assert_eq!(account.snapshot().retained_bytes, 0);
+}

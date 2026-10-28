@@ -74,7 +74,18 @@ fn upsert(host: &VerterHost, id: &str, source: &str, language: crate::FileLangua
 /// A host carrying the owner, its imported props module and its child
 /// component.
 fn host() -> VerterHost {
-    let host = VerterHost::new_standalone(HostConfig::default());
+    with_fixtures(VerterHost::new_standalone(HostConfig::default()))
+}
+
+/// [`host`] without a scheduler driver thread: admitted work dispatches only
+/// where the test's own thread pumps.
+fn caller_driven_host() -> VerterHost {
+    with_fixtures(VerterHost::new_standalone_caller_driven_for_test(
+        HostConfig::default(),
+    ))
+}
+
+fn with_fixtures(host: VerterHost) -> VerterHost {
     upsert(&host, PROPS, PROPS_SOURCE, crate::FileLanguage::script_ts());
     upsert(&host, CHILD, CHILD_SOURCE, crate::FileLanguage::vue());
     upsert(&host, OWNER, OWNER_SOURCE, crate::FileLanguage::vue());
@@ -1080,9 +1091,18 @@ fn drive_on_one_thread(mut roots: Vec<crate::CompileRequestRoot<'_>>) -> DriverR
 /// answer is the synchronous entry's. A follower's wake arrives while the
 /// driver runs its producer's work — where a waker that drove the root
 /// would re-enter the driver — and only queues a later poll.
+///
+/// The host has no scheduler driver thread, so this thread is the only one
+/// that dispatches. With a driver thread beside it, that thread could
+/// dispatch the first root's flight before its first poll returned: the root
+/// then produced and settled the flight before its sibling began, and the
+/// sibling legitimately produced the same bundle again in a flight of its
+/// own. Or a wake still in flight from that thread met an empty queue. Each
+/// flight still had exactly one producer, but neither the count nor the
+/// empty-queue check is then this thread's to assert.
 #[test]
 fn root_continuations_one_thread_drives_several_suspended_roots() {
-    let host = host();
+    let host = caller_driven_host();
     let (owner, child) = (
         compile_owner(&host),
         compiled_texts(

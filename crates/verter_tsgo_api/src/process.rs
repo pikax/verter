@@ -825,12 +825,13 @@ mod tests {
     async fn tree_kill_reaches_a_pipe_holding_descendant() {
         use tokio::io::AsyncReadExt;
 
-        // sh -c 'echo ready; (exec sleep 600) & wait' — the grandchild sleep
-        // inherits stdout/stderr; the direct child waits on it forever.
+        // The grandchild sleep inherits stdout/stderr; the direct child waits
+        // on it forever. `ready` is printed only after the grandchild was
+        // forked, so reading it proves the tree is established.
         let mut command = tokio::process::Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("echo ready; sleep 600 & wait")
+            .arg("sleep 600 & echo ready; wait")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -839,8 +840,18 @@ mod tests {
         let mut child = command.spawn().expect("spawn sh");
         let pid = child.id().expect("child pid");
 
-        // Let the tree establish, then kill it.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the tree to establish, then kill it.
+        let mut out = child.stdout.take().expect("stdout");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 64];
+        while !buf.ends_with(b"ready\n") {
+            let read = tokio::time::timeout(REAP_BOUND, out.read(&mut chunk))
+                .await
+                .expect("the shell must report the tree established")
+                .expect("read the shell's stdout");
+            assert!(read > 0, "the shell exited before reporting the tree");
+            buf.extend_from_slice(&chunk[..read]);
+        }
         TreeKill::arm(pid).kill_tree();
         assert!(
             reap_child_bounded(&mut child, REAP_BOUND).await,
@@ -848,8 +859,6 @@ mod tests {
         );
         // The pipes must hit EOF once every writer is dead (the grandchild
         // held them): a read that returns 0 bytes proves the tree died.
-        let mut out = child.stdout.take().expect("stdout");
-        let mut buf = Vec::new();
         let read = tokio::time::timeout(REAP_BOUND, out.read_to_end(&mut buf)).await;
         assert!(
             read.is_ok(),
@@ -1080,5 +1089,109 @@ mod tests {
             .await
             .expect("a healthy kill+reap succeeds");
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+}
+
+/// The stderr of engine processes started ahead of a decision, held back
+/// until the caller makes it.
+///
+/// A speculatively started engine must not show anything the in-order path
+/// would not have shown: until [`Self::release`], everything the engines
+/// write is kept; release writes it out and passes later output straight
+/// through, while [`Self::discard`] (or dropping the hold) drops it.
+#[derive(Debug, Default)]
+pub struct HeldStderr {
+    state: std::sync::Mutex<HeldStderrState>,
+    drains: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Debug)]
+enum HeldStderrState {
+    Holding(Vec<u8>),
+    Released,
+    Discarded,
+}
+
+impl Default for HeldStderrState {
+    fn default() -> Self {
+        Self::Holding(Vec::new())
+    }
+}
+
+impl HeldStderr {
+    /// Pipe a child's stderr through this hold. Must be called within a
+    /// tokio runtime; the drain ends at the child's end of file.
+    pub(crate) fn drain(self: &std::sync::Arc<Self>, mut stderr: tokio::process::ChildStderr) {
+        let hold = std::sync::Arc::clone(self);
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => hold.write(&chunk[..read]),
+                }
+            }
+        });
+        self.drains
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(drain);
+    }
+
+    /// Wait, up to `bound`, for every drain to reach its child's end of file,
+    /// so output an engine wrote just before it exited is not lost when the
+    /// runtime shuts down.
+    pub(crate) async fn drained(&self, bound: std::time::Duration) {
+        let drains = std::mem::take(
+            &mut *self
+                .drains
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let _ = tokio::time::timeout(bound, async {
+            for drain in drains {
+                let _ = drain.await;
+            }
+        })
+        .await;
+    }
+
+    fn write(&self, bytes: &[u8]) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &mut *state {
+            HeldStderrState::Holding(held) => held.extend_from_slice(bytes),
+            HeldStderrState::Released => {
+                use std::io::Write;
+                let _ = std::io::stderr().write_all(bytes);
+            }
+            HeldStderrState::Discarded => {}
+        }
+    }
+
+    /// Write out everything held so far and pass later output through.
+    pub fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let HeldStderrState::Holding(held) =
+            std::mem::replace(&mut *state, HeldStderrState::Released)
+        {
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(&held);
+        }
+    }
+
+    /// Drop everything held so far and everything written later.
+    pub fn discard(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = HeldStderrState::Discarded;
     }
 }

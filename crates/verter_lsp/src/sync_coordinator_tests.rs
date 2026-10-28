@@ -6217,8 +6217,8 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
 /// dropped), the listener must stop with it. RED-before: the listener leaked
 /// past shutdown holding the pending-redrive context (and through it the
 /// document registry and sync owners), so a late pulse armed a drain chain on
-/// the retired coordinator — observable here as provider file ops starting
-/// after the loop exited.
+/// the retired coordinator. The listener's own drop receipt is the
+/// discriminating check; a late pulse then finds nobody parked on it.
 #[tokio::test(flavor = "multi_thread")]
 async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -6234,10 +6234,6 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let provider = Arc::new(MockTypeProvider::new());
     let pulse = Arc::new(tokio::sync::Notify::new());
     provider.set_restart_pulse(Some(Arc::clone(&pulse)));
-    // The pending queue stays EMPTY while the loop lives: the loop's own
-    // plain arm would drain a queued entry (the provider is healthy) and the
-    // post-shutdown pulse would have nothing left to discriminate on. The
-    // entry is queued only after the loop has exited.
     let pending_snapshot_provider_sync: Arc<DashSet<String>> = Arc::new(DashSet::new());
     let deps = Arc::new(SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
@@ -6303,21 +6299,28 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         "coordinator_loop must return once its wake channel closes"
     );
 
-    // A late engine-start pulse must not start drain passes on the retired
-    // coordinator. RED-before: the leaked listener armed the successor chain
-    // for the freshly queued entry, which attempted provider file ops after
-    // the production initial delay.
-    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
-    let calls_before = provider.file_sync_calls().len();
+    // The listener stops with the loop: its task is dropped, which it reports
+    // itself. RED-before: the listener leaked past shutdown, so this receipt
+    // never arrives. The timeout is a liveness watchdog only.
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(30),
+        receipts.pulse_listener_stopped.notified(),
+    )
+    .await
+    .is_ok();
+    assert!(
+        stopped,
+        "the restart-pulse listener must stop with the coordinator loop"
+    );
+
+    // A late engine-start pulse finds nobody parked on it: with no waiter,
+    // `notify_one` stores its permit, which is still there to take. A leaked
+    // listener parked on the pulse would have been woken directly instead,
+    // leaving no permit behind.
     pulse.notify_one();
-    tokio::time::sleep(Duration::from_millis(
-        crate::server::PENDING_SYNC_REDRIVE.initial_delay_ms + 400,
-    ))
-    .await;
-    assert_eq!(
-        provider.file_sync_calls().len(),
-        calls_before,
-        "a restart pulse after coordinator shutdown must not start drain passes"
+    assert!(
+        futures_util::FutureExt::now_or_never(pulse.notified()).is_some(),
+        "a restart pulse after coordinator shutdown must find no listener"
     );
 }
 
@@ -6584,15 +6587,15 @@ async fn a_document_touch_survives_a_busy_lane_retry() {
         .await;
 
     let paused = handle.pause_dispatch_for_test().await;
-    // The retry's quiet time is allowed to elapse while dispatch is held; no
-    // ordering assertion depends on whether a document is still debounced.
+    // The retry's quiet window has elapsed by the time dispatch resumes: the
+    // window is zero for this coordinator, so no real window is waited out.
+    handle.set_quiet_window_for_test(Duration::ZERO);
     needs_sync.insert(replayed_id.to_string());
     handle.signal(
         replayed_id.to_string(),
         replayed_uri.to_string(),
         old_open + Duration::from_millis(1),
     );
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 2)).await;
     // The coordinator's own retry is the delivery under observation here.
     pending_sync.remove(requested_id);
     let (requested_arrived, release_requested) = test_hooks::block_after_lane_probe(requested_id);

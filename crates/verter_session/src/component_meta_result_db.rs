@@ -106,7 +106,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn empty_sig() -> verter_session_query::facts::fact_cache::ReadSetSignature {
-        verter_session_query::facts::fact_cache::ReadSetSignature::empty()
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        )
     }
 
     /// Build a slot key with zero env axes — the substrate-level DB unit
@@ -178,7 +180,7 @@ mod tests {
             .get(&key, owner_hash)
             .expect("DB-owned computation must admit its traced candidate");
         assert_eq!(
-            admitted.read_set_signature.facts.as_ref(),
+            admitted.read_set_signature.facts.to_vec(),
             std::slice::from_ref(&owner_fact)
         );
 
@@ -315,7 +317,7 @@ mod tests {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(MockPayload(42)),
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                Arc::from(vec![
+                verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                         canonical_id: "/w/Accordion.vue".into(),
                         hash: [1u8; 16],

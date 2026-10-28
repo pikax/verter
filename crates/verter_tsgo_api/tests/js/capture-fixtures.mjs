@@ -44,11 +44,11 @@ const { MsgpackWriter, writeBinHeader, binHeaderSize, MSGPACK_FIXARRAY3 } = awai
   msgpackUrl.href
 );
 
-// ── MessageType constants (mirror syncChannel.js:15-23) ──────────────────────
+// ── MessageType constants (mirror syncChannel.js:16-24) ──────────────────────
 const MSG_REQUEST = 1;
 
 // ── Reproduce SyncRpcChannel.writeTuple byte output exactly ──────────────────
-// (syncChannel.js:264-317) — used to capture canonical request-frame bytes.
+// (syncChannel.js:302-361) — used to capture canonical request-frame bytes.
 function buildTuple(type, name, payload) {
   const nameBuf = Buffer.from(name, "utf-8");
   const payloadBuf =
@@ -68,7 +68,7 @@ function buildTuple(type, name, payload) {
   return out;
 }
 
-// ── Discover the rc tsc binary portably (mirrors run-gate.mjs::discoverTsgo) ──
+// ── Discover the pinned tsc binary portably (mirrors run-gate.mjs::discoverTsgo) ──
 function discoverTsgo() {
   if (process.env.TSGO_PATH) return process.env.TSGO_PATH;
   const exeName = os.platform() === "win32" ? "tsc.exe" : "tsc";
@@ -107,7 +107,8 @@ function liveExchange(exe, cwd, frame, maxBytes = 4096) {
   let child, fd;
   if (isWindows) {
     const pipePath = `\\\\.\\pipe\\tsgo-capture-${process.pid}-${Date.now()}`;
-    child = spawn(exe, ["--api", "--cwd", cwd, "--pipe", pipePath], {
+    // Windows file systems compare case-insensitively.
+    child = spawn(exe, [...apiArgs(cwd, false), "--pipe", pipePath], {
       stdio: ["ignore", "ignore", "inherit"],
     });
     const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
@@ -131,7 +132,7 @@ function liveExchange(exe, cwd, frame, maxBytes = 4096) {
     child.kill();
     return buf.subarray(0, n);
   } else {
-    child = spawn(exe, ["--api", "--cwd", cwd], { stdio: ["pipe", "pipe", "inherit"] });
+    child = spawn(exe, apiArgs(cwd, true), { stdio: ["pipe", "pipe", "inherit"] });
     child.stdout._handle.setBlocking?.(true);
     child.stdin._handle.setBlocking?.(true);
     const wfd = child.stdin._handle.fd;
@@ -144,6 +145,11 @@ function liveExchange(exe, cwd, frame, maxBytes = 4096) {
   }
 }
 
+// The base `--api` spawn args (options.js:13-24).
+function apiArgs(cwd, caseSensitive) {
+  return ["--api", "--cwd", cwd, `--useCaseSensitiveFileNames=${caseSensitive}`];
+}
+
 function toHex(buf) {
   return Buffer.from(buf).toString("hex");
 }
@@ -152,16 +158,23 @@ function toHex(buf) {
 const requestFixtures = [
   { name: "initialize", method: "initialize", payload: "null" },
   {
-    name: "updateSnapshot_openProjects",
-    method: "updateSnapshot",
+    name: "createSnapshot_openProjects",
+    method: "createSnapshot",
     payload: JSON.stringify({ openProjects: ["/repo/tsconfig.json"] }),
   },
   {
-    name: "updateSnapshot_fileChanges",
+    name: "updateSnapshot_fileNotifications",
     method: "updateSnapshot",
     payload: JSON.stringify({
-      openProjects: ["/repo/tsconfig.json"],
-      fileChanges: { changed: ["/repo/src/a.ts"] },
+      snapshot: 1,
+      changes: { fileNotifications: { changed: ["/repo/src/a.ts"] }, ensurePrograms: true },
+    }),
+  },
+  {
+    name: "getCurrentLanguageServerSnapshot_openProjects",
+    method: "getCurrentLanguageServerSnapshot",
+    payload: JSON.stringify({
+      changes: { openProjects: ["/repo/tsconfig.json"], ensurePrograms: true },
     }),
   },
   {
@@ -170,7 +183,7 @@ const requestFixtures = [
     payload: JSON.stringify({
       snapshot: 1,
       project: "p.x",
-      file: "/repo/src/a.ts",
+      files: ["/repo/src/a.ts"],
     }),
   },
   {
@@ -198,6 +211,7 @@ const requestFixtures = [
     method: "typeToString",
     payload: JSON.stringify({ snapshot: 1, project: "p.x", type: 1 }),
   },
+  { name: "release", method: "release", payload: JSON.stringify({ snapshot: 1 }) },
   { name: "echo", method: "echo", payload: "hello-verter" },
 ];
 

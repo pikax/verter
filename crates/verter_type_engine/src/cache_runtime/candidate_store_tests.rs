@@ -16,10 +16,13 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// Build a `ReadSetSignature` over one `FileWholeHash` fact for
 /// `canonical`. The hash byte distinguishes distinct content versions.
 fn sig_for(canonical: &str, hash_byte: u8) -> ReadSetSignature {
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: [hash_byte; 16],
-    }]);
+    let facts: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash: [hash_byte; 16],
+            },
+        ]);
     ReadSetSignature::new(facts)
 }
 
@@ -34,7 +37,7 @@ fn candidate_for(
     Candidate {
         discriminant: FactCandidateDiscriminant {
             validated_at_generation: generation,
-            facts: Arc::clone(&sig.facts),
+            facts: sig.facts.clone(),
         },
         value: value.to_string(),
         signature: sig,
@@ -583,9 +586,11 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
     // The invalidator MUST be blocked while the publisher is parked. Wait
     // for the observed point where it has ENTERED the exclusive acquire:
     // parking_lot's writer takes the gate's writer bit first and then
-    // waits for the readers to leave, so `is_locked_exclusive()` turns
-    // true exactly when the invalidator is queued behind the parked
-    // publisher's read guard. A read-side invalidator never sets the bit:
+    // waits for the readers to leave, and a pending writer turns new
+    // readers away, so `try_read()` fails exactly when the invalidator is
+    // queued behind the parked publisher's read guard (while only the
+    // publisher reads, a second reader is admitted and released at once).
+    // A read-side invalidator never sets the bit:
     // however late it is scheduled, it eventually races through
     // `canonical_index.reached_by(canonical)` and finishes while the
     // publisher is still parked, which is the bug pattern. The deadline
@@ -604,7 +609,7 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
                  is taking retention_gate.read() instead of write()."
             );
         }
-        if store.retention_gate().is_locked_exclusive() {
+        if store.retention_gate().try_read().is_none() {
             break;
         }
         assert!(
@@ -669,7 +674,10 @@ fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
         receipts.push(ResultReceipt::new(facts));
     }
     let carrier = |receipt: &ResultReceipt| {
-        ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())]))
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of(vec![FactVersionRef::Receipt(receipt.clone())]),
+        )
     };
     let store: ReverseIndexedCandidateStore<u32, u32> =
         ReverseIndexedCandidateStore::with_counter(crate::cache_runtime::OccupancyCounter::new());
@@ -741,7 +749,10 @@ fn a_candidate_charge_does_not_grow_with_the_canonicals_its_receipts_reach() {
         store.insert_for_test(
             key,
             0,
-            ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())])),
+            ReadSetSignature::new(
+                verter_session_query::facts::policy::FactPolicy::production()
+                    .set_of(vec![FactVersionRef::Receipt(receipt.clone())]),
+            ),
             Arc::from(Vec::new()),
             0,
             0u32.retained_footprint(),

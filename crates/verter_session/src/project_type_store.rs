@@ -141,6 +141,7 @@ pub struct AnalysisArtifactKey {
 /// materialise closure is its single producer.
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
+    pub(crate) storage: verter_retention::pinned_heap::StoragePin,
     pub whole_hash: Hash16,
     /// Runtime-authoritative language this exact source was parsed under.
     ///
@@ -246,8 +247,24 @@ pub struct IndexedReady {
 }
 
 /// An artifact's source parse identity, derived once ([`IndexedReady::source_parse_key`]).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
+pub(crate) struct SourceParseKey(
+    verter_retention::pinned_heap::PinnedOnce<Option<verter_language::ParseKey>>,
+);
+
+impl IndexedReady {
+    pub(crate) fn pin_storage(&self) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            &Default::default(),
+        );
+    }
+    #[cfg(test)]
+    pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
+        self.source_parse_key.0.get().cloned()
+    }
+}
 
 impl SourceParseKey {
     /// An identity already derived for the artifact's exact source revision
@@ -255,7 +272,7 @@ impl SourceParseKey {
     /// so the artifact never hashes its source for it. `None` records the
     /// same refusal a derivation would reach.
     pub(crate) fn derived(parse_key: Option<verter_language::ParseKey>) -> Self {
-        Self(std::sync::OnceLock::from(parse_key))
+        Self(verter_retention::pinned_heap::PinnedOnce::from(parse_key))
     }
 }
 
@@ -318,6 +335,7 @@ impl IndexedReady {
     ) -> Self {
         let route_inventory = Arc::clone(&shallow_state.route_inventory);
         Self {
+            storage: Default::default(),
             whole_hash,
             file_language: verter_language::FileLanguage::script_ts(),
             shallow_state,
@@ -359,6 +377,7 @@ impl IndexedReady {
                 Arc::clone(&route_inventory),
             );
         Self {
+            storage: Default::default(),
             whole_hash,
             file_language: verter_language::FileLanguage::script_ts(),
             shallow_state: Arc::new(shallow),
@@ -379,6 +398,48 @@ impl IndexedReady {
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for IndexedReady {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            storage: _,
+            whole_hash: _,
+            file_language,
+            shallow_state,
+            built_at_content_generation: _,
+            parse_env_hash: _,
+            raw_source,
+            eval_source,
+            framework_parse,
+            script_analysis,
+            export_signatures,
+            snapshot,
+            route_inventory,
+            declares_interface_app_config: _,
+            // The mirror charges its own cells as they are allocated.
+            macro_hot_mirror: _,
+            source_parse_key,
+            input_projection: _,
+        } = self;
+        file_language.heap_size(meter)
+            + shallow_state.heap_size(meter)
+            + raw_source.heap_size(meter)
+            + eval_source.heap_size(meter)
+            + framework_parse.heap_size(meter)
+            + script_analysis.heap_size(meter)
+            + export_signatures.heap_size(meter)
+            + snapshot.heap_size(meter)
+            + route_inventory.heap_size(meter)
+            + source_parse_key.heap_size(meter)
+    }
+    fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
+        self.pin_storage();
+        true
     }
 }
 
@@ -1013,6 +1074,11 @@ pub struct ProjectTypeStoreCounterSnapshot {
 /// **not** bump the project generation — they bump the per-canonical
 /// `whole_hash` and invalidate keys by identity.
 pub struct ProjectTypeStore {
+    /// The fact policy every fact set this host builds is built under: the
+    /// authoritative copy, chosen at the composition root before any store
+    /// exists and never changed. Request snapshots, caches and suspended
+    /// computations carry copies.
+    fact_policy: verter_session_query::facts::policy::FactPolicy,
     project_generation: Arc<AtomicU64>,
     /// Canonical [`IndexedReady`] cache.
     indexed: FileArtifactStore,
@@ -1212,6 +1278,9 @@ pub(crate) struct EngineGrants {
 }
 
 impl ProjectTypeStore {
+    /// A hostless store under the production fact policy, for store-level
+    /// tests. A host composes its store with its workspace's policy.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new() -> Self {
         Self::build(
@@ -1219,6 +1288,7 @@ impl ProjectTypeStore {
             verter_session_query::retention::StoreAccount::default(),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            verter_session_query::facts::policy::FactPolicy::production(),
         )
         .0
     }
@@ -1231,14 +1301,23 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn with_retention_account(
         retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> Self {
         Self::build(
             None,
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            fact_policy,
         )
         .0
+    }
+
+    /// The fact policy this host builds every fact set under.
+    #[inline]
+    #[must_use]
+    pub fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.fact_policy
     }
 
     /// The aggregate retained-byte account this store's caches charge.
@@ -1274,12 +1353,14 @@ impl ProjectTypeStore {
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
             task_registry,
             memo_family_bound,
+            fact_policy,
         )
     }
 
@@ -1288,6 +1369,7 @@ impl ProjectTypeStore {
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
@@ -1344,6 +1426,7 @@ impl ProjectTypeStore {
                 counters.component_meta_cache_live.clone(),
             );
         let store = Self {
+            fact_policy,
             project_generation: Arc::new(AtomicU64::new(0)),
             indexed,
             analysis,
@@ -2050,6 +2133,7 @@ impl ProjectTypeStore {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for ProjectTypeStore {
     fn default() -> Self {
         Self::new()
@@ -2324,6 +2408,7 @@ mod tests {
         db.insert(
             Arc::from("/w/a.ts"),
             Arc::new(IndexedReady {
+                storage: Default::default(),
                 whole_hash: hash_v1,
                 file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: shallow,
@@ -2377,6 +2462,7 @@ mod tests {
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
+                storage: Default::default(),
                 whole_hash: hash,
                 file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: Arc::new(
@@ -2459,7 +2545,9 @@ mod tests {
                 owner_whole_hash: hash,
                 bindings: Arc::new(rustc_hash::FxHashMap::default()),
                 read_set_signature:
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                        verter_session_query::facts::policy::FactPolicy::production(),
+                    ),
                 validated_at_generation: 0,
             }),
         );
@@ -2500,7 +2588,7 @@ mod tests {
                     },
                 ),
                 read_set_signature:
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
                 validated_at_generation: 0,
             },
         );

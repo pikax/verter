@@ -4,7 +4,7 @@ Input snapshot: this branch's starting revision on `tama_dag/0.1.0-tama/STS0`.
 
 Ratification candidate: the commit that introduced the STS0 products; later review repairs land as later commits on the same branch and are not a new input snapshot.
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.0.2` (`typescript/unstable/sync`). Framework pin: svelte 5.56.10 (`svelte@5.56.10`, root `package.json` devDependencies, resolved at `node_modules/svelte`); semantics authority `packages/framework-conformance-harness/evidence/svelte-options.tsv` (`svelte:CompileOptions`/`runes` supported canonical).
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.1.0-beta` (`typescript/sync`). Framework pin: svelte 5.56.10 (`svelte@5.56.10`, root `package.json` devDependencies, resolved at `node_modules/svelte`); semantics authority `packages/framework-conformance-harness/evidence/svelte-options.tsv` (`svelte:CompileOptions`/`runes` supported canonical).
 
 Selected case IDs: `STS0-svelte-inventory`, `STS0-svelte-abi`, `STS0-svelte-pin`, `STS0-policy-lock`.
 

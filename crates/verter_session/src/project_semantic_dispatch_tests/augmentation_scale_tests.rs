@@ -46,9 +46,22 @@ fn contributor(i: usize, global: bool) -> (String, String) {
 /// `active` contribute; the others hold a declaration-free file of the same
 /// kind (a global script, or a module) until an edit fills them in.
 fn contributor_host_with(size: usize, active: usize, global: bool) -> VerterHost {
-    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
+    contributor_host_under(
+        size,
+        active,
+        global,
+        verter_session_query::facts::policy::FactPolicy::production(),
+    )
+}
+
+/// [`contributor_host_with`] composed with `policy`.
+fn contributor_host_under(
+    size: usize,
+    active: usize,
+    global: bool,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> VerterHost {
+    let workspace = crate::fact_policy_test_support::workspace_under(policy);
     let host = VerterHost::new(HostConfig::default(), workspace.clone());
     let mut files: Vec<_> = (0..size)
         .map(|i| {
@@ -111,8 +124,12 @@ fn contributor_host_with(size: usize, active: usize, global: bool) -> VerterHost
     host
 }
 
-fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
-    let host = contributor_host(size, global);
+fn probe(
+    size: usize,
+    global: bool,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> (usize, usize, usize, usize) {
+    let host = contributor_host_under(size, size, global, policy);
     let graph = host.project_type_store().semantic_graph();
     let before_scans = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
     let before_roots = verter_type_engine::fact_signature_helpers::root_fact_visits_for_tests();
@@ -192,14 +209,44 @@ fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
     )
 }
 
+/// The policy of the gate's merged-interface host: a completed carrier past
+/// 64 facts takes the strict-root rewrite, as one past 1024 does in
+/// production, so the gate's sizes cross the same threshold the nightly
+/// sizes cross.
+fn narrow_strict_root_policy() -> verter_session_query::facts::policy::FactPolicy {
+    crate::fact_policy_test_support::policy_with(64, 64, 1_024, 8)
+}
+
 #[test]
 fn merged_interface_indexed_access_work_is_linear() {
-    for global in [false, true] {
+    check_merged_interface_work_is_linear(
+        [8, 32, 128],
+        &[false, true],
+        narrow_strict_root_policy(),
+    );
+}
+
+/// Collection, ordering and probe work grow linearly across `sizes` (each
+/// four times the one before), for global and for module contributors as
+/// `globals` lists, and the completed probe stays inside one linear
+/// envelope that includes the strict-root rewrite's allowance — which the
+/// largest size reaches.
+fn check_merged_interface_work_is_linear(
+    sizes: [usize; 3],
+    globals: &[bool],
+    policy: verter_session_query::facts::policy::FactPolicy,
+) {
+    // Each linear bound's fixed slack, in proportion to the smallest size:
+    // 256 at the full-size series's 128 contributors.
+    let slack = 2 * sizes[0];
+    for &global in globals {
         let mut work = Vec::new();
         let mut completed_work = Vec::new();
         let mut ordering_work = Vec::new();
-        for size in [128, 512, 2048] {
-            let (total_work, scans, ordering, root_visits) = probe(size, global);
+        let mut last_root_visits = 0;
+        for size in sizes {
+            let (total_work, scans, ordering, root_visits) = probe(size, global, policy);
+            last_root_visits = root_visits;
             ordering_work.push(ordering);
             work.push((size, total_work - root_visits));
             completed_work.push((size, total_work));
@@ -210,24 +257,28 @@ fn merged_interface_indexed_access_work_is_linear() {
         }
         for pair in ordering_work.windows(2) {
             assert!(
-                pair[1] <= 4 * pair[0] + 256,
+                pair[1] <= 4 * pair[0] + slack,
                 "ordering work must grow linearly: {ordering_work:?}"
             );
         }
         for pair in work.windows(2) {
             assert!(
-                pair[1].1 <= 4 * pair[0].1 + 256,
+                pair[1].1 <= 4 * pair[0].1 + slack,
                 "collection plus probe work must grow linearly: {work:?}"
             );
         }
-        // Strict-world compaction starts only above an evidence page's width.
+        assert!(
+            last_root_visits > 0,
+            "the largest size completes a carrier past the strict-root threshold"
+        );
+        // Strict-world compaction starts only above the strict-root threshold.
         // Preserve the structural-work ratios, and bound the completed probe
         // by one linear envelope that includes the compaction allowance at
         // every size, including sizes where compaction does no work.
         let (first_size, first_work) = work[0];
         for (size, total_work) in &completed_work {
             let allowance =
-                first_work * size / first_size + ROOT_FACT_VISITS_PER_CONTRIBUTOR * size + 256;
+                first_work * size / first_size + ROOT_FACT_VISITS_PER_CONTRIBUTOR * size + slack;
             assert!(
                 *total_work <= allowance,
                 "collection plus completed probe work must be linear: {completed_work:?}"
@@ -605,9 +656,32 @@ fn project_global_reads_retain_unowned_dependencies_and_exclude_other_projects()
 
 #[test]
 fn merged_interface_indexed_access_keeps_every_contributor() {
-    for size in [100, 500, 2000, 4000] {
-        for global in [false, true] {
-            probe(size, global);
+    check_every_contributor_answers(
+        &[8, 32, 128],
+        &[false, true],
+        &[128],
+        narrow_strict_root_policy(),
+    );
+}
+
+/// Every contributor answers at every size, for global and for module
+/// contributors as `globals` lists, with root-fact sealing linear, and the
+/// sizes in `crossing` complete a carrier past the strict-root threshold.
+fn check_every_contributor_answers(
+    sizes: &[usize],
+    globals: &[bool],
+    crossing: &[usize],
+    policy: verter_session_query::facts::policy::FactPolicy,
+) {
+    for &size in sizes {
+        for &global in globals {
+            let (_, _, _, root_visits) = probe(size, global, policy);
+            if crossing.contains(&size) {
+                assert!(
+                    root_visits > 0,
+                    "size={size}, global={global}: the carrier crosses the strict-root threshold"
+                );
+            }
         }
     }
 }
@@ -864,21 +938,10 @@ fn retained(host: &VerterHost) -> Retained {
     }
 }
 
-/// Answering a merged interface at `FIRST` contributors and then, after
-/// edits add the rest, at `GROWN` leaves the engine retaining what a fresh
-/// engine answering only `GROWN` retains, plus the first answer.
-///
-/// Per-file state — artifacts, superseded versions, their parse-snapshot
-/// leases and pinned bytes — must equal the fresh engine's. The first
-/// demand's own cached answers may survive as superseded candidates, so
-/// the candidate excess is bounded by that demand's answers (its
-/// candidates beyond one lowering per contributor), and the retained-byte
-/// excess by what the first step retained. A per-contributor retention
-/// grows with the contributor count and fails both.
-#[test]
-fn growing_merged_contributors_between_answers_retains_only_the_answers() {
-    const FIRST: usize = 64;
-    const GROWN: usize = 256;
+/// [`growing_merged_contributors_between_answers_retains_only_the_answers`]
+/// from `FIRST` to `GROWN` contributors.
+#[allow(non_snake_case)]
+fn assert_growing_contributors_retain_only_the_answers(FIRST: usize, GROWN: usize) {
     for global in [true, false] {
         // The account is process-wide: the baseline engine is measured and
         // dropped before the growing one starts.
@@ -930,6 +993,101 @@ fn growing_merged_contributors_between_answers_retains_only_the_answers() {
             grown.retained_bytes
                 <= baseline.retained_bytes + (first.retained_bytes - setup.retained_bytes),
             "retained bytes may exceed a fresh engine's only by the first step's: first={first:?}, {label}"
+        );
+    }
+}
+
+/// The same growth from 16 to 64 contributors: the gate version of the
+/// 64-to-256 test in the nightly scale tier. Every bound is relative to a
+/// fresh engine answering the grown set, so it holds at any size, and the
+/// fourfold growth is the full-size test's.
+#[test]
+fn growing_merged_contributors_fourfold_retains_only_the_answers() {
+    assert_growing_contributors_retain_only_the_answers(16, 64);
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// Answering a merged interface at `FIRST` contributors and then, after
+    /// edits add the rest, at `GROWN` leaves the engine retaining what a fresh
+    /// engine answering only `GROWN` retains, plus the first answer.
+    ///
+    /// Per-file state — artifacts, superseded versions, their parse-snapshot
+    /// leases and pinned bytes — must equal the fresh engine's. The first
+    /// demand's own cached answers may survive as superseded candidates, so
+    /// the candidate excess is bounded by that demand's answers (its
+    /// candidates beyond one lowering per contributor), and the retained-byte
+    /// excess by what the first step retained. A per-contributor retention
+    /// grows with the contributor count and fails both.
+    #[test]
+    fn growing_merged_contributors_between_answers_retains_only_the_answers() {
+        assert_growing_contributors_retain_only_the_answers(64, 256);
+    }
+
+    // The full series runs as one test per contributor kind, so the two run
+    // in parallel inside the tier's deadline; together they are the whole
+    // workload.
+    #[test]
+    fn merged_interface_indexed_access_work_is_linear() {
+        check_merged_interface_work_is_linear(
+            [128, 512, 2048],
+            &[false],
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    #[test]
+    fn merged_interface_indexed_access_work_is_linear_for_global_contributors() {
+        check_merged_interface_work_is_linear(
+            [128, 512, 2048],
+            &[true],
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    // The full series (100, 500, 2,000 and 4,000 contributors, module and
+    // global) runs as four tests, so its parts run in parallel and each stays
+    // well inside the tier's deadline; together they are the whole workload.
+    #[test]
+    fn merged_interface_indexed_access_keeps_every_contributor() {
+        check_every_contributor_answers(
+            &[100, 500],
+            &[false, true],
+            &[],
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    #[test]
+    fn merged_interface_indexed_access_keeps_every_contributor_at_2000() {
+        check_every_contributor_answers(
+            &[2000],
+            &[false, true],
+            &[2000],
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    #[test]
+    fn merged_interface_indexed_access_keeps_every_module_contributor_at_4000() {
+        check_every_contributor_answers(
+            &[4000],
+            &[false],
+            &[4000],
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    #[test]
+    fn merged_interface_indexed_access_keeps_every_global_contributor_at_4000() {
+        check_every_contributor_answers(
+            &[4000],
+            &[true],
+            &[4000],
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
     }
 }

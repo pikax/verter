@@ -2,7 +2,7 @@
 
 Input snapshot (job baseline): `5506fca6316b3201dd45e1dd474b559f7ff450a7` on `tama_dag/0.1.0-tama/STP9`.
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3`, ts-native `typescript@7.0.2`. Vue pin: `vue@3.6.0-rc.5`.
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3`, ts-native `typescript@7.1.0-beta`. Vue pin: `vue@3.6.0-rc.5`.
 
 Selected case IDs: `STP9-ids`, `STP9-shadow`, `STP9-type-free`, `STP9-complete-cache`, `STP9-determinism`.
 

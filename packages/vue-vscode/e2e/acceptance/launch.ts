@@ -6,7 +6,7 @@ import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-e
 
 import {
   copyLspBinaryToTemp,
-  findWorkspaceRcTsgoBinary,
+  findWorkspacePinnedTsgoBinary,
   provisionVsCodeExtension,
   readE2eEnv,
   resolveVscodeExecutablePath,
@@ -18,7 +18,7 @@ import {
  * run reproduces the user's editor rather than whatever the marketplace serves
  * that day; override with `VERTER_E2E_NATIVE_PREVIEW_EXTENSION`.
  */
-const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
+const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@1.0.1";
 
 /**
  * Launcher for the VS Code acceptance lane.
@@ -80,9 +80,9 @@ async function main(): Promise<void> {
   if (!lspBinaryPath) {
     throw new Error("no verter-lsp binary was found — run `pnpm run prepare:e2e` first");
   }
-  const rcTsgoBinaryPath =
+  const pinnedTsgoBinaryPath =
     provider === "tsgo" || provider === "shared-tsgo"
-      ? findWorkspaceRcTsgoBinary(extensionDevelopmentPath)
+      ? findWorkspacePinnedTsgoBinary(extensionDevelopmentPath)
       : undefined;
 
   const profileRoot = path.join(
@@ -169,7 +169,7 @@ async function main(): Promise<void> {
         // rejected Verter-native answers rather than merely seeing nothing.
         ...(provider === "off" ? { VERTER_E2E_ACCEPTANCE_EXPECT_NATIVE: "1" } : {}),
         VERTER_LOG: "debug",
-        ...(rcTsgoBinaryPath ? { VERTER_TSGO_BIN: rcTsgoBinaryPath } : {}),
+        ...(pinnedTsgoBinaryPath ? { VERTER_TSGO_BIN: pinnedTsgoBinaryPath } : {}),
       },
     });
   } catch (err) {

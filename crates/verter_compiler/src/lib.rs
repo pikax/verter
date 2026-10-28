@@ -120,3 +120,13 @@ mod direct_result_tests;
 mod sourcemap_e2e_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+
+// Reserved module homes.
+pub mod build;
+pub mod emit;
+pub mod framework;
+pub mod solid;
+pub mod target_plan;
+pub mod ts_decl;
+pub mod ts_lower;
+pub mod work_ledger;

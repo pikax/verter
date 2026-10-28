@@ -29,13 +29,15 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
     SignatureReturnCarrier, VariancePhase,
 };
-pub(super) use context::{tuple_element_contexts, ArgumentReadLiterals, ArrayLiteralShape};
+pub(super) use context::{ArgumentReadLiterals, ArrayLiteralShape};
 pub(super) use contextual::ContextualCallState;
+pub(super) use elaboration::is_object_type;
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ARGUMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BINDING_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TUPLE_CONTEXT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Argument acquisition/copy positions, arity and contextual parameter visits.
@@ -50,9 +52,23 @@ pub fn binding_work_for_tests() -> usize {
     BINDING_WORK.with(std::cell::Cell::get)
 }
 
+/// Contextual tuple elements read while typing array literal elements
+/// against a contextual tuple.
+#[cfg(any(test, feature = "test-support"))]
+pub fn tuple_context_work_for_tests() -> usize {
+    TUPLE_CONTEXT_WORK.with(std::cell::Cell::get)
+}
+
 fn record_binding_work(count: usize) {
     #[cfg(any(test, feature = "test-support"))]
     BINDING_WORK.with(|work| work.set(work.get() + count));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = count;
+}
+
+pub(in crate::project_semantic_dispatch) fn record_tuple_context_work(count: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    TUPLE_CONTEXT_WORK.with(|work| work.set(work.get() + count));
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = count;
 }
@@ -2793,8 +2809,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .iter()
                         .any(|decl| self.mentions_node(target, decl.param)) =>
                 {
-                    let mut txn = self.dispatch_txn.borrow_mut();
-                    txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(1);
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .call
+                        .discard_undecided_relations(1);
                 }
                 RelationStep::Unknown | RelationStep::Assumed(_) => {
                     self.abandon_session(session_id);

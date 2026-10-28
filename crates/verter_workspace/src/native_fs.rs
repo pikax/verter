@@ -42,12 +42,28 @@ pub struct NativeFs {
     /// during the lock-free canonicalize window is never clobbered by the
     /// in-flight (now potentially stale) computation.
     realpath_epoch: AtomicU64,
+    /// Test-only: every live disk read, as `(kind, path)`, in order.
+    #[cfg(test)]
+    live_reads: parking_lot::Mutex<Vec<(&'static str, String)>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeFs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    fn note_live_read(&self, kind: &'static str, path: &str) {
+        self.live_reads
+            .lock()
+            .push((kind, normalize_path_str(path)));
+    }
+
+    /// Test-only: drain the live disk reads made since the last drain.
+    #[cfg(test)]
+    pub(crate) fn take_live_reads_for_test(&self) -> Vec<(&'static str, String)> {
+        std::mem::take(&mut *self.live_reads.lock())
     }
 
     // ── Read operations ──
@@ -65,6 +81,8 @@ impl NativeFs {
     /// retained so a resolution transaction cannot validate uncertainty as an
     /// absent file.
     pub(crate) fn read_file_live(&self, path: &str) -> std::io::Result<Option<Arc<str>>> {
+        #[cfg(test)]
+        self.note_live_read("file", path);
         let os_path = to_os_path(path);
         match std::fs::read_to_string(&os_path) {
             Ok(source) => Ok(Some(Arc::from(source))),
@@ -88,6 +106,8 @@ impl NativeFs {
         path: &str,
         maximum_bytes: u64,
     ) -> std::io::Result<BoundedFileRead> {
+        #[cfg(test)]
+        self.note_live_read("file", path);
         use std::io::Read;
 
         let os_path = to_os_path(path);
@@ -118,6 +138,8 @@ impl NativeFs {
 
     /// Current raw file length through metadata only; no payload is read.
     pub(crate) fn file_len_live(&self, path: &str) -> std::io::Result<Option<u64>> {
+        #[cfg(test)]
+        self.note_live_read("len", path);
         let os_path = to_os_path(path);
         match std::fs::metadata(&os_path) {
             Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
@@ -155,26 +177,49 @@ impl NativeFs {
         &self,
         path: &str,
     ) -> std::io::Result<verter_session_query::resolution::PathProbe> {
+        self.probe_path_live_noting_parent(path)
+            .map(|(probe, _)| probe)
+    }
+
+    /// [`Self::probe_path_live`], also reporting whether the same call showed
+    /// that `path`'s lexical parent cannot hold anything, so that nothing else
+    /// beneath it can exist either. Only Windows' attribute probe answers
+    /// that: it does not follow a final reparse point, so its
+    /// `ERROR_PATH_NOT_FOUND` means a component before the last is missing.
+    /// The metadata fallback follows a final symbolic link, so its errors may
+    /// describe the link's target rather than the parent, and say nothing.
+    pub(crate) fn probe_path_live_noting_parent(
+        &self,
+        path: &str,
+    ) -> std::io::Result<(verter_session_query::resolution::PathProbe, bool)> {
+        #[cfg(test)]
+        self.note_live_read("probe", path);
         let os_path = to_os_path(path);
+        #[cfg(windows)]
+        if let Some(answer) = attribute_probe(&os_path) {
+            return Ok(answer);
+        }
         match std::fs::metadata(&os_path) {
             Ok(metadata) if metadata.is_file() => {
-                Ok(verter_session_query::resolution::PathProbe::File)
+                Ok((verter_session_query::resolution::PathProbe::File, false))
             }
-            Ok(metadata) if metadata.is_dir() => {
-                Ok(verter_session_query::resolution::PathProbe::Directory)
-            }
-            Ok(_) => Ok(verter_session_query::resolution::PathProbe::Unknown),
+            Ok(metadata) if metadata.is_dir() => Ok((
+                verter_session_query::resolution::PathProbe::Directory,
+                false,
+            )),
+            Ok(_) => Ok((verter_session_query::resolution::PathProbe::Unknown, false)),
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                Ok(verter_session_query::resolution::PathProbe::Absent)
+                Ok((verter_session_query::resolution::PathProbe::Absent, false))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                Ok(verter_session_query::resolution::PathProbe::Inaccessible)
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok((
+                verter_session_query::resolution::PathProbe::Inaccessible,
+                false,
+            )),
             Err(error) => Err(error),
         }
     }
@@ -214,6 +259,8 @@ impl NativeFs {
     /// Canonicalize against current disk state without consulting or updating
     /// the realpath memo.
     pub(crate) fn realpath_live(&self, path: &str) -> std::io::Result<Option<String>> {
+        #[cfg(test)]
+        self.note_live_read("realpath", path);
         let key = normalize_path_str(path);
         let os_path = to_os_path(&key);
         match std::fs::canonicalize(&os_path) {
@@ -440,6 +487,66 @@ impl NativeFs {
     }
 }
 
+/// The probe one attribute query settles, or `None` where only
+/// [`std::fs::metadata`] answers it exactly.
+///
+/// `std::fs::metadata` opens the path, queries the open handle and closes it;
+/// an attribute query reads the same type in one call without opening
+/// anything, several times cheaper for the absent candidates that dominate
+/// module resolution. It answers only what it settles exactly as metadata
+/// would: a path whose final component is a reparse point (a symlink or
+/// junction metadata follows to its target), a path too long for the plain
+/// form, a path holding a NUL (metadata rejects it as invalid input, while
+/// the query would read only the part before it) and any failure other than
+/// not-found are left to metadata.
+#[cfg(windows)]
+fn attribute_probe(os_path: &str) -> Option<(verter_session_query::resolution::PathProbe, bool)> {
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesExW, GetFileExInfoStandard, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, WIN32_FILE_ATTRIBUTE_DATA,
+    };
+    /// Below `MAX_PATH`, where the plain path form needs no long-path prefix.
+    const PLAIN_PATH_LIMIT: usize = 248;
+    if os_path.len() >= PLAIN_PATH_LIMIT || os_path.contains('\0') {
+        return None;
+    }
+    let wide: Vec<u16> = os_path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut data = std::mem::MaybeUninit::<WIN32_FILE_ATTRIBUTE_DATA>::uninit();
+    // SAFETY: `wide` is NUL-terminated, and `data` is a writable
+    // `WIN32_FILE_ATTRIBUTE_DATA`, the buffer `GetFileExInfoStandard` fills.
+    let found = unsafe {
+        GetFileAttributesExW(
+            wide.as_ptr(),
+            GetFileExInfoStandard,
+            data.as_mut_ptr().cast(),
+        )
+    };
+    if found == 0 {
+        // SAFETY: reads this thread's last-error value, set by the call above.
+        let error = unsafe { GetLastError() };
+        return matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND).then_some((
+            verter_session_query::resolution::PathProbe::Absent,
+            error == ERROR_PATH_NOT_FOUND,
+        ));
+    }
+    // SAFETY: a successful call filled `data`.
+    let attributes = unsafe { data.assume_init() }.dwFileAttributes;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return None;
+    }
+    Some((
+        if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            verter_session_query::resolution::PathProbe::Directory
+        } else {
+            verter_session_query::resolution::PathProbe::File
+        },
+        false,
+    ))
+}
+
 /// Convert a canonical ID (forward slashes) to an OS path.
 #[cfg(not(target_arch = "wasm32"))]
 fn to_os_path(canonical_id: &str) -> String {
@@ -500,6 +607,56 @@ mod tests {
         assert_eq!(normalize_path_str("/a/b/c.ts"), "/a/b/c.ts");
         // Backslash + drive lowering still applied.
         assert_eq!(normalize_path_str("D:\\x\\y"), "d:/x/y");
+    }
+
+    /// A live probe types a file, a directory, a missing path and a path
+    /// under a file, and follows a link at the final component to its
+    /// target: a link to a directory is that directory, and a link whose
+    /// target is gone is absent.
+    #[test]
+    fn probe_path_live_types_paths_and_follows_a_final_link() {
+        use verter_session_query::resolution::PathProbe;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("file.ts");
+        std::fs::write(&file, "export {}").unwrap();
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = root.join("link");
+        #[cfg(windows)]
+        let linked = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
+        assert!(linked, "the directory link must be created");
+
+        let fs = NativeFs::new();
+        let probe = |path: &std::path::Path| {
+            fs.probe_path_live(&normalize_path_str(&path.to_string_lossy()))
+                .unwrap()
+        };
+        assert_eq!(probe(&file), PathProbe::File);
+        assert_eq!(probe(&target), PathProbe::Directory);
+        assert_eq!(probe(&root.join("missing.ts")), PathProbe::Absent);
+        assert_eq!(probe(&file.join("index.ts")), PathProbe::Absent);
+        let with_nul = format!("{}\0.d.ts", normalize_path_str(&file.to_string_lossy()));
+        assert_eq!(
+            fs.probe_path_live(&with_nul).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::InvalidInput),
+            "a path holding a NUL is invalid input, never the file before the NUL"
+        );
+        assert_eq!(probe(&link), PathProbe::Directory);
+        std::fs::remove_dir(&target).unwrap();
+        assert_eq!(
+            probe(&link),
+            PathProbe::Absent,
+            "a link whose target is gone is absent, not a directory"
+        );
     }
 
     #[test]

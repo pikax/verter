@@ -515,22 +515,7 @@ impl<'a> Matrix<'a> {
                     verter_audit::observe::Uncaptured,
                 >::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-                let key = verter_type_engine::semantic_query::FlowReturnKey {
-                    function: dispatch.flow_function_slot_for(
-                        Arc::from(canonical.as_str()),
-                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        Arc::from(*function),
-                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-                        0,
-                    ),
-                    normalized_type_args: verter_type_expr::OwnedSlice::from(
-                        Vec::new().into_boxed_slice(),
-                    ),
-                    context: dispatch.flow_return_context_for(&canonical),
-                    demand: ReturnProjectionDemand::whole_return(),
-                    input: verter_type_engine::semantic_query::FlowInputContext::empty(),
-                    result_contract: super::flow_solve::flow_return_result_contract_id(),
-                };
+                let key = whole_return_key(&dispatch, &canonical, function);
                 let read = dispatch.execute_read(
                     verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
                 );
@@ -547,6 +532,23 @@ impl<'a> Matrix<'a> {
     }
 
     pub(super) fn return_relation_work(&self, function: &str) -> (u64, usize, usize) {
+        let (relations, [arguments, bindings]) = self.return_work(
+            function,
+            [
+                verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests,
+                verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests,
+            ],
+        );
+        (relations, arguments, bindings)
+    }
+
+    /// The relation checks of answering `function`'s return in the first
+    /// setting, and the growth of each of `counters` over that answer.
+    pub(super) fn return_work<const N: usize>(
+        &self,
+        function: &str,
+        counters: [fn() -> usize; N],
+    ) -> (u64, [usize; N]) {
         let host = self.host(&[]);
         let canonical = format!("{}/probe.ts", self.settings[0].root);
         let store_view = host.resolver_store_view_read().into_owned_view();
@@ -556,25 +558,9 @@ impl<'a> Matrix<'a> {
             verter_audit::observe::Uncaptured,
         >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let key = verter_type_engine::semantic_query::FlowReturnKey {
-            function: dispatch.flow_function_slot_for(
-                Arc::from(canonical.as_str()),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(function),
-                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-                0,
-            ),
-            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
-            context: dispatch.flow_return_context_for(&canonical),
-            demand: ReturnProjectionDemand::whole_return(),
-            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
-            result_contract: super::flow_solve::flow_return_result_contract_id(),
-        };
+        let key = whole_return_key(&dispatch, &canonical, function);
         let before = dispatch.graph().stats_snapshot().relation_check_count;
-        let argument_before =
-            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
-        let binding_before =
-            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests();
+        let counted_before = counters.map(|counter| counter());
         let result = dispatch.execute_read(
             verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
         );
@@ -583,13 +569,82 @@ impl<'a> Matrix<'a> {
             "{function}: {:?}",
             result.partial_reasons()
         );
+        let mut counted = counted_before;
+        for (counted, counter) in counted.iter_mut().zip(counters) {
+            *counted = counter() - *counted;
+        }
         (
             dispatch.graph().stats_snapshot().relation_check_count - before,
-            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests()
-                - argument_before,
-            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests()
-                - binding_before,
+            counted,
         )
+    }
+
+    /// The work the first setting's cold read of `function`'s return spends,
+    /// by the deterministic counters a growth test compares: relation
+    /// checks, cold builds, connected work, the operations charged against
+    /// the request's fuse, and call resolution's argument and binding work.
+    pub(super) fn return_work_counters(&self, function: &str) -> Vec<(&'static str, u64)> {
+        let host = self.host(&[]);
+        let canonical = format!("{}/probe.ts", self.settings[0].root);
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let key = whole_return_key(&dispatch, &canonical, function);
+        let stats = dispatch.graph().stats_snapshot();
+        let argument_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
+        let binding_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests();
+        let connected_before = dispatch.connected_demand().work_used_for_tests();
+        // The read runs in a request of its own, under the production
+        // operation fuse, so the operations it charges are counted as the
+        // public route counts them.
+        let _request = verter_type_engine::request_context::RequestContextGuard::install(
+            verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                1,
+                Arc::from(canonical.as_str()),
+                verter_audit::RequestKind::TypeResolution,
+                false,
+                false,
+                None,
+                verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+            ),
+        );
+        let (result, charged, _) =
+            verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+                dispatch.execute_read(
+                    verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+                )
+            });
+        assert!(
+            !result.result_is_partial(),
+            "{function}: {:?}",
+            result.partial_reasons()
+        );
+        let after = dispatch.graph().stats_snapshot();
+        vec![
+            ("relation checks", after.relation_check_count - stats.relation_check_count),
+            ("cold builds", after.misses - stats.misses),
+            (
+                "connected work",
+                (dispatch.connected_demand().work_used_for_tests() - connected_before) as u64,
+            ),
+            ("charged operations", charged as u64),
+            (
+                "argument work",
+                (verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests()
+                    - argument_before) as u64,
+            ),
+            (
+                "binding work",
+                (verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests()
+                    - binding_before) as u64,
+            ),
+        ]
     }
 
     /// Each row's verdict in each setting, in row then setting order.
@@ -1586,6 +1641,29 @@ fn signature_text(
 /// `text` with every union, intersection and object member list sorted,
 /// `true | false` folded to `boolean`, and an optional tuple element's
 /// `| undefined` dropped — the spelling both sides are compared in.
+/// The cold whole-return key of `function`'s declaration body in
+/// `canonical`: the one query every harness read of a return measures.
+fn whole_return_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    function: &str,
+) -> verter_type_engine::semantic_query::FlowReturnKey {
+    verter_type_engine::semantic_query::FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(function),
+            verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
 pub(super) fn canonical_text(text: &str) -> String {
     let text = text.trim();
     canonical_level(text)
@@ -1957,7 +2035,7 @@ fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
             work();
             let _ = sender.send(());
         });
-        await_row(&thread, &receiver, cpu_budget, backstop)
+        (await_row(&thread, &receiver, cpu_budget, backstop), thread)
     };
     let spin: fn() = || {
         let started = Instant::now();
@@ -1966,17 +2044,28 @@ fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
             n = std::hint::black_box(n.wrapping_add(1));
         }
     };
-    let block: fn() = || std::thread::sleep(Duration::from_secs(5));
+    // A row that makes no progress at all: it parks until the test, having observed the
+    // backstop, releases it.
+    static RELEASE_BLOCKED_ROW: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let block: fn() = || {
+        while !RELEASE_BLOCKED_ROW.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::park();
+        }
+    };
     let answer: fn() = || {};
     let cpu_budget = Duration::from_millis(200);
     assert_eq!(
-        run(spin, cpu_budget, Duration::from_secs(4)),
+        run(spin, cpu_budget, Duration::from_secs(4)).0,
         Err(RowOverdue::Cpu(cpu_budget))
     );
-    let blocked = run(block, cpu_budget, Duration::from_millis(300));
+    let (blocked, blocked_row) = run(block, cpu_budget, Duration::from_millis(300));
+    RELEASE_BLOCKED_ROW.store(true, std::sync::atomic::Ordering::SeqCst);
+    blocked_row.thread().unpark();
+    blocked_row.join().expect("the released row returns");
     assert!(
         matches!(blocked, Err(RowOverdue::NoProgress(..))) || thread_cpu::SOURCE.is_none(),
         "{blocked:?}"
     );
-    assert_eq!(run(answer, cpu_budget, Duration::from_secs(4)), Ok(()));
+    assert_eq!(run(answer, cpu_budget, Duration::from_secs(4)).0, Ok(()));
 }

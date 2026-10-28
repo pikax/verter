@@ -5,15 +5,15 @@
   "contract": {
     "path": "docs/arch/signature-kernel.md",
     "revision": "4.1",
-    "sha256": "b34322a298af10701fdd1363cf6b97eb507743da6f2f23d5f2d3b4fcd7e5d433"
+    "sha256": "7963a5202ecfa46c49f612c76cad1f07149c7d91ff11da84948ce21bee3192c5"
   },
   "oracle": {
-    "typescript": "7.0.2",
-    "engine_version_report": "Version 7.0.2",
+    "typescript": "7.1.0-beta",
+    "engine_version_report": "Version 7.1.0-beta",
     "harness_pin": "crates/verter_session/src/typeinfo/oracle_core/identity.rs::TSGO_VERSION",
     "toolchain_record": {
       "path": "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain.json",
-      "sha256": "da2be8884c02eff402fce3acd430e67097ebc0b09c31a1ab0fb6086cd6451c59",
+      "sha256": "c5ee2782c01de9b5b6a8f724c2cfbb680ab14f505bb744e25736afb50fb2bed8",
       "platforms": [
         "darwin-arm64",
         "darwin-x64",
@@ -22,7 +22,7 @@
         "win32-arm64",
         "win32-x64"
       ],
-      "per_platform": "executable + 108 lib/*.d.ts sha256 digests (see the record)"
+      "per_platform": "executable + 116 lib/*.d.ts sha256 digests (see the record)"
     },
     "verification": "oracle_core::identity tests + typeinfo_tests::oracle_toolchain_lock re-hash the installed platform package bytes against this record"
   },
@@ -33,7 +33,7 @@
     "note": "snapshot regeneration is idempotent against the pinned engine (oracle_gen binary; 93 snapshots re-keyed to schema v5 with the raw_capture.decl_emit declaration-emit observation recorded beside hover, superseded v4 files pruned, on the implementing host); the oracle_core::identity test re-verifies these pinned constants against the manifest"
   },
   "corpus": {
-    "identity": "verter-signature-corpus-v0@typescript-7.0.2",
+    "identity": "verter-signature-corpus-v0@typescript-7.1.0-beta",
     "rows": 26,
     "seeds": "hand-authored fixed rows; no random generator (the reported 9,300-case generator was not recovered)",
     "observation_digest": "3335082cccaedfbd7303b09c83b652781b72a72cb4cbd09da90d8c7988b246b0",
@@ -49,8 +49,9 @@
     "disposition": "no reproduction claim is made; the new corpus carries its own identity and is never presented as the reported corpus"
   },
   "port_witness": {
-    "u6_checker_columns": "344/344 rows byte-identical when re-measured on the installed 7.0.2 executable on the implementing host (the E01 any-convention row verified through its IsAny leg)",
-    "oracle_snapshots": "344/344 u6 checker columns re-measured byte-identical on 7.0.2 before the schema-v5 regeneration; the current tree was regenerated with the pinned engine (93 snapshots re-keyed to schema v5, each now carrying the raw_capture.decl_emit declaration-emit observation beside hover; 93 superseded v4 files pruned) and the regeneration is idempotent"
+    "u6_checker_columns": "368/368 rows re-measured on the pinned 7.1.0-beta executable: every checker column and IsAny leg byte-identical to the recorded column and to the same probes run on 7.0.2 (the two error-typed `any` rows are silent on both legs under both versions); 344/344 had been byte-identical when ported to 7.0.2",
+    "signature_corpus": "26/26 rows re-measured on the pinned 7.1.0-beta executable: checker text, any/never legs, the SV21 TS2589 diagnostic with its `[any]` tuple recovery, and the --declaration --emitDeclarationOnly bytes all byte-identical to the recorded observations, so the observation digest is unchanged",
+    "oracle_snapshots": "93/93 snapshots regenerated with the pinned 7.1.0-beta engine (oracle_gen): every observation (oracle value, hover, decl_emit, admission digest) is byte-identical to its 7.0.2 snapshot; only the tsgo_version stamp and the snapshot id derived from it changed. Before that, 344/344 u6 checker columns had re-measured byte-identical on 7.0.2 ahead of the schema-v5 regeneration (93 snapshots re-keyed to schema v5 with the raw_capture.decl_emit observation beside hover; 93 superseded v4 files pruned), and the regeneration is idempotent"
   },
   "out_of_scope": [
     "typescript 7.1.0-dev nightlies (moving target; their content-mapper work is unrelated to this train)"

@@ -31,8 +31,9 @@ fn chain(n: usize) -> Vec<ResultReceipt> {
     receipts
 }
 
-fn carrier(receipt: &ResultReceipt) -> Arc<[FactVersionRef]> {
-    Arc::from(vec![FactVersionRef::Receipt(receipt.clone())])
+fn carrier(receipt: &ResultReceipt) -> verter_session_query::facts::fact_set::FactSet {
+    verter_session_query::facts::policy::FactPolicy::production()
+        .set_of(vec![FactVersionRef::Receipt(receipt.clone())])
 }
 
 fn reached(index: &Index, canonical: &str) -> Vec<u32> {
@@ -239,11 +240,17 @@ fn concurrent_registration_and_release_preserve_and_drain() {
 #[test]
 fn only_a_candidate_with_no_fact_and_no_extra_goes_unregistered() {
     let index = Index::default();
-    index.register(1, (), &Arc::from(Vec::new()), []);
+    index.register(
+        1,
+        (),
+        &verter_session_query::facts::policy::FactPolicy::production().empty_set(),
+        [],
+    );
     index.register(
         2,
         (),
-        &Arc::from(vec![FactVersionRef::ProjectGeneration { generation: 3 }]),
+        &verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![FactVersionRef::ProjectGeneration { generation: 3 }]),
         [],
     );
     let occupancy = index.occupancy();
@@ -310,7 +317,7 @@ fn a_drain_through_tombstones_releases_every_charged_byte() {
     const N: u32 = 3500;
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
     let index = Index::charging_registrations(&account);
-    let empty = crate::fact_signature_helpers::empty_fact_signature();
+    let empty = verter_session_query::facts::policy::FactPolicy::production().empty_set();
     let mut random = 0x1234_5678_u64;
     for key in 0..N {
         random ^= random << 13;
@@ -455,7 +462,10 @@ fn candidates_sharing_a_dispatch_fence_register_its_canonicals_once() {
     const CANDIDATES: usize = 6;
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
     let store = super::super::SemanticGraphStore::with_account(StoreAccount::new(account));
-    let carrier = ReadSetSignature::new(Arc::from(vec![file("/w/carrier.ts")]));
+    let carrier = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![file("/w/carrier.ts")]),
+    );
     let fence = || {
         DepSignature::new(
             (0..FENCE)
@@ -528,7 +538,8 @@ fn a_wide_distinct_file_fence_links_and_unlinks_in_linear_work() {
                 .map(|j| DepEntry::new(&canonical(j), DepVersion::WholeHash([7; 16])))
                 .collect::<Vec<_>>(),
         );
-        let carrier: Arc<[FactVersionRef]> = Arc::from(vec![file("/w/carrier.ts")]);
+        let carrier = verter_session_query::facts::policy::FactPolicy::production()
+            .set_of([file("/w/carrier.ts")]);
         let before = super::canonical_probes_for_tests();
         index.register_fenced(0, (), &carrier, &fence, []);
         assert_eq!(reached(&index, &canonical(files - 1)), vec![0]);
@@ -546,7 +557,7 @@ fn a_wide_distinct_file_fence_links_and_unlinks_in_linear_work() {
 
 /// A payload whose destructor reports whether its index's lock was held:
 /// a candidate's final owner may take other locks as it drops (an interned
-/// family key's interner, a root owner's arena), so the index releases
+/// family key's interner, a root set's arena), so the index releases
 /// every candidate it drops only after it unlocks.
 #[derive(Clone)]
 struct LockProbe {

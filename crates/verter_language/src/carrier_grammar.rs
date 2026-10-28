@@ -40,7 +40,7 @@ pub const CARRIER_GRAMMAR_FINGERPRINT_SCHEMA_VERSION: CarrierGrammarFingerprintS
     CarrierGrammarFingerprintSchemaVersion(1);
 
 /// Random identity of one grammar registry lifetime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct GrammarAuthorityNamespaceId([u8; 16]);
 
 impl GrammarAuthorityNamespaceId {
@@ -50,7 +50,7 @@ impl GrammarAuthorityNamespaceId {
 }
 
 /// Stable semantic SHA-256 identity of a canonical carrier grammar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct CarrierGrammarFingerprint([u8; 32]);
 
 impl CarrierGrammarFingerprint {

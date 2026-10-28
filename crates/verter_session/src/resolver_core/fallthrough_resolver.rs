@@ -176,13 +176,8 @@ impl FallthroughNodeResult {
                     * size_of::<String>()
             }
         };
-        // The result's own facts, and the cache's sealed copy of them: whole
-        // while they fit one evidence page, otherwise at most one page's
-        // width of top-level entries over pages the cache claims itself.
-        let stored_facts = self
-            .facts
-            .len()
-            .min(verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH);
+        // The result's own facts, and the cache's sealed copy of them, whole.
+        let stored_facts = self.facts.len();
         size_of::<Self>()
             + (self.facts.len() + stored_facts) * size_of::<FactVersionRef>()
             + self.diagnostics.len() * size_of::<ResolverDiagnostic>()

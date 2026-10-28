@@ -2,7 +2,7 @@
 //! back as a flow-return answer and, where the form is a returned test, as
 //! the type predicate the checker infers from it.
 //!
-//! Checker-parity answers are measured on the pinned TypeScript 7.0.2: the
+//! Checker-parity answers are measured on the pinned TypeScript 7.1.0-beta: the
 //! strict column is the function's `.d.ts` line (`tsc --declaration
 //! --emitDeclarationOnly --strict`), the loose column the same under
 //! `--strictNullChecks false`, read from a TS2322 message quoting the type
@@ -262,7 +262,7 @@ export function sig_tern() { return tern; }
 
 /// `true | false` IS `boolean`: a join or a ternary over both literals is
 /// `boolean` (beside a third arm too), one literal stays itself, and the
-/// ternary is no type predicate. Measured on 7.0.2: `boolean`, `boolean`,
+/// ternary is no type predicate. Measured on 7.1.0-beta: `boolean`, `boolean`,
 /// `"x" | true`, `"x" | boolean`, `boolean`, `(x: unknown) => boolean`.
 #[test]
 fn true_and_false_join_to_boolean() {
@@ -312,7 +312,7 @@ export function sig_n13() { return n13; }
 /// `true` when it can only be falsy, `boolean` otherwise — a fresh literal
 /// that a lone return, a `const` read back and an object member widen.
 /// Without `strictNullChecks` an operand that can be truthy can also be
-/// nullish. Measured on 7.0.2 (strict / loose): `!{ a: 1 }` is `false` /
+/// nullish. Measured on 7.1.0-beta (strict / loose): `!{ a: 1 }` is `false` /
 /// `boolean`, `!("" | 0)` is `true` / `true`, `!("a" | 1)` is `false` /
 /// `boolean` (read through annotated `const`s and a three-arm join that
 /// keeps the literals, and a `const` assertion over it),
@@ -595,7 +595,7 @@ const CALL_PREDICATE_ROWS: &[(&str, &str, &str)] = &[
 /// not a reference (`x as string`), narrow nothing. Returned, the call is
 /// the function's inferred predicate; a `this is` predicate narrows the
 /// receiver (`c11`: `b` is `Box & { v: Foo }`, whose `v` is `Foo`).
-/// Measured on 7.0.2, identically against the lib's own `Array.isArray`;
+/// Measured on 7.1.0-beta, identically against the lib's own `Array.isArray`;
 /// only `c10` differs without `strictNullChecks`, where `x === null`
 /// narrows nothing.
 ///
@@ -653,7 +653,7 @@ export function o4(x: Foo | null) { if (isC(x)) return x; throw 0; }
 /// to intersects the subject, printed as the checker prints it: the
 /// undistributed `(A | B) & C` when distributing would grow the union,
 /// else the distributed arms, a nullish arm dropping out beside the
-/// object target under `strictNullChecks`. Measured on 7.0.2; only `o2`
+/// object target under `strictNullChecks`. Measured on 7.1.0-beta; only `o2`
 /// and `o3` differ without `strictNullChecks`, where the nullish arms are
 /// gone before the test.
 #[test]
@@ -707,7 +707,7 @@ export function sig_p7() { return p7; }
 /// order wins over a named one (`p6`). A parameter narrowed short of
 /// `never` (`p2`, `p5`'s `x`) and one read where it is not narrowed
 /// (`p7`) establish nothing, and a reassigned parameter is never one
-/// (`p8` is `boolean`, complete). Measured on 7.0.2, identically without
+/// (`p8` is `boolean`, complete). Measured on 7.1.0-beta, identically without
 /// `strictNullChecks`.
 #[test]
 fn a_parameter_never_at_the_return_is_the_inferred_predicate() {
@@ -754,7 +754,7 @@ export function m2(b: Box & VF) { return b.v; }
 /// object type, a base primitive beside its literal adds nothing
 /// (`"a" & string` is `"a"`), and the undistributed intersection stays
 /// the print when distributing would grow it (`(A | B) & C`). Measured on
-/// 7.0.2, identically without `strictNullChecks`.
+/// 7.1.0-beta, identically without `strictNullChecks`.
 #[test]
 fn a_member_read_through_an_intersection_distributes_like_the_checker() {
     let rows = [
@@ -815,7 +815,7 @@ export function pib() { const v: typeof ib extends (x: any) => x is infer U ? U 
 /// `takes(us)` over `Sub` and `Base` is `Base` in either order, literals
 /// of one base union, and a nullable candidate keeps its `undefined`. A
 /// conditional whose extends type is an intersection decides each member
-/// (`A extends A & B` is `0`). Measured on 7.0.2, identically without
+/// (`A extends A & B` is `0`). Measured on 7.1.0-beta, identically without
 /// `strictNullChecks` except `tnull` (`string`).
 #[test]
 fn call_argument_inference_reads_the_last_overload_and_the_common_supertype() {
@@ -861,7 +861,7 @@ export function aba() { const v: A & B extends A ? 1 : 0 = null!; return v; }
 /// through the relation authority like any other arm, so a conditional
 /// over such a composite decides: `A extends A & B` and `Foo | Bar extends
 /// Foo` are `0`, the same spellings over type literals too. Measured on
-/// 7.0.2, identically without `strictNullChecks`.
+/// 7.1.0-beta, identically without `strictNullChecks`.
 #[test]
 fn a_conditional_over_named_composites_decides_like_the_checker() {
     let rows = [
@@ -955,7 +955,7 @@ export function sig_p4() { return p4; }
 /// true edge establishes when the false edge empties it (`p1`, `p4`). A
 /// value this substrate cannot resolve (`Missing`) is no fact about either
 /// edge: the narrow degrades.
-/// Measured on 7.0.2 with `--strict` and with `--strictNullChecks false`
+/// Measured on 7.1.0-beta with `--strict` and with `--strictNullChecks false`
 /// (`e9` reads `string`, `e11` `string` and `e26` `"a" | "b"` there).
 #[test]
 fn an_equality_between_two_values_narrows_both_references() {
@@ -1129,7 +1129,7 @@ export function lp1() { let x: string | number = 1; for (let i = 0; i < 3; i++) 
 /// A call its only candidate does not accept continues with that
 /// candidate as the checker's error-recovery candidate
 /// (`getCandidateForOverloadFailure`), re-inferred from the arguments.
-/// Measured on 7.0.2, identically without `strictNullChecks`: `takes(u)`
+/// Measured on 7.1.0-beta, identically without `strictNullChecks`: `takes(u)`
 /// is `A`; `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
 /// candidates' common supertype, which `y` then fails; `con(1)` is
 /// `string` — the inference violating `T extends string` takes the
@@ -1173,8 +1173,8 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
 /// audited flow-return boundary, printed as `tsc --pretty false` prints
 /// each — `(line,col): error TS<code>: <message>`, then its message chain
 /// indented two spaces per level — in its order. Every expected line is
-/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
-/// off.
+/// TypeScript 7.1.0-beta's on this fixture, identical with
+/// `strictNullChecks` off.
 ///
 /// The positions are the checker's: an argument's start for TS2345 (a
 /// spread's `...` for every argument it expands to), the first argument
@@ -1356,7 +1356,7 @@ export function differing_return() { return gd<string>(1); }
 /// candidate's return, beside the fitting one's TS2345. A union is related
 /// and printed in the checker's own order, and `strictNullChecks: false`
 /// leaves `null` and `undefined` out of every message. Measured on
-/// TypeScript 7.0.2.
+/// TypeScript 7.1.0-beta.
 #[test]
 fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
     const ARG: &str = "is not assignable to parameter of type";
@@ -1574,7 +1574,7 @@ export function f4() { return g(s); }
 /// A literal keeps its spelling against `never`, an eagerly rejected
 /// argument ahead of a callback is reported against the declared parameter
 /// type without the optionality's `undefined`, and a numeric key and its
-/// string spelling are one property. Measured on TypeScript 7.0.2.
+/// string spelling are one property. Measured on TypeScript 7.1.0-beta.
 #[test]
 fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
     let host = host_with(CALL_REPORT_IDENTITY);
@@ -1604,7 +1604,7 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 
 /// A long message prints as the checker prints it. Past its node builder's
 /// truncation length a union's remaining members elide as `... N more ...`
-/// before its last, a member it begins past that length as `{ ...; }`, and
+/// before its last, an object type it begins past that length as `...`, and
 /// an object's remaining properties as `... N more ...;` before its last; a
 /// printed type of twice that length is clipped to its first 317 bytes and
 /// `...`; and a failure through a property path of 70 nested object types
@@ -1614,7 +1614,7 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 /// not generic counts as the object type it resolves to, so each is elided exactly
 /// where the checker elides it, and never withheld. Each is reported at its own
 /// call, two calls of one body in source order, cold and warm. Every
-/// expected line is TypeScript 7.0.2's on this fixture, identical with
+/// expected line is TypeScript 7.1.0-beta's on this fixture, identical with
 /// `strictNullChecks` off.
 #[test]
 fn long_messages_print_as_the_checker_abbreviates_them() {
@@ -1661,14 +1661,14 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
         properties.join("; "),
         near = "x".repeat(150),
         past = "x".repeat(155),
-        index_near = "x".repeat(138),
-        index_past = "x".repeat(139),
+        index_near = "x".repeat(141),
+        index_past = "x".repeat(142),
         label = "a".repeat(90),
         indexed = properties[..20].join("; "),
     );
     const ARG: &str = "is not assignable to parameter of type 'string'.";
     let union = format!(
-        "Argument of type '{} | {{ ...; }} | ... 26 more ... | {{ ...; }}' {ARG}\n  \
+        "Argument of type '{} | ... | ... 26 more ... | ...' {ARG}\n  \
          Type '{{ member0: 0; }}' is not assignable to type 'string'.",
         (0..12)
             .map(|ordinal| format!("{{ member{ordinal}: {ordinal}; }}"))
@@ -1725,14 +1725,14 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
                     "(20,46)",
                     &format!(
                         "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<string>; }}' {ARG}",
-                        "x".repeat(138)
+                        "x".repeat(141)
                     ),
                 ),
                 at(
                     "(20,63)",
                     &format!(
                         "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<...>; }}' {ARG}",
-                        "x".repeat(139)
+                        "x".repeat(142)
                     ),
                 ),
             ],
@@ -1790,8 +1790,10 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
 /// its signature, a class expression's instance `(Anonymous class)`, each
 /// counted as the checker's node builder counts it, so the members past
 /// the truncation length elide exactly where tsc elides them and a text of
-/// twice that length is clipped. Every expected line is TypeScript 7.0.2's
-/// on this fixture, identical with `strictNullChecks` off, cold and warm.
+/// twice that length is clipped. Every expected line is TypeScript
+/// 7.1.0-beta's on this fixture, identical with `strictNullChecks` off,
+/// cold and warm; a function type the node builder begins past the
+/// truncation length elides as `...`.
 #[test]
 fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them() {
     const WIDE: usize = 30;
@@ -1827,12 +1829,13 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
              parameter of type 'string'."
         )
     };
-    let elided = |count: usize, member: &dyn Fn(usize) -> String| {
+    // The last member begins past the truncation length: a function type
+    // there elides as `...`, a class-expression instance does not.
+    let elided = |count: usize, member: &dyn Fn(usize) -> String, last: String| {
         format!(
-            "{{ {}; ... {} more ...; {}; }}",
+            "{{ {}; ... {} more ...; {last}; }}",
             members(count, member),
             WIDE - count - 1,
-            member(WIDE - 1)
         )
     };
     let predicates = format!(
@@ -1842,17 +1845,35 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
     let rows: Vec<(&str, Vec<String>)> = vec![
         (
             "typeof_wide",
-            vec![at("(35,44)", &elided(16, &|i| format!("p{i}: () => void")))],
+            vec![at(
+                "(35,44)",
+                &elided(
+                    16,
+                    &|i| format!("p{i}: () => void"),
+                    format!("p{}: ...", WIDE - 1),
+                ),
+            )],
         ),
         (
             "qualified_wide",
-            vec![at("(37,47)", &elided(16, &|i| format!("q{i}: () => void")))],
+            vec![at(
+                "(37,47)",
+                &elided(
+                    16,
+                    &|i| format!("q{i}: () => void"),
+                    format!("q{}: ...", WIDE - 1),
+                ),
+            )],
         ),
         (
             "class_wide",
             vec![at(
                 "(42,43)",
-                &elided(5, &|i| format!("a{i}: (Anonymous class)")),
+                &elided(
+                    5,
+                    &|i| format!("a{i}: (Anonymous class)"),
+                    format!("a{}: (Anonymous class)", WIDE - 1),
+                ),
             )],
         ),
         ("class_short", vec![at("(43,44)", "(Anonymous class)")]),
@@ -1888,7 +1909,7 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
 /// declaration wrote; and a mapped type that is not generic, at the top or
 /// nested, as the object type it resolves to, `undefined` printed last; and
 /// an optional `never` element or property as `undefined`.
-/// Every expected line is TypeScript 7.0.2's on this fixture.
+/// Every expected line is TypeScript 7.1.0-beta's on this fixture.
 #[test]
 fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
     let source = format!(
@@ -2014,13 +2035,13 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
 }
 
 /// A failure through a long property path is reported while the checker's
-/// relation stack holds it, and as TS2321 where the stack overflows: the
-/// failing pair itself takes a frame when it is two object types or an
-/// intersection target's member, not when it is two primitives or an
-/// object type against a primitive. An overflow is reported twice, at the
-/// call the checker compares the types in while it chooses the candidate,
-/// then at the argument, in place of TS2345. Every line is TypeScript
-/// 7.0.2's on this fixture, identical with `strictNullChecks` off.
+/// relation stack holds it, and not at all past it, where the checker's
+/// overflowing comparison holds and reports nothing: the failing pair
+/// itself takes a frame when it is two object types or an intersection
+/// target's member, not when it is two primitives or an object type against
+/// a primitive. Every line is TypeScript 7.1.0-beta's on this fixture,
+/// identical with `strictNullChecks` off; tsc reports nothing for each
+/// empty row.
 #[test]
 fn deep_chains_report_until_the_checker_relation_stack_overflows() {
     let nest = |inner: &str, depth: usize| {
@@ -2058,16 +2079,6 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             vec!["a"; depth].join("."),
         )]
     };
-    let overflowed = |call: &str, argument: &str| {
-        [call, argument]
-            .map(|position| {
-                format!(
-                    "{position}: error TS2321: Excessive stack depth comparing types \
-                     '{clipped}' and '{clipped}'."
-                )
-            })
-            .to_vec()
-    };
     let expected: [(&str, Vec<String>); 8] = [
         (
             "object_leaf_99",
@@ -2077,7 +2088,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                 "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
             ),
         ),
-        ("object_leaf_100", overflowed("(7,44)", "(7,62)")),
+        ("object_leaf_100", Vec::new()),
         (
             "object_to_primitive_99",
             reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
@@ -2090,7 +2101,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             "primitive_leaf_100",
             reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
         ),
-        ("primitive_leaf_101", overflowed("(19,47)", "(19,68)")),
+        ("primitive_leaf_101", Vec::new()),
         (
             "intersection_98",
             reported(
@@ -2100,7 +2111,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                  Type 'string' is not assignable to type '{ p: 1; }'.",
             ),
         ),
-        ("intersection_99", overflowed("(25,44)", "(25,62)")),
+        ("intersection_99", Vec::new()),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();
@@ -2122,7 +2133,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
 }
 
 /// A diagnostic whose position the call's route cannot establish is not
-/// reported, never moved to another position. TypeScript 7.0.2 reports
+/// reported, never moved to another position. TypeScript 7.1.0-beta reports
 /// TS2345 for `un1`'s argument, which the route cannot type, while the
 /// call still answers its lone signature's declared `number`.
 #[test]
@@ -2172,7 +2183,7 @@ export function predicate(x: number | string) { if (guards.isStr(x)) return x; t
 /// A lazy declared return that is the checker's parameterized recovery
 /// (TS2456, naming its alias) is reported with its bound argument at the
 /// alias's authored name, and a lone predicate signature is checked for
-/// applicability before it narrows. Measured on TypeScript 7.0.2.
+/// applicability before it narrows. Measured on TypeScript 7.1.0-beta.
 #[test]
 fn parameterized_recoveries_and_lone_predicates_report_like_the_checker() {
     const TS2456: &str = "(1,6): error TS2456: Type alias 'G' circularly references itself.";
@@ -2231,7 +2242,7 @@ export function sig_l5() { return l5; }
 /// signatures answer calls, and `Array.isArray`'s `arg is any[]` narrows
 /// both edges and is the predicate a returned call infers, over `any`
 /// (`x is any[]`) and a type parameter (`x is T[]`) too. Measured on
-/// 7.0.2 against the full lib, identically without `strictNullChecks`;
+/// 7.1.0-beta against the full lib, identically without `strictNullChecks`;
 /// the host registers the lib's own declarations of these values.
 #[test]
 fn a_lib_global_value_reads_its_lib_declaration() {
@@ -2311,7 +2322,7 @@ export function s6(x: string | number) { if (typeof x === "string") { class C { 
 /// assertion or parentheses around the target still assign (`x! = 1` and
 /// `(x) = 1` read `number`). A class's property initializer is its own
 /// control-flow container, so its write does not retype the enclosing
-/// read. Measured on 7.0.2, identically without `strictNullChecks` except
+/// read. Measured on 7.1.0-beta, identically without `strictNullChecks` except
 /// `w10`, whose `undefined` the loose parameter type never had.
 #[test]
 fn a_write_through_a_type_assertion_neither_assigns_nor_narrows() {
@@ -2384,7 +2395,7 @@ export function y21(x: unknown) { return x instanceof Cls; }
 /// one (`getNarrowedType` answers the candidate for a top type), except
 /// that the checker never narrows it to the global `Function`
 /// (`narrowTypeByTypePredicate`); `unknown` narrows the same way under
-/// `instanceof`; an `in` test leaves `any` as it is. Measured on 7.0.2,
+/// `instanceof`; an `in` test leaves `any` as it is. Measured on 7.1.0-beta,
 /// identically without `strictNullChecks`, each function's `.d.ts` line
 /// the row's answer.
 #[test]
@@ -2458,7 +2469,7 @@ export function c15<T>(x: T, g: (v: unknown) => v is T[]) { if (g(x)) return x; 
 /// string`); failing that each type-parameter arm whose constraint admits
 /// the target becomes their intersection (`T & any[]`, `T & Foo` beside a
 /// dropped `undefined`); and the false edge keeps what is not assignable
-/// to the target. Measured on 7.0.2, identically without
+/// to the target. Measured on 7.1.0-beta, identically without
 /// `strictNullChecks` (each function's `.d.ts` line): `g01v` `Foo`, `g01e`
 /// `T`, `g02` `T[]`, `g03` `T`, `g05` and `g07` `T & any[]`, `g05e` and
 /// `g07e` `T`, `g08` `T & Foo`, `g09v` `T`, `g11` `T & string`, `g12`
@@ -2555,7 +2566,7 @@ export function l18(x: string | number) { return typeof x === "string" || x > 0;
 /// (`boolean` as `true`, `unknown` as `{}`, no `undefined`) with the
 /// right under subtype reduction, or is the left alone when it cannot be
 /// falsy. A mutable slot widens the operands' fresh literals, never the
-/// falsy part. Measured on 7.0.2 (the `.d.ts` line, strict and without
+/// falsy part. Measured on 7.1.0-beta (the `.d.ts` line, strict and without
 /// `strictNullChecks`).
 #[test]
 fn a_logical_expression_value_is_typed_like_the_checker() {
@@ -2611,7 +2622,7 @@ export function a15(x: string | number) { return typeof x === "number" && Math.a
 /// establishes, or none: only `Array.isArray`'s `arg is any[]` narrows,
 /// and a call inside a comparison is off the narrowing spine. The lib's
 /// own declaration is a global's only one when no program file declares
-/// it. Measured on 7.0.2, identically without `strictNullChecks`: `a07`
+/// it. Measured on 7.1.0-beta, identically without `strictNullChecks`: `a07`
 /// is `(x: string | number | boolean[]) => x is string | boolean[]`, the
 /// rest return `boolean` with no predicate.
 #[test]
@@ -2684,7 +2695,7 @@ export function f8(x: string | number) { if (typeof x === "number") { (0, fail()
 /// expression statement's own call or comma operand
 /// (`maybeBindExpressionFlowIfCall`), and the narrowing persists past the
 /// position unless a conditional's other path joins it unnarrowed.
-/// Measured on 7.0.2, identically without `strictNullChecks`: an argument
+/// Measured on 7.1.0-beta, identically without `strictNullChecks`: an argument
 /// (`n1`), an initializer (`n2`), an array element (`n3`), a `void`
 /// operand (`n4`), a template interpolation (`n5`) and a parenthesized
 /// call (`p2`, `p3`, `p4`) leave `x` as `string | number`; a comma
@@ -2739,7 +2750,7 @@ fn only_an_entered_call_can_assert() {
 }
 
 /// A comma operand in the argument of a statement call whose callee is an
-/// unresolved import narrows like any other: measured on 7.0.2, with and
+/// unresolved import narrows like any other: measured on 7.1.0-beta, with and
 /// without `strictNullChecks` (and with the import resolved to
 /// `declare function touch(v: unknown): void`), `n8` is `string`. The
 /// lane reads `string` behind the typed guard gap, because the callee's
@@ -2775,7 +2786,7 @@ export function sig_z5() { return z5; }
 /// apparent surface, an array, a tuple or a function because it is an
 /// object — so `unknown` narrowed past `null` (`{} | undefined`) narrows
 /// to `any[]` under `Array.isArray`, the `{}` arm taking the narrower
-/// target (`getNarrowedType`). Measured on 7.0.2: `e1`–`e3` and `e5`–`e7`
+/// target (`getNarrowedType`). Measured on 7.1.0-beta: `e1`–`e3` and `e5`–`e7`
 /// are `1`; `e4` and `e8` are `0` (`1` without `strictNullChecks`); `z5`
 /// is `(x: unknown) => x is any[] | null` and `z6` `any[] | null`
 /// (`boolean` and `unknown` without `strictNullChecks`, where `x === null`
@@ -2819,7 +2830,7 @@ export function s3(x: "a" | "b") { if ((touch(), x) === "a") { return x; } throw
 /// A call inside a comparison operand of an `if` test is off the narrowing
 /// spine: its predicate narrows nothing, and it is never entered into
 /// control flow, so the test narrows exactly as its spine does. Measured
-/// on 7.0.2, identically without `strictNullChecks`: `s1` is `number`,
+/// on 7.1.0-beta, identically without `strictNullChecks`: `s1` is `number`,
 /// `s2` `string`. A comparison whose reference sits behind a comma
 /// sequence narrows that reference (`s3` is `"a"`).
 #[test]
@@ -2861,7 +2872,7 @@ export function sig_c8() { return c8; }
 /// equality, a `typeof`, a truthiness test, a predicate argument, an
 /// `instanceof` or `in` operand and a discriminant read behind `(touch(),
 /// x)` all narrow `x`, the earlier operands only running first. Measured
-/// on 7.0.2, identically without `strictNullChecks`.
+/// on 7.1.0-beta, identically without `strictNullChecks`.
 #[test]
 fn a_reference_behind_a_comma_sequence_narrows() {
     let rows = [
@@ -2925,7 +2936,7 @@ export function sig_t10() { return t10; }
 /// `strictNullChecks` (`undefined` without it); the negated edge keeps
 /// `{}`. With `unknown` split into `{} | null | undefined` past a nullish
 /// test, a returned `x === null || typeof x === "object"` infers `x is
-/// object | null`. Measured on 7.0.2 (the `.d.ts` line, strict and without
+/// object | null`. Measured on 7.1.0-beta (the `.d.ts` line, strict and without
 /// `strictNullChecks`).
 #[test]
 fn a_typeof_test_narrows_the_empty_object_type() {
@@ -2992,7 +3003,7 @@ export function sig_d4() { return d4; }
 /// A property equality narrows the property's parent only through a
 /// DISCRIMINANT property of a union (`isMatchingReferenceDiscriminant`):
 /// a parameter that is a union neither as declared nor as narrowed is
-/// never narrowed, and its member is not read for it. Measured on 7.0.2,
+/// never narrowed, and its member is not read for it. Measured on 7.1.0-beta,
 /// identically without `strictNullChecks`: `d3` / `d4` return `boolean`
 /// with no predicate, `d6` is `number[]`, `d7` `{ a: string; }`.
 #[test]
@@ -3036,7 +3047,7 @@ export function retLenOnly(x: string | number[]) { if (x.length === 0) return x;
 /// `x.length` over `string | number[]` reads each arm's `length` — the
 /// string arm through its wrapper — and every arm projects `number`, so
 /// `x.length === 0` discriminates no arm: the parent keeps both. Measured
-/// on 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting:
+/// on 7.1.0-beta under every `strictNullChecks` × `noImplicitAny` setting:
 /// `orLen` and `eqLen` return `boolean` with no predicate, `retLen` and
 /// `retLenOnly` return `string | number[]`.
 #[test]
@@ -3087,7 +3098,7 @@ export function g1(x: string | number | boolean, c: boolean) { c ? (0, a(x)) : (
 /// The flow after a conditional joins its arms' ends, so an entered
 /// `asserts` call every arm applies narrows past it — nested conditionals
 /// included, the other operands of an arm aside. Measured on
-/// 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting: `c1` to
+/// 7.1.0-beta under every `strictNullChecks` × `noImplicitAny` setting: `c1` to
 /// `c7` return `string`; a call that is an arm itself is not entered
 /// (`o1`), and an arm that asserts nothing joins the unnarrowed path
 /// (`o2`, `o3`, `o4`), each `string | number`. Arms that assert different
@@ -3104,7 +3115,10 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
 }
 
-/// Symbol abbreviation depends on spelling, not unrelated interning or query history.
+/// Symbol abbreviation depends on spelling, not unrelated interning or query
+/// history, and elides where the checker does: a symbol-keyed property counts
+/// its spelling, its leaf again and twenty bytes. Measured on TypeScript
+/// 7.1.0-beta, whose abbreviation is itself history-independent.
 #[test]
 fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
     use super::signature_predicate_inference_tests::checker_report;
@@ -3129,7 +3143,7 @@ fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
         source.push_str(&format!("[u{i}]: {i}; "));
     }
     source.push_str("}) { return x; }\n");
-    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; [s2]: number; [s3]: number; [s4]: number; ... 7 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
+    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; ... 10 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
     let expected: Vec<_> = source
         .match_indices("one(x)")
         .map(|(start, _)| {
@@ -3190,7 +3204,7 @@ export function mapped_infer<T>(x: { value: { [K in keyof T]: string } extends {
     let rows = [
         ("merged", "(4,48): error TS2345: Argument of type 'Merged' is not assignable to parameter of type 'string'."),
         ("spread", "(5,86): error TS2345: Argument of type '{ a: number; b: string; }' is not assignable to parameter of type 'string'."),
-        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends { ...; } ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends ... ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
         ("symbol_short", "(8,65): error TS2345: Argument of type '{ [key]: number; }' is not assignable to parameter of type 'string'."),
         ("symbol_wide", "(9,236): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; [key]: number; tail: boolean; last: string; }' is not assignable to parameter of type 'string'."),
         ("mapped", "(10,240): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: string; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
@@ -3324,11 +3338,15 @@ export function enum_wide(x: {{ padding: "{padding}"; [E.A]: number; tail: boole
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// A relation that overflows the checker's relation stack reports nothing
+/// at all — not at the call, not at the argument, elaborated or not, under
+/// overloads or not — while the same fixtures one level shallower report
+/// TS2719 and TS2769 (`elaborated_99`, `overloaded_99` in the measurement).
+/// Measured on TypeScript 7.1.0-beta, identical with `strictNullChecks` off.
 #[test]
-fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
+fn elaborated_and_overloaded_overflows_report_nothing() {
     let nest =
         |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
-    let clipped = format!("{}{{ ...", "{ e: ".repeat(63));
     for (name, overload, elaborated, count) in [
         ("elaborated", false, true, 100),
         ("overloaded", true, false, 100),
@@ -3347,31 +3365,8 @@ fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
             nest("{ x: number }", count), nest("{ y: number }", count),
             if overload { format!("declare function f(arg: {}{callback}, extra?: number): number;\n", nest("{ y: number }", count)) } else { String::new() },
             if elaborated { "{ e: x.e }" } else { "x" });
-        let line = source.lines().count();
-        let body = source.lines().last().unwrap();
-        let call = body.find("f(").unwrap() + 1;
-        let argument = call + 2;
-        let overflow =
-            format!("Excessive stack depth comparing types '{clipped}' and '{clipped}'.");
-        let mut expected = vec![format!("({line},{}): error TS2321: {overflow}", call)];
-        if overload && !elaborated {
-            expected.push(format!("({line},{argument}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {overflow}"));
-        } else if count == 101 {
-            expected.push(format!(
-                "({line},{}): error TS2321: {overflow}",
-                argument + 2
-            ));
-        } else {
-            let message = format!("Type '{clipped}' is not assignable to type '{clipped}'. Two different types with this name exist, but they are unrelated.\n  The types of '{}' are incompatible between these types.\n    Property 'y' is missing in type '{{ x: number; }}' but required in type '{{ y: number; }}'.", vec!["e"; 99].join("."));
-            if overload {
-                expected.push(format!("({line},{}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {}", argument + 2, message.replace('\n', "\n    ")));
-            } else {
-                expected.push(format!(
-                    "({line},{}): error TS2719: {message}",
-                    argument + 2
-                ));
-            }
-        }
+        // TypeScript 7.1.0-beta reports nothing for any of these calls.
+        let expected: Vec<String> = Vec::new();
         let host = host_with(&source);
         for pass in ["cold", "warm"] {
             for root in [STRICT_ROOT, LOOSE_ROOT] {
@@ -3382,22 +3377,137 @@ fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
                     expected,
                     "{pass} {root} {name}"
                 );
-                if overload {
-                    super::signature_predicate_inference_tests::observe(
-                        &host,
-                        root,
-                        name,
-                        |_, degradation, _| {
-                            assert!(
-                                degradation.is_some(),
-                                "overload recovery retains its existing typed gap"
-                            )
-                        },
-                    );
-                } else {
-                    assert_prints(&host, root, name, "number");
-                }
+                // The overflowing argument holds (`Maybe`), so the first
+                // candidate applies and the call answers its return type.
+                assert_prints(&host, root, name, "number");
             }
         }
     }
+}
+
+/// A property whose comparison overflows the checker's relation stack is
+/// one the checker counts related: it compares the sibling properties past
+/// it and reports the first that fails, in property order, whichever side
+/// of the overflowing one it sits. Only when every failing property
+/// overflows does the whole call report nothing (`both_deep`). One more
+/// object level puts 99 nested levels past the stack too (`deep_99`).
+/// Measured on TypeScript 7.1.0-beta with `--strict`; the messages are
+/// tsc's own, the argument types truncated as it prints them.
+#[test]
+fn an_overflowing_property_leaves_its_failing_siblings_reported() {
+    let nest =
+        |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
+    for (name, order, elaborated, count, expected) in [
+        ("deep_first", 0, false, 100, &["(3,41): error TS2345: Argument of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...' is not assignable to parameter of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("shallow_first", 1, false, 100, &["(3,44): error TS2345: Argument of type '{ shallow: string; deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { ...' is not assignable to parameter of type '{ shallow: number; deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { ...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("deep_first_elaborated", 0, true, 100, &["(3,68): error TS2322: Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("deep_99", 0, false, 99, &["(3,38): error TS2345: Argument of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...' is not assignable to parameter of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("both_deep", 2, false, 100, &[] as &[&str]),
+    ] {
+        let (source_type, target_type) = match order {
+            0 => (
+                format!("{{ deep: {}; shallow: string }}", nest("{ x: number }", count)),
+                format!("{{ deep: {}; shallow: number }}", nest("{ y: number }", count)),
+            ),
+            1 => (
+                format!("{{ shallow: string; deep: {} }}", nest("{ x: number }", count)),
+                format!("{{ shallow: number; deep: {} }}", nest("{ y: number }", count)),
+            ),
+            _ => (
+                format!(
+                    "{{ deep: {}; deep2: {} }}",
+                    nest("{ x: number }", count),
+                    nest("{ x: number }", count)
+                ),
+                format!(
+                    "{{ deep: {}; deep2: {} }}",
+                    nest("{ y: number }", count),
+                    nest("{ y: number }", count)
+                ),
+            ),
+        };
+        let argument = if elaborated {
+            "{ deep: x.deep, shallow: x.shallow }"
+        } else {
+            "x"
+        };
+        let source = format!(
+            "declare const x: {source_type};\ndeclare function f(arg: {target_type}): number;\nexport function {name}() {{ return f({argument}); }}\n"
+        );
+        let expected: Vec<String> = expected.iter().map(|line| (*line).to_owned()).collect();
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            assert_eq!(
+                super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    STRICT_ROOT,
+                    name,
+                    &source
+                ),
+                expected,
+                "{pass} {name}"
+            );
+        }
+    }
+}
+
+/// A function or constructor type is the checker's object type with one
+/// signature: one that begins past the truncation length prints as `...`,
+/// however it was written, while a method (a signature of the enclosing
+/// object, not a type) still prints, and so does a function type begun
+/// before the length even where its own parameter types start past it.
+/// Measured on TypeScript 7.1.0-beta with `--strict`.
+#[test]
+fn function_types_begun_past_the_truncation_length_elide() {
+    let mut mismatches = Vec::new();
+    for (name, pad, members, printed) in [
+        ("fun", 155, "fun: () => void", "fun: ...;"),
+        ("ctor", 155, "ctor: new () => object", "ctor: ...;"),
+        ("fun_typed", 155, "fun: (a: number) => string", "fun: ...;"),
+        ("generic", 155, "g: <T>(t: T) => T", "g: ...;"),
+        ("method", 155, "m(): void", "m(): void;"),
+        (
+            "fun_early",
+            100,
+            "fun: (a: number) => string; tail: boolean",
+            "fun: (a: number) => string; tail: boolean;",
+        ),
+        (
+            "nested_fn",
+            140,
+            "fun: (cb: () => void) => void",
+            "fun: (cb: () => void) => void;",
+        ),
+    ] {
+        let padding = "x".repeat(pad);
+        let source = format!(
+            "declare function one(v: string): void;\ndeclare const v: {{ padding: \"{padding}\"; {members} }};\nexport function {name}() {{ return one(v); }}\n"
+        );
+        let column = source.lines().nth(2).unwrap().find("one(").unwrap() + 5;
+        let expected = vec![format!(
+            "(3,{column}): error TS2345: Argument of type '{{ padding: \"{padding}\"; {printed} }}' is not assignable to parameter of type 'string'."
+        )];
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            let reports = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                STRICT_ROOT,
+                name,
+                &source,
+            );
+            if reports != expected {
+                mismatches.push(format!(
+                    "{pass} {name}: got {reports:?}, expected {expected:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches.join(
+            "
+"
+        )
+    );
 }

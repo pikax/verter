@@ -19,7 +19,10 @@ members = [
 # and testing the capture-off configuration it exists to verify. The lane
 # runs the crate by manifest path instead
 # (scripts/compile-contracts.mjs, session-observe stage).
-exclude = ["crates/verter_compile_contracts_session_observe"]
+#
+# `vendor/libmimalloc-sys2` is third-party code patched in below, not a
+# Verter crate, so `--workspace` lint, format and test runs leave it alone.
+exclude = ["crates/verter_compile_contracts_session_observe", "vendor/libmimalloc-sys2"]
 resolver = "2"
 
 [workspace.package]
@@ -42,7 +45,7 @@ repository = "https://github.com/pikax/verter"
 homepage = "https://verterjs.dev/"
 
 [workspace.dependencies]
-blake3 = "1.5"
+blake3 = "1.8"
 oxc_allocator = "0.151.0"
 oxc_ast = "0.151.0"
 oxc_ast_visit = "0.151.0"
@@ -52,13 +55,13 @@ oxc_span = "0.151.0"
 oxc_str = "0.151.0"
 oxc_syntax = "0.151.0"
 rayon = "1.12"
-rustc-hash = "2.1.2"
-self_cell = "1.2.2"
-serde = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json = "1.0.150"
-serial_test = "3"
+rustc-hash = "2.1.3"
+self_cell = "1.3.0"
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.154"
+serial_test = "4"
 sha2 = "0.11"
-syn = { version = "2.0", features = ["full", "visit"] }
+syn = { version = "3.0", features = ["full", "visit"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 verter_css_syntax = { path = "crates/verter_css_syntax" }
@@ -206,3 +209,10 @@ opt-level = 2
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# The sys crate behind `mimalloc-safe` (the native global allocator,
+# crates/verter_alloc), vendored so it builds upstream mimalloc v3.5.3 rather
+# than the release the published crate bundles.
+# vendor/libmimalloc-sys2/Cargo.toml lists every difference from that crate.
+[patch.crates-io]
+libmimalloc-sys2 = { path = "vendor/libmimalloc-sys2" }

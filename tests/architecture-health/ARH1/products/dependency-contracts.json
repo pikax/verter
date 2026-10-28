@@ -96,6 +96,7 @@
         "verter_macro_dto",
         "verter_no_typeexpr",
         "verter_parser",
+        "verter_retention",
         "verter_session_query",
         "verter_span",
         "verter_type_expr",
@@ -199,6 +200,7 @@
         "verter_execution",
         "verter_language",
         "verter_parser",
+        "verter_retention",
         "verter_semantic",
         "verter_session_query",
         "verter_span",
@@ -357,6 +359,7 @@
           "crates/verter_session/src/materialized_structure_equivalence_tests.rs",
           "crates/verter_session/src/meta_batch_fixed_view_tests.rs",
           "crates/verter_session/src/prepared_surface_intersection_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/checker_probe_lane_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
           "crates/verter_session/src/root_continuation.rs",
@@ -591,6 +594,8 @@
           "reset",
           "restart_driver",
           "quiesce",
+          "stage_task_boundary",
+          "wait_stage_tasks_before",
           "register_resolved_deps",
           "config",
           "commit_artifact",
@@ -744,6 +749,19 @@
             "referenceForms": [
               "Scheduler::test_job_queue_depth",
               ".test_job_queue_depth("
+            ]
+          },
+          {
+            "item": "test_wait_until_job_queue_depth",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_wait_until_job_queue_depth",
+              ".test_wait_until_job_queue_depth("
             ]
           },
           {
@@ -1603,6 +1621,7 @@
           "crates/verter_session/src/typeinfo/tests.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/declaration_merge.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_substrate.rs",
+          "crates/verter_session/src/typeinfo/typeinfo_tests/generic_interface_identity.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/macro_producer_fact_replay.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/mapped_template.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_discriminated_union.rs",
@@ -1627,6 +1646,7 @@
           "crates/verter_session/tests/allocation_cases/intersection_distribution.rs",
           "crates/verter_session/tests/allocation_cases/recursive_growth.rs",
           "crates/verter_session/tests/allocation_cases/recursive_paths.rs",
+          "crates/verter_session/tests/allocation_cases/root_sets.rs",
           "crates/verter_session/tests/allocator_canaries.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
@@ -2046,6 +2066,7 @@
               "crates/verter_session/src/typeinfo/tests.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/declaration_merge.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_substrate.rs",
+              "crates/verter_session/src/typeinfo/typeinfo_tests/generic_interface_identity.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/macro_producer_fact_replay.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/mapped_template.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_discriminated_union.rs",
@@ -2067,6 +2088,7 @@
               "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
               "crates/verter_session/tests/allocation_cases/flow_products.rs",
               "crates/verter_session/tests/allocation_cases/intersection_distribution.rs",
+              "crates/verter_session/tests/allocation_cases/root_sets.rs",
               "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
               "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
               "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",

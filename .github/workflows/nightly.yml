@@ -39,7 +39,7 @@ jobs:
       - name: Install wasm-bindgen CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.122
+          tool: wasm-bindgen-cli@0.2.129
 
       # --- Node + pnpm ---
       - uses: pnpm/action-setup@v6
@@ -129,6 +129,116 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Full capture-enabled correctness and observation coverage. Pull requests
+  # keep a small host-backed smoke; this nightly retains the full core selection.
+  rust-observe:
+    name: Rust Test (instrumentation)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: rust-observe
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Fetch locked Cargo dependencies
+        run: cargo fetch --locked
+      - name: Run the instrumentation lane
+        timeout-minutes: 80
+        id: nextest
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node scripts/observe-lane.mjs args)"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/observe-lane.mjs run
+      - name: Locate nextest JUnit report
+        if: always()
+        id: junit
+        run: |
+          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+          if [ -z "$found" ]; then
+            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
+            exit 1
+          fi
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          junit-path: ${{ steps.junit.outputs.path }}
+          name: nextest-evidence-rust-observe
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+      - name: Retain instrumentation test results
+        if: always() && steps.junit.outputs.path != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: rust-instrumentation-test-results
+          path: ${{ steps.junit.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The nightly scale tier: every test under a `nightly_scale` module, at full
+  # size, on the debug build, with the `nightly` nextest profile's own deadline
+  # (`.config/nextest.toml`). The PR gate (profiles `default` and `ci`)
+  # excludes exactly these tests and runs their smaller gate versions instead.
+  # nextest fails a run that selects no test, so an emptied or mistyped tier
+  # fails here rather than passing vacuously.
+  # ---------------------------------------------------------------------------
+  rust-scale-tier:
+    name: Rust Test (nightly scale tier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # It only builds and tests: no write token, and none left in the checkout.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-scale-tier
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run the nightly scale tier
+        id: nextest
+        env:
+          NEXTEST_PROFILE: nightly
+        run: |
+          node scripts/compile-fixture-artifacts.mjs prepare --workspace
+          cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)"
+      - name: Upload nightly scale tier JUnit
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nextest-nightly-scale-tier
+          path: target/nextest/nightly/junit.xml
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # Rust coverage. Moved off the PR path: `cargo llvm-cov` changes RUSTFLAGS, so
   # it cannot share the rust-cache with rust-test and is a FULLY SEPARATE
@@ -196,6 +306,7 @@ jobs:
       # more than a runner's disk. The `%8m` pool merges each binary's
       # processes online into at most eight files.
       - name: Generate coverage
+        id: nextest
         env:
           LANE: ${{ matrix.lane }}
           REQUIRE: ${{ matrix.require }}
@@ -203,16 +314,27 @@ jobs:
           LLVM_PROFILE_FILE_NAME: verter-%8m.profraw
         run: |
           source <(cargo llvm-cov show-env --sh)
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
           cargo llvm-cov clean --workspace
           status=0
           if [ "$LANE" = core ]; then
             node scripts/compile-fixture-artifacts.mjs prepare --workspace || status=1
-            cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)" || status=1
+            nextest_argv=(nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)")
+            echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
+            cargo "${nextest_argv[@]}" || status=1
           else
             env "$REQUIRE=1" node scripts/provider-ci.mjs run "$LANE" || status=1
           fi
           cargo llvm-cov report --lcov --output-path "lcov-$LANE.info" || status=1
           exit "$status"
+      - name: Nextest JUnit evidence
+        if: always() && matrix.lane == 'core'
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-rust-coverage-core
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+          matrix-json: ${{ toJSON(matrix) }}
       - name: Upload lane coverage
         if: always()
         uses: actions/upload-artifact@v6

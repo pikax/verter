@@ -1709,9 +1709,10 @@ fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
             .collect::<Vec<_>>()
             .into_boxed_slice(),
     );
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
-        facts.into_boxed_slice(),
-    ));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(facts.into_boxed_slice()),
+    );
     let generation = host.project_type_store().current_project_generation();
     for key in [&root_key, &member_key] {
         graph.insert_relation_payload_for_tests(
@@ -1775,7 +1776,9 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_publication() 
         let sibling_generation = exact_root.validated_at_generation.saturating_add(1);
         graph.insert_relation_payload_for_tests(
             root_key.clone(),
-            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
             graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             sibling_generation,
@@ -1918,11 +1921,13 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         // relation carriers always fold the dispatch ProjectGeneration
         // fence, so the empty-signature form is unrepresentative. The
         // sibling entry validates only in the warm reader's generation.
-        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
-            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
-                generation: sibling_generation,
-            },
-        ])),
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of([
+                verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                    generation: sibling_generation,
+                },
+            ]),
+        ),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
         sibling_generation,
@@ -3102,11 +3107,11 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
-/// A completed carrier wider than one evidence page — a traced set that
-/// already filled a page, plus the structural self-root merged in after
-/// finalisation — is paged and published whole, never refused for its width.
+/// A completed carrier wider than `WIDE_SIGNATURE_WIDTH` — a traced set
+/// already that wide, plus the structural self-root merged in after
+/// finalisation — is published whole, never refused for its width.
 #[test]
-fn semantic_publication_pages_a_post_finalise_wide_carrier() {
+fn semantic_publication_seals_a_post_finalise_wide_carrier_whole() {
     let canonical = "/w/semantic-publish.ts";
     let host = host();
     upsert_ts(&host, canonical, "export type Root = string;\n");
@@ -3114,7 +3119,7 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .ensure_indexed_ready(canonical)
         .expect("semantic root is indexed")
         .whole_hash;
-    let traced = crate::semantic_graph_self_root_tests::page_width_terminal_witness_facts();
+    let traced = crate::semantic_graph_self_root_tests::wide_width_terminal_witness_facts();
     let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
         QueryResult::Error(QueryError::Miss),
         verter_type_engine::semantic_query::DepSignature::default(),
@@ -3125,9 +3130,9 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
     let completed = finalise_traced_build_output(
         &host,
         output,
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(
-            traced.clone(),
-        )),
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(traced.clone()),
+        ),
         &CarrierNormalizationPrelude::none(),
     );
 
@@ -3139,17 +3144,17 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .graph_carrier
         .expect("the wide carrier is published");
     assert!(
-        carrier.facts.len() <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
-        "the published carrier's top level fits one page"
+        carrier.facts.len()
+            > verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max(),
+        "the published carrier is one set as wide as what it read"
     );
-    let entries: Vec<_> = carrier.entries().cloned().collect();
     assert!(
-        traced.iter().all(|fact| entries.contains(fact)),
-        "every traced fact survives into the paged carrier"
+        traced.iter().all(|fact| carrier.facts.contains(fact)),
+        "every traced fact survives into the carrier"
     );
 }
 
-/// A work-refused build that read more than one evidence page delivers its
+/// A work-refused build that read a wide set of facts delivers its
 /// WHOLE proving prefix: the broadcast carrier holds every traced fact, and
 /// the refusal is certified on that complete evidence — never on an empty
 /// or truncated signature.
@@ -3163,14 +3168,15 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
         .ensure_indexed_ready(canonical)
         .expect("the root is indexed")
         .whole_hash;
-    let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
-            .map(|generation| {
-                verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
-                    generation: generation as u64,
-                }
-            })
-            .collect();
+    let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = (0..2
+        * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()
+        + 1)
+        .map(|generation| {
+            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                generation: generation as u64,
+            }
+        })
+        .collect();
     let refused = || {
         let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
             QueryResult::Error(QueryError::Miss),
@@ -3186,7 +3192,10 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
     };
     let finalise = || {
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(traced.clone()),
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                verter_session_query::facts::policy::FactPolicy::production(),
+                traced.clone(),
+            ),
         )
     };
 
@@ -3245,7 +3254,9 @@ fn a_torn_self_root_never_certifies_a_refusal() {
         output
     };
     let traced = || {
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(Vec::new()))
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
+        )
     };
 
     let torn = || {
@@ -14599,12 +14610,13 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
 /// Deeply nested arrays relate on the heap-backed worklist, one element
 /// pair per level, and never answer `Unknown` for their depth: within the
 /// checker's recursion depth the relation reaches the innermost `Number`
-/// vs `String` mismatch, and past it the relation overflows, false, as the
-/// checker's does (every element pair is one `recursiveTypeRelatedTo`
-/// entry; measured on TypeScript 7.0.2, `{ v: … }[]` nested 50 times
-/// overflows with TS2321). Either way a 90-deep and a 500-deep
-/// **readonly** chain `readonly Number[]…[]` against `readonly
-/// String[]…[]` are `NotAssignable`. Readonly Array-Array relation is
+/// vs `String` mismatch, and past it the checker answers `Maybe`, which
+/// holds (every element pair is one `recursiveTypeRelatedTo` entry;
+/// measured on TypeScript 7.1.0-beta, assigning `readonly number[]` nested
+/// 90, 99 and 100 times to its `string` twin fails, and nested 101 and
+/// 500 times holds). So a 90-deep **readonly** chain `readonly
+/// Number[]…[]` against `readonly String[]…[]` is `NotAssignable` and a
+/// 500-deep one is `Assignable`. Readonly Array-Array relation is
 /// covariant (forward only), so descent is linear in depth.
 #[test]
 fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
@@ -14642,12 +14654,19 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
         );
 
         let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
-        assert!(
-            matches!(result, RelationResult::NotAssignable),
-            "relating a {depth}-deep readonly Array chain must answer NotAssignable \
-             (the leaf mismatch, or the checker's depth overflow), never Unknown; \
-             got {result:?}",
-        );
+        if depth < 100 {
+            assert!(
+                matches!(result, RelationResult::NotAssignable),
+                "relating a {depth}-deep readonly Array chain must answer NotAssignable \
+                 (the leaf mismatch), never Unknown; got {result:?}",
+            );
+        } else {
+            assert!(
+                matches!(result, RelationResult::Assignable { .. }),
+                "relating a {depth}-deep readonly Array chain must answer Assignable \
+                 (the checker's Maybe past its depth), never Unknown; got {result:?}",
+            );
+        }
     }
 }
 
@@ -31234,8 +31253,25 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     );
 }
 
+/// The same cold mapped-type demand over a 4,100-deep finite `KeyOf` chain on
+/// an 896 KiB thread: the gate version of the 10,000-deep test in the nightly
+/// scale tier. The chain is still past the structural depth-fuse cap
+/// (`MAX_DEPTH`, 4,096), so depth alone is shown not to be a limit, and with
+/// the demand's measured 192 to 256 KiB fixed need, 896 KiB allows at most
+/// 0.17 KiB a level, no more than the 2 MiB test thread allows over 10,000.
 #[test]
-fn real_query_deep_finite_nested_demand_completes_and_warms() {
+fn real_query_deep_finite_nested_demand_past_the_depth_cap_completes_and_warms() {
+    std::thread::Builder::new()
+        .stack_size(896 << 10)
+        .spawn(|| deep_finite_nested_demand_completes_and_warms_at(4_100))
+        .expect("spawn the demand thread")
+        .join()
+        .expect("the demand completes");
+}
+
+/// A cold `MappedType` demand whose per-key value is a `depth`-deep finite
+/// `KeyOf` chain completes, stays admissible and warms on repeat.
+fn deep_finite_nested_demand_completes_and_warms_at(depth: usize) {
     // REAL-QUERY structural-depth control. Drive a cold `MappedType` query whose
     // per-key value is a 10,000-deep finite `KeyOf` chain. The heap evaluator must
     // materialise it as Complete: structural depth alone is not an operational
@@ -31246,7 +31282,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mut current = leaf;
-    for _ in 0..10_000 {
+    for _ in 0..depth {
         current = graph.intern_node(SemanticNodeData::KeyOf { base: current });
     }
     let deep_value = current;
@@ -34592,5 +34628,16 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
                 0
             );
         }
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn real_query_deep_finite_nested_demand_completes_and_warms() {
+        deep_finite_nested_demand_completes_and_warms_at(10_000);
     }
 }

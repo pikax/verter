@@ -202,6 +202,7 @@ import {
   statSync,
   copyFileSync,
   chmodSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -7318,6 +7319,14 @@ fi
       skip("(GB6g.1) ci.yml / nextest.toml not present — cannot derive the CI profile contract");
     } else {
       const yml = readFileSync(ciYml, "utf8");
+      // The junit locate step lives in the composite actions the workflow `uses:`, so read those too.
+      const actionsDir = join(repoRoot, ".github", "actions");
+      const actionsYml = existsSync(actionsDir)
+        ? readdirSync(actionsDir, { recursive: true })
+            .filter((f) => /(^|[\\/])action\.ya?ml$/.test(String(f)))
+            .map((f) => readFileSync(join(actionsDir, String(f)), "utf8"))
+            .join("\n")
+        : "";
       const toml = readFileSync(nextestToml, "utf8");
       // The profile the workflow sets for the gate step.
       const m = /NEXTEST_PROFILE:\s*([A-Za-z0-9_-]+)/.exec(yml);
@@ -7334,7 +7343,9 @@ fi
         // the segment is what makes all three legs move together on a profile rename: the env key, the
         // `[profile.<x>.junit]` declaration, and the `*/nextest/<x>/junit.xml` the workflow looks for.
         const profileRe = profile.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
-        const locatesJunit = new RegExp(`nextest/${profileRe}/junit\\.xml`).test(yml);
+        const locatesJunit = new RegExp(`nextest/${profileRe}/junit\\.xml`).test(
+          `${yml}\n${actionsYml}`,
+        );
         note(
           `GB6g.1 CI asks for profile '${profile}'; [profile.${profile}.junit] declared = ` +
             `${junitDeclared}; workflow locates nextest/${profile}/junit.xml = ${locatesJunit}`,

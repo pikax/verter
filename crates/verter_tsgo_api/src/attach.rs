@@ -122,7 +122,7 @@ impl AttachOwnership for NonOwning {
 }
 
 /// The LSP `custom/` method that asks a `tsgo --lsp` server to mint an `--api`
-/// session sharing its `project.Session`. Verified against the shipped rc
+/// session sharing its `project.Session`. Verified against the pinned
 /// `typescript` engine binary (the JS package carries only the doc comment; the
 /// method + result shape live in the Go server).
 pub const INITIALIZE_API_SESSION_METHOD: &str = "custom/initializeAPISession";
@@ -155,6 +155,9 @@ pub struct TsgoLspConnection {
     /// `None` for an [`ConnectionOwnership::AttachedNonOwning`] connection —
     /// the editor owns the process; Verter holds no kill handle.
     child: Option<tokio::process::Child>,
+    /// The process-tree kill armed at spawn: dropping the connection at any
+    /// point, mid-handshake included, kills every descendant too.
+    tree: Option<crate::process::TreeKill>,
     /// Whether Verter owns the engine behind this connection.
     ownership: ConnectionOwnership,
 }
@@ -169,6 +172,7 @@ impl TsgoLspConnection {
         Self {
             conn,
             child,
+            tree: None,
             ownership,
         }
     }
@@ -218,6 +222,9 @@ impl TsgoLspConnection {
     /// [`TsgoAttach`].
     pub(crate) async fn terminate(mut self) {
         let _ = self.conn.close().await;
+        // The guard armed at spawn kills the tree while the child is still
+        // unreaped, so it never fires at a pid the reap released.
+        drop(self.tree.take());
         if let Some(mut child) = self.child.take() {
             let _ =
                 crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
@@ -281,19 +288,22 @@ impl TsgoLspConnectionSource for SpawnOwnTsgoLsp {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = TsgoApiResult<TsgoLspConnection>> + Send + '_>,
     > {
-        Box::pin(async move { spawn_own_lsp_connection(&self.exe, &self.cwd).await })
+        Box::pin(async move { spawn_own_lsp_connection(&self.exe, &self.cwd, None).await })
     }
 }
 
 /// Spawn `tsgo --lsp --stdio` and wrap its stdio in a [`JsonRpcConnection`].
 ///
 /// `pub(crate)` for the toolchain validator's capability smoke
-/// ([`crate::toolchain::validation`]). The child is `kill_on_drop`: a dropped
-/// connection (e.g. a bounded validation timing out mid-handshake) never leaks
-/// the engine process.
+/// ([`crate::toolchain::validation`]). A dropped connection (e.g. a bounded
+/// validation timing out mid-handshake, or a cancelled one) never leaks the
+/// engine process or its descendants: the child is `kill_on_drop` and the
+/// connection holds a process-tree kill armed at spawn. With `held`, the
+/// child's stderr is piped through it instead of inherited.
 pub(crate) async fn spawn_own_lsp_connection(
     exe: &Path,
     cwd: &Path,
+    held: Option<&std::sync::Arc<crate::process::HeldStderr>>,
 ) -> TsgoApiResult<TsgoLspConnection> {
     let mut command = tokio::process::Command::new(exe);
     command
@@ -302,14 +312,22 @@ pub(crate) async fn spawn_own_lsp_connection(
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(if held.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
         .kill_on_drop(true);
-    // Own process group / job: the teardown tree kill reaches any descendant
-    // that inherited the pipes.
+    // Own process group / job: the tree kill reaches any descendant that
+    // inherited the pipes.
     crate::process::configure_tree_spawn(&mut command);
     let mut child = command.spawn().map_err(|e| {
         TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))
     })?;
+    let tree = crate::process::TreeKill::arm(child.id().unwrap_or(0));
+    if let (Some(held), Some(stderr)) = (held, child.stderr.take()) {
+        held.drain(stderr);
+    }
 
     let stdin = child
         .stdin
@@ -321,7 +339,9 @@ pub(crate) async fn spawn_own_lsp_connection(
         .ok_or_else(|| TsgoApiError::Spawn("tsgo --lsp child stdout not piped".into()))?;
 
     let conn = JsonRpcConnection::connect(stdout, stdin);
-    Ok(TsgoLspConnection::new_owned(conn, Some(child)))
+    let mut connection = TsgoLspConnection::new_owned(conn, Some(child));
+    connection.tree = Some(tree);
+    Ok(connection)
 }
 
 /// The result of `custom/initializeAPISession`: the minted pipe path + session id.
@@ -346,7 +366,7 @@ pub struct TsgoAttach<O: AttachOwnership = Owned> {
     api: ApiAttachClient,
     session: ApiSessionHandle,
     /// The engine version the wire gate accepted for this attach — the value
-    /// that flows to the `--api` `updateSnapshot` rail.
+    /// that flows to the `--api` first-snapshot rail.
     observed_version: String,
     /// How that version was observed (in-band `serverInfo` vs a probe).
     witness: EngineVersionWitness,
@@ -443,7 +463,7 @@ impl<O: AttachOwnership> TsgoAttach<O> {
     /// ordered sync barrier, and `custom/initializeAPISession` re-emission —
     /// everything else is refused before the wire (deny-by-default). On a
     /// non-owning attach this is the only public `--lsp` carrier-write
-    /// surface (the `--api` snapshot rail — `api()` / `update_snapshot()` —
+    /// surface (the `--api` snapshot rail — `api()` / `current_snapshot()` —
     /// is separate).
     #[must_use]
     pub fn injection_channel(&self) -> CarrierInjectionChannel<'_> {
@@ -467,7 +487,7 @@ impl<O: AttachOwnership> TsgoAttach<O> {
     }
 
     /// The engine version the wire gate accepted for this attach — the value
-    /// the `--api` `updateSnapshot` rail is driven with.
+    /// the `--api` first-snapshot rail is driven with.
     #[must_use]
     pub fn observed_version(&self) -> &str {
         &self.observed_version
@@ -479,13 +499,15 @@ impl<O: AttachOwnership> TsgoAttach<O> {
         self.witness
     }
 
-    /// Open / refresh the configured-project snapshot using the STORED
-    /// gate-accepted engine version (the in-band witness) — the convenience
-    /// over [`ApiAttachClient::update_snapshot_open_project`] so callers never
-    /// re-supply (or hardcode) the version the gate already validated.
-    pub async fn update_snapshot(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
+    /// Read the language server's current snapshot with `tsconfig_path` open,
+    /// using the STORED gate-accepted engine version (the in-band witness) —
+    /// the convenience over [`ApiAttachClient::current_snapshot_for_project`] so
+    /// callers never re-supply (or hardcode) the version the gate already
+    /// validated. The returned snapshot is the caller's to release through
+    /// [`ApiAttachClient::release`] (`self.api().release(..)`).
+    pub async fn current_snapshot(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
         self.api
-            .update_snapshot_open_project(tsconfig_path, &self.observed_version)
+            .current_snapshot_for_project(tsconfig_path, &self.observed_version)
             .await
     }
 }
@@ -510,7 +532,7 @@ impl TsgoAttach<Owned> {
     /// connection Verter spawned, READ the in-band `serverInfo.version`
     /// witness from the `initialize` result, and feed it to the wire gate
     /// (fail-closed on an unknown channel). Returns the accepted clearance
-    /// (its `observed_version` flows to the `--api` `updateSnapshot` rail).
+    /// (its `observed_version` flows to the `--api` first-snapshot rail).
     /// This is the ONLY place Verter originates an `initialize` — an
     /// editor-owned connection is already initialized and MUST NOT be
     /// re-initialized.
@@ -518,13 +540,13 @@ impl TsgoAttach<Owned> {
         conn: &JsonRpcConnection,
         root_uri: &str,
     ) -> TsgoApiResult<GateClearance> {
-        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::from_env()).await
+        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::production()).await
     }
 
     /// The policy-explicit handshake-half (crate-internal): the toolchain
     /// validator injects its own [`VersionPolicy`] so the in-band gate and the
     /// provisioning policy cannot disagree. [`TsgoAttach::lsp_handshake`]
-    /// delegates here with the env-derived policy.
+    /// delegates here with the production policy.
     pub(crate) async fn lsp_handshake_with_policy(
         conn: &JsonRpcConnection,
         root_uri: &str,
@@ -561,7 +583,7 @@ impl TsgoAttach<Owned> {
     /// initialized, and a second Verter-originated `initialize` would be a
     /// protocol violation — use [`TsgoAttach::attach_to_initialized`] instead.
     pub async fn attach_over(lsp: TsgoLspConnection, root_uri: &str) -> TsgoApiResult<Self> {
-        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::from_env()).await
+        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::production()).await
     }
 
     /// The policy-explicit owned composer (crate-internal): like
@@ -606,6 +628,9 @@ impl TsgoAttach<Owned> {
         let _ = self.api.close().await;
         let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
         let _ = self.lsp.conn.close().await;
+        // The guard armed at spawn kills the tree while the child is still
+        // unreaped, so it never fires at a pid the reap released.
+        drop(self.lsp.tree.take());
         if let Some(mut child) = self.lsp.child.take() {
             let _ =
                 crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;

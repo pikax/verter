@@ -2877,7 +2877,7 @@ impl VerterHost {
         // without changing call sites. Re-emit the structured trace
         // via `invalid_fact_details` only when validation fails so
         // the observability path still surfaces the offending facts.
-        if !view.validates_fact_signature(&cached.fact_versions) {
+        if !view.validates_fact_signature((&cached.fact_versions).into()) {
             let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
             component_meta_trace_custom!(
                 "try_get_cached_component_meta_invalid",
@@ -3293,7 +3293,7 @@ impl VerterHost {
         // `StoreView::validates_fact_signature` so per-domain validators
         // can short-circuit on the first mismatch. Empty signatures
         // trivially validate per the default-impl contract.
-        if view.validates_fact_signature(&cached.fact_versions) {
+        if view.validates_fact_signature((&cached.fact_versions).into()) {
             return Some(cached.payload.clone());
         }
         None
@@ -3371,7 +3371,7 @@ impl VerterHost {
         let view = current.view();
         verter_session_query::facts::store_view::StoreView::validates_fact_signature(
             view,
-            fact_versions,
+            verter_session_query::facts::fact_set::FactsRef::Slice(fact_versions),
         )
     }
 

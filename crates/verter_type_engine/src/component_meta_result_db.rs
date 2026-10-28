@@ -874,20 +874,21 @@ impl<P> ComponentMetaResultDb<P> {
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + request_bytes;
         let handles = recovery_footprint.handles.merge(aliases.take_handles());
-        let reserved = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        // The signature's storage is claimed only once the refusal's own
+        // names are held: a refused hold leaves it pinned and unclaimed.
+        let reserved = verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
             self.retention_account(),
             bytes,
             &[&read_set_signature.facts],
-        ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => handles
-                .retained_with(
+            |charge| {
+                handles.retained_with(
                     charge,
                     verter_session_query::retention::owned::ChargeCtx::new(
                         self.retention_account(),
                     ),
-                ),
-            verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
-        };
+                )
+            },
+        );
         let charge = match reserved {
             Ok(charge) => charge,
             Err(refusal) => {
@@ -1075,7 +1076,9 @@ impl<P> ComponentMetaResultDb<P> {
     {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
-            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
             validated_at_generation: 0,
         };
         self.insert(key, [0u8; 16], entry);
@@ -1331,7 +1334,9 @@ mod refusal_ledger_tests {
                     status,
                     ResultCompleteness::partial(PartialReasonSet::OPERATION_BUDGET),
                     Arc::new(index as u32),
-                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                        verter_session_query::facts::policy::FactPolicy::production()
+                    ),
                     0,
                     ComponentMetaRefusalEffects::default(),
                 )
@@ -1379,7 +1384,9 @@ mod refusal_ledger_tests {
                 status,
                 ResultCompleteness::partial(PartialReasonSet::OPERATION_BUDGET),
                 Arc::new(7u32),
-                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                ),
                 0,
                 ComponentMetaRefusalEffects::default(),
             )
@@ -1417,7 +1424,9 @@ mod refusal_ledger_tests {
             ComponentMetaResultDb::with_account_for_test(Arc::clone(&account));
         let status = final_component_refusal_status(PartialReasonSet::OPERATION_BUDGET).unwrap();
         let completeness = ResultCompleteness::partial(PartialReasonSet::OPERATION_BUDGET);
-        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::empty();
+        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::empty(
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
         let seal = |root: &str, effects: ComponentMetaRefusalEffects| {
             db.seal_refusal(
                 key("/w/charged.vue"),

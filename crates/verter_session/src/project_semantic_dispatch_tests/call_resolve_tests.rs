@@ -477,6 +477,7 @@ fn call_site_indexed_version_conflicting_with_a_retained_operand_refuses_carrier
         let carrier = verter_type_engine::semantic_query_memo::semantic_graph_carrier(
             &view,
             &roots,
+            &verter_session_query::facts::policy::FactPolicy::production().empty_set(),
             Vec::new(),
         );
         if edited {

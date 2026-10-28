@@ -17,6 +17,16 @@ thread_local! {
     #[cfg(any(test, feature = "semantic-observe"))]
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     static RESOLUTION_DIRECTORY_OBSERVATIONS: RefCell<Vec<ResolutionDirectoryObservation>> = const { RefCell::new(Vec::new()) };
+    /// Test-only: import-resolution attempts whose admission final
+    /// validation refused the frozen evidence.
+    #[cfg(test)]
+    static ADMISSION_REVALIDATION_REFUSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: drain the count of admission final-validation refusals.
+#[cfg(test)]
+pub(crate) fn take_admission_revalidation_refusals_for_test() -> usize {
+    ADMISSION_REVALIDATION_REFUSALS.take()
 }
 
 /// A recorded directory-membership observation.
@@ -181,14 +191,29 @@ impl FilesystemWorkspace {
         )
     }
 
-    /// Construct with a complete tightening-only semantic budget policy.
+    /// Construct with a complete tightening-only semantic budget policy,
+    /// sealing under the production fact policy.
     pub fn new_with_input_resolution_budgets(
         options: FilesystemOptions,
         budgets: verter_session_query::resolution::InputResolutionBudgets,
     ) -> Self {
+        Self::new_with_fact_policy(
+            options,
+            budgets,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        )
+    }
+
+    /// Construct with a budget policy and the fact policy the workspace,
+    /// and every host bound to it, seals its evidence under.
+    pub fn new_with_fact_policy(
+        options: FilesystemOptions,
+        budgets: verter_session_query::resolution::InputResolutionBudgets,
+        fact_policy: verter_session_query::facts::policy::FactPolicy,
+    ) -> Self {
         Self {
             options,
-            engine: Engine::new_with_input_resolution_budgets(budgets),
+            engine: Engine::new_with_input_resolution_budgets(budgets, fact_policy),
             #[cfg(not(target_arch = "wasm32"))]
             native_fs: crate::native_fs::NativeFs::new(),
             sinks: crate::audit_sink::VfsAuditSinks::default(),
@@ -473,8 +498,17 @@ impl FilesystemWorkspace {
             }
             input_ledger.discard_staged_loaded_inputs();
 
+            // The freeze just read every observation live, or reused the live
+            // read this attempt already made of it in the same content
+            // generation, so the replay starts as soon as nothing it was
+            // sealed against moved. The evidence is read live once more only
+            // if the replay reaches admission, through the operation's final
+            // validation, which never reuses a read: a change that landed
+            // after a reused read is refused there and the attempt restarts.
+            // A replay that settles before admission returns its outcome as
+            // it is.
             let frozen = recorder.freeze();
-            if !frozen.revalidate() {
+            if !frozen.sealed_current() {
                 if input_ledger.charge_outer_restart(self).is_err() {
                     return crate::resolution_currency::ResolutionOutcome::refused(
                         None,
@@ -496,7 +530,7 @@ impl FilesystemWorkspace {
                         published,
                         &mut input_ledger,
                         &|| {
-                            let valid = frozen.complete() && frozen.revalidate();
+                            let valid = frozen.revalidate();
                             final_valid.set(valid);
                             valid
                         },
@@ -507,6 +541,8 @@ impl FilesystemWorkspace {
             if final_valid.get() {
                 return outcome;
             }
+            #[cfg(test)]
+            ADMISSION_REVALIDATION_REFUSALS.set(ADMISSION_REVALIDATION_REFUSALS.get() + 1);
             if input_ledger.charge_outer_restart(self).is_err() {
                 return crate::resolution_currency::ResolutionOutcome::refused(
                     None,
@@ -740,6 +776,242 @@ struct FilesystemResolutionRecorder<'a> {
     workspace: &'a FilesystemWorkspace,
     published: Arc<crate::published_state::PublishedRoot>,
     observations: FilesystemResolutionObservations,
+    live_reads: AttemptLiveReads,
+}
+
+/// The live disk reads one resolution attempt has made, so a later step of
+/// the same attempt reuses a read instead of repeating it: the freeze
+/// re-reads every path the attempt observed, and the bounded input preflight
+/// had already read many of them live moments earlier.
+///
+/// A probe that finds a directory missing also answers every later probe
+/// beneath that directory as absent without reading the disk: a missing
+/// directory holds nothing, so that answer is the directory's absence as
+/// the pass observed it.
+///
+/// It belongs to one attempt's recorder and is dropped when the attempt
+/// seals its evidence, so no read outlives its attempt. It answers only
+/// while the workspace's content generation is the one it was created at.
+/// The admission's final validation never reads through it: it re-checks
+/// live through a fresh pass of its own, so a disk change that lands after
+/// a reused read is caught there, and the attempt restarts.
+#[cfg(not(target_arch = "wasm32"))]
+struct AttemptLiveReads {
+    content_generation: u64,
+    probes: parking_lot::Mutex<HashMap<String, verter_session_query::resolution::PathProbe>>,
+    realpaths: parking_lot::Mutex<HashMap<String, Option<String>>>,
+    files: parking_lot::Mutex<HashMap<String, Option<Arc<str>>>>,
+    /// Directories a probe of this pass showed to be missing (or not a
+    /// directory). Every path beneath one is absent, answered without
+    /// reading the disk again: that answer is the directory's absence as
+    /// this pass observed it.
+    missing_directories: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Directories a probe of this pass showed to exist, so their children's
+    /// misses are not followed by a probe of the directory itself.
+    #[cfg(not(windows))]
+    present_directories: parking_lot::Mutex<std::collections::HashSet<String>>,
+}
+
+/// The parent directory of the canonical `key` whose absence may stand for
+/// its children: never a filesystem root (`/` spelled as the empty prefix, or
+/// a Windows drive `c:`), so one root-level miss cannot answer every path.
+#[cfg(not(target_arch = "wasm32"))]
+fn prunable_parent(key: &str) -> Option<&str> {
+    let parent = &key[..key.rfind('/')?];
+    (!parent.is_empty() && !parent.ends_with(':') && parent.contains('/')).then_some(parent)
+}
+
+/// On `wasm32` there is no live filesystem, so an attempt has no reads to keep.
+#[cfg(target_arch = "wasm32")]
+struct AttemptLiveReads;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AttemptLiveReads {
+    fn new(workspace: &FilesystemWorkspace) -> Self {
+        Self {
+            content_generation: workspace.engine.current_content_generation(),
+            probes: parking_lot::Mutex::default(),
+            realpaths: parking_lot::Mutex::default(),
+            files: parking_lot::Mutex::default(),
+            missing_directories: parking_lot::Mutex::default(),
+            #[cfg(not(windows))]
+            present_directories: parking_lot::Mutex::default(),
+        }
+    }
+
+    /// Whether `key` lies beneath a directory this pass found missing.
+    /// Only directories [`prunable_parent`] admits are ever recorded.
+    fn beneath_missing_directory(&self, key: &str) -> bool {
+        let missing = self.missing_directories.lock();
+        if missing.is_empty() {
+            return false;
+        }
+        let mut directory = key;
+        while let Some(slash) = directory.rfind('/') {
+            directory = &directory[..slash];
+            if missing.contains(directory) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn in_generation(&self, workspace: &FilesystemWorkspace) -> bool {
+        workspace.engine.current_content_generation() == self.content_generation
+    }
+
+    /// `read`'s value for `path`, reused when this attempt already read it
+    /// in its generation. Only a successful read is kept.
+    fn reuse_or_read<T: Clone, E>(
+        &self,
+        workspace: &FilesystemWorkspace,
+        map: &parking_lot::Mutex<HashMap<String, T>>,
+        path: &str,
+        read: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let key = observation_key(path);
+        if self.in_generation(workspace) {
+            if let Some(value) = map.lock().get(&key) {
+                return Ok(value.clone());
+            }
+        }
+        let value = read()?;
+        if self.in_generation(workspace) {
+            map.lock().insert(key, value.clone());
+        }
+        Ok(value)
+    }
+
+    /// The probe of `path`: reused when this pass already probed it, absent
+    /// without a read when it lies beneath a directory this pass found
+    /// missing, else read live. A live miss whose read shows the parent is
+    /// missing records the parent, so its other children cost no read.
+    fn probe(
+        &self,
+        workspace: &FilesystemWorkspace,
+        path: &str,
+    ) -> std::io::Result<verter_session_query::resolution::PathProbe> {
+        use verter_session_query::resolution::PathProbe;
+        let key = observation_key(path);
+        let in_generation = self.in_generation(workspace);
+        if in_generation {
+            if let Some(probe) = self.probes.lock().get(&key) {
+                return Ok(*probe);
+            }
+            if self.beneath_missing_directory(&key) {
+                self.probes.lock().insert(key, PathProbe::Absent);
+                return Ok(PathProbe::Absent);
+            }
+        }
+        let (probe, parent_missing) = workspace.native_fs.probe_path_live_noting_parent(path)?;
+        if !in_generation || !self.in_generation(workspace) {
+            return Ok(probe);
+        }
+        self.probes.lock().insert(key.clone(), probe);
+        if let Some(parent) = prunable_parent(&key) {
+            #[cfg(not(windows))]
+            let parent_missing = parent_missing
+                || (probe == PathProbe::Absent && self.directory_is_missing(workspace, parent)?);
+            if parent_missing {
+                self.missing_directories.lock().insert(parent.to_owned());
+            }
+        }
+        Ok(probe)
+    }
+
+    /// Whether `directory` holds nothing, probed once per pass: where a plain
+    /// not-found says nothing about the parent, a miss is followed by one
+    /// probe of the parent itself.
+    #[cfg(not(windows))]
+    fn directory_is_missing(
+        &self,
+        workspace: &FilesystemWorkspace,
+        directory: &str,
+    ) -> std::io::Result<bool> {
+        if self.present_directories.lock().contains(directory) {
+            return Ok(false);
+        }
+        let probe = self.probe(workspace, directory)?;
+        let missing = matches!(
+            probe,
+            verter_session_query::resolution::PathProbe::Absent
+                | verter_session_query::resolution::PathProbe::File
+        );
+        if !missing {
+            self.present_directories.lock().insert(directory.to_owned());
+        }
+        Ok(missing)
+    }
+
+    fn realpath(
+        &self,
+        workspace: &FilesystemWorkspace,
+        path: &str,
+    ) -> std::io::Result<Option<String>> {
+        self.reuse_or_read(workspace, &self.realpaths, path, || {
+            workspace.native_fs.realpath_live(path)
+        })
+    }
+
+    fn file(
+        &self,
+        workspace: &FilesystemWorkspace,
+        path: &str,
+    ) -> std::io::Result<Option<Arc<str>>> {
+        self.reuse_or_read(workspace, &self.files, path, || {
+            workspace.native_fs.read_file_live(path)
+        })
+    }
+
+    /// The byte length of `path`, from a kept read when there is one.
+    fn file_len(
+        &self,
+        workspace: &FilesystemWorkspace,
+        path: &str,
+    ) -> std::io::Result<Option<u64>> {
+        if self.in_generation(workspace) {
+            if let Some(kept) = self.files.lock().get(&observation_key(path)) {
+                return Ok(kept.as_ref().map(|source| source.len() as u64));
+            }
+        }
+        workspace.native_fs.file_len_live(path)
+    }
+
+    /// A bounded read of `path`: a kept read answers it within the bound,
+    /// and a complete or missing live read is kept.
+    fn bounded_file(
+        &self,
+        workspace: &FilesystemWorkspace,
+        path: &str,
+        maximum_bytes: u64,
+    ) -> std::io::Result<crate::native_fs::BoundedFileRead> {
+        let key = observation_key(path);
+        if self.in_generation(workspace) {
+            if let Some(kept) = self.files.lock().get(&key) {
+                return Ok(match kept {
+                    None => crate::native_fs::BoundedFileRead::Missing,
+                    Some(source) if source.len() as u64 > maximum_bytes => {
+                        crate::native_fs::BoundedFileRead::Exceeded
+                    }
+                    Some(source) => crate::native_fs::BoundedFileRead::Complete(Arc::clone(source)),
+                });
+            }
+        }
+        let read = workspace
+            .native_fs
+            .read_file_bounded_live(path, maximum_bytes)?;
+        let kept = match &read {
+            crate::native_fs::BoundedFileRead::Missing => Some(None),
+            crate::native_fs::BoundedFileRead::Complete(source) => Some(Some(Arc::clone(source))),
+            crate::native_fs::BoundedFileRead::Exceeded => None,
+        };
+        if let Some(kept) = kept {
+            if self.in_generation(workspace) {
+                self.files.lock().insert(key, kept);
+            }
+        }
+        Ok(read)
+    }
 }
 
 impl<'a> FilesystemResolutionRecorder<'a> {
@@ -751,6 +1023,10 @@ impl<'a> FilesystemResolutionRecorder<'a> {
             workspace,
             published,
             observations: FilesystemResolutionObservations::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            live_reads: AttemptLiveReads::new(workspace),
+            #[cfg(target_arch = "wasm32")]
+            live_reads: AttemptLiveReads,
         }
     }
 
@@ -777,6 +1053,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
         self.observations
             .absorb_directory_evidence(take_resolution_directory_evidence());
         let workspace = self.workspace;
+        let reads = Some(&self.live_reads);
         let mut complete = self.observations.consistent.into_inner();
         // Memos whose cached answer demonstrably disagrees with the live
         // filesystem, so the retry reads current state instead of replaying
@@ -785,7 +1062,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
 
         let mut files = self.observations.files.into_inner();
         for (canonical, recorded) in &mut files {
-            match workspace.independent_file_bytes(canonical) {
+            match workspace.independent_file_bytes_in(canonical, reads) {
                 Ok(live) if live == *recorded => {}
                 Ok(live) => {
                     *recorded = live;
@@ -797,7 +1074,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
 
         let mut probes = self.observations.probes.into_inner();
         for (canonical, recorded) in &mut probes {
-            let live = workspace.independent_probe_path(canonical);
+            let live = workspace.independent_probe_path_in(canonical, reads);
             if live == *recorded {
                 continue;
             }
@@ -811,7 +1088,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
 
         let mut realpaths = self.observations.realpaths.into_inner();
         for (canonical, recorded) in &mut realpaths {
-            match workspace.independent_realpath(canonical) {
+            match workspace.independent_realpath_in(canonical, reads) {
                 Ok(live) if live == *recorded => {}
                 Ok(live) => {
                     *recorded = live;
@@ -824,7 +1101,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
 
         let mut manifests = self.observations.manifests.into_inner();
         for (canonical, recorded) in &mut manifests {
-            match workspace.independent_manifest(canonical) {
+            match workspace.independent_manifest_in(canonical, reads) {
                 Ok(live) if manifests_equal(live.as_ref(), recorded.as_ref()) => {}
                 Ok(live) => {
                     *recorded = live;
@@ -887,24 +1164,49 @@ impl FilesystemWorkspace {
     }
 
     fn independent_file_bytes(&self, canonical_id: &str) -> Result<Option<Arc<str>>, ()> {
+        self.independent_file_bytes_in(canonical_id, None)
+    }
+
+    /// [`Self::independent_file_bytes`], reusing a read the current attempt
+    /// already made when `reads` is given.
+    fn independent_file_bytes_in(
+        &self,
+        canonical_id: &str,
+        reads: Option<&AttemptLiveReads>,
+    ) -> Result<Option<Arc<str>>, ()> {
         if let Some(source) = self.engine.overlay.read().get(canonical_id) {
             return Ok(Some(source));
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.count_live_evidence_read();
-            self.native_fs.read_file_live(canonical_id).map_err(|_| ())
+            match reads {
+                Some(reads) => reads.file(self, canonical_id),
+                None => self.native_fs.read_file_live(canonical_id),
+            }
+            .map_err(|_| ())
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = canonical_id;
+            let _ = (canonical_id, reads);
             Err(())
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn independent_probe_path(
         &self,
         canonical_id: &str,
+    ) -> verter_session_query::resolution::PathProbe {
+        self.independent_probe_path_in(canonical_id, None)
+    }
+
+    /// [`Self::independent_probe_path`], reusing a read the current attempt
+    /// already made when `reads` is given.
+    fn independent_probe_path_in(
+        &self,
+        canonical_id: &str,
+        reads: Option<&AttemptLiveReads>,
     ) -> verter_session_query::resolution::PathProbe {
         if self.engine.overlay.read().has_overlay(canonical_id) {
             return verter_session_query::resolution::PathProbe::File;
@@ -912,27 +1214,45 @@ impl FilesystemWorkspace {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.count_live_evidence_read();
-            self.native_fs.probe_path(canonical_id)
+            match reads {
+                Some(reads) => reads.probe(self, canonical_id),
+                None => self.native_fs.probe_path_live(canonical_id),
+            }
+            .unwrap_or(verter_session_query::resolution::PathProbe::Unknown)
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = canonical_id;
+            let _ = (canonical_id, reads);
             verter_session_query::resolution::PathProbe::Unknown
         }
     }
 
     fn independent_realpath(&self, canonical_id: &str) -> Result<Option<String>, ()> {
+        self.independent_realpath_in(canonical_id, None)
+    }
+
+    /// [`Self::independent_realpath`], reusing a read the current attempt
+    /// already made when `reads` is given.
+    fn independent_realpath_in(
+        &self,
+        canonical_id: &str,
+        reads: Option<&AttemptLiveReads>,
+    ) -> Result<Option<String>, ()> {
         if self.engine.overlay.read().has_overlay(canonical_id) {
             return Ok(Some(observation_key(canonical_id)));
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.count_live_evidence_read();
-            self.native_fs.realpath_live(canonical_id).map_err(|_| ())
+            match reads {
+                Some(reads) => reads.realpath(self, canonical_id),
+                None => self.native_fs.realpath_live(canonical_id),
+            }
+            .map_err(|_| ())
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = canonical_id;
+            let _ = (canonical_id, reads);
             Err(())
         }
     }
@@ -941,9 +1261,18 @@ impl FilesystemWorkspace {
         &self,
         canonical_id: &str,
     ) -> Result<Option<crate::types::PackageManifest>, ()> {
-        self.independent_file_bytes(canonical_id).map(|source| {
-            source.map(|source| crate::package_index::parse_package_json(source.as_ref()))
-        })
+        self.independent_manifest_in(canonical_id, None)
+    }
+
+    fn independent_manifest_in(
+        &self,
+        canonical_id: &str,
+        reads: Option<&AttemptLiveReads>,
+    ) -> Result<Option<crate::types::PackageManifest>, ()> {
+        self.independent_file_bytes_in(canonical_id, reads)
+            .map(|source| {
+                source.map(|source| crate::package_index::parse_package_json(source.as_ref()))
+            })
     }
 
     /// **This backend's live evidence read** — the implementation behind
@@ -1179,7 +1508,9 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
     }
 
     fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
-        let result = crate::traits::WorkspaceRead::probe_path(self.workspace, canonical_id);
+        let result = self
+            .workspace
+            .probe_path_in(canonical_id, Some(&self.live_reads));
         self.observations
             .record(&self.observations.probes, canonical_id, result);
         result
@@ -1238,11 +1569,9 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         crate::resolver::ResolutionInputReservationBatch,
         verter_session_query::resolution::AttemptFailure,
     > {
-        let reservation = crate::traits::WorkspaceRead::preflight_resolution_inputs_bounded(
-            self.workspace,
-            keys,
-            basis,
-        )?;
+        let reservation =
+            self.workspace
+                .preflight_resolution_inputs_in(keys, basis, Some(&self.live_reads))?;
         for entry in reservation.entries() {
             match entry {
                 crate::resolver::ResolutionInputReservation::PathProbe {
@@ -1272,10 +1601,9 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         crate::resolver::LoadedResolutionInputBatch,
         verter_session_query::resolution::AttemptFailure,
     > {
-        let loaded = crate::traits::WorkspaceRead::load_preflighted_resolution_inputs(
-            self.workspace,
-            reservation,
-        )?;
+        let loaded = self
+            .workspace
+            .load_preflighted_resolution_inputs_in(reservation, Some(&self.live_reads))?;
         for entry in loaded.entries() {
             if let crate::resolver::LoadedResolutionInput::PackageManifest {
                 manifest_path,
@@ -1382,25 +1710,38 @@ impl FrozenFilesystemResolutionReader<'_> {
         self.complete.load(Ordering::Acquire)
     }
 
+    /// Whether the sealed evidence is complete and nothing it was sealed
+    /// against has moved: the content generation and the published root.
+    /// Reads nothing from disk; [`Self::revalidate`] adds the live re-read.
+    fn sealed_current(&self) -> bool {
+        self.complete()
+            && self.workspace.engine.current_content_generation() == self.content_generation
+            && self
+                .workspace
+                .engine
+                .load_published()
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.published))
+    }
+
     fn revalidate(&self) -> bool {
-        if !self.complete() {
+        if !self.sealed_current() {
             return false;
         }
-        if self.workspace.engine.current_content_generation() != self.content_generation {
-            return false;
-        }
-        let Some(current) = self.workspace.engine.load_published() else {
-            return false;
-        };
-        if !Arc::ptr_eq(&current, &self.published) {
-            return false;
-        }
+        // The re-check reads live, through reads of its own: within this one
+        // pass a probe that finds a directory missing answers the other
+        // probes beneath it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let pass = AttemptLiveReads::new(self.workspace);
+        #[cfg(target_arch = "wasm32")]
+        let pass = AttemptLiveReads;
         self.files.iter().all(|(canonical, expected)| {
             self.workspace
                 .independent_file_bytes(canonical)
                 .is_ok_and(|actual| actual == *expected)
         }) && self.probes.iter().all(|(canonical, expected)| {
-            self.workspace.independent_probe_path(canonical) == *expected
+            self.workspace
+                .independent_probe_path_in(canonical, Some(&pass))
+                == *expected
         }) && self.realpaths.iter().all(|(canonical, expected)| {
             self.workspace
                 .independent_realpath(canonical)
@@ -1747,6 +2088,215 @@ impl FilesystemWorkspace {
     }
 }
 
+impl FilesystemWorkspace {
+    /// [`crate::traits::WorkspaceRead::probe_path`], reusing a probe the
+    /// current attempt already made when `reads` is given.
+    fn probe_path_in(
+        &self,
+        canonical_id: &str,
+        reads: Option<&AttemptLiveReads>,
+    ) -> verter_session_query::resolution::PathProbe {
+        if self.engine.overlay.read().has_overlay(canonical_id)
+            || self.engine.snapshot.read().contains(canonical_id)
+        {
+            return verter_session_query::resolution::PathProbe::File;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // A complete clean directory index can answer stable absence
+            // without a syscall. A positive still goes through metadata so a
+            // directory is not laundered into File.
+            if self.ensure_parent_dir_indexed(canonical_id) == Some(false) {
+                return verter_session_query::resolution::PathProbe::Absent;
+            }
+            match reads {
+                Some(reads) => reads.probe(self, canonical_id),
+                None => self.native_fs.probe_path_live(canonical_id),
+            }
+            .unwrap_or(verter_session_query::resolution::PathProbe::Unknown)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = reads;
+            verter_session_query::resolution::PathProbe::Absent
+        }
+    }
+
+    /// The bounded input preflight, reusing reads the current attempt
+    /// already made when `reads` is given.
+    fn preflight_resolution_inputs_in(
+        &self,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
+        reads: Option<&AttemptLiveReads>,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_session_query::resolution::AttemptFailure,
+    > {
+        crate::resolver::preflight_supported_resolution_inputs(
+            keys,
+            basis,
+            |path| {
+                let value = if self.engine.overlay.read().has_overlay(path)
+                    || self.engine.snapshot.read().contains(path)
+                {
+                    verter_session_query::resolution::PathProbe::File
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match reads {
+                            Some(reads) => reads.probe(self, path),
+                            None => self.native_fs.probe_path_live(path),
+                        }
+                        .map_err(|_| {
+                            verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
+                                key: Box::new(verter_session_query::resolution::InputKey::PathProbe {
+                                    path: path.into(),
+                                }),
+                            }
+                        })?
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        verter_session_query::resolution::PathProbe::Absent
+                    }
+                };
+                Ok((value, Vec::new()))
+            },
+            |path| {
+                let value = if self.engine.overlay.read().has_overlay(path)
+                    || self.engine.snapshot.read().contains(path)
+                {
+                    Some(path.to_string())
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match reads {
+                            Some(reads) => reads.realpath(self, path),
+                            None => self.native_fs.realpath_live(path),
+                        }
+                        .map_err(|_| {
+                            verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
+                                key: Box::new(verter_session_query::resolution::InputKey::RealPath {
+                                    path: path.into(),
+                                }),
+                            }
+                        })?
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        None
+                    }
+                };
+                Ok((value, Vec::new()))
+            },
+            |manifest_path, key| {
+                let _ = take_resolution_directory_observations();
+                let in_memory = self
+                    .engine
+                    .overlay
+                    .read()
+                    .get(manifest_path)
+                    .or_else(|| self.engine.snapshot.read().read(manifest_path));
+                #[cfg(target_arch = "wasm32")]
+                let length = {
+                    let _ = (key, reads);
+                    in_memory.map(|source| source.len() as u64)
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let length = if let Some(source) = in_memory {
+                    Some(source.len() as u64)
+                } else {
+                    match reads {
+                        Some(reads) => reads.file_len(self, manifest_path),
+                        None => self.native_fs.file_len_live(manifest_path),
+                    }
+                    .map_err(|_| {
+                        verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
+                            key: Box::new(key.clone()),
+                        }
+                    })?
+                };
+                Ok((length.is_some(), length.unwrap_or(0), Vec::new()))
+            },
+        )
+    }
+
+    /// The preflighted input load, reusing reads the current attempt already
+    /// made when `reads` is given.
+    fn load_preflighted_resolution_inputs_in(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+        reads: Option<&AttemptLiveReads>,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_session_query::resolution::AttemptFailure,
+    > {
+        crate::resolver::load_supported_resolution_inputs(
+            reservation,
+            |manifest_path, expected_present, reserved_raw_bytes, key| {
+                let in_memory = self
+                    .engine
+                    .overlay
+                    .read()
+                    .get(manifest_path)
+                    .or_else(|| self.engine.snapshot.read().read(manifest_path));
+                let source = if let Some(source) = in_memory {
+                    if source.len() as u64 > reserved_raw_bytes {
+                        return Err(
+                            verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
+                                unresolved: vec![key.clone()],
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
+                            },
+                        );
+                    }
+                    Some(source)
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match match reads {
+                            Some(reads) => reads.bounded_file(self, manifest_path, reserved_raw_bytes),
+                            None => self
+                                .native_fs
+                                .read_file_bounded_live(manifest_path, reserved_raw_bytes),
+                        }
+                        .map_err(|_| {
+                                verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
+                                    key: Box::new(key.clone()),
+                                }
+                            })? {
+                            crate::native_fs::BoundedFileRead::Missing => None,
+                            crate::native_fs::BoundedFileRead::Exceeded => {
+                                return Err(
+                                    verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
+                                        unresolved: vec![key.clone()],
+                                        reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
+                                    },
+                                );
+                            }
+                            crate::native_fs::BoundedFileRead::Complete(source) => Some(source),
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = reads;
+                        None
+                    }
+                };
+                if source.is_some() != expected_present {
+                    return Err(
+                        verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
+                            unresolved: vec![key.clone()],
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                        },
+                    );
+                }
+                Ok(source.map(|source| crate::package_index::parse_package_json(&source)))
+            },
+        )
+    }
+}
+
 impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.read_file_in::<verter_audit::observe::Uncaptured>(canonical_id, None)
@@ -1785,25 +2335,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     }
 
     fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
-        if self.engine.overlay.read().has_overlay(canonical_id)
-            || self.engine.snapshot.read().contains(canonical_id)
-        {
-            return verter_session_query::resolution::PathProbe::File;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // A complete clean directory index can answer stable absence
-            // without a syscall. A positive still goes through metadata so a
-            // directory is not laundered into File.
-            if self.ensure_parent_dir_indexed(canonical_id) == Some(false) {
-                return verter_session_query::resolution::PathProbe::Absent;
-            }
-            self.native_fs.probe_path(canonical_id)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            verter_session_query::resolution::PathProbe::Absent
-        }
+        self.probe_path_in(canonical_id, None)
     }
 
     fn resolution_event_bridge_complete(&self) -> bool {
@@ -1853,81 +2385,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         crate::resolver::ResolutionInputReservationBatch,
         verter_session_query::resolution::AttemptFailure,
     > {
-        crate::resolver::preflight_supported_resolution_inputs(
-            keys,
-            basis,
-            |path| {
-                let value = if self.engine.overlay.read().has_overlay(path)
-                    || self.engine.snapshot.read().contains(path)
-                {
-                    verter_session_query::resolution::PathProbe::File
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        self.native_fs.probe_path_live(path).map_err(|_| {
-                            verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
-                                key: Box::new(verter_session_query::resolution::InputKey::PathProbe {
-                                    path: path.into(),
-                                }),
-                            }
-                        })?
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        verter_session_query::resolution::PathProbe::Absent
-                    }
-                };
-                Ok((value, Vec::new()))
-            },
-            |path| {
-                let value = if self.engine.overlay.read().has_overlay(path)
-                    || self.engine.snapshot.read().contains(path)
-                {
-                    Some(path.to_string())
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        self.native_fs.realpath_live(path).map_err(|_| {
-                            verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
-                                key: Box::new(verter_session_query::resolution::InputKey::RealPath {
-                                    path: path.into(),
-                                }),
-                            }
-                        })?
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        None
-                    }
-                };
-                Ok((value, Vec::new()))
-            },
-            |manifest_path, key| {
-                let _ = take_resolution_directory_observations();
-                let in_memory = self
-                    .engine
-                    .overlay
-                    .read()
-                    .get(manifest_path)
-                    .or_else(|| self.engine.snapshot.read().read(manifest_path));
-                #[cfg(target_arch = "wasm32")]
-                let length = {
-                    let _ = key;
-                    in_memory.map(|source| source.len() as u64)
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                let length = if let Some(source) = in_memory {
-                    Some(source.len() as u64)
-                } else {
-                    self.native_fs.file_len_live(manifest_path).map_err(|_| {
-                        verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
-                            key: Box::new(key.clone()),
-                        }
-                    })?
-                };
-                Ok((length.is_some(), length.unwrap_or(0), Vec::new()))
-            },
-        )
+        self.preflight_resolution_inputs_in(keys, basis, None)
     }
 
     fn load_preflighted_resolution_inputs(
@@ -1937,64 +2395,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         crate::resolver::LoadedResolutionInputBatch,
         verter_session_query::resolution::AttemptFailure,
     > {
-        crate::resolver::load_supported_resolution_inputs(
-            reservation,
-            |manifest_path, expected_present, reserved_raw_bytes, key| {
-                let in_memory = self
-                    .engine
-                    .overlay
-                    .read()
-                    .get(manifest_path)
-                    .or_else(|| self.engine.snapshot.read().read(manifest_path));
-                let source = if let Some(source) = in_memory {
-                    if source.len() as u64 > reserved_raw_bytes {
-                        return Err(
-                            verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
-                                unresolved: vec![key.clone()],
-                                reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
-                            },
-                        );
-                    }
-                    Some(source)
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        match self
-                            .native_fs
-                            .read_file_bounded_live(manifest_path, reserved_raw_bytes)
-                            .map_err(|_| {
-                                verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
-                                    key: Box::new(key.clone()),
-                                }
-                            })? {
-                            crate::native_fs::BoundedFileRead::Missing => None,
-                            crate::native_fs::BoundedFileRead::Exceeded => {
-                                return Err(
-                                    verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
-                                        unresolved: vec![key.clone()],
-                                        reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
-                                    },
-                                );
-                            }
-                            crate::native_fs::BoundedFileRead::Complete(source) => Some(source),
-                        }
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        None
-                    }
-                };
-                if source.is_some() != expected_present {
-                    return Err(
-                        verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
-                            unresolved: vec![key.clone()],
-                            reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
-                        },
-                    );
-                }
-                Ok(source.map(|source| crate::package_index::parse_package_json(&source)))
-            },
-        )
+        self.load_preflighted_resolution_inputs_in(reservation, None)
     }
 
     fn commit_loaded_resolution_inputs(&self, entries: &[crate::resolver::LoadedResolutionInput]) {
@@ -2288,6 +2689,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 }
 
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+    fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
+        self.engine.fact_policy
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,

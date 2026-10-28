@@ -7,7 +7,7 @@
 //! the server-minted pipe and exchanges JSON-RPC 2.0 envelopes over this framing;
 //! see [`crate::jsonrpc`] for the connection layer that drives it.
 //!
-//! Mirrors the shipped rc `typescript` async client's transport
+//! Mirrors the pinned `typescript` async client's transport
 //! (`dist/api/async/client.js` → vendored `vscode-jsonrpc` v9
 //! `SocketMessageReader`/`SocketMessageWriter`, `Content-Length` header,
 //! `createMessageConnection`). Binary op results ride a base64 `{ data }` field

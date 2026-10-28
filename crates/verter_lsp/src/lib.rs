@@ -121,6 +121,7 @@ pub mod external_ts;
 pub mod external_ts_sync;
 pub mod features;
 pub mod heap_in_use;
+pub(crate) mod idle_collect;
 pub mod interaction_trace;
 pub mod outbound;
 pub mod provider_surface_store;
@@ -535,3 +536,14 @@ pub enum ProjectSyncMode {
     #[default]
     FullProject,
 }
+
+// Reserved module homes.
+pub mod coexistence;
+pub mod diagnostic_transport;
+pub mod enhancement;
+pub mod file_operations;
+pub mod progress;
+pub mod project_profile;
+pub mod ts_enhancement;
+pub mod workspace_edit;
+pub mod workspace_protocol;

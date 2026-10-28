@@ -25,7 +25,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, ThreadId};
-use std::time::{Duration, Instant};
 
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -65,7 +64,7 @@ fn warm_read_validates_outside_entries_mutex() {
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
         QueryResult::Value(value),
-        ReadSetSignature::empty(),
+        ReadSetSignature::empty(verter_session_query::facts::policy::FactPolicy::production()),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         0,
@@ -147,20 +146,12 @@ fn warm_read_validates_outside_entries_mutex() {
 
     // The discriminating assertion. While the worker is parked
     // inside `MemoEntry::validate`, attempt `entries.try_lock()` on
-    // the store. Under the FIX (snapshot + outside-lock validate),
-    // the mutex is NOT held and try_lock succeeds within a generous
-    // window. Under the BUG (validate-under-mutex), the mutex IS
-    // held and try_lock returns None for the entire window.
-    let try_lock_window = Duration::from_millis(150);
-    let start = Instant::now();
-    let mut try_lock_succeeded = false;
-    while start.elapsed() < try_lock_window {
-        if graph_for_probe.try_lock_entries_for_tests() {
-            try_lock_succeeded = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
+    // the store. The worker is the store's only user and is parked on
+    // the barrier, so the mutex state cannot change under the probe:
+    // under the FIX (snapshot + outside-lock validate) the mutex is NOT
+    // held and try_lock succeeds; under the BUG (validate-under-mutex)
+    // it IS held and try_lock fails.
+    let try_lock_succeeded = graph_for_probe.try_lock_entries_for_tests();
 
     // Release the worker.
     barrier.wait();

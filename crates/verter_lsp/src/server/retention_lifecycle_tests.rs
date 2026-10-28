@@ -67,26 +67,20 @@ fn still_alive(handles: &[(Arc<str>, std::sync::Weak<ProviderSurfaceSnapshot>)])
         .collect()
 }
 
-/// WSP6-AC3: repeated token requests across document revisions do not retain
-/// every old document version.
-///
-/// Semantic tokens are a render-cadence decoration: the editor re-asks on every
-/// scroll, cursor move and edit. Each request builds a token BASE — the provider
-/// surface, both UTF-16 line indexes and the position mapper it merges through —
-/// from the current surface. Two hundred of those across two hundred revisions
-/// must leave the session holding ONE surface per live path, not two hundred.
-///
-/// This drives the real `semantic_tokens_full` entry point, against a provider
-/// that returns real tokens, so the retention under test is the one in the
-/// handler and context lifecycle rather than a store call a test makes itself.
-///
-/// Discriminating: the per-revision generations are captured as weak handles
-/// BEFORE the loop continues past them; a handler or store that kept any of them
-/// leaves a live handle behind and the final assertion names it.
+/// The same requests across 20 revisions: the gate version of the
+/// 200-revision test in the nightly scale tier. A retained generation leaves a
+/// live weak handle, and a bounded cache of superseded surfaces raises the
+/// retained count, after any second revision, so 20 revisions discriminate
+/// every retention the 200-revision run does.
 #[tokio::test(flavor = "multi_thread")]
-async fn repeated_token_requests_retain_one_document_version_not_every_version() {
-    const REVISIONS: usize = 200;
+async fn repeated_token_requests_across_twenty_revisions_retain_one_document_version() {
+    assert_token_requests_retain_one_document_version(20).await;
+}
 
+/// Token requests across `REVISIONS` revisions leave the session holding what
+/// one request holds, and release every superseded generation.
+#[allow(non_snake_case)]
+async fn assert_token_requests_retain_one_document_version(REVISIONS: usize) {
     let provider = Arc::new(MockTypeProvider::new());
     let fixture = fixture_with_provider(&source(0), Some(provider.clone())).await;
     let server = fixture.server();
@@ -272,4 +266,31 @@ async fn a_cancelled_inspection_releases_every_graph_handle_it_pinned() {
     );
 
     fixture.shutdown().await;
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// WSP6-AC3: repeated token requests across document revisions do not retain
+    /// every old document version.
+    ///
+    /// Semantic tokens are a render-cadence decoration: the editor re-asks on every
+    /// scroll, cursor move and edit. Each request builds a token BASE — the provider
+    /// surface, both UTF-16 line indexes and the position mapper it merges through —
+    /// from the current surface. Two hundred of those across two hundred revisions
+    /// must leave the session holding ONE surface per live path, not two hundred.
+    ///
+    /// This drives the real `semantic_tokens_full` entry point, against a provider
+    /// that returns real tokens, so the retention under test is the one in the
+    /// handler and context lifecycle rather than a store call a test makes itself.
+    ///
+    /// Discriminating: the per-revision generations are captured as weak handles
+    /// BEFORE the loop continues past them; a handler or store that kept any of them
+    /// leaves a live handle behind and the final assertion names it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_token_requests_retain_one_document_version_not_every_version() {
+        assert_token_requests_retain_one_document_version(200).await;
+    }
 }

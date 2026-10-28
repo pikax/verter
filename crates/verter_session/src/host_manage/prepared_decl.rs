@@ -2848,6 +2848,7 @@ impl VerterHost {
             // Publish the canonical post-parse artifact into FileArtifactStore.
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
+                storage: Default::default(),
                 whole_hash,
                 file_language,
                 shallow_state,
@@ -2871,6 +2872,7 @@ impl VerterHost {
                 ),
                 input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             });
+            indexed.pin_storage();
 
             if held_source.is_some_and(|held| {
                 crate::resolver_store::syntactic_route_interface_hash(
@@ -3798,6 +3800,7 @@ impl VerterHost {
         // never admitted.
         if resolution_unretained {
             let surface = crate::owner_import_surface::build_owner_import_surface(
+                self.project_type_store().fact_policy(),
                 Arc::from(owner_canonical),
                 whole_hash,
                 entries,
@@ -3822,6 +3825,7 @@ impl VerterHost {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let surface = crate::owner_import_surface::build_owner_import_surface(
+                self.project_type_store().fact_policy(),
                 Arc::from(owner_canonical),
                 whole_hash,
                 entries,
@@ -3886,6 +3890,7 @@ impl VerterHost {
                         verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                     let surface = crate::owner_import_surface::build_owner_import_surface(
+                        self.project_type_store().fact_policy(),
                         Arc::from(owner_canonical),
                         whole_hash,
                         entries,
@@ -3901,6 +3906,7 @@ impl VerterHost {
         }
 
         let surface = crate::owner_import_surface::build_owner_import_surface(
+            self.project_type_store().fact_policy(),
             Arc::from(owner_canonical),
             whole_hash,
             entries,

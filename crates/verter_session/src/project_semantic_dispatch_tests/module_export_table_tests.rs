@@ -236,18 +236,42 @@ fn exported_ambient_imports_keep_their_namespace_values() {
 #[test]
 fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
     assert_proportional_growth(
-        (100, check_barrel_chain_proofs_and_folding(100)),
-        (500, check_barrel_chain_proofs_and_folding(500)),
+        (
+            100,
+            check_barrel_chain_proofs_and_folding(
+                100,
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
+        ),
+        (
+            500,
+            check_barrel_chain_proofs_and_folding(
+                500,
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
+        ),
     );
 }
 
-#[test]
-fn large_barrel_chain_retains_every_suffix_proof_and_literal() {
-    check_barrel_chain_proofs_and_folding(2_000);
+/// The policy of the gate's large-chain and large-namespace hosts: every
+/// width 64, so 200 modules cross the fresh-slice, strict-root and
+/// precise-domain widths that 2,000 cross in production.
+fn narrow_policy() -> verter_session_query::facts::policy::FactPolicy {
+    crate::fact_policy_test_support::policy_with(64, 64, 64, 8)
 }
 
-fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize); 4] {
-    use verter_session_query::facts::fact_cache::signature_entries;
+/// Every suffix proof and literal of a chain past every fact-policy width
+/// is retained with linear work. The gate runs 200 modules on a host whose
+/// widths are 64; the nightly tier runs 2,000 at the production widths.
+#[test]
+fn large_barrel_chain_retains_every_suffix_proof_and_literal() {
+    check_barrel_chain_proofs_and_folding(200, narrow_policy());
+}
+
+fn check_barrel_chain_proofs_and_folding(
+    count: usize,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> [(&'static str, usize); 4] {
     use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
     let owned: Vec<_> = (0..count)
@@ -267,10 +291,13 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
         .iter()
         .map(|(name, source)| (name.as_str(), source.as_str()))
         .collect();
-    let host = probe_host(ProbeProject {
-        files: &files,
-        ..ProbeProject::default()
-    });
+    let host = super::checker_probe_lane_tests::probe_host_under(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        policy,
+    );
     // Inspect the shared suffixes through one request, as namespace
     // consumers do, so completed proofs validate once in that view.
     let table_view = host.resolver_store_view_read().into_owned_view();
@@ -291,7 +318,7 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
             .module_export_table(&format!("/wb/m{i}.ts"))
             .expect("shared suffix");
         assert_eq!(table.bindings.len(), count - i);
-        proof_entries += signature_entries(&table.facts).count();
+        proof_entries += table.facts.len();
         if i > 0 {
             owned_slots += table.owned_binding_slots;
         }
@@ -527,26 +554,48 @@ fn export_tables_under_retention_pressure_answer_without_admission() {
 #[test]
 fn export_tables_and_namespace_evaluation_have_linear_work() {
     assert_proportional_growth(
-        (100, check_export_table_and_namespace_work(100)),
-        (500, check_export_table_and_namespace_work(500)),
+        (
+            100,
+            check_export_table_and_namespace_work(
+                100,
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
+        ),
+        (
+            500,
+            check_export_table_and_namespace_work(
+                500,
+                verter_session_query::facts::policy::FactPolicy::production(),
+            ),
+        ),
     );
 }
 
+/// A namespace over a barrel past every fact-policy width evaluates with
+/// linear work and keeps every literal. The gate runs 200 leaves on a host
+/// whose widths are 64; the nightly tier runs 2,000 at the production
+/// widths.
 #[test]
 fn large_namespace_evaluation_retains_linear_work_and_every_literal() {
-    check_export_table_and_namespace_work(2_000);
+    check_export_table_and_namespace_work(200, narrow_policy());
 }
 
-fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize); 3] {
+fn check_export_table_and_namespace_work(
+    count: usize,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> [(&'static str, usize); 3] {
     let owned = barrel_files(count);
     let files: Vec<_> = owned
         .iter()
         .map(|(name, source)| (name.as_str(), source.as_str()))
         .collect();
-    let host = probe_host(ProbeProject {
-        files: &files,
-        ..ProbeProject::default()
-    });
+    let host = super::checker_probe_lane_tests::probe_host_under(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        policy,
+    );
     let signature_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
     crate::u6_flow_shape_corpus_tests::upsert(
         &host,
@@ -1051,6 +1100,28 @@ fn a_member_path_typeof_reads_one_root_and_path_query_wherever_it_is_read() {
         assert_eq!(
             typeof_reads, 1,
             "`{probe}` over `{source}` reads its root and path once"
+        );
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier
+/// (`.config/nextest.toml`); the gate runs each one's narrow-policy version.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn large_barrel_chain_retains_every_suffix_proof_and_literal() {
+        check_barrel_chain_proofs_and_folding(
+            2_000,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
+
+    #[test]
+    fn large_namespace_evaluation_retains_linear_work_and_every_literal() {
+        check_export_table_and_namespace_work(
+            2_000,
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
     }
 }

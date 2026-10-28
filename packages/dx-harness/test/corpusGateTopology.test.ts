@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
   evaluateCorpusGate,
@@ -500,7 +500,8 @@ describe("end-to-end topologies (hermetic, injected runner)", () => {
         runRoute: async (route, _config, sample) => {
           started.add(route);
           maxOverlap = Math.max(maxOverlap, started.size);
-          await new Promise((resolve) => setTimeout(resolve, 60));
+          // The asynchronous result keeps parallel routes in flight together.
+          await Promise.resolve();
           started.delete(route);
           return report(route, sample);
         },
@@ -651,25 +652,30 @@ describe("end-to-end topologies (hermetic, injected runner)", () => {
 
 describe("whole-gate budget", () => {
   it("records target vs actual and advises (not fails) on a breach", async () => {
-    const receiptPath = path.join(tempDir(), "budget.json");
-    const outcome = await runCorpusGate(
-      testConfig({ receiptPath, gateBudgetMs: 1, routes: ["tsgo"] }),
-      {
-        log: () => {},
-        machine: BIG_MACHINE,
-        runRoute: async (route, _config, sample) => {
-          await new Promise((resolve) => setTimeout(resolve, 30));
-          return report(route, sample);
+    vi.useFakeTimers();
+    try {
+      const receiptPath = path.join(tempDir(), "budget.json");
+      const outcome = await runCorpusGate(
+        testConfig({ receiptPath, gateBudgetMs: 1, routes: ["tsgo"] }),
+        {
+          log: () => {},
+          machine: BIG_MACHINE,
+          runRoute: async (route, _config, sample) => {
+            vi.advanceTimersByTime(30);
+            return report(route, sample);
+          },
         },
-      },
-    );
-    expect(outcome.receipt.budget?.targetMs).toBe(1);
-    expect(outcome.receipt.budget?.actualMs).toBeGreaterThan(1);
-    expect(outcome.receipt.budget?.exceeded).toBe(true);
-    expect(outcome.receipt.budget?.fatal).toBe(false);
-    expect(outcome.failures.some((failure) => failure.includes("budget"))).toBe(false);
-    expect(outcome.advisories.some((line) => line.includes("exceeds the"))).toBe(true);
-    expect(outcome.receipt.pass).toBe(true);
+      );
+      expect(outcome.receipt.budget?.targetMs).toBe(1);
+      expect(outcome.receipt.budget?.actualMs).toBeGreaterThan(1);
+      expect(outcome.receipt.budget?.exceeded).toBe(true);
+      expect(outcome.receipt.budget?.fatal).toBe(false);
+      expect(outcome.failures.some((failure) => failure.includes("budget"))).toBe(false);
+      expect(outcome.advisories.some((line) => line.includes("exceeds the"))).toBe(true);
+      expect(outcome.receipt.pass).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("promotes a breach to a gating failure when opted in", () => {

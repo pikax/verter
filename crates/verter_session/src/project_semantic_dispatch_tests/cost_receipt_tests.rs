@@ -834,12 +834,26 @@ fn reversed_object_unions_reach_the_checker_answer_3200() {
     assert_reversed_checker_answer(3200, 2);
 }
 
+/// The same rails over 100 reversed arms under a 5,000-comparison allowance:
+/// the gate version of the 200-arm, 20,000-comparison test in the nightly
+/// scale tier. Relating 100 reversed arms needs 5,050 comparisons, just past
+/// the allowance, as 200 arms need 20,100 against 20,000, so the work rail
+/// stops the reducer first, the mapped read reaches the checker's TS2859, and
+/// every other check holds as at full size.
 #[test]
-fn cold_query_entries_fit_within_the_checker_relation_envelope() {
+fn cold_query_entries_fit_within_a_quarter_relation_envelope() {
+    assert_cold_query_entries_fit_the_relation_envelope(100, 5_000);
+}
+
+/// Over `arms` reversed object arms under a `comparisons` allowance just
+/// short of their relation's need, the work rail stops the reducer before the
+/// checker, the mapped read recovers the checker's TS2859 without a branch
+/// proof, and a warm repeat recomputes and compares nothing.
+fn assert_cold_query_entries_fit_the_relation_envelope(arms: usize, comparisons: u32) {
     use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
     use verter_type_engine::semantic_query::PartialReasonSet;
-    let host = bench_host(1_000_000, &reversed_unions(200));
-    let (key, [source, target]) = reversed_conditional_key(&host, 200);
+    let host = bench_host(1_000_000, &reversed_unions(arms));
+    let (key, [source, target]) = reversed_conditional_key(&host, arms);
     let branch_proofs = || {
         host.project_type_store()
             .semantic_graph()
@@ -859,7 +873,6 @@ fn cold_query_entries_fit_within_the_checker_relation_envelope() {
             .count()
     };
     let before_recovery = branch_proofs();
-    let comparisons = 20_000;
     let reducer_only =
         comparisons as usize * super::connected_demand::RELATION_UNITS_PER_COMPARISON;
     // One hundredth of the pinned checker's comparison allowance and
@@ -979,26 +992,38 @@ fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
     );
 }
 
-/// Imported modules whose relation [`wide_refusal_root`] reads: enough that
-/// the refusal's proving prefix spans more than one evidence page while
-/// every fact domain stays precise.
+/// Imported modules whose relation [`wide_refusal_root`] reads at the
+/// production policy: enough that the refusal's proving prefix is wider than
+/// the fresh-slice width while every fact domain stays precise.
 const WIDE_PREFIX_MODULES: usize = 300;
 
-/// Work units that refuse [`wide_refusal_root`] only after it has read every
-/// module.
+/// Work units that refuse [`wide_refusal_root`] at [`WIDE_PREFIX_MODULES`]
+/// only after it has read every module.
 const WIDE_PREFIX_WORK: usize = 2_000;
 
+/// The gate's module count, under [`GATE_PREFIX_POLICY_WIDTH`]: a proving
+/// prefix wider than that fresh-slice width.
+const GATE_PREFIX_MODULES: usize = 40;
+
+/// Work units that refuse [`wide_refusal_root`] at [`GATE_PREFIX_MODULES`]
+/// only after it has read every module.
+const GATE_PREFIX_WORK: usize = 200;
+
+/// The fresh-slice width of the gate's host.
+const GATE_PREFIX_POLICY_WIDTH: u16 = 64;
+
 /// A host whose probe relates `S`, a union of one type imported from each
-/// of [`WIDE_PREFIX_MODULES`] sibling modules, to the reversed union `T`,
+/// of `modules` sibling modules, to the reversed union `T`,
 /// and that relation as a root key.
-fn wide_refusal_root() -> (
+fn wide_refusal_root(
+    modules: usize,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) -> (
     Arc<VerterHost>,
     verter_type_engine::semantic_query::SemanticQueryKey,
 ) {
-    let names: Vec<String> = (0..WIDE_PREFIX_MODULES)
-        .map(|i| format!("m{i:04}.ts"))
-        .collect();
-    let sources: Vec<String> = (0..WIDE_PREFIX_MODULES)
+    let names: Vec<String> = (0..modules).map(|i| format!("m{i:04}.ts")).collect();
+    let sources: Vec<String> = (0..modules)
         .map(|i| format!("export type A{i} = {{ p{i}: {i} }};\n"))
         .collect();
     let files: Vec<(&str, &str)> = names
@@ -1010,12 +1035,12 @@ fn wide_refusal_root() -> (
         files: &files,
         ..Default::default()
     };
-    let host = super::checker_probe_lane_tests::probe_host(project);
-    let imports: String = (0..WIDE_PREFIX_MODULES)
+    let host = super::checker_probe_lane_tests::probe_host_under(project, policy);
+    let imports: String = (0..modules)
         .map(|i| format!("import type {{ A{i} }} from \"./m{i:04}\";\n"))
         .collect();
-    let source_arms: Vec<String> = (0..WIDE_PREFIX_MODULES).map(|i| format!("A{i}")).collect();
-    let target_arms: Vec<String> = (0..WIDE_PREFIX_MODULES)
+    let source_arms: Vec<String> = (0..modules).map(|i| format!("A{i}")).collect();
+    let target_arms: Vec<String> = (0..modules)
         .rev()
         .map(|i| format!("{{ p{i}: number }}"))
         .collect();
@@ -1048,94 +1073,128 @@ fn wide_refusal_root() -> (
     (host, key)
 }
 
-/// A refusal whose proving prefix is wider than one evidence page is sealed
+/// A refusal whose proving prefix is wider than a wide signature is sealed
 /// whole and replayed like a narrow one: the root, out of work after reading
-/// every imported module, seals a refusal whose carrier pages every fact it
-/// read; the sealed refusal keeps its pages charged; an exact repeat answers
-/// it without evaluating; a follower parked on a producer's flight answers
-/// as the root does alone; and a change to the one fact on the carrier's
-/// LAST page — the project generation — misses the refusal, so the root
-/// evaluates afresh.
+/// every imported module, seals a refusal whose carrier holds every fact it
+/// read; the sealed refusal keeps the carrier's storage charged; an exact
+/// repeat answers it without evaluating; a follower parked on a producer's
+/// flight answers as the root does alone; and a change to the carrier's one
+/// project-generation fact — which sorts after every file fact, at the end
+/// of the canonical order — misses the refusal, so the root evaluates
+/// afresh.
+///
+/// The gate runs it at [`GATE_PREFIX_MODULES`] on a host whose policy makes
+/// that prefix wide; the nightly tier runs it at the production width.
 #[test]
-fn a_wide_refusal_is_replayed_whole_and_missed_by_a_last_page_edit() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt};
-    use verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH;
+fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
+    check_wide_refusal_replay(
+        GATE_PREFIX_MODULES,
+        GATE_PREFIX_WORK,
+        crate::fact_policy_test_support::narrow_storage(GATE_PREFIX_POLICY_WIDTH),
+    );
+}
 
-    let (host, key) = wide_refusal_root();
-    let refused = root_read(&host, &key, WIDE_PREFIX_WORK);
+fn check_wide_refusal_replay(
+    modules: usize,
+    work: usize,
+    policy: verter_session_query::facts::policy::FactPolicy,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    let wide_signature_width = policy.fresh_slice_max();
+
+    let (host, key) = wide_refusal_root(modules, policy);
+    let refused = root_read(&host, &key, work);
     assert!(
         refused.partial,
-        "{WIDE_PREFIX_WORK} units cannot relate {WIDE_PREFIX_MODULES} reversed arms"
+        "{work} units cannot relate {modules} reversed arms"
     );
     let store = Arc::clone(host.project_type_store().semantic_graph());
     let carriers = store.refusal_carriers_for_tests();
     assert_eq!(carriers.len(), 1, "the refused root sealed its refusal");
     let carrier = &carriers[0];
-    let pages: Vec<ResultReceipt> = carrier
-        .facts
-        .iter()
-        .filter_map(|entry| match entry {
-            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-            _ => None,
-        })
-        .collect();
     assert!(
-        carrier.entries().count() > FACT_PAGE_WIDTH && pages.len() >= 2,
-        "the proving prefix is wider than one page and held on pages: {} entries on {} pages",
-        carrier.entries().count(),
-        pages.len()
+        carrier.facts.len() > wide_signature_width,
+        "the proving prefix is wider than a wide signature: {} facts",
+        carrier.facts.len()
     );
+    assert_eq!(
+        carrier
+            .facts
+            .iter()
+            .filter(|fact| matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id.contains("/m")
+            ))
+            .count(),
+        modules,
+        "the root refused only after reading every imported module"
+    );
+    let storage = carrier.facts.tree_footprint();
     assert!(
-        pages.iter().all(|page| page.retained_charge_class()
-            == Some(verter_session_query::retention::ChargeClass::Retained)),
-        "sealing the refusal claimed its pages into its retained reservation"
+        storage.nodes > 0 && storage.charged_bytes > 0,
+        "the carrier completes a wide traced set, so it is held in tree storage: {storage:?}"
     );
-    let last_page = pages
-        .iter()
-        .max_by(|a, b| a.facts().last().cmp(&b.facts().last()))
-        .expect("pages");
+    assert_eq!(
+        (storage.pinned_bytes, storage.retained_bytes),
+        (0, storage.charged_bytes),
+        "sealing the refusal claimed every node of its carrier into a retained reservation"
+    );
     let is_generation =
         |fact: &FactVersionRef| matches!(fact, FactVersionRef::ProjectGeneration { .. });
+    assert_eq!(
+        carrier
+            .facts
+            .iter()
+            .filter(|fact| is_generation(fact))
+            .count(),
+        1,
+        "the carrier reads the project generation once"
+    );
     assert!(
-        last_page.facts().iter().any(is_generation)
-            && pages
-                .iter()
-                .filter(|page| page.facts().iter().any(is_generation))
-                .count()
-                == 1,
-        "the project generation is read on the carrier's last page alone"
+        carrier
+            .facts
+            .iter()
+            .rev()
+            .take_while(|fact| !is_generation(fact))
+            .all(|fact| !matches!(
+                fact,
+                FactVersionRef::FileWholeHash { .. }
+                    | FactVersionRef::DerivedFactHash { .. }
+                    | FactVersionRef::Parse(_)
+                    | FactVersionRef::ResolveImports(_)
+            )),
+        "the project generation sorts after every file fact of the carrier"
     );
 
     let misses = semantic_misses(&host);
     assert_eq!(
-        root_read(&host, &key, WIDE_PREFIX_WORK),
+        root_read(&host, &key, work),
         refused,
         "the repeat answers the sealed refusal, charged as the refused root"
     );
     assert_eq!(semantic_misses(&host), misses, "and evaluates nothing");
 
     host.project_type_store().bump_project_generation();
-    let _ = root_read(&host, &key, WIDE_PREFIX_WORK);
+    let _ = root_read(&host, &key, work);
     assert!(
         semantic_misses(&host) > misses,
-        "a change to the fact on the last page misses the refusal"
+        "a change to the carrier's last file-independent fact misses the refusal"
     );
 
     store.invalidate_all();
-    assert!(
-        pages.iter().all(|page| page.retained_charge_class()
-            == Some(verter_session_query::retention::ChargeClass::Retained)
-            && page.retained_charge_bytes() > 0),
-        "a page outliving the refusal that claimed it stays charged while a holder lives"
+    let outliving = carrier.facts.tree_footprint();
+    assert_eq!(
+        (outliving.nodes, outliving.charged_bytes),
+        (storage.nodes, storage.charged_bytes),
+        "storage outliving the refusal that claimed it stays charged while a holder lives"
     );
-    drop(pages);
     drop(carriers);
 
     // A follower parked on a producer's flight answers as the root alone.
-    let (host, key) = wide_refusal_root();
+    let (host, key) = wide_refusal_root(modules, policy);
     let store = Arc::clone(host.project_type_store().semantic_graph());
-    let claimed = Arc::new(AtomicBool::new(false));
+    let claimed = Arc::new(Flag::default());
     let held = Arc::new(AtomicBool::new(false));
     let joined_before = store.test_joiner_on_condvar_count();
     let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
@@ -1149,19 +1208,18 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_a_last_page_edit() {
             if claimed_key != &key || held.swap(true, Ordering::SeqCst) {
                 return;
             }
-            claimed.store(true, Ordering::SeqCst);
-            wait_until("the follower to park on the producer's flight", || {
-                store.test_joiner_on_condvar_count() > joined_before
-            });
+            claimed.raise();
+            assert!(
+                store.test_wait_for_joiners_on_condvar(joined_before + 1, HANG_GUARD),
+                "timed out waiting for the follower to park on the producer's flight"
+            );
         })
     };
     let _hook = ProduceHookGuard::install(&store, hook);
     let (producer, follower) = std::thread::scope(|scope| {
-        let producer = scope.spawn(|| root_read(&host, &key, WIDE_PREFIX_WORK));
-        wait_until("the producer to claim the root", || {
-            claimed.load(Ordering::SeqCst)
-        });
-        let follower = scope.spawn(|| root_read(&host, &key, WIDE_PREFIX_WORK));
+        let producer = scope.spawn(|| root_read(&host, &key, work));
+        claimed.wait("the producer to claim the root");
+        let follower = scope.spawn(|| root_read(&host, &key, work));
         (
             producer.join().expect("the producer completes"),
             follower.join().expect("the follower completes"),
@@ -1994,16 +2052,44 @@ fn a_partly_warm_demand_is_charged_as_its_cold_run() {
     }
 }
 
-/// Waits until `ready` holds, failing the test past a deadline rather than
-/// hanging it.
-fn wait_until(what: &str, ready: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !ready() {
+/// The hang guard of every wait below.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A one-way flag a thread raises and another waits on.
+#[derive(Default)]
+struct Flag {
+    raised: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl Flag {
+    fn raise(&self) {
+        *self.raised.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    /// Raise the flag, returning whether it was already raised.
+    fn swap_raise(&self) -> bool {
+        let mut raised = self.raised.lock().unwrap();
+        let was = std::mem::replace(&mut *raised, true);
+        self.changed.notify_all();
+        was
+    }
+
+    fn is_raised(&self) -> bool {
+        *self.raised.lock().unwrap()
+    }
+
+    /// Wait until the flag is raised, failing the test past the hang guard.
+    fn wait(&self, what: &str) {
+        let (raised, timeout) = self
+            .changed
+            .wait_timeout_while(self.raised.lock().unwrap(), HANG_GUARD, |raised| !*raised)
+            .unwrap();
         assert!(
-            std::time::Instant::now() < deadline,
+            *raised && !timeout.timed_out(),
             "timed out waiting for {what}"
         );
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -2054,7 +2140,7 @@ fn concurrent_profiles_and_followers_are_charged_as_alone() {
     let host = super::checker_probe_lane_tests::default_probe_host();
     let key = reversed_relation_key(&host, 24, false);
     let store = Arc::clone(host.project_type_store().semantic_graph());
-    let claimed = Arc::new(AtomicBool::new(false));
+    let claimed = Arc::new(Flag::default());
     let held = Arc::new(AtomicBool::new(false));
     let joined_before = store.test_joiner_on_condvar_count();
     let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
@@ -2068,18 +2154,17 @@ fn concurrent_profiles_and_followers_are_charged_as_alone() {
             if claimed_key != &key || held.swap(true, Ordering::SeqCst) {
                 return;
             }
-            claimed.store(true, Ordering::SeqCst);
-            wait_until("both followers to park on the producer's flight", || {
-                store.test_joiner_on_condvar_count() >= joined_before + 2
-            });
+            claimed.raise();
+            assert!(
+                store.test_wait_for_joiners_on_condvar(joined_before + 2, HANG_GUARD),
+                "timed out waiting for both followers to park on the producer's flight"
+            );
         })
     };
     let _hook = ProduceHookGuard::install(&store, hook);
     let (producer, followers) = std::thread::scope(|scope| {
         let producer = scope.spawn(|| root_read(&host, &key, full));
-        wait_until("the producer to claim the root", || {
-            claimed.load(Ordering::SeqCst)
-        });
+        claimed.wait("the producer to claim the root");
         let followers: Vec<_> = [48, full]
             .into_iter()
             .map(|work| {
@@ -2136,8 +2221,8 @@ fn a_root_cut_by_a_wait_cycle_never_seals_its_refusal() {
     let k = reversed_relation_key(&host, 40, false);
     let j = reversed_relation_key(&host, 40, true);
     let store = Arc::clone(host.project_type_store().semantic_graph());
-    let k_claimed = Arc::new(AtomicBool::new(false));
-    let j_claimed = Arc::new(AtomicBool::new(false));
+    let k_claimed = Arc::new(Flag::default());
+    let j_claimed = Arc::new(Flag::default());
     let cut = Arc::new(AtomicBool::new(false));
     let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
         let (k, j) = (k.clone(), j.clone());
@@ -2148,22 +2233,19 @@ fn a_root_cut_by_a_wait_cycle_never_seals_its_refusal() {
             Arc::clone(&store),
         );
         Arc::new(move |claimed, nested| {
-            if claimed == &k && !k_claimed.swap(true, Ordering::SeqCst) {
+            if claimed == &k && !k_claimed.swap_raise() {
                 // K's producer: once J's producer waits on K, need J.
-                wait_until("J's producer to claim J", || {
-                    j_claimed.load(Ordering::SeqCst)
-                });
-                wait_until("J's producer to wait on K", || {
-                    store.wait_graph_counts_for_tests().1 >= 1
-                });
+                j_claimed.wait("J's producer to claim J");
+                assert!(
+                    store.wait_for_wait_edges_for_tests(1, HANG_GUARD),
+                    "timed out waiting for J's producer to wait on K"
+                );
                 nested(j.clone());
                 cut.store(true, Ordering::SeqCst);
-            } else if claimed == &j && !j_claimed.load(Ordering::SeqCst) {
+            } else if claimed == &j && !j_claimed.is_raised() {
                 // J's producer: need K, which K's producer holds.
-                wait_until("K's producer to claim K", || {
-                    k_claimed.load(Ordering::SeqCst)
-                });
-                j_claimed.store(true, Ordering::SeqCst);
+                k_claimed.wait("K's producer to claim K");
+                j_claimed.raise();
                 nested(k.clone());
             }
         })
@@ -2252,8 +2334,11 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
             verter_type_engine::semantic_query::ReadReceipt::Unpriced,
         )
     };
-    let carrier =
-        || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));
+    let carrier = || {
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production().set_of(Vec::new()),
+        )
+    };
     let entry = store.refusal_entry_for_tests(&host);
     for name in 0..=REFUSAL_SUMMARY_CAP {
         assert!(store.seal_refusal_for_tests(
@@ -2617,9 +2702,16 @@ fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
     // cached.
     let base = ResultReceipt::new(vec![file("/w/base.ts")]);
     let mid = ResultReceipt::new(vec![file("/w/mid.ts"), FactVersionRef::Receipt(base)]);
-    let through_prefix =
-        || ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(mid.clone())]));
-    let elsewhere = ReadSetSignature::new(Arc::from(vec![file("/w/other.ts")]));
+    let through_prefix = || {
+        ReadSetSignature::new(
+            verter_session_query::facts::policy::FactPolicy::production()
+                .set_of(vec![FactVersionRef::Receipt(mid.clone())]),
+        )
+    };
+    let elsewhere = ReadSetSignature::new(
+        verter_session_query::facts::policy::FactPolicy::production()
+            .set_of(vec![file("/w/other.ts")]),
+    );
 
     let entry = store.refusal_entry_for_tests(&host);
     assert!(store.seal_refusal_for_tests(
@@ -3075,4 +3167,24 @@ fn a_369_by_271_spread_infers_every_constituent_and_the_later_write() {
 #[test]
 fn a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write() {
     assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[50, 50, 39]);
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn cold_query_entries_fit_within_the_checker_relation_envelope() {
+        assert_cold_query_entries_fit_the_relation_envelope(200, 20_000);
+    }
+
+    #[test]
+    fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
+        check_wide_refusal_replay(
+            WIDE_PREFIX_MODULES,
+            WIDE_PREFIX_WORK,
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+    }
 }

@@ -164,9 +164,19 @@ fn run_session(n: usize, distinct_sources: usize) -> SessionWork {
     }
 }
 
+/// The same series at 128, 256 and 512 publications: the gate version of the
+/// test that reaches 1,024, in the nightly scale tier. Every size is past two
+/// compaction floors, each size's work invariants are exact, and the reader's
+/// bytes are compared over two doublings.
 #[test]
-fn publication_work_is_proportional_to_records_with_bounded_compaction() {
-    const SIZES: [usize; 4] = [128, 256, 512, 1024];
+fn publication_work_is_proportional_to_records_with_bounded_compaction_to_512() {
+    assert_publication_work_is_proportional([128, 256, 512]);
+}
+
+/// Every publication count in `SIZES` keeps the writer's and reader's work
+/// invariants, and each doubling at most about doubles the reader's bytes.
+#[allow(non_snake_case)]
+fn assert_publication_work_is_proportional<const N: usize>(SIZES: [usize; N]) {
     // Churn over a fixed carrier set (compaction-heavy) and an ever-growing set
     // (every publication adds a carrier — the whole-manifest worst case).
     // The two growth series own separate stores. Overlap their durable I/O,
@@ -242,10 +252,21 @@ fn publication_work_is_proportional_to_records_with_bounded_compaction() {
     });
 }
 
+/// The same cold load after 256 publications over 16 carriers: the gate
+/// version of the 1,024-publication test in the nightly scale tier. Four
+/// compaction floors have passed, so the store has compacted and retired a
+/// generation, and the bounds are the full-size test's.
 #[test]
-fn a_cold_load_reads_at_most_the_live_rows_plus_a_bounded_journal() {
+fn a_cold_load_after_256_publications_reads_the_live_rows_and_a_bounded_journal() {
+    assert_cold_load_reads_the_live_rows_and_a_bounded_journal(256);
+}
+
+/// After `publications` publications over 16 carriers, a cold load reads one
+/// base of at most 32 rows and a journal tail under one compaction floor, and
+/// only the current and the previous generation stay on disk.
+fn assert_cold_load_reads_the_live_rows_and_a_bounded_journal(publications: usize) {
     let (store, ws, _ut) = fresh();
-    for k in 0..1024usize {
+    for k in 0..publications {
         publish(&store, &ws, k % 16, k as u64).expect("publish");
     }
     let mut cold = PublishedStoreReader::open(store.workspace_dir());
@@ -257,7 +278,7 @@ fn a_cold_load_reads_at_most_the_live_rows_plus_a_bounded_journal() {
         work.records_applied < COMPACTION_FLOOR,
         "the journal tail stays bounded: {work:?}"
     );
-    assert_eq!(cold.epoch(), Some(1024));
+    assert_eq!(cold.epoch(), Some(publications as u64));
     // Retired generations are removed; the current and the one before remain.
     let generation = head_generation(&store);
     let mut generations: BTreeSet<u64> = BTreeSet::new();
@@ -579,4 +600,20 @@ fn a_complete_invalid_last_line_is_dropped_and_the_next_publish_rebuilds_on_the_
     let restarted = CarrierPublishStore::open(HOST_VERSION, &ws);
     publish(&restarted, &ws, 2, 0).expect("the next publish truncates the torn tail");
     assert_eq!(membership(&read_strict(&restarted)), expect(&[0, 2]));
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn publication_work_is_proportional_to_records_with_bounded_compaction() {
+        assert_publication_work_is_proportional([128, 256, 512, 1024]);
+    }
+
+    #[test]
+    fn a_cold_load_reads_at_most_the_live_rows_plus_a_bounded_journal() {
+        assert_cold_load_reads_the_live_rows_and_a_bounded_journal(1024);
+    }
 }

@@ -13,7 +13,7 @@ use verter_type_engine::resolver_core::request_ports::OwnedLowering;
 use verter_type_expr::locators::AuthoredBodyLocator;
 
 fn lower_authored(
-    inputs: &impl SourceInputProvider,
+    inputs: &(impl SourceInputProvider + KeptBodyHolder),
     locator: &AuthoredBodyLocator,
 ) -> QueryHostServe {
     let canonical = match locator {
@@ -28,13 +28,10 @@ fn lower_authored(
             outcome: Err(QueryHostError::UnknownFile),
         };
     };
+    let memo = serve.indexed.shallow_state.decl_bodies();
     QueryHostServe {
         admission: QueryHostAdmission::from_store_published(serve.store_published),
-        outcome: serve
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .deref_locator_body(locator)
+        outcome: deref_with_kept(inputs, memo, locator)
             .map(crate::query_host_port::neutral_lowering)
             .map_err(crate::query_host_port::neutral_error),
     }
@@ -490,7 +487,7 @@ pub(crate) trait HostSourcePort {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>>;
+    ) -> Option<verter_semantic_source::decl_body_memo::RawSurfaces>;
 }
 impl<T: SourceInputProvider> HostSourcePort for T {
     fn svelte_script_facts(
@@ -542,7 +539,7 @@ impl<T: SourceInputProvider> HostSourcePort for T {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>> {
+    ) -> Option<verter_semantic_source::decl_body_memo::RawSurfaces> {
         let Some(source) = SourceInputProvider::source(self, source) else {
             missing_source();
             return None;
@@ -923,7 +920,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
                 };
-                source.decl_bodies().deref_locator_body(locator)
+                deref_with_kept(self, source.decl_bodies(), locator)
             }
 
             fn prepared_type_from_input(
@@ -980,9 +977,20 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Missing;
                 };
-                bundle
-                    .prepared_type_decls
-                    .get_in_for_projection(owner, name)
+                // A declaration first lowered here, for its preparation,
+                // keeps its body for the body read the request makes next,
+                // so that read does not lower its statements again.
+                let holder = KeptBodyHolder::kept_body_holder(self);
+                let keep = |body| {
+                    if let Some((request, account)) = holder {
+                        request.keep_type_body(body, account);
+                    }
+                };
+                bundle.prepared_type_decls.get_in_for_projection_keeping(
+                    owner,
+                    name,
+                    holder.is_some().then_some(&keep as &dyn Fn(_)),
+                )
             }
             fn prepare_augmentation_type(
                 &self,
@@ -1129,6 +1137,68 @@ macro_rules! owned_lowering_from_source_inputs {
         }
     };
 }
+/// The request view that holds the type declaration bodies a request's
+/// preparations kept for the body reads that follow, and the retention
+/// account they are charged to; none outside a request.
+trait KeptBodyHolder {
+    fn kept_body_holder(
+        &self,
+    ) -> Option<(
+        &crate::resolver_core::RequestStoreView<'_>,
+        &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    )>;
+}
+
+impl<L: RequestBoundLifecycle> KeptBodyHolder for RequestBoundAdapter<L> {
+    fn kept_body_holder(
+        &self,
+    ) -> Option<(
+        &crate::resolver_core::RequestStoreView<'_>,
+        &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    )> {
+        Some((
+            self.0.request_view(),
+            self.0.host().project_type_store().retention_account(),
+        ))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl KeptBodyHolder for crate::VerterHost {
+    fn kept_body_holder(
+        &self,
+    ) -> Option<(
+        &crate::resolver_core::RequestStoreView<'_>,
+        &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    )> {
+        None
+    }
+}
+
+/// Deref `locator` through `memo`, reading a type body from the parts
+/// `holder`'s request kept for it when it keeps them
+/// ([`crate::resolver_core::request_store_view::deref_taking`]).
+fn deref_with_kept(
+    holder: &impl KeptBodyHolder,
+    memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
+    locator: &AuthoredBodyLocator,
+) -> Result<
+    verter_session_query::source::deref::DerefedAuthoredBody,
+    verter_session_query::source::deref::LocatorBodyDerefError,
+> {
+    match holder.kept_body_holder() {
+        Some((request, _)) => {
+            let (derefed, _charges) = crate::resolver_core::request_store_view::deref_taking(
+                memo,
+                locator,
+                |owner, name, scope| request.take_kept_type_body(memo, owner, name, scope),
+            );
+            derefed
+        }
+        None => memo.deref_locator_body(locator),
+    }
+}
+
 owned_lowering_from_source_inputs!([L: RequestBoundLifecycle] RequestBoundAdapter<L> where [
     Self: verter_type_engine::resolver_core::resolver_context::sealed::Sealed
         + verter_type_engine::resolver_core::resolver_context::sealed::RequestBoundSealed,

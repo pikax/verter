@@ -14,7 +14,7 @@ use super::{
 
 fn base_env() -> PinnedEnv {
     PinnedEnv {
-        tsgo_version: "7.0.2".to_string(),
+        tsgo_version: super::TSGO_VERSION.to_string(),
         oracle_schema_version: 1,
         normalizer_version: 1,
         probe_synthesis_version: 1,
@@ -717,7 +717,7 @@ fn evidence_manifest_digests_reproduce_from_checked_in_inputs() {
 
     assert_eq!(
         manifest["corpus"]["identity"].as_str(),
-        Some("verter-signature-corpus-v0@typescript-7.0.2"),
+        Some("verter-signature-corpus-v0@typescript-7.1.0-beta"),
         "the manifest names the signature corpus's OWN identity — never the unrecovered \
          9,300-case report"
     );

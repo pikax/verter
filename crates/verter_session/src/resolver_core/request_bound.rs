@@ -1370,6 +1370,7 @@ impl crate::VerterHost {
                 &seed,
                 &self.live_aggregate_counters(),
             ),
+            self.project_type_store().fact_policy(),
             f,
         )
     }
@@ -1454,7 +1455,8 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: Vec<FactVersionRef>,
+        traced: &verter_session_query::facts::fact_set::FactSet,
+        extra: Vec<FactVersionRef>,
     ) -> Result<
         verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
         verter_audit::NonAdmissionReason,
@@ -1465,7 +1467,8 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         verter_type_engine::semantic_query_memo::semantic_graph_carrier(
             self.0.request_view(),
             roots,
-            facts,
+            traced,
+            extra,
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -1588,7 +1591,10 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         verter_type_engine::count_resolver_context_call!("FactValidation::aggregate_basis_seed");
         self.0.request_view().aggregate_basis_seed()
     }
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(
+        &self,
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
+    ) -> bool {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_fact_signature"
         );
@@ -1596,7 +1602,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     }
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         verter_type_engine::count_resolver_context_call!("FactValidation::validate_fact_signature");
@@ -1606,7 +1612,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     }
     fn validates_fact_signature_with_self_roots(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> bool {
         verter_type_engine::count_resolver_context_call!(
@@ -1618,7 +1624,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     }
     fn validates_retained_signature_with_self_roots(
         &self,
-        sig: &Arc<[FactVersionRef]>,
+        sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
         verter_type_engine::count_resolver_context_call!(

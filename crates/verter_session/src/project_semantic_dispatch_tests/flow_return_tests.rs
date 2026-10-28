@@ -411,22 +411,11 @@ fn flow_execution_abort_is_delivered_to_singleflight_follower() {
                     ReturnProjectionDemand::whole_return(),
                 )
             });
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             let joined = with_dispatch(&host, |dispatch| {
-                while dispatch
-                    .graph()
-                    .task_registry_for_tests()
-                    .wait_count_for_tests()
-                    == 0
-                    && std::time::Instant::now() < deadline
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
                 dispatch
                     .graph()
                     .task_registry_for_tests()
-                    .wait_count_for_tests()
-                    > 0
+                    .wait_for_wait_count_for_tests(1, std::time::Duration::from_secs(10))
             });
             // Release before asserting, so a failed rendezvous cannot strand a worker.
             gate.wait();
@@ -616,21 +605,10 @@ fn assert_exhausted_follower_abort(
                         });
                     }
                 });
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                while dispatch
-                    .graph()
-                    .task_registry_for_tests()
-                    .wait_count_for_tests()
-                    == 0
-                    && std::time::Instant::now() < deadline
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
                 let joined = dispatch
                     .graph()
                     .task_registry_for_tests()
-                    .wait_count_for_tests()
-                    > 0;
+                    .wait_for_wait_count_for_tests(1, std::time::Duration::from_secs(10));
                 // Release before asserting or joining, including a failed rendezvous.
                 let _ = release_tx.send(());
                 let produced = producer.join().expect("the producer completes");
@@ -4991,7 +4969,9 @@ fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
                     replay: super::dispatch_txn::FlowMemberReuse {
                         reads:
                             verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
-                                facts: Arc::from(Vec::new()),
+                                facts: verter_session_query::facts::policy::FactPolicy::production(
+                                )
+                                .set_of(Vec::new()),
                                 non_cacheable: false,
                             },
                         observed_self_roots: Vec::new(),
@@ -5028,7 +5008,8 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
                 reuse,
                 replay: super::dispatch_txn::FlowMemberReuse {
                     reads: verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
-                        facts: Arc::from(vec![fact.clone()]),
+                        facts: verter_session_query::facts::policy::FactPolicy::production()
+                            .set_of(vec![fact.clone()]),
                         non_cacheable: false,
                     },
                     observed_self_roots: vec![root.clone()],

@@ -79,7 +79,7 @@ impl RetentionHook {
     pub(crate) fn reserve_with_evidence(
         &self,
         bytes: usize,
-        facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+        facts: verter_session_query::facts::fact_set::FactsRef<'_>,
     ) -> Result<ResolutionRetentionCharge, RetentionRefused> {
         self.0
             .read()
@@ -249,7 +249,7 @@ where
         key: K,
         value: T,
         bytes: usize,
-        facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+        facts: verter_session_query::facts::fact_set::FactsRef<'_>,
         authority: &OverlayAuthority,
     ) -> Option<u64> {
         let charge = self.retention.reserve_with_evidence(bytes, facts).ok()?;
@@ -528,6 +528,7 @@ mod tests {
             receipt::ResultReceipt,
         };
         let facts = seal_canonical_signature(
+            verter_session_query::facts::policy::FactPolicy::production(),
             (0..2051)
                 .map(|index| FactVersionRef::FileWholeHash {
                     canonical_id: format!("/wide/{index}.ts").into(),
@@ -535,48 +536,35 @@ mod tests {
                 })
                 .collect(),
         );
-        let pages = facts
-            .iter()
-            .filter_map(|fact| match fact {
-                FactVersionRef::Receipt(page) => Some(page.clone()),
-                _ => None,
-            })
-            .collect();
+        // One consumed result holds every wide fact; its receipt is the
+        // storage an admission must claim.
+        let consumed = ResultReceipt::new(facts.to_vec());
         (
-            vec![FactVersionRef::Receipt(ResultReceipt::new(facts.to_vec()))],
-            pages,
+            vec![FactVersionRef::Receipt(consumed.clone())],
+            vec![consumed],
         )
     }
 
     #[test]
-    fn resolution_admission_reserves_candidate_and_consumed_pages_together() {
+    fn resolution_admission_reserves_candidate_and_consumed_receipts_together() {
         use verter_session_query::retention::{
             ChargeClass, ResolutionRetention, RetentionLimits, SemanticRetentionAccount,
         };
         for overlay in [false, true] {
             for admitted in [true, false] {
-                let (facts, pages) = wide_resolution_facts();
+                let (facts, receipts) = wide_resolution_facts();
                 let own_bytes = 100;
-                // The pages and the result receipt wrapping them are each
-                // charged; the admission claims them together.
-                let page_bytes: usize = pages
+                // The candidate's own bytes and the consumed receipt's
+                // storage are claimed together, in one reservation.
+                let evidence_bytes: usize = receipts
                     .iter()
-                    .map(|page| page.retained_charge_bytes())
-                    .sum::<usize>()
-                    + facts
-                        .iter()
-                        .map(|fact| match fact {
-                            verter_session_query::facts::fact_cache::FactVersionRef::Receipt(
-                                receipt,
-                            ) => receipt.retained_charge_bytes(),
-                            _ => 0,
-                        })
-                        .sum::<usize>();
+                    .map(|receipt| receipt.retained_charge_bytes())
+                    .sum();
                 let account = SemanticRetentionAccount::new(RetentionLimits {
                     max_entry_bytes: if admitted {
-                        own_bytes + page_bytes
+                        own_bytes + evidence_bytes
                     } else {
-                        own_bytes + page_bytes - 1
+                        own_bytes + evidence_bytes - 1
                     },
                     ..RetentionLimits::defaults()
                 });
@@ -586,17 +574,21 @@ mod tests {
                 let map = Arc::new(AuthorityHeld::new(Arc::clone(&hook), 2, 16));
                 if overlay {
                     assert_eq!(
-                        map.insert(1, facts.clone(), own_bytes, &facts, &authority)
+                        map.insert(1, facts.clone(), own_bytes, (&facts).into(), &authority)
                             .is_some(),
                         admitted
                     );
                     assert_eq!(map.len(), usize::from(admitted));
                 } else {
-                    let charge = hook.reserve_with_evidence(own_bytes, &facts);
+                    let charge = hook.reserve_with_evidence(own_bytes, (&facts).into());
                     assert_eq!(charge.is_ok(), admitted);
                     assert_eq!(
                         account.snapshot().retained_bytes,
-                        if admitted { own_bytes + page_bytes } else { 0 }
+                        if admitted {
+                            own_bytes + evidence_bytes
+                        } else {
+                            0
+                        }
                     );
                     drop(charge);
                 }
@@ -605,19 +597,19 @@ mod tests {
                 } else {
                     ChargeClass::Pinned
                 };
-                assert!(!pages.is_empty());
-                assert!(pages
+                assert!(!receipts.is_empty());
+                assert!(receipts
                     .iter()
-                    .all(|page| page.retained_charge_class() == Some(expected)));
+                    .all(|receipt| receipt.retained_charge_class() == Some(expected)));
                 assert_eq!(
                     account.snapshot().retained_bytes,
                     if admitted {
-                        page_bytes + if overlay { own_bytes } else { 0 }
+                        evidence_bytes + if overlay { own_bytes } else { 0 }
                     } else {
                         0
                     }
                 );
-                drop((authority, map, facts, pages));
+                drop((authority, map, facts, receipts));
                 assert_eq!(account.snapshot().retained_bytes, 0);
             }
         }
@@ -628,13 +620,25 @@ mod tests {
         let map = held(2, 3);
         let authority = OverlayAuthority::new();
         for value in 0..3 {
-            map.insert(7, value, 1, &[], &authority);
+            map.insert(
+                7,
+                value,
+                1,
+                verter_session_query::facts::fact_set::FactsRef::Slice(&[]),
+                &authority,
+            );
         }
         let values: Vec<u32> = map.items(&7).into_iter().map(|(_, value)| value).collect();
         assert_eq!(values, [1, 2], "the oldest item leaves first");
 
         for key in 0..5 {
-            map.insert(key, key, 1, &[], &authority);
+            map.insert(
+                key,
+                key,
+                1,
+                verter_session_query::facts::fact_set::FactsRef::Slice(&[]),
+                &authority,
+            );
         }
         assert_eq!(map.len(), 3, "the oldest keys leave first");
         assert!(map.items(&7).is_empty() && map.items(&0).is_empty());
@@ -648,7 +652,13 @@ mod tests {
         let first = OverlayAuthority::new();
         let second = OverlayAuthority::new();
         let seq = map
-            .insert(1, 10, 1, &[], &first)
+            .insert(
+                1,
+                10,
+                1,
+                verter_session_query::facts::fact_set::FactsRef::Slice(&[]),
+                &first,
+            )
             .expect("no account refuses");
         map.adopt(&1, seq, &second);
         drop(first);
@@ -675,7 +685,13 @@ mod tests {
         let map = held(1, 16);
         for key in 0..1000 {
             let authority = OverlayAuthority::new();
-            map.insert(key, key, 1, &[], &authority);
+            map.insert(
+                key,
+                key,
+                1,
+                verter_session_query::facts::fact_set::FactsRef::Slice(&[]),
+                &authority,
+            );
         }
         assert_eq!(map.len(), 0);
         assert!(map.queue_len() <= 64, "queue: {}", map.queue_len());

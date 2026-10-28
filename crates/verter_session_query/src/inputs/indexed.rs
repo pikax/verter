@@ -16,7 +16,7 @@ use crate::source::snapshot::SnapshotKey;
 
 /// Identity of one observed indexed input: the snapshot it was read from, a
 /// per-observation id, and its language / parse identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct IndexedInputIdentity {
     pub source: SnapshotKey,
     pub observation_id: u64,
@@ -25,8 +25,10 @@ pub struct IndexedInputIdentity {
 }
 
 /// The owned record of one served post-parse artifact.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct IndexedInputRecord {
+    storage: verter_retention::pinned_heap::StoragePin,
     pub identity: IndexedInputIdentity,
     pub whole_hash: Hash16,
     pub file_language: FileLanguage,
@@ -66,6 +68,7 @@ impl IndexedInputRecord {
         snapshot: Arc<FileAnalysisSnapshot>,
     ) -> Self {
         Self {
+            storage: Default::default(),
             identity,
             whole_hash,
             file_language,
@@ -105,6 +108,16 @@ impl IndexedInputRecord {
                 crate::inputs::route_surface::hash_route_surface_inputs(&self.shallow_state)
             })
         })
+    }
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for IndexedInputRecord {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
     }
 }
 

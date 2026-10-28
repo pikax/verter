@@ -146,8 +146,8 @@ impl fmt::Display for RejectionReason {
                 "this is the TypeScript {version} Node.js toolchain (the tsserver family), \
                  not the tsgo native engine — Verter serves TypeScript 5.x/6.x workspaces \
                  through their tsserver, so no tsgo install is required; only install \
-                 typescript@{} or newer 7.0.x if you want the native tsgo engine",
-                super::policy::BUNDLED_TSGO_VERSION
+                 typescript@{} if you want the native tsgo engine",
+                super::policy::TYPESCRIPT_PIN
             ),
             Self::LspHandshakeFailed { detail } => write!(
                 f,
@@ -188,17 +188,21 @@ pub trait CandidateValidator: Send + Sync {
 }
 
 /// The production validator: real bounded process probes + capability smokes.
+#[derive(Debug, Clone)]
 pub struct ProcessValidator {
     policy: VersionPolicy,
     probe_bound: Duration,
     smoke_bound: Duration,
+    /// Where the capability smoke's engine writes its stderr; inherited when
+    /// `None`.
+    held_stderr: Option<std::sync::Arc<crate::process::HeldStderr>>,
 }
 
 impl ProcessValidator {
-    /// A validator using the env-derived policy ([`VersionPolicy::from_env`])
+    /// A validator using the production policy ([`VersionPolicy::production`])
     /// and the default bounds.
-    pub fn from_env() -> Self {
-        Self::with_policy(VersionPolicy::from_env())
+    pub fn production() -> Self {
+        Self::with_policy(VersionPolicy::production())
     }
 
     /// A validator with an explicit policy and the default bounds.
@@ -207,6 +211,7 @@ impl ProcessValidator {
             policy,
             probe_bound: DEFAULT_PROBE_BOUND,
             smoke_bound: DEFAULT_SMOKE_BOUND,
+            held_stderr: None,
         }
     }
 
@@ -214,6 +219,15 @@ impl ProcessValidator {
     pub fn with_bounds(mut self, probe_bound: Duration, smoke_bound: Duration) -> Self {
         self.probe_bound = probe_bound;
         self.smoke_bound = smoke_bound;
+        self
+    }
+
+    /// Pipe the capability smoke's engine stderr through `held`.
+    pub(crate) fn holding_stderr(
+        mut self,
+        held: std::sync::Arc<crate::process::HeldStderr>,
+    ) -> Self {
+        self.held_stderr = Some(held);
         self
     }
 
@@ -227,6 +241,14 @@ impl ProcessValidator {
         path: &Path,
         requirement: Capability,
     ) -> Result<ValidatedCandidate, RejectionReason> {
+        let candidate = self.probe_candidate(path).await?;
+        self.cross_check(&candidate, requirement).await?;
+        Ok(candidate)
+    }
+
+    /// Steps 1 and 2 of validation: a regular file whose bounded `--version`
+    /// probe parses as strict SemVer and satisfies the support policy.
+    async fn probe_candidate(&self, path: &Path) -> Result<ValidatedCandidate, RejectionReason> {
         // 1. A regular file.
         if !path.is_file() {
             return Err(RejectionReason::NotARegularFile);
@@ -238,13 +260,23 @@ impl ProcessValidator {
                 detail: e.to_string(),
             })?;
         let version = classify_probed_version(&self.policy, &probe)?;
-        // 3. The capability smoke on a throwaway process.
-        self.smoke(path, &probe, requirement).await?;
         Ok(ValidatedCandidate {
             path: path.to_path_buf(),
             version,
             version_string: probe,
         })
+    }
+
+    /// Step 3 of validation: the capability smoke on a throwaway process,
+    /// cross-checking the engine's in-band version against the candidate's
+    /// probed one.
+    pub(crate) async fn cross_check(
+        &self,
+        candidate: &ValidatedCandidate,
+        requirement: Capability,
+    ) -> Result<(), RejectionReason> {
+        self.smoke(&candidate.path, &candidate.version_string, requirement)
+            .await
     }
 
     /// The capability smoke: prove the required surface on a throwaway spawned
@@ -287,7 +319,7 @@ impl ProcessValidator {
         probe: &str,
         staged: &SmokeProject,
     ) -> Result<(), RejectionReason> {
-        let conn = spawn_own_lsp_connection(path, &staged.dir)
+        let conn = spawn_own_lsp_connection(path, &staged.dir, self.held_stderr.as_ref())
             .await
             .map_err(|e| RejectionReason::LspHandshakeFailed {
                 detail: e.to_string(),
@@ -314,14 +346,15 @@ impl ProcessValidator {
     /// The `--api` smoke: the full owned attach (LSP handshake + `--api`
     /// session mint) plus a minimal configured-project snapshot whose first
     /// handle must be a bare integer (the rail lives inside
-    /// `update_snapshot_open_project`).
+    /// `current_snapshot_for_project`). The smoke releases its snapshot before
+    /// the teardown.
     async fn api_smoke(
         &self,
         path: &Path,
         probe: &str,
         staged: &SmokeProject,
     ) -> Result<(), RejectionReason> {
-        let conn = spawn_own_lsp_connection(path, &staged.dir)
+        let conn = spawn_own_lsp_connection(path, &staged.dir, self.held_stderr.as_ref())
             .await
             .map_err(|e| RejectionReason::ApiSmokeFailed {
                 detail: format!("spawn the engine: {e}"),
@@ -340,8 +373,9 @@ impl ProcessValidator {
             });
         }
         let tsconfig = staged.tsconfig_string();
-        let result = match attach.update_snapshot(&tsconfig).await {
+        let result = match attach.current_snapshot(&tsconfig).await {
             Ok(snapshot) => {
+                let _ = attach.api().release(&snapshot.snapshot).await;
                 // The integer handle alone proves nothing: the snapshot must
                 // actually CONTAIN the staged configured project. A hollow
                 // `projects: []` (or a foreign project set) means the engine
@@ -372,6 +406,23 @@ impl ProcessValidator {
     }
 }
 
+/// The probe stage of a [`ProcessValidator`] alone (steps 1 and 2), for
+/// [`crate::toolchain::discovery::resolve_provisional`]. Crate-private: a
+/// candidate it accepts is only provisional until the same validator's
+/// [`ProcessValidator::cross_check`] confirms it.
+pub(crate) struct ProbeStage<'a>(pub(crate) &'a ProcessValidator);
+
+impl CandidateValidator for ProbeStage<'_> {
+    fn validate<'a>(
+        &'a self,
+        path: &'a Path,
+        _requirement: Capability,
+    ) -> Pin<Box<dyn Future<Output = Result<ValidatedCandidate, RejectionReason>> + Send + 'a>>
+    {
+        Box::pin(async move { self.0.probe_candidate(path).await })
+    }
+}
+
 impl CandidateValidator for ProcessValidator {
     fn validate<'a>(
         &'a self,
@@ -395,7 +446,7 @@ fn versions_agree(probe: &str, server_info: &str) -> bool {
 /// Classify a probed `--version` report against the support policy.
 ///
 /// A parseable version whose major is below the tsgo family's
-/// ([`super::policy::SUPPORTED_TSGO_RANGE_MIN`]) is not a below-floor tsgo: it
+/// ([`super::policy::pinned_version`]) is not a below-floor tsgo: it
 /// is the TypeScript Node.js toolchain answering `tsc --version` (a TypeScript
 /// 5.x/6.x install — the tsserver family). It classifies as
 /// [`RejectionReason::NotTsgoEngine`] so the diagnostic names what the binary
@@ -405,7 +456,7 @@ fn classify_probed_version(
     probe: &str,
 ) -> Result<TsgoVersion, RejectionReason> {
     if let Ok(version) = TsgoVersion::parse(probe) {
-        if version.major < super::policy::SUPPORTED_TSGO_RANGE_MIN.major {
+        if version.major < super::policy::pinned_version().major {
             return Err(RejectionReason::NotTsgoEngine {
                 version: probe.to_string(),
             });
@@ -479,24 +530,21 @@ mod tests {
 
     #[test]
     fn versions_agree_only_on_exact_semver_equality() {
-        assert!(versions_agree("7.0.2", "7.0.2"));
-        assert!(versions_agree(
-            "7.0.0-dev.20260703.1",
-            "7.0.0-dev.20260703.1"
-        ));
+        assert!(versions_agree("7.1.2", "7.1.2"));
+        assert!(versions_agree("7.1.0-beta", "7.1.0-beta"));
         assert!(
-            !versions_agree("7.0.2", "7.0.9"),
+            !versions_agree("7.1.2", "7.1.9"),
             "a patch disagreement is a mismatch"
         );
         assert!(
-            !versions_agree("7.0.2", "7.0.2-rc.1"),
+            !versions_agree("7.1.0", "7.1.0-rc.1"),
             "a prerelease disagreement is a mismatch"
         );
         assert!(
-            !versions_agree("7.0.2", "garbage"),
+            !versions_agree("7.1.2", "garbage"),
             "an unparseable self-report can never agree"
         );
-        assert!(!versions_agree("garbage", "7.0.2"));
+        assert!(!versions_agree("garbage", "7.1.2"));
     }
 
     // ── DISCRIMINATING: rejection diagnostics name the requirement, the
@@ -513,14 +561,17 @@ mod tests {
         assert!(probe.to_string().contains("exited with code Some(2)"));
 
         let policy = RejectionReason::PolicyRejected {
-            version: "7.1.0".to_string(),
+            version: "7.2.0".to_string(),
             rejection: crate::toolchain::policy::PolicyRejection::OutOfSupportedRange {
-                version: crate::toolchain::policy::TsgoVersion::new(7, 1, 0),
+                version: crate::toolchain::policy::TsgoVersion::new(7, 2, 0),
             },
         };
         let msg = policy.to_string();
-        assert!(msg.contains("7.1.0"), "{msg}");
-        assert!(msg.contains(">=7.0.2, <7.1.0"), "{msg}");
+        assert!(msg.contains("7.2.0"), "{msg}");
+        assert!(
+            msg.contains(crate::toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL),
+            "{msg}"
+        );
 
         let handshake = RejectionReason::LspHandshakeFailed {
             detail: "engine exited before initialize completed".to_string(),
@@ -533,12 +584,12 @@ mod tests {
         );
 
         let mismatch = RejectionReason::ServerInfoVersionMismatch {
-            probe: "7.0.2".to_string(),
-            server_info: "7.0.9".to_string(),
+            probe: "7.1.2".to_string(),
+            server_info: "7.1.9".to_string(),
         };
         let msg = mismatch.to_string();
-        assert!(msg.contains("7.0.2"), "{msg}");
-        assert!(msg.contains("7.0.9"), "{msg}");
+        assert!(msg.contains("7.1.2"), "{msg}");
+        assert!(msg.contains("7.1.9"), "{msg}");
         assert!(msg.contains("serverInfo"), "{msg}");
 
         let api = RejectionReason::ApiSmokeFailed {
@@ -553,7 +604,7 @@ mod tests {
     //    `tsc` answering `--version` is the Node.js tsserver toolchain, NOT a
     //    below-floor tsgo. It must classify as NotTsgoEngine — the diagnostic
     //    names what the binary is and points at the tsserver route instead of
-    //    rejecting it against the tsgo 7.0.x window. ─────────────────────────
+    //    rejecting it against the tsgo version window. ──────────────────────
     #[test]
     fn a_pre7_version_is_not_a_tsgo_engine() {
         let policy = VersionPolicy::production();
@@ -576,9 +627,9 @@ mod tests {
         );
 
         // The tsgo family itself still flows through the support policy.
-        assert!(classify_probed_version(&policy, "7.0.2").is_ok());
+        assert!(classify_probed_version(&policy, crate::toolchain::policy::TYPESCRIPT_PIN).is_ok());
         assert!(matches!(
-            classify_probed_version(&policy, "7.1.0"),
+            classify_probed_version(&policy, "7.2.0"),
             Err(RejectionReason::PolicyRejected { .. })
         ));
         assert!(matches!(
@@ -611,16 +662,5 @@ mod tests {
             .await
             .expect_err("a directory must be rejected");
         assert!(matches!(err, RejectionReason::NotARegularFile), "{err:?}");
-    }
-
-    // ── the validator honors the injected policy (production vs dev
-    //    override) — the process-level nightly coverage lives in the
-    //    integration suite; here the policy object is what flows through. ────
-    #[test]
-    fn validator_carries_the_injected_policy() {
-        let production = ProcessValidator::with_policy(VersionPolicy::production());
-        assert!(!production.policy().allows_dev_nightly());
-        let dev = ProcessValidator::with_policy(VersionPolicy::with_dev_nightly_override());
-        assert!(dev.policy().allows_dev_nightly());
     }
 }

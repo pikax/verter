@@ -140,6 +140,64 @@ pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: u64 =
             * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64
         + (512 << 20);
 
+/// The cost of an inline part of a computation, measured apart from the
+/// rest of it ([`ConnectedDemandLedger::open_inline_cost`]): the usage it
+/// charged itself, its longest tail run, and the results it consumed. A
+/// consumer that skips performing the part again charges it with
+/// [`ConnectedDemandLedger::replay_inline_cost`].
+#[derive(Clone)]
+pub(crate) struct InlineCost {
+    exclusive: LogicalUsage,
+    tail_steps: u32,
+    prerequisites: Vec<CostDependency>,
+}
+
+/// An inline measurement being taken
+/// ([`ConnectedDemandLedger::open_inline_cost`]). Dropped unclosed — an
+/// unwind — it ends unmeasured, with the recordings opened above it, each
+/// abandoned into the one below.
+pub(crate) struct InlineCostRecording<'l> {
+    ledger: &'l dyn InlineCostLedger,
+    place: usize,
+    open: bool,
+}
+
+impl InlineCostRecording<'_> {
+    /// Close it: what it measured, kept by the computation below. `None`
+    /// when it is not the recording on top.
+    pub(crate) fn close(mut self) -> Option<InlineCost> {
+        self.open = false;
+        self.ledger.close_at(self.place)
+    }
+}
+
+impl Drop for InlineCostRecording<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.ledger.abandon_at(self.place);
+        }
+    }
+}
+
+/// The ledger operations an [`InlineCostRecording`] ends itself with.
+trait InlineCostLedger {
+    fn close_at(&self, place: usize) -> Option<InlineCost>;
+    fn abandon_at(&self, place: usize);
+}
+
+impl InlineCostLedger for ConnectedDemandLedger<'_> {
+    fn close_at(&self, place: usize) -> Option<InlineCost> {
+        self.close_inline_cost(place)
+    }
+    fn abandon_at(&self, place: usize) {
+        self.abandon_inline_cost(place);
+    }
+}
+
+/// The identity of an inline measurement, which is never sealed.
+#[derive(Hash, PartialEq, Eq)]
+struct InlineCostKey;
+
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.
 #[cfg(any(test, feature = "test-support"))]
@@ -1364,6 +1422,148 @@ impl ConnectedDemandLedger<'_> {
         }
     }
 
+    /// Open the measurement of an inline part of the computation on top:
+    /// until it closes ([`InlineCostRecording::close`]), the charges the
+    /// demand takes and the results it consumes are measured apart, and
+    /// stay the computation's own.
+    pub(crate) fn open_inline_cost(&self) -> InlineCostRecording<'_> {
+        let place = self.recording_depth();
+        self.open_cost_scope(CostIdentity::of_key(InlineCostKey));
+        InlineCostRecording {
+            ledger: self,
+            place,
+            open: true,
+        }
+    }
+
+    /// End the measurement at `place` unmeasured, with every recording
+    /// opened above it: each is abandoned into the one below it.
+    fn abandon_inline_cost(&self, place: usize) {
+        // bounded-loop: at most the recordings open above `place`.
+        while self.recording_depth() > place {
+            self.abandon_cost_scope();
+        }
+    }
+
+    /// Close the measurement [`Self::open_inline_cost`] opened at `place`:
+    /// what it measured goes to the computation below exactly as if it had
+    /// been charged there — its usage added, its tail runs joined, each
+    /// result it consumed a prerequisite of its own — and is returned.
+    /// `None`, closing nothing, when that measurement is not the recording
+    /// on top.
+    fn close_inline_cost(&self, place: usize) -> Option<InlineCost> {
+        if self.recording_depth() != place + 1 {
+            return None;
+        }
+        let scope = self.suspend_cost_scope()?;
+        let cost = InlineCost {
+            exclusive: scope.exclusive,
+            tail_steps: scope.tail_steps,
+            prerequisites: scope.prerequisites.clone(),
+        };
+        if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
+            consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
+            consumer.tail_steps = consumer.tail_steps.max(scope.tail_steps);
+            consumer.prerequisites.extend(scope.prerequisites);
+        }
+        Some(cost)
+    }
+
+    /// Perform `part`, a computation whose result the parts measured on
+    /// top of it keep for one another, with the charges it takes going to
+    /// the computation below those measurements: a measured part that
+    /// performs it pays it once, and a part found by a measurement later
+    /// performed again would find its result kept, so the measurement it
+    /// is charged into never holds it.
+    pub(crate) fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        if !self.scope_open.get() {
+            return part();
+        }
+        let lifted = {
+            let mut scopes = self.scopes.borrow_mut();
+            let keep = scopes
+                .iter()
+                .rposition(|scope| !scope.identity.is_keyed_by::<InlineCostKey>())
+                .map_or(0, |below| below + 1);
+            if keep == scopes.len() {
+                drop(scopes);
+                return part();
+            }
+            self.flush_usage(&mut scopes);
+            let lifted = scopes.split_off(keep);
+            self.sync_top(&scopes);
+            lifted
+        };
+        let value = part();
+        let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
+        scopes.extend(lifted);
+        self.sync_top(&scopes);
+        value
+    }
+
+    /// Charge an inline part's measured cost again, as performing that part
+    /// again would: its work units, construction bytes and request
+    /// operations to the demand and its request, all of it, with its
+    /// comparisons, tail runs and consumed results, to the computation on
+    /// top. `false`, charging nothing, when the demand has tripped or been
+    /// cancelled, lacks the room any of those charges needs, or a result the
+    /// part consumed does not fit this reader's allowances
+    /// ([`Self::footprint_refusal`]): performing the part again is then
+    /// what meets the allowance.
+    pub(crate) fn replay_inline_cost(
+        &self,
+        cost: &InlineCost,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> bool {
+        if !self.tripped.get().is_empty() || self.cancellation.is_cancelled() {
+            return false;
+        }
+        if cost.prerequisites.iter().any(|dependency| {
+            self.footprint_refusal(&dependency.receipt, dependency.nesting)
+                .is_some()
+        }) {
+            return false;
+        }
+        let usage = cost.exclusive;
+        let work = usize::try_from(usage.work).unwrap_or(usize::MAX);
+        if work > self.work_limit.get().saturating_sub(self.work_used.get()) {
+            return false;
+        }
+        let enforced = usage.bytes.saturating_sub(usage.advisory_bytes);
+        if self.enforced_bytes().saturating_add(enforced) > self.bytes_limit.get() {
+            return false;
+        }
+        let operations = usize::try_from(usage.operations).unwrap_or(usize::MAX);
+        if let Some(request) = request {
+            let room = request
+                .effective_projection_op_budget()
+                .saturating_sub(request.projection_ops_executed_count());
+            if operations > room {
+                return false;
+            }
+        }
+        self.commit_usage(work, usage.bytes, usage.advisory_bytes);
+        if let Some(request) = request {
+            // `operations` was checked against the request operations left.
+            // bounded-loop: at most the request operations left in its allowance.
+            for _ in 0..operations {
+                self.spend_request_operation(request);
+            }
+        }
+        if self.scope_open.get() {
+            let comparisons = &self.pending_usage.comparisons;
+            comparisons.set(comparisons.get().saturating_add(usage.comparisons));
+            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+                scope.tail_steps = scope.tail_steps.max(cost.tail_steps);
+                scope
+                    .prerequisites
+                    .extend(cost.prerequisites.iter().cloned());
+            }
+        }
+        true
+    }
+
     /// Fold an ended recording into the recording below it, if any: the
     /// usage it charged, and the prerequisites it consumed — more than one
     /// as a single failed-prefix receipt
@@ -1451,6 +1651,44 @@ impl ConnectedDemandLedger<'_> {
         .map(|_| ())
     }
 
+    /// Why the result `receipt` costs, read the way `nesting` names, does
+    /// not fit this reader's allowances whatever it has paid: its nesting
+    /// past the remaining query depth, its instantiation frames past the
+    /// instantiation allowance at the reader's frame depth, or its tail runs
+    /// past the tail allowance. `None` when it fits.
+    fn footprint_refusal(
+        &self,
+        receipt: &DemandCostReceipt,
+        nesting: Nesting,
+    ) -> Option<ReplayRefusal> {
+        let footprint = receipt.footprint();
+        // The reader's own nesting bounds where the result's drive, and so
+        // each of its frames, would be entered from.
+        if u32::from(self.query_depth.get())
+            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
+            > u32::from(self.query_depth_limit.get())
+        {
+            return Some(ReplayRefusal::Depth);
+        }
+        let first_frame = match nesting {
+            Nesting::Frame { depth } => Some(depth),
+            Nesting::Drive => Some(1),
+            Nesting::InPlace | Nesting::Entered | Nesting::Folded => None,
+        };
+        if footprint.instantiation_required > self.instantiation_depth_limit
+            || first_frame.is_some_and(|depth| {
+                depth.saturating_add(u32::from(footprint.instantiation_height))
+                    > self.instantiation_depth_limit
+            })
+        {
+            return Some(ReplayRefusal::InstantiationDepth);
+        }
+        if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
+            return Some(ReplayRefusal::TailSteps);
+        }
+        None
+    }
+
     /// [`Self::replay_admit`] for a reader whose relation check, if any,
     /// has `comparison_room` structured comparisons left: the unpaid
     /// closure's comparisons — what its cold run would have recorded into
@@ -1467,30 +1705,8 @@ impl ConnectedDemandLedger<'_> {
         if !tripped.is_empty() || self.cancellation.is_cancelled() {
             return Err(ReplayRefusal::Tripped);
         }
-        let footprint = receipt.footprint();
-        // The reader's own nesting bounds where the result's drive, and so
-        // each of its frames, would be entered from.
-        if u32::from(self.query_depth.get())
-            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
-            > u32::from(self.query_depth_limit.get())
-        {
-            return Err(ReplayRefusal::Depth);
-        }
-        let first_frame = match nesting {
-            Nesting::Frame { depth } => Some(depth),
-            Nesting::Drive => Some(1),
-            Nesting::InPlace | Nesting::Entered | Nesting::Folded => None,
-        };
-        if footprint.instantiation_required > self.instantiation_depth_limit
-            || first_frame.is_some_and(|depth| {
-                depth.saturating_add(u32::from(footprint.instantiation_height))
-                    > self.instantiation_depth_limit
-            })
-        {
-            return Err(ReplayRefusal::InstantiationDepth);
-        }
-        if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
-            return Err(ReplayRefusal::TailSteps);
+        if let Some(refusal) = self.footprint_refusal(receipt, nesting) {
+            return Err(refusal);
         }
         let operations_paid = request.map(|request| request.operations_paid());
         if self.paid.borrow().contains(receipt.identity())
@@ -1950,6 +2166,7 @@ mod ownership_tests {
                 crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                     std::sync::atomic::AtomicU64::new(0),
                 )),
+                verter_session_query::facts::policy::FactPolicy::production(),
             );
             let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
             ledger.set_limits_for_tests(1, 8);
@@ -2000,6 +2217,7 @@ mod envelope_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         let (guard, trip) = ledger.enter(false);
@@ -2034,6 +2252,7 @@ mod advisory_bytes_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         let (_guard, trip) = ledger.enter(false);
@@ -2120,6 +2339,7 @@ mod advisory_bytes_tests {
             crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
             )),
+            verter_session_query::facts::policy::FactPolicy::production(),
         );
         let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
         ledger.set_byte_limit_for_tests(100);
@@ -2195,5 +2415,72 @@ mod advisory_bytes_tests {
             .charge_construction(1, 1_000)
             .unwrap_err()
             .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
+    }
+}
+
+#[cfg(test)]
+mod inline_cost_tests {
+    use super::*;
+
+    fn with_ledger(run: impl FnOnce(&ConnectedDemandLedger<'_>)) {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+            verter_session_query::facts::policy::FactPolicy::production(),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        let (_guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+        run(&ledger);
+    }
+
+    /// A measurement keeps what its part charged, the computation below it
+    /// keeps that too, and a part every measured part shares is charged to
+    /// the computation alone. Replaying the measurement charges the demand
+    /// its work again, and refuses, charging nothing, past the allowance.
+    #[test]
+    fn a_measurement_replays_what_its_part_charged_and_no_shared_part() {
+        with_ledger(|ledger| {
+            let outer = ledger.open_inline_cost();
+            ledger.charge().unwrap();
+            let inner = ledger.open_inline_cost();
+            ledger.charge().unwrap();
+            ledger.outside_inline_costs(|| {
+                ledger.charge_units(5).unwrap();
+            });
+            let inner = inner.close().expect("the inner measurement is on top");
+            let outer = outer.close().expect("the outer measurement is on top");
+            assert_eq!((inner.exclusive.work, outer.exclusive.work), (1, 2));
+            let computation = ledger.suspend_cost_scope().unwrap();
+            assert_eq!(computation.exclusive.work, 7);
+            assert_eq!(ledger.recording_depth(), 0);
+
+            let used = ledger.work_used.get();
+            assert!(ledger.replay_inline_cost(&outer, None));
+            assert_eq!(ledger.work_used.get(), used + 2);
+            ledger.work_limit.set(ledger.work_used.get() + 1);
+            assert!(!ledger.replay_inline_cost(&outer, None));
+            assert_eq!(ledger.work_used.get(), used + 2);
+        });
+    }
+
+    /// Measurements dropped unclosed, the outer first as an unwinding
+    /// stack of them drops, end with every recording opened above them,
+    /// each abandoned into the one below: the computation keeps every
+    /// charge and is on top again.
+    #[test]
+    fn measurements_dropped_unclosed_leave_the_computation_on_top() {
+        with_ledger(|ledger| {
+            let mut measurements = vec![ledger.open_inline_cost()];
+            ledger.charge().unwrap();
+            measurements.push(ledger.open_inline_cost());
+            ledger.charge().unwrap();
+            drop(measurements);
+            assert_eq!(ledger.recording_depth(), 1);
+            let computation = ledger.suspend_cost_scope().unwrap();
+            assert_eq!(computation.exclusive.work, 2);
+        });
     }
 }

@@ -177,6 +177,9 @@ const STP1 = readStp1Inventory(REPO_ROOT);
 export const PATH_FILTERS = Object.freeze({
   rust: [
     "crates/**",
+    // Rust source outside the workspace that a workspace crate compiles (see
+    // OUT_OF_WORKSPACE_SOURCES): the Rust tests build it.
+    "vendor/libmimalloc-sys2/**",
     // Read by Rust tests (`verter_source_policy_gate` validates the schemas;
     // the style-IR corpora are read and `include_str!`-ed), so this lane owns
     // them; nothing else does.
@@ -239,6 +242,7 @@ export const PATH_FILTERS = Object.freeze({
     // it silently narrows what that lane runs.
     "scripts/compile-contracts.mjs",
     "scripts/provider-ci*.mjs",
+    "scripts/observe-lane*.mjs",
     "packages/framework-conformance-harness/**",
     "packages/language-shared/**",
     "packages/svelte-jsx/**",
@@ -647,6 +651,27 @@ export function matchPathFilters(changedFiles, filters = COMPILED_PATH_FILTERS) 
 }
 
 /**
+ * Source trees outside the workspace that a workspace crate compiles, by path
+ * prefix, mapped to that crate. The crate half classifies a change under one
+ * as a change to the crate, so every lane downstream of it follows. A mapped
+ * crate missing from the metadata maps nothing, so the file falls back to
+ * running every lane; ci-impact.test.mjs checks every mapped crate exists.
+ */
+export const OUT_OF_WORKSPACE_SOURCES = Object.freeze({
+  // The vendored sys crate behind the native global allocator, patched in
+  // from the workspace manifest and compiled into verter_alloc.
+  "vendor/libmimalloc-sys2": "verter_alloc",
+});
+
+/** The workspace crate that compiles `file` from outside the workspace, if any. */
+function outOfWorkspaceOwner(index, file) {
+  for (const [prefix, crate] of Object.entries(OUT_OF_WORKSPACE_SOURCES)) {
+    if (file === prefix || file.startsWith(`${prefix}/`)) return index.byName.get(crate) ?? null;
+  }
+  return null;
+}
+
+/**
  * The crates each impact lane is built from. A lane is impacted when a
  * changed crate is one of these or anything they transitively depend on.
  * Every name must be a workspace member; `classifyCiImpact` refuses otherwise.
@@ -932,7 +957,7 @@ export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS,
       if (hatch.everything) everything = true;
       continue;
     }
-    const crate = mapPathToCrate(index, file);
+    const crate = mapPathToCrate(index, file) ?? outOfWorkspaceOwner(index, file);
     if (crate) {
       directCrates.add(crate.name);
       continue;

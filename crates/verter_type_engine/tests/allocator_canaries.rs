@@ -267,8 +267,8 @@ mod signature_kernel_warm_positional {
 }
 
 mod root_set_operands_inline {
-    //! Rooting a few operands holds them in the shared owner itself: one
-    //! allocation per root set, none for its operand list, none to release.
+    //! Rooting a few operands holds them in the root set itself: no
+    //! allocation for the set, its operand list or its release.
 
     use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
     use verter_type_engine::semantic_query_memo::SemanticGraphStore;
@@ -276,7 +276,7 @@ mod root_set_operands_inline {
     use super::{alloc_count, reset_alloc_counter};
 
     #[test]
-    fn rooting_and_releasing_a_few_operands_allocates_only_the_owner() {
+    fn rooting_and_releasing_a_few_operands_allocates_nothing() {
         let graph = SemanticGraphStore::new();
         let _lane = graph.enter_node_root_scope();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -291,8 +291,8 @@ mod root_set_operands_inline {
         }
         let allocations = alloc_count();
         assert_eq!(
-            allocations, SETS,
-            "rooting two operands allocated {allocations} times over {SETS} sets (an operand list or a release worklist per set?)"
+            allocations, 0,
+            "rooting two operands allocated {allocations} times over {SETS} sets (a shared block, an operand list or a release worklist per set?)"
         );
     }
 }

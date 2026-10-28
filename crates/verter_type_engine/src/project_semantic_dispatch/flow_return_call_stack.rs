@@ -553,8 +553,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Positional<CallValue> {
         let newly_degraded = mark.degradation.is_none() && self.degradation.is_some();
         if !matches!(value, Positional::Unmodeled) && !newly_degraded {
+            #[cfg(any(test, feature = "test-support"))]
+            if self.self_slot.is_none()
+                && self
+                    .dispatch
+                    .observers
+                    .flow
+                    .undecided_nested_call_relations
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                self.dispatch.restore_call_relation_observations(1);
+            }
             let relations_decided =
                 self.dispatch.call_undecided_relations() == mark.undecided_relations;
+            #[cfg(any(test, feature = "test-support"))]
+            if self
+                .dispatch
+                .observers
+                .flow
+                .observe_call_evidence
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                if let Ok(mut observed) = self.dispatch.observers.flow.call_evidence.lock() {
+                    observed.push(relations_decided);
+                }
+            }
             self.call_evidence.push(FlowCallEvidence {
                 span: site.span(),
                 relations_decided,
@@ -924,8 +947,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             crate::semantic_query::CheckerDiagnosticSite {
                 operation_start: Some(call.report_point),
                 operation_end: Some(call.report_end),
-                expression_start: Some(span.start),
-                expression_end: Some(span.end),
                 arguments: call
                     .args
                     .iter()

@@ -275,12 +275,13 @@ where
     /// newer versions that evict it before its entry exists, then insert an
     /// entry no version list names — one no later eviction can reach.
     ///
-    /// The entry retains its signature's evidence pages, so admission first
-    /// claims them into a refusable reservation; a refused claim memoizes
+    /// The entry retains the storage its signature reaches (tree nodes and
+    /// consumed receipts), so admission first claims it into a refusable
+    /// reservation; a refused claim memoizes
     /// nothing and returns the complete entry uncached.
     pub fn insert(&self, key: FullKey<K>, entry: StoredSurfaceDto<B>) -> Arc<StoredSurfaceDto<B>> {
         let arc = Arc::new(entry);
-        if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
+        if let Err(refusal) = verter_session_query::facts::receipt::claim_retained_storage(
             &verter_session_query::retention::SemanticRetentionAccount::process_local(),
             &arc.read_set_signature.facts,
         ) {
@@ -343,11 +344,13 @@ pub(crate) fn read_framework_surface<K, B, F>(
 where
     K: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     B: Send + Sync + 'static,
-    F: FnOnce(&[verter_session_query::facts::fact_cache::FactVersionRef]) -> bool,
+    F: FnOnce(verter_session_query::facts::fact_set::FactsRef<'_>) -> bool,
 {
     let candidate = store.candidate(key)?;
     if candidate.validated_at_generation != generation
-        || !validates(&candidate.read_set_signature.facts)
+        || !validates(verter_session_query::facts::fact_set::FactsRef::Set(
+            &candidate.read_set_signature.facts,
+        ))
     {
         return None;
     }
@@ -492,7 +495,9 @@ mod tests {
             key.clone(),
             StoredSurfaceDto {
                 dto_bundle: Arc::new(7u32),
-                read_set_signature: ReadSetSignature::empty(),
+                read_set_signature: ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                ),
                 validated_at_generation: 5,
             },
         );
@@ -542,7 +547,9 @@ mod tests {
             key.clone(),
             StoredSurfaceDto {
                 dto_bundle: Arc::new(1u32),
-                read_set_signature: ReadSetSignature::empty(),
+                read_set_signature: ReadSetSignature::empty(
+                    verter_session_query::facts::policy::FactPolicy::production(),
+                ),
                 validated_at_generation: 0,
             },
         );
@@ -758,9 +765,10 @@ mod tests {
             key.clone(),
             StoredSurfaceDto {
                 dto_bundle: Arc::new(11u32),
-                read_set_signature: ReadSetSignature::new(Arc::from(
-                    vec![cross_file_fact].into_boxed_slice(),
-                )),
+                read_set_signature: ReadSetSignature::new(
+                    verter_session_query::facts::policy::FactPolicy::production()
+                        .set_of(vec![cross_file_fact].into_boxed_slice()),
+                ),
                 validated_at_generation: 5,
             },
         );

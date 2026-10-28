@@ -12,6 +12,10 @@
 //!   `path(&field, meter) -> usize`, for a foreign type this crate cannot
 //!   implement the trait for.
 //!
+//! A container may specify `#[heap_size(pin = "path")]` to call its
+//! embedded-storage publication hook from `HeapSize::pin_storage`. Every
+//! field still participates in the exhaustive heap measurement.
+//!
 //! Type parameters gain a `HeapSize` bound; field types gain none, so a
 //! recursive type (an enum holding `Arc<Self>`) derives without the trait
 //! solver recursing.
@@ -147,6 +151,26 @@ fn heap_size_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             ))
         }
     };
+    let mut pin = None;
+    for attr in &input.attrs {
+        if attr.path().is_ident("heap_size") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("pin") {
+                    let path: LitStr = meta.value()?.parse()?;
+                    pin = Some(path.parse::<syn::Path>()?);
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let pin_method = pin.map(|path| {
+        quote! {
+            fn pin_storage(&self, context: &::verter_retention::pinned_heap::PinContext) -> bool {
+                #path(self, context);
+                true
+            }
+        }
+    });
     if iterative(&input.attrs)? {
         return Ok(quote! {
             impl #impl_generics ::verter_retention::heap_size::IterativeNode for #ident #ty_generics
@@ -164,6 +188,7 @@ fn heap_size_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             impl #impl_generics ::verter_retention::heap_size::HeapSize for #ident #ty_generics
                 #where_clause
             {
+                #pin_method
                 fn heap_size<'t>(
                     &'t self,
                     meter: &mut ::verter_retention::heap_size::HeapMeter<'_, 't>,
@@ -177,6 +202,7 @@ fn heap_size_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         impl #impl_generics ::verter_retention::heap_size::HeapSize for #ident #ty_generics
             #where_clause
         {
+            #pin_method
             #[allow(unused_variables, clippy::let_and_return)]
             fn heap_size<'t>(
                 &'t self,
@@ -197,7 +223,10 @@ fn iterative(attrs: &[syn::Attribute]) -> syn::Result<bool> {
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("iterative") {
+            if meta.path.is_ident("pin") {
+                let _: LitStr = meta.value()?.parse()?;
+                Ok(())
+            } else if meta.path.is_ident("iterative") {
                 iterative = true;
                 Ok(())
             } else {

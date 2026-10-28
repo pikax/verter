@@ -20,6 +20,25 @@ pub(crate) struct DagMutex {
     inner: InnerMutex,
     delivery: Mutex<Delivery>,
     inbox: crossbeam_channel::Sender<Submission>,
+    /// TEST-ONLY: Artifact identities whose worker has finished its
+    /// post-executor publication path (published, or dropped its result).
+    #[cfg(test)]
+    settled_artifacts: (Mutex<Vec<WorkNodeIdentity>>, parking_lot::Condvar),
+}
+
+/// TEST-ONLY: records its identity as a settled Artifact when dropped, so
+/// every exit from the worker's post-executor path is observed.
+#[cfg(test)]
+pub(super) struct ArtifactSettledReceipt<'a>(&'a DagMutex, Option<WorkNodeIdentity>);
+
+#[cfg(test)]
+impl Drop for ArtifactSettledReceipt<'_> {
+    fn drop(&mut self) {
+        if let Some(identity) = self.1.take() {
+            self.0.settled_artifacts.0.lock().push(identity);
+            self.0.settled_artifacts.1.notify_all();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -111,6 +130,37 @@ impl DagMutex {
             owner: self,
             _wakes: wakes,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn artifact_settled_receipt(
+        &self,
+        identity: WorkNodeIdentity,
+    ) -> ArtifactSettledReceipt<'_> {
+        ArtifactSettledReceipt(self, Some(identity))
+    }
+
+    /// TEST-ONLY: wait until the worker for `identity` has settled its
+    /// post-executor path. The budget is a hang guard only.
+    #[cfg(test)]
+    pub(crate) fn wait_artifact_settled(
+        &self,
+        identity: &WorkNodeIdentity,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut settled = self.settled_artifacts.0.lock();
+        while !settled.contains(identity) {
+            if self
+                .settled_artifacts
+                .1
+                .wait_until(&mut settled, deadline)
+                .timed_out()
+            {
+                return settled.contains(identity);
+            }
+        }
+        true
     }
 
     pub(super) fn defer_wakes(&self) -> WakeDeferral<'_> {
@@ -205,13 +255,18 @@ pub(super) fn new_dag_mutex(
     Arc::new_cyclic(|weak| {
         dag.set_progress_waker(Waker::from(Arc::new(CapacityWake(weak.clone()))));
         #[cfg(feature = "semantic-observe")]
-        let inner = hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag");
+        let inner = hotpath::mutex!(
+            hotpath_parking_lot::Mutex::new(dag),
+            label = "scheduler_dag"
+        );
         #[cfg(not(feature = "semantic-observe"))]
         let inner = Mutex::new(dag);
         DagMutex {
             inner,
             delivery: Mutex::new(Delivery::default()),
             inbox,
+            #[cfg(test)]
+            settled_artifacts: Default::default(),
         }
     })
 }

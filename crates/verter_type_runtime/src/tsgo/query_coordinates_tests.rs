@@ -35,10 +35,27 @@ impl Engine {
         }
     }
 
-    /// The next message, which must be `method`.
+    /// The next message, which must be `method`. A `didOpen` must come right
+    /// behind the `custom/projectInfo` request for the same document.
     async fn expect(&mut self, method: &str) -> serde_json::Value {
+        let lead = if method == "textDocument/didOpen" {
+            let lead = self.next().await;
+            assert_eq!(
+                lead["method"], "custom/projectInfo",
+                "a first open must lead with its project: {lead}"
+            );
+            Some(lead)
+        } else {
+            None
+        };
         let message = self.next().await;
         assert_eq!(message["method"], method, "unexpected message {message}");
+        if let Some(lead) = lead {
+            assert_eq!(
+                lead["params"]["textDocument"]["uri"], message["params"]["textDocument"]["uri"],
+                "the project lead names the document it opens"
+            );
+        }
         message
     }
 

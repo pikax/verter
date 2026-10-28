@@ -64,17 +64,18 @@ pub(crate) const RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
 
 /// The checker's relation stack depth (`recursiveTypeRelatedTo`): a
 /// structured comparison entered while this many are already open on its
-/// source or target stack overflows, and the check reports TS2321 in place
-/// of the failure it would otherwise explain. Measured on TypeScript 7.0.2:
-/// an argument failing through a property path of 100 nested object types
-/// reports TS2345 with that path; through 101, TS2321.
+/// source or target stack overflows, and the overflowing check reports no
+/// failure at all in place of the one it would otherwise explain. Measured
+/// on TypeScript 7.1.0-beta: an argument failing through a property path of
+/// 100 nested object types reports TS2345 with that path; through 101, the
+/// call reports nothing.
 pub(crate) const RELATION_STACK_DEPTH: u32 = 100;
 
 /// The length past which the checker abbreviates a type it prints in a
 /// message (`defaultMaximumTruncationLength`): once its node builder's
 /// running length count (`approximateLength`) passes it, the rest of a list
 /// or member set is elided, and `typeToString` clips the printed text at
-/// twice this many bytes. Measured on TypeScript 7.0.2.
+/// twice this many bytes. Measured on TypeScript 7.1.0-beta.
 pub(crate) const MAXIMUM_TRUNCATION_LENGTH: usize = 160;
 
 /// The witness that one type operation exhausted its own allowance: minted

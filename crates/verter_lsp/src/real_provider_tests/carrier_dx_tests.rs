@@ -435,7 +435,7 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
 ///   `TS2304 defineProps`, the prop surface degrades to `any`, no bindings are
 ///   extracted), so on THIS fixture refs/rename return only the self-occurrence
 ///   side. Building a Vue-macro/JSX/type-runtime conformance fixture, and validating
-///   against the authoritative `typescript@7.0.2` engine (not the dev channel),
+///   against the pinned `typescript` engine (not a nightly),
 ///   is the tracked follow-up for the both-sides refs/rename + completion items.
 /// * The plain-`.ts`-importer raw companion→source remap for def/refs/rename (the
 ///   editor's-own-TS-channel surface for a plain `.ts`) is the §2.10 SHARED-proxy
@@ -480,7 +480,7 @@ async fn assert_carrier_dx_contract_carrier_surface(session: &RealProviderTestSe
 
     // ── (1) Vue: the carrier resolves under the configured project — no false TS2307. ──
     // `merged_diagnostics` already retries internally for the async OWNED tsgo
-    // membership (didOpen overlay + `--api` updateSnapshot). The carrier's own
+    // membership (didOpen overlay + `--api` getCurrentLanguageServerSnapshot). The carrier's own
     // imports resolve under the configured project; a false `TS2307` would mean the
     // carrier was placed in a config-less inferred project (the inferred-project bug
     // S3 fixed). The positive readiness gate is the definition in item (2).

@@ -108,7 +108,7 @@ impl IntersectionInputId {
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        self.1 .0.owned_heap_bytes(aliases)
+        self.1.owned_heap_bytes(aliases)
     }
 }
 

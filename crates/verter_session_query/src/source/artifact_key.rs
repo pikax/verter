@@ -11,7 +11,7 @@ use verter_language::FileLanguage;
 /// `file_language_id`. Two project envs reading the same canonical at
 /// the same `content_hash` but different `parse_env_hash` coexist; the
 /// cache returns the matching entry for the caller's env.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct FileArtifactKey {
     pub canonical: Arc<str>,
     pub content_hash: Hash16,

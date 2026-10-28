@@ -809,14 +809,14 @@ where
 /// `ArcSwap.rcu(|old| clone, FIFO-evict if cap reached, push new)`.
 ///
 /// **Signature width**: never a refusal. A candidate's
-/// `fact_dep_signature` wider than one evidence page
-/// ([`verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH`]) is
-/// sealed into immutable evidence pages and admitted whole; every fact it
-/// holds is validated on every warm read.
+/// `fact_dep_signature` wider than
+/// [`verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max()`] is
+/// sealed into its canonical order and admitted whole; every fact it holds
+/// is validated on every warm read.
 ///
-/// **Evidence retention**: a candidate retains every evidence page its
-/// signature reaches, so its admission claims each page no earlier
-/// admission claimed into one refusable `Retained` reservation on the
+/// **Evidence retention**: a candidate retains every receipt its signature
+/// reaches, so its admission claims each one no earlier admission claimed
+/// into one refusable `Retained` reservation on the
 /// process retention account
 /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]),
 /// held by the candidate for its life. A refused reservation admits
@@ -840,7 +840,7 @@ where
     V: CachedData,
 {
     entries: DashMap<K, Arc<CacheEntry<V>>>,
-    /// The account a candidate's evidence pages are claimed into.
+    /// The account a candidate's receipts are claimed into.
     retention_account: verter_session_query::retention::StoreAccount,
     /// R20 instrumentation counter: increments on each admission
     /// refused by the fact-completeness guard. Read via
@@ -923,8 +923,8 @@ pub struct Candidate<V: CachedData> {
     pub signature_fingerprint: [u8; 16],
     pub value: CachedValue<V>,
     pub fact_dep_signature: OwnedFactSignature,
-    /// This candidate's own allocations and its share of the evidence pages
-    /// its signature claimed, with the holds on its value's and its
+    /// This candidate's own allocations and its share of the receipts its
+    /// signature claimed, with the holds on its value's and its
     /// signature's cells and the other owned cells it reaches; released
     /// when the candidate's last holder drops, each cell passing to the
     /// readers still keeping it.
@@ -969,16 +969,37 @@ impl<V: CachedData> ValidatedFactAdmission<V> {
 /// bound.
 pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
-/// Seal an admitted candidate's facts: kept as recorded while they fit one
-/// evidence page, paged (never truncated, never refused) when wider.
+/// Seal an admitted candidate's facts into its self-charged owned slice, in
+/// canonical order (never truncated, never refused) at every width. The
+/// facts are normalized in place: no set storage is built only to be read
+/// back into the slice.
 fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> OwnedFactSignature {
-    if facts.len() > verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH {
-        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)
+    OwnedFactSignature::from(
+        verter_session_query::facts::fact_read_set::canonical_signature_facts(facts),
+    )
+}
+
+/// Run `compare` on `facts` in the form [`seal_admitted_signature`] stores
+/// them, so a recorded witness is matched against a stored candidate as the
+/// same set whatever order it lists its facts in. A witness already in that
+/// form (strictly increasing, with fewer than two receipts, so no receipt can
+/// consume another) is compared as it is, without a copy.
+fn compare_as_admitted<R>(
+    facts: &[FactVersionRef],
+    compare: impl FnOnce(&[FactVersionRef]) -> R,
+) -> R {
+    let canonical = facts.windows(2).all(|pair| pair[0] < pair[1])
+        && facts
             .iter()
-            .cloned()
-            .collect()
+            .filter(|fact| matches!(fact, FactVersionRef::Receipt(_)))
+            .nth(1)
+            .is_none();
+    if canonical {
+        compare(facts)
     } else {
-        OwnedFactSignature::from(facts)
+        compare(
+            &verter_session_query::facts::fact_read_set::canonical_signature_facts(facts.to_vec()),
+        )
     }
 }
 
@@ -1057,7 +1078,7 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            if view.validates_fact_signature(&candidate.fact_dep_signature) {
+            if view.validates_fact_signature((&candidate.fact_dep_signature).into()) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
@@ -1105,7 +1126,7 @@ where
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
             if view.validates_fact_signature_with_self_roots(
-                &candidate.fact_dep_signature,
+                (&candidate.fact_dep_signature).into(),
                 self_root_canonicals,
             ) {
                 self.warm_hits
@@ -1168,9 +1189,10 @@ where
             // so the attribution comes out of the same validation the
             // hit/miss decision came out of — never a second, separately
             // written loop that could disagree with it.
-            let candidate_ok = match view
-                .validate_fact_signature(&candidate.fact_dep_signature, self_root_canonicals)
-            {
+            let candidate_ok = match view.validate_fact_signature(
+                (&candidate.fact_dep_signature).into(),
+                self_root_canonicals,
+            ) {
                 Ok(()) => true,
                 Err(index) => {
                     last_rejected_fact = candidate.fact_dep_signature.get(index).cloned();
@@ -1206,7 +1228,7 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            if view.validates_fact_signature(&candidate.fact_dep_signature) {
+            if view.validates_fact_signature((&candidate.fact_dep_signature).into()) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
@@ -1350,7 +1372,7 @@ where
     }
 
     /// Reserve one candidate's charge, held by the candidate: its own
-    /// allocations and the evidence pages its sealed signature reaches, in
+    /// allocations and the receipts its sealed signature reaches, in
     /// one refusable reservation, holding its value's and its signature's
     /// cells and the owned cells its key reaches. The refusal when the
     /// account refuses either; the value is then charged to the caller
@@ -1492,11 +1514,13 @@ where
     #[must_use]
     pub fn holds_candidate_with_signature(&self, key: &K, facts: &[FactVersionRef]) -> bool {
         match self.entries.get(key) {
-            Some(entry) => entry
-                .candidates
-                .load()
-                .iter()
-                .any(|candidate| candidate.fact_dep_signature.as_ref() == facts),
+            Some(entry) => compare_as_admitted(facts, |facts| {
+                entry
+                    .candidates
+                    .load()
+                    .iter()
+                    .any(|candidate| candidate.fact_dep_signature.as_ref() == facts)
+            }),
             None => false,
         }
     }
@@ -1521,8 +1545,10 @@ where
         V: PartialEq,
     {
         match self.entries.get(key) {
-            Some(entry) => entry.candidates.load().iter().any(|candidate| {
-                candidate.fact_dep_signature.as_ref() == facts && *candidate.value == *value
+            Some(entry) => compare_as_admitted(facts, |facts| {
+                entry.candidates.load().iter().any(|candidate| {
+                    candidate.fact_dep_signature.as_ref() == facts && *candidate.value == *value
+                })
             }),
             None => false,
         }
@@ -1852,6 +1878,10 @@ where
     /// that lock.
     #[cfg(test)]
     joiner_park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// TEST-ONLY: notified, under the `flights` lock, whenever a caller takes a reference to
+    /// an existing lane, so a test waits for a lane's strong count to rise without polling it.
+    #[cfg(any(test, feature = "test-support"))]
+    lane_joined: parking_lot::Condvar,
 }
 
 #[derive(Debug)]
@@ -2096,6 +2126,8 @@ where
             non_retained_seam_hook: SeamHookSlot::default(),
             #[cfg(test)]
             joiner_park_tx: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            lane_joined: parking_lot::Condvar::new(),
         }
     }
 
@@ -2129,6 +2161,8 @@ where
                 existing
                     .pins
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(any(test, feature = "test-support"))]
+                self.lane_joined.notify_all();
                 existing
             } else {
                 let state = Arc::new(FlightState {
@@ -2323,6 +2357,8 @@ where
                     existing
                         .pins
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.lane_joined.notify_all();
                     // Claim a Pending lane (created by a participation pin)
                     // by transitioning it to Running under this task.
                     let mut leader = false;
@@ -2573,6 +2609,37 @@ where
     /// Exposed under `cfg(any(test, feature = "test-support"))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can reach it
     /// transitively through the per-DB test-only accessors.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_wait_for_flight_strong_count(
+        &self,
+        key: &K,
+        token: StoreViewCompatToken,
+        more_than: usize,
+        budget: std::time::Duration,
+    ) -> bool {
+        let lane_key = (key.clone(), token);
+        let deadline = std::time::Instant::now() + budget;
+        let count = |flights: &FlightTable<K, V, E>| {
+            flights
+                .lanes
+                .get(&lane_key)
+                .map(Arc::strong_count)
+                .unwrap_or(0)
+        };
+        let mut flights = self.flights.lock();
+        while count(&flights) <= more_than {
+            if self
+                .lane_joined
+                .wait_until(&mut flights, deadline)
+                .timed_out()
+            {
+                return count(&flights) > more_than;
+            }
+        }
+        true
+    }
+
+    /// Test-only: the strong count of the lane for `(key, token)` (0 when absent).
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_flight_strong_count(&self, key: &K, token: StoreViewCompatToken) -> usize {
         let lane_key = (key.clone(), token);
@@ -3288,12 +3355,16 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
+        // The leader's compute holds until the other caller has parked on its flight, so the
+        // two always overlap.
+        let joiner_parked = Arc::new(std::sync::Mutex::new(group.subscribe_joiner_park()));
 
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let group = Arc::clone(&group);
                 let start = Arc::clone(&start);
                 let computes = Arc::clone(&computes);
+                let joiner_parked = Arc::clone(&joiner_parked);
                 std::thread::spawn(move || {
                     start.wait();
                     group
@@ -3306,7 +3377,11 @@ mod tests {
                             },
                             || {
                                 computes.fetch_add(1, Ordering::SeqCst);
-                                std::thread::sleep(Duration::from_millis(50));
+                                joiner_parked
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(Duration::from_secs(10))
+                                    .expect("the other caller parks on the leader's flight");
                                 Ok(42)
                             },
                         )
@@ -4195,6 +4270,10 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
+        // Each leader computes only once both lanes are claimed, so the lanes always overlap. A
+        // caller that never computes (a coalescing regression) fails the other's rendezvous at
+        // the hang guard instead of hanging the test.
+        let both_computing = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
 
         let handles: Vec<_> = [
             StoreViewCompatToken {
@@ -4213,12 +4292,26 @@ mod tests {
             let group = Arc::clone(&group);
             let start = Arc::clone(&start);
             let computes = Arc::clone(&computes);
+            let both_computing = Arc::clone(&both_computing);
             std::thread::spawn(move || {
                 start.wait();
                 group
                     .run("node".to_string(), token, || {
                         computes.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(50));
+                        let (computing, all_in) = &*both_computing;
+                        *computing.lock().unwrap() += 1;
+                        all_in.notify_all();
+                        let (_computing, rendezvous) = all_in
+                            .wait_timeout_while(
+                                computing.lock().unwrap(),
+                                Duration::from_secs(10),
+                                |n| *n < 2,
+                            )
+                            .unwrap();
+                        assert!(
+                            !rendezvous.timed_out(),
+                            "both leaders must be computing at once"
+                        );
                         Ok(token.epoch as usize)
                     })
                     .unwrap()
@@ -4842,6 +4935,10 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
+        // Each leader computes only once both lanes are claimed, so the lanes always overlap. A
+        // caller that never computes (a coalescing regression) fails the other's rendezvous at
+        // the hang guard instead of hanging the test.
+        let both_computing = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
 
         let handles: Vec<_> = [
             StoreViewCompatToken {
@@ -4860,12 +4957,26 @@ mod tests {
             let group = Arc::clone(&group);
             let start = Arc::clone(&start);
             let computes = Arc::clone(&computes);
+            let both_computing = Arc::clone(&both_computing);
             std::thread::spawn(move || {
                 start.wait();
                 group
                     .run("node".to_string(), token, || {
                         computes.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(50));
+                        let (computing, all_in) = &*both_computing;
+                        *computing.lock().unwrap() += 1;
+                        all_in.notify_all();
+                        let (_computing, rendezvous) = all_in
+                            .wait_timeout_while(
+                                computing.lock().unwrap(),
+                                Duration::from_secs(10),
+                                |n| *n < 2,
+                            )
+                            .unwrap();
+                        assert!(
+                            !rendezvous.timed_out(),
+                            "both leaders must be computing at once"
+                        );
                         Ok(token.validity_fingerprint as usize)
                     })
                     .unwrap()
@@ -5079,10 +5190,12 @@ mod file_source_env_fact_rail_tests {
         let a = source_env_fact("/dep.ts", 1, 2, "/dep.ts");
         let b = source_env_fact("/dep.ts", 2, 2, "/dep.ts");
 
-        let mut forward = FactReadSet::new();
+        let mut forward =
+            FactReadSet::new(verter_session_query::facts::policy::FactPolicy::production());
         forward.observe(a.clone());
         forward.observe(b.clone());
-        let mut reverse = FactReadSet::new();
+        let mut reverse =
+            FactReadSet::new(verter_session_query::facts::policy::FactPolicy::production());
         reverse.observe(b.clone());
         reverse.observe(a.clone());
 
@@ -5101,8 +5214,8 @@ mod file_source_env_fact_rail_tests {
             }
         };
         assert_eq!(
-            forward_sig.as_ref(),
-            reverse_sig.as_ref(),
+            forward_sig.to_vec(),
+            reverse_sig.to_vec(),
             "observation order must not change the finalised signature"
         );
         assert_eq!(
@@ -5350,7 +5463,7 @@ mod central_signature_rail_tests {
         }
         fn validate_fact_signature(
             &self,
-            sig: &[FactVersionRef],
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
             _self_root_canonicals: &[&str],
         ) -> Result<(), usize> {
             let mut seen: Vec<&str> = Vec::new();
@@ -5527,11 +5640,11 @@ mod central_signature_rail_tests {
         let view = StrictSelfRootRejectingView;
         let sig = [whole_hash("/own.ts", 1), whole_hash("/dep.ts", 2)];
         assert_eq!(
-            view.validates_fact_signature(&sig),
-            view.validates_fact_signature_with_self_roots(&sig, &[]),
+            view.validates_fact_signature((&sig).into()),
+            view.validates_fact_signature_with_self_roots((&sig).into(), &[]),
         );
-        assert!(view.validates_fact_signature(&sig));
-        assert!(!view.validates_fact_signature_with_self_roots(&sig, &["/own.ts"]));
+        assert!(view.validates_fact_signature((&sig).into()));
+        assert!(!view.validates_fact_signature_with_self_roots((&sig).into(), &["/own.ts"]));
     }
 }
 
@@ -5600,7 +5713,7 @@ mod receipt_validation_tests {
         }
         let signature = vec![below, middle.expect("a middle level")];
         let view = CountingView::default();
-        assert!(view.validates_fact_signature(&signature));
+        assert!(view.validates_fact_signature((&signature).into()));
         assert_eq!(
             view.validated.get(),
             64,
@@ -5612,7 +5725,7 @@ mod receipt_validation_tests {
             ..CountingView::default()
         };
         assert!(
-            !stale.validates_fact_signature(&signature),
+            !stale.validates_fact_signature((&signature).into()),
             "a fact deep inside a receipt that no longer holds invalidates the signature"
         );
     }
@@ -5630,17 +5743,89 @@ mod receipt_validation_tests {
             ..CountingView::default()
         };
         assert!(
-            view.validates_fact_signature(&signature),
+            view.validates_fact_signature((&signature).into()),
             "lazily, the self file's hash holds"
         );
         assert!(
-            !view.validates_fact_signature_with_self_roots(&signature, &["/self.ts"]),
+            !view.validates_fact_signature_with_self_roots((&signature).into(), &["/self.ts"]),
             "as a self-root it is validated strictly, inside the receipt too"
         );
     }
 
+    /// An admitted signature narrower than the fresh-slice width is stored
+    /// canonically — sorted, deduplicated, and without a receipt another of
+    /// its receipts consumed — where it used to be stored as recorded. The
+    /// stored facts reach exactly the facts admitted, so the answer is the
+    /// same, the candidate is charged exactly what admitting the canonical
+    /// facts directly charges, and an edit to any admitted fact, a consumed
+    /// receipt's leaf included, still misses.
+    #[test]
+    fn a_narrow_admitted_signature_is_stored_canonically_and_misses_every_edit() {
+        use verter_session_query::retention::{
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        // Fresh receipts per admission: a receipt's storage is claimed by the
+        // first admission that retains it.
+        let recorded = || {
+            let inner = receipt(vec![whole_hash("/inner.ts", 1)]);
+            let outer = receipt(vec![inner.clone(), whole_hash("/outer.ts", 2)]);
+            vec![
+                whole_hash("/z.ts", 3),
+                outer,
+                whole_hash("/a.ts", 4),
+                inner,
+                whole_hash("/z.ts", 3),
+            ]
+        };
+        let canonical =
+            || verter_session_query::facts::fact_read_set::canonical_signature_facts(recorded());
+        let expected = canonical();
+        assert_eq!(
+            expected.len(),
+            3,
+            "sorted, deduplicated, the consumed receipt dropped"
+        );
+        assert_eq!(
+            &expected[..2],
+            &[whole_hash("/a.ts", 4), whole_hash("/z.ts", 3)]
+        );
+        assert!(
+            matches!(expected[2], FactVersionRef::Receipt(_)),
+            "the outer receipt stays"
+        );
+        let admit = |facts: Vec<FactVersionRef>| {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, u32> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            assert!(cache.insert("k", 7, facts));
+            let retained = account.snapshot().retained_bytes;
+            (cache, retained)
+        };
+        let (cache, retained) = admit(recorded());
+        let (_, canonical_retained) = admit(canonical());
+        assert_eq!(
+            retained, canonical_retained,
+            "the candidate is charged exactly the canonical slice it stores"
+        );
+        let (value, stored) = cache
+            .get_if_valid_with_facts(&"k", &CountingView::default())
+            .expect("every admitted fact holds");
+        assert_eq!(*value, 7, "the answer is unchanged");
+        assert_eq!(&stored[..], expected.as_slice());
+        for edited in ["/z.ts", "/a.ts", "/inner.ts", "/outer.ts"] {
+            let view = CountingView {
+                rejected: Some(edited),
+                ..CountingView::default()
+            };
+            assert!(
+                cache.get_if_valid(&"k", &view).is_none(),
+                "an edit to {edited} misses the canonical signature"
+            );
+        }
+    }
+
     fn wide_facts() -> Vec<FactVersionRef> {
-        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        (0..2 * verter_session_query::facts::policy::FactPolicy::production().fresh_slice_max() + 3)
             .map(|index| whole_hash(&format!("/wide/{index:05}.ts"), 1))
             .collect()
     }
@@ -5870,13 +6055,13 @@ mod receipt_validation_tests {
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
-    /// A wide candidate's admission claims the pages its sealing minted into
-    /// the cache's refusable reservation, and evicting it drains them; an
-    /// account that refuses that footprint admits nothing.
+    /// A wide candidate is retained whole — every fact of its signature in
+    /// the cache's refusable reservation — and evicting it drains that
+    /// charge; an account that refuses that footprint admits nothing.
     #[test]
-    fn a_wide_candidate_claims_its_pages_and_is_refused_for_them() {
+    fn a_wide_candidate_is_retained_whole_and_refused_for_its_footprint() {
         use verter_session_query::retention::{
-            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
         };
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
         let cache: ValidatedFactCache<&'static str, u32> =
@@ -5885,29 +6070,19 @@ mod receipt_validation_tests {
         let (_, signature) = cache
             .get_if_valid_with_facts(&"wide", &CountingView::default())
             .expect("the admitted candidate validates");
-        let pages: Vec<_> = signature
-            .iter()
-            .filter_map(|fact| match fact {
-                FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(!pages.is_empty(), "premise: the signature is paged");
-        assert!(pages
-            .iter()
-            .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
-        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+        assert_eq!(signature.len(), wide_facts().len(), "every fact is kept");
+        let flat_bytes = signature.len() * std::mem::size_of::<FactVersionRef>();
         let retained = account.snapshot().retained_bytes;
         assert!(
-            retained > page_bytes,
-            "the candidate's own allocations ride its pages: {retained} <= {page_bytes}"
+            retained > flat_bytes,
+            "the candidate is charged its whole signature: {retained} <= {flat_bytes}"
         );
-        drop((pages, signature));
+        drop(signature);
         cache.clear();
         assert_eq!(
             account.snapshot().retained_bytes,
             0,
-            "evicting the candidate drains its pages and its own charge"
+            "evicting the candidate drains its whole charge"
         );
 
         let tight = SemanticRetentionAccount::new(RetentionLimits {

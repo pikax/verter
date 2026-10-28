@@ -12,7 +12,7 @@ use std::sync::Arc;
 use verter_type_expr::TopLevelOwnerId;
 
 /// TypeScript script vs external-module classification of one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum FileModuleKind {
     /// No import/export syntax: top-level interfaces and namespaces
     /// contribute to the global object.

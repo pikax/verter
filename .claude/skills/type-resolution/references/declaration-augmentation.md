@@ -56,7 +56,7 @@ contributing file roots on every hit, and replays those facts into the caller.
 All observed whole-file facts are strict roots: the memo key has no single
 file owner, and an untracked contributor must reject the cached answer.
 Each continuation frame traces its own reads; completing a child folds its
-signature into its parent. The metadata and evidence pages use the existing
+signature into its parent. The metadata and the shared signature storage use the existing
 aggregate retention account. A newly added consumer must observe augmenter
 edits and additions even when its declaration subject was already evaluated.
 

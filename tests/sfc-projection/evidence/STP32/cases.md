@@ -1,6 +1,6 @@
 # STP32 evidence index
 
-Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` (`ts-js` typescript 6.0.3, `ts-native` typescript 7.0.2). Vue pin: `vue@3.6.0-rc.5`.
+Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` (`ts-js` typescript 6.0.3, `ts-native` typescript 7.1.0-beta). Vue pin: `vue@3.6.0-rc.5`.
 
 Selected case IDs: `STP32-dynamic-correlated`, `STP32-async`, `STP32-recursive`, `STP32-global`, `STP32-namespace`, `STP32-missing`.
 

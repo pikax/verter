@@ -58,7 +58,7 @@ fn fallthrough_signature_carries_module_augmentation_index_shape() {
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "fallthrough matrix slice: the permissive view MUST accept a \
          `ModuleAugmentationIndexShape` RouteSurface fact in the \
          Arc-stored fallthrough signature."

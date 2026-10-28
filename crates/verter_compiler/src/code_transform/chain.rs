@@ -290,8 +290,8 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             out.into_boxed_slice(),
             None,
         );
-        if let Some(ignore_list) = input.get_x_google_ignore_list() {
-            chained.set_x_google_ignore_list(ignore_list.to_vec());
+        if let Some(ignore_list) = input.get_ignore_list() {
+            chained.set_ignore_list(ignore_list.to_vec());
         }
         if let Some(debug_id) = input.get_debug_id() {
             chained.set_debug_id(debug_id);
