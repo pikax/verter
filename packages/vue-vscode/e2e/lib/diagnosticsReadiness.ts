@@ -35,6 +35,15 @@ export function describeLastReadiness(observed: {
   return `last readiness: ready=${ready}, server version=${version}, editor version=${editor}${quiet}${pending}`;
 }
 
+/**
+ * Cadence of the readiness poll. Every `verter._getDiagnosticStatus` read first
+ * awaits a per-document `getAnalysis`, which the server records as demand for
+ * that document; polling faster than the server's frontier advances re-signals
+ * that demand continuously and starves the carrier pass the poll is waiting on,
+ * most visibly on a loaded machine right after a restart.
+ */
+export const DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS = 1_000;
+
 export async function waitForDiagnosticReceipt<T>(
   readStatus: () => PromiseLike<DiagnosticReadiness | undefined>,
   currentVersion: () => number | undefined,
@@ -42,6 +51,7 @@ export async function waitForDiagnosticReceipt<T>(
   readDiagnostics: () => T,
   timeoutMs: number,
   stableMs: number,
+  pollIntervalMs: number = DIAGNOSTIC_SETTLE_POLL_INTERVAL_MS,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let answers = 0;
@@ -83,7 +93,7 @@ export async function waitForDiagnosticReceipt<T>(
       ) {
         return readDiagnostics();
       }
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
     throw failure();
   };
