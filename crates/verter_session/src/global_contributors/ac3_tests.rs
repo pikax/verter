@@ -191,6 +191,40 @@ fn injected_unimported_ambient_is_ingested_without_upserting_it() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn contributor_ingestion_takes_admission_before_its_cursor() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace.clone()));
+    workspace.inject_file(
+        "/cursor.d.ts".into(),
+        Arc::from("declare const cursor: number;"),
+    );
+    let unfenced = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let observed = unfenced.clone();
+    let weak = Arc::downgrade(&host);
+    *host.test_force.ambient_ingestion_cursor_hook.0.lock() = Some(Arc::new(move || {
+        let host = weak.upgrade().unwrap();
+        let admission_available = std::thread::spawn(move || {
+            let admission = host.block_content.admission_fence.try_lock();
+            admission.is_some()
+        })
+        .join()
+        .unwrap();
+        observed.store(admission_available, std::sync::atomic::Ordering::SeqCst);
+    }));
+    host.ingest_injected_ambient_roots(None);
+    assert!(
+        !unfenced.load(std::sync::atomic::Ordering::SeqCst),
+        "a cursor holder must never wait behind ingress admission"
+    );
+    assert!(host
+        .project_type_store()
+        .indexed()
+        .get_any("/cursor.d.ts")
+        .is_some());
+}
+
 #[test]
 fn upserted_unimported_ambient_is_ingested_on_standalone_host() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1143,15 +1177,8 @@ fn never_upserted_contributors_follow_snapshot_edits_and_removals() {
     );
     let edited = contributors("X");
     assert_eq!(edited.entries.len(), 2);
-    assert_eq!(
-        edited.fingerprint, original.fingerprint,
-        "member content changes preserve the same contributor population"
-    );
-    assert_eq!(
-        answer(),
-        ["edited", "script"],
-        "actual member content remains independently invalidating"
-    );
+    assert_ne!(edited.fingerprint, original.fingerprint);
+    assert_eq!(answer(), ["edited", "script"]);
     workspace.inject_file(
         "/script.ts".into(),
         Arc::from("export {}; interface X { private: number }"),

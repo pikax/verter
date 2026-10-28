@@ -31,146 +31,109 @@ fn request() -> ScopedCacheNodeRequest {
 }
 
 #[test]
-fn transferred_producer_clears_an_unrelated_executor_request() {
-    use verter_execution::request_context::{
-        current_request_id, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike,
-        TlsUninstall,
-    };
-    struct Request(u64);
-    impl RequestContextLike for Request {
-        fn request_id(&self) -> u64 {
-            self.0
-        }
-        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
-            struct Installed {
-                _guard: OpaqueContextGuard,
+fn attaching_pre_admission_owners_preserves_a_live_sibling_after_cancelled_first_owner() {
+    for cancel_all in [false, true] {
+        let scheduler = scheduler();
+        let flight = ScopedCacheFlight::new(
+            scheduler.dag.clone(),
+            scheduler.task_registry.register_task(),
+        );
+        assert!(flight.try_add_owner(1, Some(CancellationToken::new())));
+        assert!(flight.try_add_owner(2, Some(CancellationToken::new())));
+        // Use the actual map order: the cancelled owner must be attached first.
+        let (cancelled_id, sibling_id) = {
+            let state = flight.state.lock();
+            let mut owners = state.owners.iter();
+            let (cancelled_id, first) = owners.next().unwrap();
+            let (sibling_id, sibling) = owners.next().unwrap();
+            first.request.as_ref().unwrap().cancel();
+            if cancel_all {
+                sibling.request.as_ref().unwrap().cancel();
             }
-            impl TlsUninstall for Installed {
-                fn uninstall(self: Box<Self>) {}
-            }
-            Box::new(Installed {
-                _guard: OpaqueContextGuard::install(OpaqueRequestContext(self)),
-            })
-        }
-    }
-    for captured in [None, Some(11)] {
-        for driver_request in [None, Some(999)] {
-            for panics in [false, true] {
-                let scheduler = scheduler();
-                let mut submitted = request();
-                submitted.request_context =
-                    captured.map(|id| OpaqueRequestContext(Arc::new(Request(id))));
-                let mut root = scheduler
-                    .begin_scoped_cache_node::<Option<u64>>(submitted)
-                    .unwrap();
-                assert!(root.poll(Waker::noop()).is_pending());
-                scheduler.drive_all();
-                let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) =
-                    root.poll(Waker::noop())
-                else {
-                    panic!("dispatch transfers the producer");
-                };
-                let _driver = driver_request.map(|id| {
-                    OpaqueContextGuard::install(OpaqueRequestContext(Arc::new(Request(id))))
-                });
-                producer.run(|_| {
-                    let observed = current_request_id();
-                    if panics {
-                        panic!("producer failure");
-                    }
-                    observed
-                });
-                assert_eq!(current_request_id(), driver_request, "restore driver TLS");
-                match root.poll(Waker::noop()) {
-                    Poll::Ready(Ok(ScopedCacheNodeStep::Value(observed))) if !panics => {
-                        assert_eq!(*observed, captured, "work observes its captured request");
-                    }
-                    Poll::Ready(Err(ScopedCacheNodeError::Panicked)) if panics => {}
-                    _ => panic!("producer settles with the expected terminal"),
-                }
-            }
+            (*cancelled_id, *sibling_id)
+        };
+        let aggregate = CancellationToken::aggregate();
+        assert_eq!(flight.attach_aggregate(aggregate.clone()), !cancel_all);
+        assert_eq!(aggregate.is_cancelled(), cancel_all);
+        if cancel_all {
+            assert!(matches!(
+                flight.terminal(),
+                Some(ScopedCacheTerminal::Cancelled)
+            ));
+            assert_eq!(flight.owner_count(), 0);
+        } else {
+            assert!(flight.terminal().is_none());
+            assert_eq!(flight.owner_count(), 2);
+            assert!(!flight.detach_owner(cancelled_id));
+            assert!(flight.detach_owner(sibling_id));
+            assert!(aggregate.is_cancelled());
         }
     }
 }
 
 #[test]
-fn aggregate_cancellation_wakes_after_scoped_teardown_unlocks() {
+fn dropping_the_last_scoped_owner_releases_its_edge_before_notifying_the_producer() {
+    use verter_execution::tasks::{ExecutionScope, ExecutionTask};
     struct Probe {
-        scheduler: std::sync::Weak<Scheduler>,
-        flight: std::sync::Weak<ScopedCacheFlight>,
-        calls: AtomicUsize,
-        locked: AtomicBool,
+        waiter: ExecutionTask,
+        producer: ExecutionTask,
+        observed: Arc<AtomicUsize>,
     }
     impl Wake for Probe {
         fn wake(self: Arc<Self>) {
-            let scheduler = self.scheduler.upgrade().unwrap();
-            let flight = self.flight.upgrade().unwrap();
-            // Avoid hanging the test if a regression invokes this callback
-            // under a hold. The unlocked branch exercises actual re-entry.
-            if scheduler.scoped_cache_gate.try_lock().is_none()
-                || scheduler.dag.try_lock().is_none()
-                || flight.state.try_lock().is_none()
-            {
-                self.locked.store(true, Ordering::SeqCst);
-            } else {
-                drop(scheduler.begin_scoped_cache_node::<u64>(request()).unwrap());
-            }
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.observed.store(
+                if self.producer.wait_for(&self.waiter).is_ok() {
+                    1
+                } else {
+                    2
+                },
+                Ordering::SeqCst,
+            );
         }
     }
-    for terminal in [
-        "success",
-        "panic",
-        "producer_drop",
-        "follower_drop",
-        "reset",
-    ] {
-        let scheduler = scheduler();
-        let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
-        assert!(root.poll(Waker::noop()).is_pending());
-        scheduler.drive_all();
-        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop())
-        else {
-            panic!("dispatch transfers the producer");
-        };
-        let flight = Arc::clone(
-            scheduler
-                .scoped_cache_flights
-                .get(&request().identity())
-                .unwrap()
-                .value(),
-        );
-        let aggregate = flight.state.lock().aggregate.clone().unwrap();
-        let probe = Arc::new(Probe {
-            scheduler: Arc::downgrade(&scheduler),
-            flight: Arc::downgrade(&flight),
-            calls: AtomicUsize::new(0),
-            locked: AtomicBool::new(false),
-        });
-        let mut stop = aggregate.subscribe();
-        assert!(stop.poll(&Waker::from(Arc::clone(&probe))).is_pending());
-        match terminal {
-            "success" => producer.run(|_| 41),
-            "panic" => producer.run(|_| panic!("producer failure")),
-            "producer_drop" => drop(producer),
-            "follower_drop" => {
-                drop(root);
-                drop(producer);
-            }
-            "reset" => {
-                scheduler.reset();
-                drop(producer);
-            }
-            _ => unreachable!(),
-        }
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 1, "{terminal}");
-        assert!(!probe.locked.load(Ordering::SeqCst), "{terminal}");
-    }
+    let scheduler = scheduler();
+    let waiter = scheduler.task_registry.register_task();
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    scheduler.drive_all();
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("dispatch transfers the producer");
+    };
+    let flight = scheduler
+        .scoped_cache_flights
+        .get(&request().identity())
+        .unwrap()
+        .clone();
+    let aggregate = flight.state.lock().aggregate.clone().unwrap();
+    let producer_task = flight.state.lock().producer.as_ref().unwrap().0.clone();
+    let mut follower = {
+        let _scope = ExecutionScope::install(&scheduler.task_registry, &waiter);
+        scheduler.begin_scoped_cache_node::<u64>(request()).unwrap()
+    };
+    assert!(follower.poll(Waker::noop()).is_pending());
+    drop(root);
+    let observed = Arc::new(AtomicUsize::new(0));
+    let waker = Waker::from(Arc::new(Probe {
+        waiter,
+        producer: producer_task,
+        observed: observed.clone(),
+    }));
+    let mut stop = aggregate.subscribe();
+    assert!(stop.poll(&waker).is_pending());
+    drop(follower);
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        1,
+        "last-owner detach must notify after removing its wait edge"
+    );
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+    drop(producer);
 }
 
 #[test]
 fn scoped_handoff_suspends_without_running_its_producer_and_resumes_elsewhere() {
     let scheduler = scheduler();
+    let scheduler_lifetime = Arc::downgrade(&scheduler);
     let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
     let mut follower = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
     let counter = Arc::new(CountWake::default());
@@ -196,6 +159,16 @@ fn scoped_handoff_suspends_without_running_its_producer_and_resumes_elsewhere() 
     assert_eq!(*value, 42);
     assert!(Arc::ptr_eq(&value, &shared));
     assert!(scheduler.scoped_cache_flights.is_empty());
+    assert_eq!(
+        scheduler.task_registry.active_task_count_for_tests(),
+        0,
+        "completed handoffs release their task pins before they are dropped"
+    );
+    drop(scheduler);
+    assert!(
+        scheduler_lifetime.upgrade().is_none(),
+        "completed handoffs must release their scheduler owner"
+    );
 }
 
 #[test]
@@ -295,26 +268,20 @@ fn scoped_handoff_cancellation_detaches_only_its_follower() {
     let mut follower = scheduler
         .begin_scoped_cache_node::<u64>(follower_request)
         .unwrap();
+    let cancelled_wake = Arc::new(CountWake::default());
+    let cancelled_waker = Waker::from(Arc::clone(&cancelled_wake));
     assert!(root.poll(Waker::noop()).is_pending());
-    assert!(follower.poll(Waker::noop()).is_pending());
+    assert!(follower.poll(&cancelled_waker).is_pending());
     scheduler.drive_all();
     let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
         panic!("dispatch transfers the producer");
     };
-    // With the producer held and no timer, the cancellation alone wakes the
-    // pending follower, and its next poll ends it.
-    let counter = Arc::new(CountWake::default());
-    let waker = Waker::from(Arc::clone(&counter));
-    assert!(follower.poll(&waker).is_pending());
-    let before = counter.0.load(Ordering::SeqCst);
+    assert!(follower.poll(&cancelled_waker).is_pending());
+    let before = cancelled_wake.0.load(Ordering::SeqCst);
     token.cancel();
-    assert_eq!(
-        counter.0.load(Ordering::SeqCst),
-        before + 1,
-        "cancelling the request wakes its pending follower once"
-    );
+    assert_eq!(cancelled_wake.0.load(Ordering::SeqCst), before + 1);
     assert!(matches!(
-        follower.poll(&waker),
+        follower.poll(Waker::noop()),
         Poll::Ready(Err(ScopedCacheNodeError::Cancelled))
     ));
     producer.run(|token| {
@@ -324,6 +291,178 @@ fn scoped_handoff_cancellation_detaches_only_its_follower() {
     assert!(
         matches!(root.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 31)
     );
+}
+
+#[test]
+fn scoped_and_completion_waits_share_one_cycle_authority() {
+    use verter_execution::tasks::ExecutionScope;
+    let scheduler = scheduler();
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    scheduler.drive_all();
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("dispatch transfers the sole producer");
+    };
+    let task = scheduler
+        .scoped_cache_flights
+        .get(&request().identity())
+        .unwrap()
+        .state
+        .lock()
+        .producer
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let other = scheduler.task_registry.register_task();
+    let (handle, sender) = completion_pair::<u64>();
+    let mut completion = handle
+        .subscribe()
+        .owned(task, other.clone(), CancellationToken::new());
+    assert!(completion.poll(Waker::noop()).is_pending());
+    let mut follower = {
+        let _scope = ExecutionScope::install(&scheduler.task_registry, &other);
+        scheduler.begin_scoped_cache_node::<u64>(request()).unwrap()
+    };
+    assert!(matches!(
+        follower.poll(Waker::noop()),
+        Poll::Ready(Err(ScopedCacheNodeError::Reentrant))
+    ));
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 1);
+    sender.send(CompletionState::Ready(7));
+    assert!(matches!(
+        completion.poll(Waker::noop()),
+        Poll::Ready(Ok(CompletionState::Ready(7)))
+    ));
+    producer.run(|_| 49);
+    assert!(
+        matches!(root.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 49)
+    );
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
+fn a_transferred_producer_cannot_wait_for_its_waiting_parent_task() {
+    use verter_execution::dependency::DependencyStop;
+    use verter_execution::tasks::ExecutionScope;
+    let scheduler = scheduler();
+    let parent = scheduler.task_registry.register_task();
+    let mut root = {
+        let _scope = ExecutionScope::install(&scheduler.task_registry, &parent);
+        scheduler
+            .begin_scoped_cache_node::<bool>(request())
+            .unwrap()
+    };
+    // A sibling dispatches before the parent's first poll. Claiming must
+    // register the parent wait even without a previous Pending result.
+    let mut dispatcher = scheduler
+        .begin_scoped_cache_node::<bool>(request())
+        .unwrap();
+    assert!(dispatcher.poll(Waker::noop()).is_pending());
+    scheduler.drive_all();
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("dispatch transfers the producer");
+    };
+    let (handle, _sender) = completion_pair::<u64>();
+    producer.run(|_| {
+        let task = ExecutionScope::current(&scheduler.task_registry).unwrap();
+        let mut child = handle
+            .subscribe()
+            .owned(task, parent.clone(), CancellationToken::new());
+        matches!(
+            child.poll(Waker::noop()),
+            Poll::Ready(Err(DependencyStop::Cycle))
+        )
+    });
+    assert!(
+        matches!(root.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(refused))) if *refused)
+    );
+    assert!(
+        matches!(dispatcher.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(refused))) if *refused)
+    );
+    scheduler.drive_all();
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
+fn owned_request_closes_a_scoped_cache_source_cycle_across_threads() {
+    use verter_execution::tasks::ExecutionScope;
+    struct CycleLoader {
+        scheduler: Mutex<std::sync::Weak<Scheduler>>,
+    }
+    impl SourceLoader for CycleLoader {
+        fn load(&self, _: &str) -> Option<Arc<str>> {
+            let scheduler = self.scheduler.lock().upgrade().expect("live scheduler");
+            let task =
+                ExecutionScope::current(&scheduler.task_registry).expect("actual source task");
+            // A fresh thread has no active-path fallback. Only the shared
+            // registry can see cache -> Source -> cache here.
+            std::thread::spawn(move || {
+                let _scope = ExecutionScope::install(&scheduler.task_registry, &task);
+                let mut back = scheduler
+                    .begin_scoped_cache_node::<bool>(request())
+                    .unwrap();
+                assert!(matches!(
+                    back.poll(Waker::noop()),
+                    Poll::Ready(Err(ScopedCacheNodeError::Reentrant))
+                ));
+            })
+            .join()
+            .unwrap();
+            Some(Arc::from("export const n = 1;"))
+        }
+        fn exists(&self, _: &str) -> bool {
+            true
+        }
+        fn classify(&self, _: &str) -> verter_language::FileLanguage {
+            verter_language::FileLanguage::script_ts()
+        }
+        fn realpath(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+    let loader = Arc::new(CycleLoader {
+        scheduler: Mutex::new(std::sync::Weak::new()),
+    });
+    let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
+    *loader.scheduler.lock() = Arc::downgrade(&scheduler);
+    let mut root = scheduler
+        .begin_scoped_cache_node::<bool>(request())
+        .unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    scheduler.drive_all();
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("dispatched cache producer");
+    };
+    producer.run(|_| {
+        let task = ExecutionScope::current(&scheduler.task_registry).expect("cache task");
+        let mut source = scheduler.begin_owned_request(
+            Request {
+                file_id: "/cycle.ts".into(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: None,
+                file_language: None,
+                request_context: None,
+            },
+            task,
+            CancellationToken::new(),
+        );
+        assert!(source.poll(Waker::noop()).is_pending());
+        scheduler.drain_inbox();
+        assert!(source.poll(Waker::noop()).is_pending());
+        assert!(scheduler.drive_one());
+        scheduler.drain_inbox();
+        matches!(
+            source.poll(Waker::noop()),
+            Poll::Ready(Ok(CompletionState::Ready(_)))
+        )
+    });
+    assert!(
+        matches!(root.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(answer))) if *answer)
+    );
+    scheduler.drive_all();
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
 }
 
 #[test]
@@ -482,6 +621,144 @@ fn a_higher_priority_scoped_follower_upgrades_the_admitted_job() {
 }
 
 #[test]
+fn transferred_producer_clears_an_unrelated_executor_request() {
+    use verter_execution::request_context::{
+        current_request_id, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike,
+        TlsUninstall,
+    };
+    struct Request(u64);
+    impl RequestContextLike for Request {
+        fn request_id(&self) -> u64 {
+            self.0
+        }
+        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            struct Installed {
+                _guard: OpaqueContextGuard,
+            }
+            impl TlsUninstall for Installed {
+                fn uninstall(self: Box<Self>) {}
+            }
+            Box::new(Installed {
+                _guard: OpaqueContextGuard::install(OpaqueRequestContext(self)),
+            })
+        }
+    }
+    for captured in [None, Some(11)] {
+        for driver_request in [None, Some(999)] {
+            for panics in [false, true] {
+                let scheduler = scheduler();
+                let mut submitted = request();
+                submitted.request_context =
+                    captured.map(|id| OpaqueRequestContext(Arc::new(Request(id))));
+                let mut root = scheduler
+                    .begin_scoped_cache_node::<Option<u64>>(submitted)
+                    .unwrap();
+                assert!(root.poll(Waker::noop()).is_pending());
+                scheduler.drive_all();
+                let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) =
+                    root.poll(Waker::noop())
+                else {
+                    panic!("dispatch transfers the producer");
+                };
+                let _driver = driver_request.map(|id| {
+                    OpaqueContextGuard::install(OpaqueRequestContext(Arc::new(Request(id))))
+                });
+                producer.run(|_| {
+                    let observed = current_request_id();
+                    if panics {
+                        panic!("producer failure");
+                    }
+                    observed
+                });
+                assert_eq!(current_request_id(), driver_request, "restore driver TLS");
+                match root.poll(Waker::noop()) {
+                    Poll::Ready(Ok(ScopedCacheNodeStep::Value(observed))) if !panics => {
+                        assert_eq!(*observed, captured, "work observes its captured request");
+                    }
+                    Poll::Ready(Err(ScopedCacheNodeError::Panicked)) if panics => {}
+                    _ => panic!("producer settles with the expected terminal"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn aggregate_cancellation_wakes_after_scoped_teardown_unlocks() {
+    struct Probe {
+        scheduler: std::sync::Weak<Scheduler>,
+        flight: std::sync::Weak<ScopedCacheFlight>,
+        calls: AtomicUsize,
+        locked: AtomicBool,
+    }
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {
+            let scheduler = self.scheduler.upgrade().unwrap();
+            let flight = self.flight.upgrade().unwrap();
+            // Avoid hanging the test if a regression invokes this callback
+            // under a hold. The unlocked branch exercises actual re-entry.
+            if scheduler.scoped_cache_gate.try_lock().is_none()
+                || scheduler.dag.try_lock().is_none()
+                || flight.state.try_lock().is_none()
+            {
+                self.locked.store(true, Ordering::SeqCst);
+            } else {
+                drop(scheduler.begin_scoped_cache_node::<u64>(request()).unwrap());
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for terminal in [
+        "success",
+        "panic",
+        "producer_drop",
+        "follower_drop",
+        "reset",
+    ] {
+        let scheduler = scheduler();
+        let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+        assert!(root.poll(Waker::noop()).is_pending());
+        scheduler.drive_all();
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop())
+        else {
+            panic!("dispatch transfers the producer");
+        };
+        let flight = Arc::clone(
+            scheduler
+                .scoped_cache_flights
+                .get(&request().identity())
+                .unwrap()
+                .value(),
+        );
+        let aggregate = flight.state.lock().aggregate.clone().unwrap();
+        let probe = Arc::new(Probe {
+            scheduler: Arc::downgrade(&scheduler),
+            flight: Arc::downgrade(&flight),
+            calls: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
+        });
+        let mut stop = aggregate.subscribe();
+        assert!(stop.poll(&Waker::from(Arc::clone(&probe))).is_pending());
+        match terminal {
+            "success" => producer.run(|_| 41),
+            "panic" => producer.run(|_| panic!("producer failure")),
+            "producer_drop" => drop(producer),
+            "follower_drop" => {
+                drop(root);
+                drop(producer);
+            }
+            "reset" => {
+                scheduler.reset();
+                drop(producer);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1, "{terminal}");
+        assert!(!probe.locked.load(Ordering::SeqCst), "{terminal}");
+    }
+}
+
+#[test]
 fn producer_election_wakes_followers_to_register_task_waits() {
     let scheduler = scheduler();
     let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
@@ -560,6 +837,7 @@ fn suspended_same_task_reentry_is_refused_on_another_thread() {
         Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 53
     ));
     drop((root, nested, task));
+    scheduler.quiesce();
     assert_eq!(scheduler.task_registry.active_task_count_for_tests(), 0);
 }
 
@@ -842,7 +1120,10 @@ fn final_capacity_release_wakes_progress_subscribers_after_lifecycle_unlock() {
 #[test]
 fn dispatch_before_aggregate_binding_keeps_earlier_owners_on_the_job() {
     let scheduler = scheduler();
-    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    let flight = ScopedCacheFlight::new(
+        Arc::clone(&scheduler.dag),
+        scheduler.task_registry.register_task(),
+    );
     let root = CancellationToken::new();
     let follower = CancellationToken::new();
     assert!(flight.try_add_owner(1, Some(root.clone())));
@@ -861,7 +1142,10 @@ fn dispatch_before_aggregate_binding_keeps_earlier_owners_on_the_job() {
 
 fn bind_with_a_cancelled_owner(dispatch_first: bool) {
     let scheduler = scheduler();
-    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    let flight = ScopedCacheFlight::new(
+        Arc::clone(&scheduler.dag),
+        scheduler.task_registry.register_task(),
+    );
     assert!(flight.try_add_owner(1, Some(CancellationToken::new())));
     assert!(flight.try_add_owner(2, Some(CancellationToken::new())));
     // Cancel the first owner in this map's iteration order, after insertion

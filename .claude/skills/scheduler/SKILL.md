@@ -15,6 +15,16 @@ admission state from outside the computation. See
 [`root-continuations.md`](../../../docs/arch/root-continuations.md) for the
 ownership, drop, backpressure and error contract.
 
+`Scheduler::begin_owned_request` combines inbox admission and completion under
+the host's shared task registry. `CompletionSubscription::owned_producer`
+uses the scheduler-stamped execution task, following the first admitted
+prerequisite of a gated stage until that prerequisite completes. Multiple
+prerequisites are followed in deterministic key order; each release moves the
+subscription to the next producer and wakes it. Reverse dependency indexes
+propagate admission, failure, cancellation and scoped-task replacement to
+affected ancestor requests, including Analysis dependencies still awaiting
+Source. No additional task registry or multiwait authority is introduced.
+
 Completion state still publishes under the scheduler DAG lifecycle hold.
 `scheduler/dag_lock.rs` retains polling wakes and delivers them after unlock;
 reset additionally defers them through its serialization hold and driver join.
@@ -56,9 +66,14 @@ task, transferred producers install it on their running thread, and followers
 hold RAII wait edges until terminal/drop. Election wakes pre-existing followers
 to register their edges; self-dependency and mixed semantic/cache task cycles
 take the existing `Reentrant` refusal without cancelling siblings.
+The DAG uses that same injected registry. Producer election replaces its
+admission-time task stamp with the transferred task, provided the aggregate
+cancellation source still identifies the same incarnation. Owned completion
+subscribers therefore follow the task that actually executes the producer.
 Pending scoped handoffs subscribe to their request's cancellation. Scheduler
-completion subscriptions and other unconverted waits still need that
-integration. See the root-continuations reference for the full contract.
+`CompletionSubscription::owned` binds completion waits to explicit producer
+and waiter tasks plus a stop token, and `begin_owned_request` follows the
+scheduler-stamped prerequisite task through admission and completion. See the root-continuations reference for the full contract.
 
 Capacity return is a scheduler progress transition. Each dispatched permit
 carries a weak notification to the lifecycle delivery rail; its final shared

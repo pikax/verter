@@ -1194,7 +1194,7 @@ fn check_wide_refusal_replay(
     // A follower parked on a producer's flight answers as the root alone.
     let (host, key) = wide_refusal_root(modules, policy);
     let store = Arc::clone(host.project_type_store().semantic_graph());
-    let claimed = Arc::new(AtomicBool::new(false));
+    let claimed = Arc::new(Flag::default());
     let held = Arc::new(AtomicBool::new(false));
     let joined_before = store.test_joiner_on_condvar_count();
     let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
@@ -1208,18 +1208,17 @@ fn check_wide_refusal_replay(
             if claimed_key != &key || held.swap(true, Ordering::SeqCst) {
                 return;
             }
-            claimed.store(true, Ordering::SeqCst);
-            wait_until("the follower to park on the producer's flight", || {
-                store.test_joiner_on_condvar_count() > joined_before
-            });
+            claimed.raise();
+            assert!(
+                store.test_wait_for_joiners_on_condvar(joined_before + 1, HANG_GUARD),
+                "timed out waiting for the follower to park on the producer's flight"
+            );
         })
     };
     let _hook = ProduceHookGuard::install(&store, hook);
     let (producer, follower) = std::thread::scope(|scope| {
         let producer = scope.spawn(|| root_read(&host, &key, work));
-        wait_until("the producer to claim the root", || {
-            claimed.load(Ordering::SeqCst)
-        });
+        claimed.wait("the producer to claim the root");
         let follower = scope.spawn(|| root_read(&host, &key, work));
         (
             producer.join().expect("the producer completes"),
@@ -2053,16 +2052,44 @@ fn a_partly_warm_demand_is_charged_as_its_cold_run() {
     }
 }
 
-/// Waits until `ready` holds, failing the test past a deadline rather than
-/// hanging it.
-fn wait_until(what: &str, ready: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !ready() {
+/// The hang guard of every wait below.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A one-way flag a thread raises and another waits on.
+#[derive(Default)]
+struct Flag {
+    raised: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl Flag {
+    fn raise(&self) {
+        *self.raised.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    /// Raise the flag, returning whether it was already raised.
+    fn swap_raise(&self) -> bool {
+        let mut raised = self.raised.lock().unwrap();
+        let was = std::mem::replace(&mut *raised, true);
+        self.changed.notify_all();
+        was
+    }
+
+    fn is_raised(&self) -> bool {
+        *self.raised.lock().unwrap()
+    }
+
+    /// Wait until the flag is raised, failing the test past the hang guard.
+    fn wait(&self, what: &str) {
+        let (raised, timeout) = self
+            .changed
+            .wait_timeout_while(self.raised.lock().unwrap(), HANG_GUARD, |raised| !*raised)
+            .unwrap();
         assert!(
-            std::time::Instant::now() < deadline,
+            *raised && !timeout.timed_out(),
             "timed out waiting for {what}"
         );
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -2113,7 +2140,7 @@ fn concurrent_profiles_and_followers_are_charged_as_alone() {
     let host = super::checker_probe_lane_tests::default_probe_host();
     let key = reversed_relation_key(&host, 24, false);
     let store = Arc::clone(host.project_type_store().semantic_graph());
-    let claimed = Arc::new(AtomicBool::new(false));
+    let claimed = Arc::new(Flag::default());
     let held = Arc::new(AtomicBool::new(false));
     let joined_before = store.test_joiner_on_condvar_count();
     let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
@@ -2127,18 +2154,17 @@ fn concurrent_profiles_and_followers_are_charged_as_alone() {
             if claimed_key != &key || held.swap(true, Ordering::SeqCst) {
                 return;
             }
-            claimed.store(true, Ordering::SeqCst);
-            wait_until("both followers to park on the producer's flight", || {
-                store.test_joiner_on_condvar_count() >= joined_before + 2
-            });
+            claimed.raise();
+            assert!(
+                store.test_wait_for_joiners_on_condvar(joined_before + 2, HANG_GUARD),
+                "timed out waiting for both followers to park on the producer's flight"
+            );
         })
     };
     let _hook = ProduceHookGuard::install(&store, hook);
     let (producer, followers) = std::thread::scope(|scope| {
         let producer = scope.spawn(|| root_read(&host, &key, full));
-        wait_until("the producer to claim the root", || {
-            claimed.load(Ordering::SeqCst)
-        });
+        claimed.wait("the producer to claim the root");
         let followers: Vec<_> = [48, full]
             .into_iter()
             .map(|work| {
@@ -2195,8 +2221,8 @@ fn a_root_cut_by_a_wait_cycle_never_seals_its_refusal() {
     let k = reversed_relation_key(&host, 40, false);
     let j = reversed_relation_key(&host, 40, true);
     let store = Arc::clone(host.project_type_store().semantic_graph());
-    let k_claimed = Arc::new(AtomicBool::new(false));
-    let j_claimed = Arc::new(AtomicBool::new(false));
+    let k_claimed = Arc::new(Flag::default());
+    let j_claimed = Arc::new(Flag::default());
     let cut = Arc::new(AtomicBool::new(false));
     let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
         let (k, j) = (k.clone(), j.clone());
@@ -2207,22 +2233,19 @@ fn a_root_cut_by_a_wait_cycle_never_seals_its_refusal() {
             Arc::clone(&store),
         );
         Arc::new(move |claimed, nested| {
-            if claimed == &k && !k_claimed.swap(true, Ordering::SeqCst) {
+            if claimed == &k && !k_claimed.swap_raise() {
                 // K's producer: once J's producer waits on K, need J.
-                wait_until("J's producer to claim J", || {
-                    j_claimed.load(Ordering::SeqCst)
-                });
-                wait_until("J's producer to wait on K", || {
-                    store.wait_graph_counts_for_tests().1 >= 1
-                });
+                j_claimed.wait("J's producer to claim J");
+                assert!(
+                    store.wait_for_wait_edges_for_tests(1, HANG_GUARD),
+                    "timed out waiting for J's producer to wait on K"
+                );
                 nested(j.clone());
                 cut.store(true, Ordering::SeqCst);
-            } else if claimed == &j && !j_claimed.load(Ordering::SeqCst) {
+            } else if claimed == &j && !j_claimed.is_raised() {
                 // J's producer: need K, which K's producer holds.
-                wait_until("K's producer to claim K", || {
-                    k_claimed.load(Ordering::SeqCst)
-                });
-                j_claimed.store(true, Ordering::SeqCst);
+                k_claimed.wait("K's producer to claim K");
+                j_claimed.raise();
                 nested(k.clone());
             }
         })

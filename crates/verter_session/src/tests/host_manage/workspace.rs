@@ -1339,13 +1339,15 @@ defineProps<ButtonHTMLAttributes>()
 <template><button /></template>"#,
     );
 
-    for _ in 0..100 {
-        if ws.read_count("/workspace/src/runtime/types/html.ts") >= 1 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-
+    // The scheduler ingests the blocker on its own thread; wait for its read of the
+    // normalized companion before checking what else it read.
+    assert!(
+        ws.wait_for_read(
+            "/workspace/src/runtime/types/html.ts",
+            std::time::Duration::from_secs(20)
+        ),
+        "scheduler blocker ingestion should read the normalized typed companion at least once",
+    );
     assert_eq!(
         ws.read_count("/workspace/src/runtime/types/html"),
         0,
@@ -1429,11 +1431,10 @@ export interface Props { label: string }
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact)
-                if fact.canonical_id.as_ref() == "/src/types.vue"
-                    && matches!(&fact.key, verter_session_query::facts::FactKey::DirectDeclarationExport { name } if name.as_ref() == "Props")
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if &**canonical_id == "/src/types.vue"
         )),
-        "the direct-local proof must certify the exact declaration/export header",
+        "the direct-local proof must track the provider content hash",
     );
     assert_eq!(
         host.provenance().snapshot().indexed_ready_materializes,

@@ -75,9 +75,12 @@ no parse, analysis or compile work happens in a constructor.
 
 Minimal public surface is the complete `minimalPublicSurface` row, not a
 subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
-`handles`, `into_handles`, `new`, `with_executor`, `new_sync`,
-`new_sync_with_executor`, `execute_scoped_cache_node`, `submit_request`,
-`submit_batch_atomic`, `wait_batch`, `account_batch_submission`,
+`handles`, `into_handles`, `new`, `with_executor`, `with_executor_and_task_registry`,
+`new_sync`, `new_sync_with_executor`, `new_sync_with_executor_and_task_registry`,
+`begin_scoped_cache_node`, `run_transferred_producer`, `execute_scoped_cache_node`,
+`begin_submit_request`, `submit_request`, `begin_submit_batch_atomic`,
+`submit_batch_atomic`, `wait_batch`, `account_batch_submission`, `subscribe_progress`,
+`dispatch_for_pending_dependency`,
 `counters`, `dependency_occupancy`, `try_get_source`, `try_get_witnessed_source`,
 `try_get_source_for_witness`, `capture_source_root`, `source_directory`,
 `try_get_analysis`, `try_get_artifact`, `try_get_last_known_good`,
@@ -90,9 +93,14 @@ subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
 `ScopedCacheNodeRequest`, `ScopedCacheNodeError`, `ScopedCacheFlight`,
 `Admission`, `BatchHandle`, `Scheduler`. The remaining bookkeeping field
 (`deferred_blocker_ids`; removal tombstones and generation floors have no
-storage) and the fifteen `test_`-prefixed hooks are ratified for narrowing to
+storage) and the `test_`-prefixed hooks are ratified for narrowing to
 `pub(crate)` / test configuration — do not add new consumers of them; they are not a
 supported API for contributions.
+
+Hooks used by cross-crate integration tests, including
+`Scheduler::test_wait_until_job_queue_depth`, stay `pub` behind
+`cfg(any(test, feature = "test-support"))`. Each has a `test-configuration`
+narrowing row with its exact consumer inventory and qualified reference forms.
 
 ### Flow-return dispatch — `crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs`
 

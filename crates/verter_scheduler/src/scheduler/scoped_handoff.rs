@@ -41,11 +41,11 @@ pub enum ScopedCacheNodeStep<T: Send + Sync + 'static> {
 /// cycle return `Reentrant` without cancelling other owners. Producer election
 /// wakes subscribers so waits made before election can register their edges.
 pub struct ScopedCacheNodeHandoff<T: Send + Sync + 'static> {
-    scheduler: Arc<Scheduler>,
-    identity: WorkNodeIdentity,
-    flight: Arc<ScopedCacheFlight>,
+    scheduler: Option<Arc<Scheduler>>,
+    identity: Option<WorkNodeIdentity>,
+    flight: Option<Arc<ScopedCacheFlight>>,
     owner_id: u64,
-    task: ExecutionTask,
+    task: Option<ExecutionTask>,
     wait: Option<WaitEdge>,
     context: Option<verter_execution::request_context::OpaqueRequestContext>,
     request: Option<CancellationToken>,
@@ -71,11 +71,11 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         let task = ExecutionScope::current(&scheduler.task_registry)
             .unwrap_or_else(|| scheduler.task_registry.register_task());
         Self {
-            scheduler,
-            identity,
-            flight,
+            scheduler: Some(scheduler),
+            identity: Some(identity),
+            flight: Some(flight),
             owner_id,
-            task,
+            task: Some(task),
             wait: None,
             context,
             stop: request.as_ref().map(CancellationToken::subscribe),
@@ -94,30 +94,30 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         waker: &Waker,
     ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
         assert!(!self.finished, "scoped cache handoff already completed");
-        let delivery = Arc::clone(&self.scheduler.dag);
+        let delivery = Arc::clone(&self.scheduler.as_ref().expect("live scheduler").dag);
         let _wakes = delivery.defer_wakes();
         if self
-            .request
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+            .stop
+            .as_mut()
+            .is_some_and(|stop| stop.poll(waker).is_ready())
         {
             return self.finish(Err(ScopedCacheNodeError::Cancelled));
         }
-        if caller_kind::active_path_contains_work(&self.identity) {
+        if caller_kind::active_path_contains_work(self.identity.as_ref().expect("live identity")) {
             return self.finish(Err(ScopedCacheNodeError::Reentrant));
         }
         // A sibling may already have admitted or completed this flight.
         // Its answer must not wait for capacity in a later inbox incarnation.
-        let terminal = self.flight.terminal();
+        let terminal = self.flight.as_ref().expect("live flight").terminal();
         if let Some(terminal) = terminal {
             return self.finish_terminal(terminal);
         }
         if let Some(admission) = &mut self.admission {
-            match admission.poll(&self.scheduler, waker) {
+            match admission.poll(self.scheduler.as_ref().expect("live scheduler"), waker) {
                 Poll::Pending => {
                     // Subscribe to settlement as well as capacity: reset or a
                     // sibling's completion can answer without admitting us.
-                    let flight = Arc::clone(&self.flight);
+                    let flight = Arc::clone(self.flight.as_ref().expect("live flight"));
                     let mut state = flight.state.lock();
                     if let Some(terminal) = state.terminal.clone() {
                         drop(state);
@@ -130,16 +130,22 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
                     drop(state);
                     return self.pending_until_cancelled(waker);
                 }
-                Poll::Ready(Ok(())) => self.scheduler.record_inbox_submission(),
-                Poll::Ready(Err(submission)) => {
-                    self.scheduler.shutdown_drained_submission(*submission)
-                }
+                Poll::Ready(Ok(())) => self
+                    .scheduler
+                    .as_ref()
+                    .expect("live scheduler")
+                    .record_inbox_submission(),
+                Poll::Ready(Err(submission)) => self
+                    .scheduler
+                    .as_ref()
+                    .expect("live scheduler")
+                    .shutdown_drained_submission(*submission),
             }
             self.admission = None;
         }
         // Neither admission nor this poll dispatches work. Claiming and
         // registering share the same flight hold as dispatch and settlement.
-        let flight = Arc::clone(&self.flight);
+        let flight = Arc::clone(self.flight.as_ref().expect("live flight"));
         let mut state = flight.state.lock();
         if let Some(terminal) = state.terminal.clone() {
             drop(state);
@@ -150,18 +156,37 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
                 .aggregate
                 .clone()
                 .expect("dispatch attaches the job token");
-            state.producer = Some((self.task.clone(), self.owner_id));
+            state.producer = Some((
+                self.task.as_ref().expect("live task").clone(),
+                self.owner_id,
+            ));
             state.wakers.withdraw(&mut self.registration);
             // Followers that yielded before election must register their wait
             // edges now that the producer is known, even if it never runs.
-            self.scheduler.dag.deliver(vec![state.wakers.take()]);
+            let wakes = state.wakers.take();
+            drop(state);
+            let scheduler = self.scheduler.as_ref().expect("live scheduler");
+            {
+                let identity = self.identity.as_ref().expect("live identity");
+                let mut dag = scheduler.dag.lock();
+                if dag
+                    .cancellation_for(identity)
+                    .is_some_and(|current| current.same_source(&aggregate))
+                {
+                    dag.set_execution_task(
+                        identity,
+                        self.task.as_ref().expect("live task").clone(),
+                    );
+                }
+            }
+            scheduler.dag.deliver(vec![wakes]);
             return Poll::Ready(Ok(ScopedCacheNodeStep::Produce(ScopedCacheNodeProducer {
-                scheduler: Arc::clone(&self.scheduler),
-                identity: self.identity.clone(),
-                flight: Arc::clone(&self.flight),
+                scheduler: Arc::clone(self.scheduler.as_ref().expect("live scheduler")),
+                identity: self.identity.as_ref().expect("live identity").clone(),
+                flight: Arc::clone(self.flight.as_ref().expect("live flight")),
                 context: self.context.clone(),
                 aggregate,
-                task: self.task.clone(),
+                task: self.task.as_ref().expect("live task").clone(),
                 settled: false,
                 value: PhantomData,
             })));
@@ -204,8 +229,10 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
             if *owner_id != self.owner_id && self.wait.is_none() {
                 self.wait = Some(
                     self.scheduler
+                        .as_ref()
+                        .expect("live scheduler")
                         .task_registry
-                        .register_wait(self.task.id(), producer.id())
+                        .register_wait(self.task.as_ref().expect("live task").id(), producer.id())
                         .map_err(|_| ScopedCacheNodeError::Reentrant)?,
                 );
             }
@@ -236,16 +263,16 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         self.finished = true;
         self.wait = None;
         self.stop = None;
+        self.task = None;
         self.admission = None;
-        self.flight
-            .state
-            .lock()
-            .wakers
-            .withdraw(&mut self.registration);
-        self.scheduler
-            .detach_scoped_cache_owner(&self.identity, &self.flight, self.owner_id);
-        if self
-            .request
+        let flight = self.flight.take().expect("live flight");
+        flight.state.lock().wakers.withdraw(&mut self.registration);
+        let scheduler = self.scheduler.take().expect("live scheduler");
+        let identity = self.identity.take().expect("live identity");
+        self.context = None;
+        let request = self.request.take();
+        scheduler.detach_scoped_cache_owner(&identity, &flight, self.owner_id);
+        if request
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
         {
@@ -258,15 +285,25 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
 
 impl<T: Send + Sync + 'static> Drop for ScopedCacheNodeHandoff<T> {
     fn drop(&mut self) {
+        // Last-owner detach can synchronously notify the producer. Retire
+        // this subscriber's graph and stop interests before that callback.
         self.wait = None;
-        self.flight
-            .state
-            .lock()
-            .wakers
-            .withdraw(&mut self.registration);
+        self.stop = None;
+        self.task = None;
+        self.admission = None;
+        let Some(flight) = self.flight.take() else {
+            return;
+        };
+        flight.state.lock().wakers.withdraw(&mut self.registration);
         if !self.finished {
             self.scheduler
-                .detach_scoped_cache_owner(&self.identity, &self.flight, self.owner_id);
+                .as_ref()
+                .expect("live scheduler")
+                .detach_scoped_cache_owner(
+                    self.identity.as_ref().expect("live identity"),
+                    &flight,
+                    self.owner_id,
+                );
         }
     }
 }

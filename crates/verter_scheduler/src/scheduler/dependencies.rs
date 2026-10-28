@@ -446,6 +446,7 @@ impl Scheduler {
             stage: FileStageKey::Analysis,
         };
         if dag.token_for(&analysis_identity).is_some() {
+            dag.bind_file_producer(&analysis_identity);
             return BlockerStatus::Gating;
         }
 

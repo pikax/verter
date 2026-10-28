@@ -141,6 +141,47 @@ the cache-runtime overhaul and any feature admitting cache entries.
     returns its COMPLETE value uncached under
     `NonAdmissionReason::RetentionPressure`.
 
+## Owned cache admission
+
+`cache_runtime::singleflight::owned_admit_with_post_publish` and its
+`_by_flight_key` counterpart retain owned map, view and callback inputs in an
+`OwnedAdmission`. The query-candidate adapter uses
+`lookup_publish::owned_admit_with_lookup_publish`. Polling only looks up,
+validates or subscribes; a cold winner transfers `OwnedAdmissionProducer`
+through `OwnedAdmissionStep::Produce`. The external owner runs that producer,
+then polls for `Value`. No queue, pool or cold computation runs within poll.
+Rejected artifact entries retain their exact identity for cleanup by the
+transferred producer before computation. Poll never takes the retention fence;
+removal and accounting still run together under that fence outside poll.
+
+Both synchronous admission adapters drive this same protocol with borrowed
+policies. With an execution scope they inherit its registry; standalone
+compatibility callers allocate no second authority. An explicit owned waiter
+cannot join a producer with absent or foreign registry authority.
+
+The owned producer installs its actual task scope and replaces ambient job
+cancellation with a live aggregate producer owner, so neither the executing
+waiter's job nor its request cancellation can stop shared work. Request
+accounting and observation stay installed. Borrowed
+compatibility drivers preserve their ambient cancellation. Its parent retains a
+wait edge through transferred work; followers register their own shared-registry edges
+and readiness/stop subscriptions. Cancellation or drop detaches only that
+waiter. `Cancelled`, `Cycle`, `ProducerUnowned`, `ProducerDropped` and
+`ProducerPanicked` carry no partial value. A pending legacy producer with no
+task scope is `ProducerUnowned`, rather than a fabricated cycle. A completed
+answer requires no producer authority. Terminalization releases the waiter, key, table and callback
+captures even if the completed handle remains alive.
+Abandonment withdraws wait edges and subscriptions before destroying callback
+captures, so capture destructors may re-enter without observing abandoned edges.
+
+`Value(None)` preserves each adapter's existing failure policy: artifact
+followers surface a failed compute; query followers fork after panic or rejected
+admission. Return-only values remain winner-only. Every successful follower
+validates and bubbles facts against its own captured view. The same-key and
+split-flight entries retain their distinct publication/cleanup locking; the
+query adapter retains its publish-core/deferred-eviction fence. Captured views
+and tracers belong to the caller, rather than borrowed thread-local state.
+
 ## Aggregate retention account
 
 `crates/verter_retention` owns `SemanticRetentionAccount` and its charge
@@ -967,16 +1008,6 @@ display facts is **physically split** at the cache layer
 (`MemberSemanticFactStore` keyed on `parse_stable_hash`, `MemberDisplayFactStore`
 keyed on `content_hash`) so a cosmetic edit hits only the display store and
 does not recompute semantic facts.
-
-**Selected class-member display evidence.** The existing fact has two real
-lanes: `DeclBodyMemo::class_member_read_hashes_in` hashes both from one retained
-selection and binder frame. Both use the same bounded facts walker; its Display
-lane includes graph-preserved parameter/type-parameter/index names and tuple
-labels, omitting source coordinates and method bodies. Semantic bytes remain
-alpha-normalized under R16. The narrow class-member port observes both lanes,
-so cosmetic names refresh display-bearing graph answers without making
-unrelated members or annotated implementation bodies dependencies.
-
 
 **R14 (path-precise).** `Export(name).semantic_hash` is computed over the
 **export's body alone**, with every cross-decl reference (same-file local decl,
@@ -2126,43 +2157,23 @@ reachability.
 augmenter_set_fingerprint }` — the SOLE `RouteSurface` fact; that domain is
 one-arm — is observed by the augmentation-stitch consumers.
 `augmenter_set_fingerprint = stable_hash(sorted([(augmenter_canonical,
-matching_binding_population_hash)]))`. The per-slot digest includes exact owners,
-specifiers, binding names, symbol spaces and declaring-file kind; it excludes
-member headers and all authored content versions. Add/remove/owner/binding changes
-invalidate the population. Actual program source order has its own fact below.
+augmenter_parse_stable_hash)]))`. Adding / removing an augmenter changes the
+fingerprint → every stitched candidate that observed it invalidates.
 
 **Stitching pipeline.** `ProjectSemanticDispatch::stitch_module_augmentations`
 (through the shared `collect_augmentation_contributions` folder) is the cold
 path. It calls
 `FileArtifactStore::ensure_augmentation_index_populated(target_key)` on first
 miss — the scan walks every loaded `FileArtifacts.augmentations`, sorts matched
-augmenters by canonical, computes the content-free population fingerprint,
+augmenters by `(canonical, parse_stable_hash)`, computes the fingerprint,
 inserts into `augmentation_index`, and emits a typed
 `ModuleAugmentationIndexShape` audit event recording the install (or refresh on
 re-population). Each `AugmenterSet` entry is an `AugmenterEntry` carrying the
 **exact** `FileArtifactKey` of the scanned augmenter artifact (plus its
-`parse_stable_hash` as content metadata). The owned lowering port re-fetches each
-augmenter's `.augmentations` through its current exact artifact identity, requires
-the hash of the actual indexed serve, and observes that content before exposing
-any facts, including negative named-contributor reads. A warm population first
-reacquires its known contributors through source authority. Upsert queues old
-OR new contributor classifications, including declaration-file retractions, so
-removing the last contribution is lazily indexed even when the new source no
-longer classifies as ambient. A changed identity triggers the same authoritative
-cold scan; an unavailable known identity keeps the answer return-only, even if
-its artifact disappears during scanning. Unrelated noncontributors remain
-untouched.
-Cold population scans hold an existing fully-applied artifact-root lease.
-Callbacks run without storage guards. Publication reserves its own membership
-epoch, then holds the existing root-registry state lock through admission and
-row insertion: the scan root must immediately precede that epoch, with no other
-in-flight mutation and no exhaustion. This prevents a new canonical's
-invalidation from observing an empty index between the check and publication.
-A raced or unsettled scan answers return-only and leaves no shared row; the
-next stable scan discovers the full population.
-
-A stale captured key may be refreshed without moving the population fingerprint; parse identities include
-content and must be reacquired with the exact current key. The stitcher then folds
+`parse_stable_hash`) — the stitcher re-fetches each augmenter's `.augmentations`
+via `FileArtifactStore::get_artifacts(&key)` keyed by that exact key, never a
+content-agnostic canonical-only scan, so the stitch reads precisely the
+augmenter version the fingerprint was computed over. The stitcher then folds
 each augmenter's `(owner, augmented_name, space)` contributions, together with
 the base declaration's own contributors, into ONE `SemanticNodeData::MergedDecl`
 carrier. The result's `ReadSetSignature.facts` records the

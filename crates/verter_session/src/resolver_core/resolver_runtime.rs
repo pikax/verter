@@ -52,8 +52,12 @@ where
     }
 
     pub fn clear(&self) {
+        self.clear_deferred().wake();
+    }
+
+    fn clear_deferred(&self) -> verter_execution::wake::TakenWakers {
         self.cache.clear();
-        self.singleflight.clear();
+        self.singleflight.clear_deferred()
     }
 
     pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<CachedValue<V>>
@@ -339,6 +343,24 @@ where
         }
     }
 
+    /// Bind every resolver rendezvous to the host's existing cycle authority.
+    pub(crate) fn bind_task_registry(&self, registry: verter_execution::tasks::TaskRegistry) {
+        self.component_meta
+            .singleflight
+            .bind_task_registry(registry.clone());
+        self.prepared_decl_bundles
+            .singleflight
+            .bind_task_registry(registry.clone());
+        self.top_level_fallthrough_singleflight
+            .bind_task_registry(registry.clone());
+        self.indexed_singleflight
+            .bind_task_registry(registry.clone());
+        self.imported_roots
+            .singleflight
+            .bind_task_registry(registry.clone());
+        self.routes.bind_task_registry(registry);
+    }
+
     /// return a cloned `Arc<RouteDb>` handle for use as a
     /// stable shared reference. Mirrors
     /// [`ProjectTypeStore::routes_handle`](crate::project_type_store::ProjectTypeStore::routes_handle)
@@ -362,11 +384,12 @@ where
         // The view bookkeeping goes with the states it tracks, under the
         // admission lock, so a reset host keeps no fingerprint queue for a
         // document it no longer holds.
-        {
+        let wakes = {
             let mut recent = self.recent_component_meta_views.lock();
             recent.clear();
-            self.component_meta.clear();
-        }
+            self.component_meta.clear_deferred()
+        };
+        wakes.wake();
         self.prepared_decl_bundles.clear();
         self.top_level_fallthrough_singleflight.clear();
         self.indexed_singleflight.clear();
@@ -566,6 +589,66 @@ mod tests {
     fn runtime_clear_caches_resets_both_subsystems() {
         let runtime = UnifiedResolverRuntime::<(), ()>::for_tests();
         runtime.clear_caches();
+    }
+
+    #[test]
+    fn runtime_reset_delivers_flight_wakes_after_view_bookkeeping_unlocks() {
+        use crate::resolver_core::ResolverFlightStep;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Poll, Wake, Waker};
+        use verter_execution::cancellation::CancellationToken;
+        use verter_execution::tasks::TaskRegistry;
+        struct Reenter {
+            runtime: Arc<UnifiedResolverRuntime<(), ()>>,
+            locked: AtomicUsize,
+            reentered: AtomicUsize,
+        }
+        impl Wake for Reenter {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                if let Some(guard) = self.runtime.recent_component_meta_views.try_lock() {
+                    drop(guard);
+                    assert_eq!(self.runtime.component_meta_view_bookkeeping_len(), 0);
+                    self.reentered.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    self.locked.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let runtime = Arc::new(UnifiedResolverRuntime::<(), ()>::for_tests());
+        let registry = TaskRegistry::default();
+        let mut flight = runtime.component_meta.singleflight.begin_owned_retaining(
+            view_key("/view.vue", 1),
+            verter_session_query::facts::store_view::StoreViewCompatToken {
+                epoch: 1,
+                session: None,
+                validity_fingerprint: 0,
+            },
+            registry.register_task(),
+            CancellationToken::new(),
+            || panic!("reset abandons held work"),
+            |_| true,
+        );
+        let producer = match flight.poll(Waker::noop()) {
+            Poll::Ready(Ok(ResolverFlightStep::Produce(producer))) => producer,
+            _ => panic!("cold producer"),
+        };
+        let callback = Arc::new(Reenter {
+            runtime: runtime.clone(),
+            locked: AtomicUsize::new(0),
+            reentered: AtomicUsize::new(0),
+        });
+        assert!(flight.poll(&Waker::from(callback.clone())).is_pending());
+        runtime.clear_caches();
+        drop(producer);
+        assert_eq!(
+            callback.locked.load(Ordering::SeqCst),
+            0,
+            "no notification may run inside the outer admission lock"
+        );
+        assert_eq!(callback.reentered.load(Ordering::SeqCst), 1);
     }
 
     #[test]

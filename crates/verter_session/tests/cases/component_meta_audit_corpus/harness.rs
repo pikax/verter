@@ -162,12 +162,17 @@ pub fn run_corpus_fixture_with_audit_capture(
     // The worker takes ownership of the fixture so the move is clean
     // across thread boundaries.
     let started = Instant::now();
+    // The worker reports its end — a panicking end included — on `finished`.
+    let (finished_tx, finished) = std::sync::mpsc::channel::<()>();
     let worker = thread::Builder::new()
         .name(format!("audit-corpus-worker:{basename_for_thread}"))
-        .spawn(move || run_audited(fixture, cancel_for_worker))
+        .spawn(move || {
+            let _finished = FinishedSignal(finished_tx);
+            run_audited(fixture, cancel_for_worker)
+        })
         .expect("spawning the corpus regression worker thread must succeed");
 
-    let result = wait_for_worker(worker, timeout, &cancel);
+    let result = wait_for_worker(worker, &finished, timeout, &cancel);
     let elapsed = started.elapsed();
 
     match result {
@@ -203,6 +208,15 @@ pub fn run_corpus_fixture_with_audit_capture(
 /// racing into a spurious process abort.
 const MIN_HARD_DEADLINE: Duration = Duration::from_secs(30);
 
+/// Sends on drop, so the harness learns of the worker's end however it ended.
+struct FinishedSignal(std::sync::mpsc::Sender<()>);
+
+impl Drop for FinishedSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
 enum WorkerResult {
     Done(Box<Result<RequestAuditRecord, AuditedRequestError>>),
     /// Sentinel only used to make `wait_for_worker`'s type total.
@@ -212,6 +226,7 @@ enum WorkerResult {
 
 fn wait_for_worker(
     worker: thread::JoinHandle<Result<RequestAuditRecord, AuditedRequestError>>,
+    finished: &std::sync::mpsc::Receiver<()>,
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> WorkerResult {
@@ -227,30 +242,27 @@ fn wait_for_worker(
     // they cross `timeout`.
     let cancel_at = Instant::now() + timeout;
 
-    let poll_slice = Duration::from_millis(50);
-    let mut cancel_signalled = false;
-
-    loop {
-        if worker.is_finished() {
-            return WorkerResult::Done(Box::new(join_or_panic(worker)));
-        }
-        let now = Instant::now();
-        if !cancel_signalled && now >= cancel_at {
+    // Wait for the worker's end up to the slow-classification boundary, then signal cancel and
+    // keep waiting up to the hang deadline.
+    let ended = finished
+        .recv_timeout(cancel_at.saturating_duration_since(Instant::now()))
+        .is_ok()
+        || {
             cancel.store(true, Ordering::SeqCst);
-            cancel_signalled = true;
-        }
-        if now >= hard_deadline_at {
-            // Worker still running past the hang deadline. Aborting
-            // the process is the only safe option — joining would
-            // block forever and detaching would leak host locks into
-            // later tests in this binary.
-            eprintln!(
-                "verter audit corpus harness: worker did not return within the hang deadline; aborting test process to avoid thread abandonment"
-            );
-            std::process::abort();
-        }
-        thread::sleep(poll_slice);
+            finished
+                .recv_timeout(hard_deadline_at.saturating_duration_since(Instant::now()))
+                .is_ok()
+        };
+    if ended {
+        return WorkerResult::Done(Box::new(join_or_panic(worker)));
     }
+    // Worker still running past the hang deadline. Aborting the process is the only safe
+    // option — joining would block forever and detaching would leak host locks into later
+    // tests in this binary.
+    eprintln!(
+        "verter audit corpus harness: worker did not return within the hang deadline; aborting test process to avoid thread abandonment"
+    );
+    std::process::abort();
 }
 
 fn join_or_panic(

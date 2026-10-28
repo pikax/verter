@@ -2872,7 +2872,7 @@ pub struct LiveResolutionObservation {
 /// `Unknown` probe is NOT that case: those are observed VALUES, and returning
 /// them as values is what lets a candidate whose target became unreadable die
 /// instead of validating forever.
-pub(crate) trait LiveResolutionEvidence {
+pub(crate) trait LiveResolutionEvidence: Sync {
     fn observe_live_resolution_evidence(
         &self,
         canonical_id: &str,
