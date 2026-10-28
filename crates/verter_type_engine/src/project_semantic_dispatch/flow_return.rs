@@ -3981,9 +3981,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(identity) = identity {
                 let canonical: &str = identity.canonical_id.as_ref();
                 let embedded = identity.whole_hash;
-                if !observed
-                    .iter()
-                    .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
+                // A reference minted before its file's content was
+                // authoritative embeds the zero version: no version was
+                // interned, so there is none to certify (a zero fact could
+                // never validate against any content).
+                if embedded != [0u8; 16]
+                    && !observed
+                        .iter()
+                        .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
                 {
                     observed.push((Arc::from(canonical), embedded));
                     // The version the retained payload actually embeds, not the

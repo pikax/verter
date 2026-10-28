@@ -191,7 +191,10 @@ impl VerterHost {
                         memoised_resolve,
                         None,
                         Some(&|canonical| {
-                            let serve = self.ensure_indexed_ready_serve(canonical)?;
+                            let Some(serve) = self.ensure_indexed_ready_serve(canonical) else {
+                                contributor_unverified.set(true);
+                                return None;
+                            };
                             if !serve.store_published {
                                 // A fenced serve is a VALID complete read: the
                                 // contributor keeps its exact-content identity and
