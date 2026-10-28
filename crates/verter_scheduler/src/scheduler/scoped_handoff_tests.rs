@@ -30,6 +30,158 @@ fn request() -> ScopedCacheNodeRequest {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn completed_file_stage_releases_its_task_before_worker_context_cleanup() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use verter_execution::request_context::{
+        OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    };
+
+    struct HeldCleanup {
+        posted: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        released: mpsc::Sender<()>,
+    }
+    impl TlsUninstall for HeldCleanup {
+        fn uninstall(self: Box<Self>) {}
+    }
+    impl Drop for HeldCleanup {
+        fn drop(&mut self) {
+            if self.posted.send(()).is_err() {
+                return;
+            }
+            match self.release.recv_timeout(Duration::from_secs(5)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!("consumer did not finish"),
+            }
+            let _ = self.released.send(());
+        }
+    }
+    struct Context(Mutex<Option<HeldCleanup>>);
+    impl RequestContextLike for Context {
+        fn request_id(&self) -> u64 {
+            1
+        }
+        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            Box::new(self.0.lock().take().expect("one source execution"))
+        }
+    }
+
+    for caller in [
+        caller_kind::CallerKind::Driver,
+        caller_kind::CallerKind::IoWorker,
+    ] {
+        let scheduler = scheduler();
+        let (posted_tx, posted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (released_tx, released_rx) = mpsc::channel();
+        let context = OpaqueRequestContext(Arc::new(Context(Mutex::new(Some(HeldCleanup {
+            posted: posted_tx,
+            release: release_rx,
+            released: released_tx,
+        })))));
+        let mut root = scheduler.begin_owned_request(
+            Request {
+                file_id: "/completed.ts".into(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("export const n = 41;")),
+                file_language: Some(verter_language::FileLanguage::script_ts()),
+                request_context: Some(context),
+            },
+            scheduler.task_registry.register_task(),
+            CancellationToken::new(),
+        );
+        assert!(root.poll(Waker::noop()).is_pending());
+        std::thread::scope(|scope| {
+            let dispatch = scope.spawn(|| {
+                scheduler.pump_ready(PumpReason::DriverLoop, caller);
+            });
+            // The stage has posted its terminal envelope, but its worker is
+            // still held in unrelated request-context cleanup.
+            posted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            scheduler.drain_inbox();
+            assert!(matches!(
+                root.poll(Waker::noop()),
+                Poll::Ready(Ok(CompletionState::Ready(RequestResult::Source(_))))
+            ));
+            drop(root);
+            assert_eq!(
+                scheduler.task_registry.active_task_count_for_tests(),
+                0,
+                "execution task retained after {caller:?} completion"
+            );
+            assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+            drop(release_tx);
+            released_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            dispatch.join().unwrap();
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn scoped_dispatch_releases_its_task_before_waking_the_consumer() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct HeldWake {
+        channels: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    }
+    impl Wake for HeldWake {
+        fn wake(self: Arc<Self>) {
+            let channels = self.channels.lock().take();
+            if let Some((ready, release)) = channels {
+                ready.send(()).unwrap();
+                // Disconnection also releases dispatch during assertion unwind.
+                match release.recv_timeout(Duration::from_secs(5)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => panic!("consumer did not finish"),
+                }
+            }
+        }
+    }
+
+    for native in [true, false] {
+        let scheduler = scheduler();
+        let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let waker = Waker::from(Arc::new(HeldWake {
+            channels: Mutex::new(Some((ready_tx, release_rx))),
+        }));
+        assert!(root.poll(&waker).is_pending());
+        std::thread::scope(|scope| {
+            let dispatch = scope.spawn(|| {
+                if native {
+                    scheduler.pump_ready(PumpReason::DriverLoop, caller_kind::CallerKind::Driver);
+                } else {
+                    scheduler.drive_all();
+                }
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // Dispatch is still inside its readiness callback while another thread
+            // can claim, execute and consume the complete answer.
+            let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop())
+            else {
+                panic!("dispatch transfers the producer");
+            };
+            producer.run(|_| 41);
+            assert!(matches!(
+                root.poll(Waker::noop()),
+                Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 41
+            ));
+            drop(root);
+            assert_eq!(scheduler.task_registry.active_task_count_for_tests(), 0);
+            assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+            drop(release_tx);
+            dispatch.join().unwrap();
+        });
+    }
+}
+
 #[test]
 fn attaching_pre_admission_owners_preserves_a_live_sibling_after_cancelled_first_owner() {
     for cancel_all in [false, true] {
@@ -168,6 +320,32 @@ fn scoped_handoff_suspends_without_running_its_producer_and_resumes_elsewhere() 
     assert!(
         scheduler_lifetime.upgrade().is_none(),
         "completed handoffs must release their scheduler owner"
+    );
+}
+
+#[test]
+fn terminal_scoped_flight_releases_tasks_with_a_late_submission_still_queued() {
+    let scheduler = scheduler();
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    assert!(scheduler.drive_one());
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("dispatch transfers the producer");
+    };
+    let mut follower = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(follower.poll(Waker::noop()).is_pending());
+    producer.run(|_| 42);
+    for handoff in [&mut root, &mut follower] {
+        assert!(matches!(
+            handoff.poll(Waker::noop()),
+            Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 42
+        ));
+    }
+    assert!(!scheduler.inbox.receiver.is_empty());
+    assert_eq!(
+        scheduler.task_registry.active_task_count_for_tests(),
+        0,
+        "terminal flight envelopes must not retain execution tasks"
     );
 }
 

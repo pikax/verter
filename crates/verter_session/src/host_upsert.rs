@@ -36,7 +36,7 @@ pub(crate) struct UpsertBatchOutcome {
     #[cfg(not(target_arch = "wasm32"))]
     pub canonical_id: String,
     pub result: Result<Option<HostUpdateResult>, HostError>,
-    workspace_commit: Option<WorkspaceParsedCommit>,
+    post_commit: UpsertPostCommit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,21 @@ struct WorkspaceParsedCommit {
     canonical_id: String,
     source: Arc<str>,
     parsed_edges: Vec<verter_workspace::ParsedEdge>,
+}
+
+#[derive(Default)]
+struct UpsertPostCommit {
+    workspace: Option<WorkspaceParsedCommit>,
+    carrier_route: Option<CarrierRouteInterfaceCommit>,
+}
+
+/// Snapshot-fenced derived work that may join an index producer. It runs only
+/// after the source and workspace publication fence has been released.
+struct CarrierRouteInterfaceCommit {
+    canonical_id: String,
+    old_source: Arc<verter_scheduler::node::SourceSnapshot>,
+    new_source: Arc<verter_scheduler::node::SourceSnapshot>,
+    version: verter_scheduler::node::SourceVersion,
 }
 
 /// The per-canonical state captured BEFORE the atomic batch is
@@ -89,7 +104,7 @@ impl UpsertBatchTxn {
         self,
         host: &VerterHost,
         result_demand: UpsertResultDemand,
-    ) -> Vec<UpsertBatchOutcome> {
+    ) -> (Vec<UpsertBatchOutcome>, Vec<String>) {
         let UpsertBatchTxn { prepared, batch } = self;
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
@@ -105,10 +120,10 @@ impl UpsertBatchTxn {
         let mut outcomes = Self::map_states(host, prepared, states, true, result_demand);
         let workspace_commits = outcomes
             .iter_mut()
-            .filter_map(|outcome| outcome.workspace_commit.take())
+            .filter_map(|outcome| outcome.post_commit.workspace.take())
             .collect();
-        host.finish_workspace_batch(workspace_commits);
-        outcomes
+        let changed = host.finish_workspace_batch(workspace_commits);
+        (outcomes, changed)
     }
 
     /// The completion-state → [`UpsertBatchOutcome`] mapper: zip each
@@ -145,7 +160,7 @@ impl UpsertBatchTxn {
                 // target gate as its sole consumer.
                 #[cfg(not(target_arch = "wasm32"))]
                 let canonical_id = prepared.canonical_id.clone();
-                let (result, workspace_commit) = match state {
+                let (result, post_commit) = match state {
                     CompletionState::Ready(ready) => match verter_audit::specialise!(
                         crate::capture::installed_mode() => M,
                         {
@@ -157,18 +172,24 @@ impl UpsertBatchTxn {
                             )
                         }
                     ) {
-                        Ok((result, workspace_commit)) => (Ok(result), workspace_commit),
-                        Err(error) => (Err(error), None),
+                        Ok((result, post_commit)) => (Ok(result), post_commit),
+                        Err(error) => (Err(error), UpsertPostCommit::default()),
                     },
-                    CompletionState::Failed(e) => (Err(HostError::Scheduler(e)), None),
-                    CompletionState::Superseded => (Err(HostError::Superseded), None),
-                    CompletionState::Shutdown => (Err(HostError::Shutdown), None),
+                    CompletionState::Failed(e) => {
+                        (Err(HostError::Scheduler(e)), UpsertPostCommit::default())
+                    }
+                    CompletionState::Superseded => {
+                        (Err(HostError::Superseded), UpsertPostCommit::default())
+                    }
+                    CompletionState::Shutdown => {
+                        (Err(HostError::Shutdown), UpsertPostCommit::default())
+                    }
                 };
                 UpsertBatchOutcome {
                     #[cfg(not(target_arch = "wasm32"))]
                     canonical_id,
                     result,
-                    workspace_commit,
+                    post_commit,
                 }
             })
             .collect()
@@ -195,7 +216,10 @@ impl UpsertBatchTxn {
             states.len(),
             "finish_from_states requires one completion state per prepared entry"
         );
-        Self::map_states(host, prepared, states, false, UpsertResultDemand::Full)
+        let mut outcomes =
+            Self::map_states(host, prepared, states, false, UpsertResultDemand::Full);
+        host.materialize_upsert_carrier_routes(&mut outcomes);
+        outcomes
     }
 }
 
@@ -381,14 +405,37 @@ impl VerterHost {
         // one fence. The lock covers scheduler commit plus host publication,
         // so no owner revision can land between an override's current-stamp
         // validation and its atomic admission.
-        let _block_content_fence = self.block_content.admission_fence.lock();
         verter_session_query::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
         //      `submit_batch_atomic`).
         // 6:   drive it (ONE `wait_batch`, then per-index post-commit).
-        self.submit_upsert_batch(requests, priority)
-            .finish(self, result_demand)
+        let (mut outcomes, changed) = {
+            let _block_content_fence = self.block_content.admission_fence.lock();
+            self.submit_upsert_batch(requests, priority)
+                .finish(self, result_demand)
+        };
+        // Derived work can join an index producer whose source integration
+        // needs the admission fence. Source and workspace publication above
+        // are complete before any such dependency is awaited.
+        self.materialize_upsert_carrier_routes(&mut outcomes);
+        if !changed.is_empty() {
+            self.ingest_changed_program_files(changed);
+        }
+        outcomes
+    }
+
+    fn materialize_upsert_carrier_routes(&self, outcomes: &mut [UpsertBatchOutcome]) {
+        for outcome in outcomes {
+            if let Some(route) = outcome.post_commit.carrier_route.take() {
+                let _ = self.materialize_committed_unchanged_carrier_route_interface(
+                    &route.canonical_id,
+                    &route.old_source,
+                    route.new_source,
+                    route.version,
+                );
+            }
+        }
     }
 
     /// Build the in-flight upsert transaction: resolve and uniqueness-
@@ -614,7 +661,7 @@ impl VerterHost {
         ready: verter_scheduler::job::RequestResult,
         defer_workspace_commit: bool,
         result_demand: UpsertResultDemand,
-    ) -> Result<(Option<HostUpdateResult>, Option<WorkspaceParsedCommit>), HostError> {
+    ) -> Result<(Option<HostUpdateResult>, UpsertPostCommit), HostError> {
         let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::RequestResult;
@@ -747,7 +794,7 @@ impl VerterHost {
                 }
             }
             if result_demand == UpsertResultDemand::StatusOnly {
-                return Ok((None, None));
+                return Ok((None, UpsertPostCommit::default()));
             }
             // Cache-state is a no-op, but the *result* is still a full
             // description of the live parse: bundlers re-resolve external
@@ -796,7 +843,7 @@ impl VerterHost {
                     export_signatures: parse.export_signatures.clone(),
                     parse_duration_ms,
                 }),
-                None,
+                UpsertPostCommit::default(),
             ));
         }
 
@@ -1072,14 +1119,6 @@ impl VerterHost {
                 )?)
             }
         };
-        if let Some(old_source_snap) = old_source_snap.as_ref() {
-            let _ = self.materialize_committed_unchanged_carrier_route_interface(
-                &canonical_id,
-                old_source_snap,
-                Arc::clone(&new_source_snap),
-                committed_version,
-            );
-        }
         self.ingest_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
         let pending_overlay =
             (crate::global_contributors::source_has_ambient_contribution(req.source.as_ref())
@@ -1107,12 +1146,24 @@ impl VerterHost {
             "store_view_epoch",
             &canonical_id,
         );
-        Ok((result, workspace_commit))
+        let carrier_route = old_source_snap.map(|old_source| CarrierRouteInterfaceCommit {
+            canonical_id,
+            old_source,
+            new_source: new_source_snap,
+            version: committed_version,
+        });
+        Ok((
+            result,
+            UpsertPostCommit {
+                workspace: workspace_commit,
+                carrier_route,
+            },
+        ))
     }
 
-    fn finish_workspace_batch(&self, commits: Vec<WorkspaceParsedCommit>) {
+    fn finish_workspace_batch(&self, commits: Vec<WorkspaceParsedCommit>) -> Vec<String> {
         if commits.is_empty() {
-            return;
+            return Vec::new();
         }
 
         // Publish every admitted source into the overlay before resolving
@@ -1131,7 +1182,10 @@ impl VerterHost {
             .collect::<Vec<_>>();
         self.ws().record_parsed_edges_many(&records);
         self.ingest_injected_ambient_roots(None);
-        self.ingest_changed_program_files(records.into_iter().map(|(canonical, _)| canonical));
+        records
+            .into_iter()
+            .map(|(canonical, _)| canonical)
+            .collect()
     }
 
     fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {

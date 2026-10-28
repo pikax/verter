@@ -106,8 +106,6 @@ use cancellation::*;
 use completion::*;
 use dag_lock::*;
 use dependencies::*;
-#[cfg(all(target_arch = "wasm32", any(test, feature = "test-support")))]
-use driver::DispatchPauseHook;
 #[cfg(not(target_arch = "wasm32"))]
 use driver::*;
 // The dispatch pause hook is test instrumentation every build that carries
@@ -260,7 +258,6 @@ pub enum ScopedCacheNodeError {
 pub struct ScopedCacheFlight {
     state: Mutex<ScopedCacheFlightState>,
     delivery: Arc<DagMutex>,
-    task: verter_execution::tasks::ExecutionTask,
 }
 
 /// Typed result of a submission attempt.
