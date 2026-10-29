@@ -191,6 +191,7 @@ impl SchedulerDag {
             // stranded waiter would never enter a lane and never
             // dispatch.
             self.refresh_ready_membership(waiter_tok);
+            self.bind_waiter_producer(waiter_tok);
         }
         stranded
     }

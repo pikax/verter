@@ -55,6 +55,52 @@ oracle proof.
 Compile-fail fixtures run through `node scripts/compile-contracts.mjs`, outside
 Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
+`Compiler Contracts` uses the existing `compiler_contracts` change gate on PRs:
+the ten fixture-owner crates and the workspace runner crates are lane roots,
+so their transitive dependencies select the lane too. The excluded
+`verter_compile_contracts_session_observe` runner (including its separate
+`Cargo.lock`) is owned by the path filter, alongside the runner script,
+self-tests, generated-artifact inputs and nightly workflow. Workspace Cargo
+inputs, the toolchain, `.cargo/` and `ci.yml` select the lane through the shared
+fail-closed rules. Unrelated editor, package and prose changes skip it;
+`CI Required` accepts that skip and still rejects any failed or cancelled
+matrix leg.
+
+The full suite is partitioned into four independent runner jobs. Each job
+executes its configurations serially, keeping their original Cargo feature
+sets separate:
+
+| Group             | Configurations                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`            | audit, CSS syntax, identity, language, semantic, session-query, type-runtime, workspace; session test-support variants                   |
+| `compiler`        | compiler-default, compiler-bench, session soak-support; generated Svelte freshness and isolated default-feature compiler build/lib tests |
+| `session`         | session-default                                                                                                                          |
+| `session-observe` | excluded semantic-observe runner                                                                                                         |
+
+Run one group locally with `node scripts/compile-contracts.mjs --group core`;
+omitting `--group` runs all fourteen configurations. `--list-groups` prints the
+matrix inventory. The workflow self-test checks both PR and nightly matrices
+against it. Matrix failure cancellation is disabled so every group reports.
+
+Every group has its own target cache; within it, outer Cargo runners and all
+trybuild projects share `target/compiler-contracts`. Separate GitHub runners
+prevent concurrent writers to the generated fixture workspaces. Immutable cache
+keys include OS/architecture, group, toolchain/configuration, manifests, both
+workspace and excluded-runner lockfiles, and the checkout revision; restore
+prefixes reuse compatible earlier builds while source-only changes can refresh
+the saved cache. Both workflows save only on `main`, which nightly also warms.
+The sccache wrapper is explicitly enabled with incremental compilation off and
+a common namespace across groups and workflows. These jobs disable dev/test
+debug-symbol emission, including inside trybuild's generated workspaces, while
+retaining debug assertions and every original feature configuration. Only the
+compiler group needs the pnpm install and the isolated compiler build/tests.
+Both workflows disable `setup-node`'s automatic package-manager cache detection;
+only the compiler group explicitly enables pnpm caching. The plain production
+`cargo build` remains necessary: the compiler's test targets enable its
+`test-support` dev-dependency self-edge. Each invocation logs `COMPILE CONTRACT TIME`
+for its fetches and configurations plus a group total, and each matrix leg uploads
+its log even on failure.
+
 ### tsserver nightly (`tsserver-nightly.yml`)
 
 tsgo is the main platform and pull request CI tests it in full; tsserver is the
@@ -345,7 +391,14 @@ See [Publishing a Release](#publishing-a-release) for the full flow.
 
 ### Nightly (`nightly.yml`)
 
-Triggered daily at 06:00 UTC and manually through `workflow_dispatch`.
+Triggered daily at 06:00 UTC on `main` and manually through `workflow_dispatch`.
+
+The full four-group compile-contract suite runs every night without change
+filters, using the same runner, feature configurations and cache keys as PR CI.
+It also retains the compiler group's generated-artifact and default-feature lib
+checks. The existing nightly scale and coverage lanes run alongside it.
+
+The WASM/playground build:
 
 1. Builds WASM via `cargo build --target wasm32-unknown-unknown`, `wasm-bindgen`, and a `wasm-opt` size pass
 2. Smoke tests the WASM binary
@@ -367,7 +420,20 @@ the separate native and WASM instrumentation package jobs are unchanged.
 
 ## Nextest JUnit evidence
 
-Every job that runs nextest with the `ci` profile (the `Rust Test (Core n/4)` shards, the nightly instrumentation lane, BF2 Authoritative, and the nightly core coverage lane) uploads its `junit.xml` with a `junit-metadata.json` beside it, through `.github/actions/nextest-evidence`, under a stable artifact name (`nextest-evidence-<job>[-<partition>]`), also when tests fail. The document (schema v1, `scripts/ci-junit-metadata.mjs`) carries the tested tree and its parents read from the checked-out commit object, tool versions, the environment fingerprint, the run configuration and each test's hermetic flag. A test is hermetic only when `scripts/manifests/ci-hermetic-tests.json` names it. The environment fingerprint is the allow-listed snapshot the nextest step itself writes (`ci-junit-metadata.mjs snapshot-env`, run inside that step's shell after any `cargo llvm-cov show-env`), and command, cargo features, filter and partition are read from the cargo argument vector the run used. The same script's `check` mode fails the job when a required field is missing or the test list differs from the junit.xml. No required check reads these files; existing JUnit locate and `Test report` steps remain independent of the evidence step, so deleting the evidence step restores the previous CI.
+Every job that runs nextest with the `ci` profile (the `Rust Test (Core n/4)` shards, the nightly instrumentation lane, BF2 Authoritative, and the nightly core coverage lane) uploads its `junit.xml` with a `junit-metadata.json` beside it, through `.github/actions/nextest-evidence`, under a stable artifact name (`nextest-evidence-<job>[-<partition>]`), also when tests fail. The document (schema v1, `scripts/ci-junit-metadata.mjs`) carries the tested tree and its parents read from the checked-out commit object, tool versions, the environment fingerprint, the run configuration and each test's hermetic flag. A test is hermetic only when the operator-approved candidate list `scripts/manifests/ci-hermetic-candidates.json` names it (see Perturbation reruns below). The environment fingerprint is the allow-listed snapshot the nextest step itself writes (`ci-junit-metadata.mjs snapshot-env`, run inside that step's shell after any `cargo llvm-cov show-env`), and command, cargo features, filter and partition are read from the cargo argument vector the run used. The same script's `check` mode fails the job when a required field is missing or the test list differs from the junit.xml. No required check reads these files; existing JUnit locate and `Test report` steps remain independent of the evidence step, so deleting the evidence step restores the previous CI.
+
+## Perturbation reruns
+
+`.github/workflows/perturbation.yml` (weekly, manual dispatch, and on pull requests and branch pushes that change its own machinery) is a separate, non-required workflow; disabling it stops the reruns and changes no required check. It builds one nextest archive, then runs the whole core suite from it once per configured rerun (`scripts/manifests/perturbation.json` fixes the count and each rerun's clock offset and time zone), each on its own runner, through `node scripts/perturbation.mjs run`:
+
+- unprivileged (no container, `sudo` or runner administration; the uid is recorded), with the runner's OS image identity (distribution and release from `/etc/os-release`, kernel from `uname`) recorded;
+- the environment cleared to the JUnit metadata allow-list plus `PATH` and the toolchain homes, with HOME and TMPDIR in fresh per-job directories;
+- network isolation beyond loopback through an unprivileged user and network namespace (`unshare`) where the runner allows one, recorded as applied or not with the reason;
+- its own temporary directory, runner-supplied variable values (`CI`, `ImageOS`, `ImageVersion`), host, and wall clock (a whole-day offset through libfaketime built from its pinned release source, monotonic clock untouched) and time zone, each recorded in `perturbation-record.json`.
+
+Each rerun uploads its junit.xml and JUnit metadata document (`perturbation-rerun-<n>-nextest-evidence`) and its record (`perturbation-rerun-<n>-record`). The compare job (`node scripts/perturbation.mjs compare`) writes `perturbation-comparison.json`, listing every test's outcome in each rerun with its hermetic flag, and a proposed next version of the candidate list, uploaded together with the reruns' metadata documents as `perturbation-comparison`. The reruns are comparable only when they tested one tree with one command, every rerun has an exact base environment fingerprint match (OS and image identity, architecture, toolchain pins, allow-listed variables as the runner supplied them), and each rerun varied every dimension, including a wall-clock shift that was applied and read back off the real clock by its offset (a time zone alone changes neither Rust's `SystemTime` nor the UTC date); otherwise the job fails and proposes no candidate. A candidate passed in every rerun and no exclusion names it; a test whose outcome differs in any rerun, that is missing from one, or that fails in every rerun is never a candidate.
+
+`scripts/manifests/ci-hermetic-candidates.json` is versioned (`version`) and stays `approved: false` until the operator approves it by committing the proposal with `approved: true`, `approvedBy` and `approvedOn`; only an approved list sets a hermetic flag. Its `exclusions` keep tests non-hermetic whatever the reruns show, each group with its reason: verter_lsp (its build script embeds the build date), verter_bench (it embeds the compiling checkout's identity), the modules whose test code reads the clock for a budget, deadline or timeout, and the modules whose test code, or a test helper it calls, depends on any build-environment value cargo fixes at compile time through `env!`/`option_env!` (the `env!("CARGO")` dependency-closure guards, `CARGO_MANIFEST_DIR`/`CARGO_TARGET_TMPDIR`/`OUT_DIR` paths, `CARGO_BIN_EXE_<name>` binaries and `CARGO_PKG_*` metadata). One pattern may appear under several reasons, and a test excluded for several reasons reports all of them. A new test module that reads the clock for a timing budget or depends on a build-environment value gets an exclusion pattern in the same change. `node scripts/perturbation.mjs check-list` validates the list.
 
 ## Versioning
 

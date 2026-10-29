@@ -111,6 +111,10 @@ mod resolution_driver_tests;
 #[cfg(test)]
 mod resolution_flight_tests;
 pub(crate) mod resolution_flights;
+mod resolution_gate;
+pub mod resolution_handoff;
+#[cfg(test)]
+mod resolution_handoff_tests;
 #[cfg(test)]
 mod resolution_interleaving_tests;
 pub mod resolver;
