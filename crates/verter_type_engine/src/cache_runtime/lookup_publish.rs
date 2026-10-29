@@ -79,10 +79,8 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::singleflight::{
-    retire_slot_if_current, ComputeAdmission, InflightFailureKind, InflightPanicGuard,
-    InflightSlot, InflightTable, SlotJoin,
-};
+use super::owned_admission::{drive, AdmissionCore, AdmissionPolicy, OwnedAdmission};
+use super::singleflight::{ComputeAdmission, InflightFailureKind, InflightSlot, InflightTable};
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -174,11 +172,11 @@ pub(crate) fn cooperative_admit_with_lookup_publish<
 >(
     inflight: &InflightTable<FlightK>,
     flight_key: FlightK,
-    mut lookup: Lookup,
+    lookup: Lookup,
     compute: Compute,
     project: Project,
     project_unadmitted: ProjectUnadmitted,
-    mut revalidate_after_compute: Revalidate,
+    revalidate_after_compute: Revalidate,
     publish_core: PublishCore,
     evict_deferred: EvictDeferred,
     publish_fence: Option<&parking_lot::RwLock<()>>,
@@ -195,89 +193,104 @@ where
     PublishCore: FnOnce(Entry) -> Victims,
     EvictDeferred: FnOnce(Victims),
 {
-    // `compute`, `project`, `publish_core`, and `evict_deferred` are
-    // logically one-shot but the joiner re-validation loop may iterate.
-    // Carry them in `Option`s and `take()` them only on the iteration
-    // where THIS caller becomes the cold winner.
-    let mut compute = Some(compute);
-    let mut project = Some(project);
-    let mut project_unadmitted = Some(project_unadmitted);
-    let mut publish_core = Some(publish_core);
-    let mut evict_deferred = Some(evict_deferred);
-    loop {
-        // Warm-hit read-side validation through the slot's own lookup.
-        if let Some(value) = lookup() {
-            return Some(value);
+    let policy = LookupPublishPolicy {
+        lookup,
+        compute: Some(compute),
+        project: Some(project),
+        project_unadmitted: Some(project_unadmitted),
+        revalidate_after_compute,
+        publish_core: Some(publish_core),
+        evict_deferred: Some(evict_deferred),
+        publish_fence,
+        marker: std::marker::PhantomData,
+    };
+    drive(AdmissionCore::new(
+        inflight,
+        flight_key,
+        policy,
+        verter_execution::tasks::ExecutionScope::current_task(),
+        verter_execution::cancellation::CancellationToken::new(),
+    ))
+}
+
+type PolicyMarker<Entry, V, Victims> = std::marker::PhantomData<fn() -> (Entry, V, Victims)>;
+
+struct LookupPublishPolicy<
+    Fence,
+    Entry,
+    V,
+    Victims,
+    Lookup,
+    Compute,
+    Project,
+    ProjectUnadmitted,
+    Revalidate,
+    PublishCore,
+    EvictDeferred,
+> {
+    lookup: Lookup,
+    compute: Option<Compute>,
+    project: Option<Project>,
+    project_unadmitted: Option<ProjectUnadmitted>,
+    revalidate_after_compute: Revalidate,
+    publish_core: Option<PublishCore>,
+    evict_deferred: Option<EvictDeferred>,
+    publish_fence: Option<Fence>,
+    marker: PolicyMarker<Entry, V, Victims>,
+}
+impl<
+        Fence,
+        Entry,
+        V,
+        Victims,
+        Lookup,
+        Compute,
+        Project,
+        ProjectUnadmitted,
+        Revalidate,
+        PublishCore,
+        EvictDeferred,
+    > AdmissionPolicy<V>
+    for LookupPublishPolicy<
+        Fence,
+        Entry,
+        V,
+        Victims,
+        Lookup,
+        Compute,
+        Project,
+        ProjectUnadmitted,
+        Revalidate,
+        PublishCore,
+        EvictDeferred,
+    >
+where
+    Fence: std::ops::Deref<Target = parking_lot::RwLock<()>>,
+    Lookup: FnMut() -> Option<V>,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry>,
+    Project: FnOnce(&Entry) -> V,
+    ProjectUnadmitted: FnOnce(&Entry) -> Option<V>,
+    Revalidate: FnMut(&Entry) -> bool,
+    PublishCore: FnOnce(Entry) -> Victims,
+    EvictDeferred: FnOnce(Victims),
+{
+    fn lookup(&mut self) -> Option<V> {
+        (self.lookup)()
+    }
+    fn retry_failure(&self, failure: InflightFailureKind) -> bool {
+        match failure {
+            InflightFailureKind::ComputeFailed => false,
+            InflightFailureKind::WinnerPanicked | InflightFailureKind::AdmissionRejected => true,
         }
-
-        // Claim the inflight slot or join an in-progress build.
-        let slot = {
-            let mut table = inflight.table.lock();
-            table
-                .entry(flight_key.clone())
-                .or_insert_with(|| Arc::new(InflightSlot::new()))
-                .clone()
-        };
-
-        let mut state = slot.state.lock();
-        if state.claimed {
-            // Joiner — wait for the winner to publish or fail.
-            #[cfg(any(test, feature = "test-support"))]
-            inflight.notify_joiner_park();
-            drop(state);
-            SlotJoin::new(&slot).wait();
-            let state = slot.state.lock();
-            match state.failure {
-                // Deterministic compute failure — surface `None` (the
-                // caller's fallback owns retry policy).
-                Some(InflightFailureKind::ComputeFailed) => return None,
-                // The winner produced NO completeness evidence (panic),
-                // or computed a value its own view could not admit
-                // (admission rejection). Neither outcome is consumable by
-                // this joiner as a value — fork and cold-recompute for
-                // this joiner's OWN view, exactly like the cross-view
-                // stale-reject fork below. A panicked winner's bug
-                // surfaces as the joiner's own panic on recompute, never
-                // as a fabricated value-bearing result.
-                Some(InflightFailureKind::WinnerPanicked)
-                | Some(InflightFailureKind::AdmissionRejected) => {
-                    drop(state);
-                    retire_slot_if_current(&inflight.table, &flight_key, &slot);
-                    drop(slot);
-                    continue;
-                }
-                None => {}
-            }
-            // A `ReturnOnly` winner published nothing the joiner can
-            // view-validate against its own view, so it forks and
-            // cold-recomputes.
-            let non_cacheable_winner = state.non_cacheable_winner;
-            drop(state);
-            if non_cacheable_winner {
-                retire_slot_if_current(&inflight.table, &flight_key, &slot);
-                drop(slot);
-                continue;
-            }
-            // Cacheable winner — re-read the slot via `lookup` against
-            // THIS follower's view. A hit returns the validated value (and
-            // bubbles facts); a miss means the winner's candidate is stale
-            // for the follower's view, so the follower forks and
-            // cold-recomputes. The slot keeps the winner's candidate for
-            // other views; this adapter never evicts it.
-            if let Some(value) = lookup() {
-                return Some(value);
-            }
-            retire_slot_if_current(&inflight.table, &flight_key, &slot);
-            drop(slot);
-            continue;
-        }
-        state.claimed = true;
-        drop(state);
-
-        // Cold winner runs compute under a panic guard.
-        let mut panic_guard =
-            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, flight_key.clone());
-
+    }
+    fn produce(&mut self, slot: &Arc<InflightSlot>) -> Option<V> {
+        let compute = &mut self.compute;
+        let project = &mut self.project;
+        let project_unadmitted = &mut self.project_unadmitted;
+        let revalidate_after_compute = &mut self.revalidate_after_compute;
+        let publish_core = &mut self.publish_core;
+        let evict_deferred = &mut self.evict_deferred;
+        let publish_fence = self.publish_fence.as_deref();
         let admission = compute
             .take()
             .expect("compute is taken exactly once by the cold winner")();
@@ -318,9 +331,6 @@ where
                             state.failure = Some(InflightFailureKind::AdmissionRejected);
                         }
                     });
-                    panic_guard.mark_finished();
-                    drop(panic_guard);
-                    retire_slot_if_current(&inflight.table, &flight_key, &slot);
                     // Wake the joiners only once the publish fence is released.
                     drop(_retention);
                     joiners.wake();
@@ -378,11 +388,69 @@ where
         };
         joiners.wake();
 
-        panic_guard.mark_finished();
-        drop(panic_guard);
-        retire_slot_if_current(&inflight.table, &flight_key, &slot);
-        return value;
+        value
     }
+}
+
+/// Begin owned multi-candidate admission with split publication under one fence.
+/// Captured lookup and computation inputs must be owned and transferable.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) fn owned_admit_with_lookup_publish<
+    FlightK,
+    Entry,
+    V,
+    Victims,
+    Lookup,
+    Compute,
+    Project,
+    ProjectUnadmitted,
+    Revalidate,
+    PublishCore,
+    EvictDeferred,
+>(
+    inflight: &InflightTable<FlightK>,
+    flight_key: FlightK,
+    lookup: Lookup,
+    compute: Compute,
+    project: Project,
+    project_unadmitted: ProjectUnadmitted,
+    revalidate_after_compute: Revalidate,
+    publish_core: PublishCore,
+    evict_deferred: EvictDeferred,
+    publish_fence: Option<Arc<parking_lot::RwLock<()>>>,
+    waiter: verter_execution::tasks::ExecutionTask,
+    cancellation: verter_execution::cancellation::CancellationToken,
+) -> OwnedAdmission<FlightK, V>
+where
+    FlightK: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: 'static,
+    Victims: 'static,
+    Lookup: FnMut() -> Option<V> + Send + 'static,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry> + Send + 'static,
+    Project: FnOnce(&Entry) -> V + Send + 'static,
+    ProjectUnadmitted: FnOnce(&Entry) -> Option<V> + Send + 'static,
+    Revalidate: FnMut(&Entry) -> bool + Send + 'static,
+    PublishCore: FnOnce(Entry) -> Victims + Send + 'static,
+    EvictDeferred: FnOnce(Victims) + Send + 'static,
+{
+    OwnedAdmission::new(
+        inflight,
+        flight_key,
+        LookupPublishPolicy {
+            lookup,
+            compute: Some(compute),
+            project: Some(project),
+            project_unadmitted: Some(project_unadmitted),
+            revalidate_after_compute,
+            publish_core: Some(publish_core),
+            evict_deferred: Some(evict_deferred),
+            publish_fence,
+            marker: std::marker::PhantomData,
+        },
+        waiter,
+        cancellation,
+    )
 }
 
 #[cfg(test)]

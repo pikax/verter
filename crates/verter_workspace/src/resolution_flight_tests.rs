@@ -367,7 +367,7 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
                                 "./dep",
                                 CONTEXT,
                                 ResolutionOperation::unpinned(&mut ledger, &|| true)
-                                    .cancelled_by(&cancel),
+                                    .cancelled_by(&|| cancel.is_cancelled()),
                             );
                         *outcome.lock().unwrap() = Some(result.non_admission_reason());
                         let _ = detached_tx.send(());

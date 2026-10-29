@@ -226,20 +226,12 @@
       "count": 7,
       "reason": "measured-record"
     },
-    "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs": {
-      "count": 1,
-      "reason": "measured-record"
-    },
     "crates/verter_session/src/project_semantic_dispatch_tests/enum_literal_tests.rs": {
       "count": 21,
       "reason": "measured-record"
     },
     "crates/verter_session/src/project_semantic_dispatch_tests/equality_value_narrowing_tests.rs": {
       "count": 7,
-      "reason": "measured-record"
-    },
-    "crates/verter_session/src/project_semantic_dispatch_tests/flow_narrowing_parity_tests.rs": {
-      "count": 2,
       "reason": "measured-record"
     },
     "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_accessor_tests.rs": {
@@ -534,14 +526,6 @@
       "count": 5,
       "reason": "measured-record"
     },
-    "crates/verter_session/src/signature_corpus_rows_tests.rs": {
-      "count": 1,
-      "reason": "measured-record"
-    },
-    "crates/verter_session/src/signature_corpus_tests.rs": {
-      "count": 2,
-      "reason": "measured-record"
-    },
     "crates/verter_session/src/tests/meta/events.rs": {
       "count": 2,
       "reason": "measured-record"
@@ -564,10 +548,6 @@
     },
     "crates/verter_session/src/tests/meta/publication.rs": {
       "count": 2,
-      "reason": "measured-record"
-    },
-    "crates/verter_session/src/typeinfo/oracle_core/identity/tests.rs": {
-      "count": 1,
       "reason": "measured-record"
     },
     "crates/verter_session/src/typeinfo/typeinfo_tests/apparent_types.rs": {
@@ -690,18 +670,6 @@
       "count": 1,
       "reason": "measured-record"
     },
-    "crates/verter_session/src/u6_flow_expect_tests.rs": {
-      "count": 10,
-      "reason": "measured-record"
-    },
-    "crates/verter_session/src/u6_flow_shape_corpus_rows_tests.rs": {
-      "count": 2,
-      "reason": "measured-record"
-    },
-    "crates/verter_session/src/u6_flow_shape_corpus_tests.rs": {
-      "count": 2,
-      "reason": "measured-record"
-    },
     "crates/verter_session/tests/allocation_cases/construction_bytes.rs": {
       "count": 2,
       "reason": "measured-record"
@@ -807,23 +775,11 @@
       "reason": "evidence-record"
     },
     "docs/evidence/relation-benchmark.md": {
-      "count": 3,
-      "reason": "evidence-record"
-    },
-    "docs/evidence/signature-kernel/determinism-matrix.md": {
-      "count": 2,
-      "reason": "evidence-record"
-    },
-    "docs/evidence/signature-kernel/manifest.json": {
-      "count": 2,
-      "reason": "evidence-record"
-    },
-    "docs/evidence/signature-kernel/oxc-deep-parse.md": {
       "count": 1,
       "reason": "evidence-record"
     },
-    "docs/evidence/signature-kernel/performance-gates.md": {
-      "count": 12,
+    "docs/evidence/signature-kernel/manifest.json": {
+      "count": 1,
       "reason": "evidence-record"
     },
     "docs/evidence/signature-kernel/semantic-difference-ledger.md": {

@@ -341,6 +341,12 @@ pub struct FactReadSet {
     /// re-sorting a set that was already sorted once. Every run in here has
     /// been verified strictly increasing at insertion.
     canonical_runs: Vec<FactSet>,
+    /// The storage address of every run in `canonical_runs`, so a replay
+    /// of a shared canonical signature this scope already absorbed is one
+    /// hash lookup instead of a scan that must also compare content.
+    /// Mirrors `canonical_runs` exactly: inserted together, removed
+    /// together (absorption, receipt collapse, canonicalisation).
+    run_addresses: rustc_hash::FxHashSet<usize>,
     /// TRUE when a NON-CACHEABLE read was consumed inside this tracer's
     /// scope. The class is: a FENCED (ReturnOnly, `store_published ==
     /// false`) `IndexedReady` serve; a broken decl-body lease
@@ -407,6 +413,7 @@ impl FactReadSet {
             policy,
             observations: SmallVec::new(),
             canonical_runs: Vec::new(),
+            run_addresses: rustc_hash::FxHashSet::default(),
             non_cacheable_propagation: None,
             untrusted_non_cacheable: false,
             aggregate_basis: AggregateGenerations::default(),
@@ -607,41 +614,51 @@ impl FactReadSet {
     /// A [`FactSet`] is canonical by construction, so the run is kept as is
     /// with no check, and finalisation merges it with the other runs and
     /// the local observations into the same canonical set — there is
-    /// exactly one canonicaliser.
+    /// exactly one canonicaliser. A replay of a signature this scope
+    /// already absorbed is recognised by its storage address and never
+    /// stored or charged twice, however many absorptions pass between the
+    /// two replays.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &FactSet) {
         self.policy.assert_compatible(signature.policy());
-        if signature.is_empty() || self.recently_absorbed(signature) {
+        if signature.is_empty() {
             return;
         }
+        // A shared canonical set this scope already holds — by storage, not
+        // by a bounded window — is one hash lookup: a warm read replays the
+        // SAME retained signature object many times into one scope, and
+        // each replay must neither grow the run list nor pay a comparison
+        // against it again. Every run this scope holds is a cloned Arc, so
+        // a held address cannot be freed and reused while it is in the set.
+        let address = signature.address();
+        if self.run_addresses.contains(&address) {
+            return;
+        }
+        self.run_addresses.insert(address);
         self.canonical_runs.push(signature.clone());
     }
 
-    /// Whether one of the last [`RECENT_WINDOW`] absorbed runs is
-    /// `signature`. An immutable retained run already proved its canonical
-    /// order; replaying it must not grow live storage for each warm read.
+    /// Whether this scope already holds `fact` — recorded as one of its own
+    /// observations or inside an absorbed canonical run, so it is in the
+    /// set this scope will seal either way.
+    ///
+    /// A producer that re-derives a fact a nested delivery or a warm read
+    /// already carried into this scope uses this to skip recording it
+    /// again: the sealed signature is the same union, only narrower to
+    /// build. The scan is over this scope's own live observations plus one
+    /// ordered lookup per absorbed run.
     #[inline]
-    fn recently_absorbed(&self, signature: &FactSet) -> bool {
-        let recent =
-            &self.canonical_runs[self.canonical_runs.len().saturating_sub(RECENT_WINDOW)..];
-        let mut comparisons = 0;
-        let mut seen = false;
-        for run in recent.iter().rev() {
-            comparisons += 1;
-            if run.ptr_eq(signature) {
-                seen = true;
-                break;
-            }
-            if run.len() == signature.len() {
-                comparisons += run.len();
-                if run == signature {
-                    seen = true;
-                    break;
-                }
-            }
+    #[must_use]
+    pub fn holds(&self, fact: &FactVersionRef) -> bool {
+        if self
+            .observations
+            .iter()
+            .rev()
+            .any(|observed| observed == fact)
+        {
+            return true;
         }
-        record_signature_work(comparisons);
-        seen
+        self.canonical_runs.iter().any(|run| run.contains(fact))
     }
 
     /// The mark of everything observed so far.
@@ -677,8 +694,12 @@ impl FactReadSet {
             && end.canonical_len <= self.canonical_runs.len();
         if intact {
             self.observations.drain(start.len..end.len);
-            self.canonical_runs
-                .drain(start.canonical_len..end.canonical_len);
+            for run in self
+                .canonical_runs
+                .drain(start.canonical_len..end.canonical_len)
+            {
+                self.run_addresses.remove(&run.address());
+            }
             self.observations.insert(start.len, receipt);
         } else {
             self.observations.push(receipt);
@@ -706,8 +727,8 @@ impl FactReadSet {
     }
 
     /// The absorbed run that holds every fact this scope observed, when its
-    /// own seal reproduces it ([`seals_unchanged`]): the widest run, every
-    /// other run a subset of it and every local observation in it.
+    /// own seal reproduces it ([`seals_unchanged`]) and it is the scope's
+    /// ONE absorbed witness: every local observation lies in it.
     fn covering_run(&self) -> Option<usize> {
         let mut widest = 0;
         let mut index = 1;
@@ -716,6 +737,14 @@ impl FactReadSet {
                 widest = index;
             }
             index += 1;
+        }
+        // Only the scope that replayed exactly ONE witness seals as it: a
+        // scope that absorbed several runs merges them, which costs one
+        // pass over what the base lacks, while proving every other run a
+        // subset of the widest first would walk the widest run once per
+        // other run and still leave the merge nothing saved.
+        if self.canonical_runs.len() > 1 {
+            return None;
         }
         let run = self.canonical_runs.get(widest)?;
         if !seals_unchanged(run) {
@@ -730,14 +759,6 @@ impl FactReadSet {
                 break;
             }
         }
-        let mut other = 0;
-        while covered && other < self.canonical_runs.len() {
-            if other != widest {
-                compared += self.canonical_runs[other].len();
-                covered = run.is_superset(&self.canonical_runs[other]);
-            }
-            other += 1;
-        }
         record_signature_work(compared);
         covered.then_some(widest)
     }
@@ -751,6 +772,7 @@ impl FactReadSet {
     fn canonicalise(&mut self) -> FactSet {
         self.rewrites = self.rewrites.wrapping_add(1);
         let runs = std::mem::take(&mut self.canonical_runs);
+        self.run_addresses.clear();
         let mut edit = if runs.is_empty() {
             // Nothing absorbed: the local observations are the whole set.
             // Observations held inline are copied straight into the set's
@@ -764,9 +786,8 @@ impl FactReadSet {
                 FactSet::from_canonical_slice(self.policy, &local).edit()
             }
         } else {
-            // The widest absorbed run is the base, shared; every other run
-            // and every local observation is inserted into it, so the set
-            // pays only for what the base lacks.
+            // Extend the widest shared run for a small delta; bulk-build
+            // when the distinct additions outnumber the base facts.
             let mut widest = 0;
             for (index, run) in runs.iter().enumerate() {
                 if run.len() > runs[widest].len() {
@@ -774,21 +795,68 @@ impl FactReadSet {
                 }
             }
             let base = &runs[widest];
-            let mut edit = base.edit();
+            // Compare borrowed facts by hash/equality once, independently of
+            // whether the base uses a slice or a tree. Repeated tree probes
+            // for overlapping runs otherwise multiply the merge by depth.
+            let base_facts = std::cell::LazyCell::new(|| {
+                record_signature_work(base.len());
+                base.iter().collect::<rustc_hash::FxHashSet<_>>()
+            });
+            let mut added = rustc_hash::FxHashSet::default();
+            // Preserve the canonical input runs' order for the final sort.
+            // Iterating the hash index would scramble those ordered runs.
+            let mut additions = Vec::new();
             for (index, run) in runs.iter().enumerate() {
-                if index == widest || run.ptr_eq(base) {
+                if index == widest
+                    || run.ptr_eq(base)
+                    || crate::facts::fact_set::subset_memo::known_subset(run, base)
+                {
                     continue;
                 }
+                let mut held_all = true;
                 for fact in run.iter() {
                     record_signature_work(1);
-                    if !edit.contains(fact) {
-                        edit.insert(fact.clone());
+                    if !base_facts.contains(fact) {
+                        held_all = false;
+                        if added.insert(fact) {
+                            additions.push(fact.clone());
+                        }
                     }
                 }
+                if held_all {
+                    crate::facts::fact_set::subset_memo::record_subset(run, base);
+                }
             }
-            for fact in std::mem::take(&mut self.observations) {
-                edit.insert(fact);
+            for fact in &self.observations {
+                record_signature_work(1);
+                if !base_facts.contains(fact) && added.insert(fact) {
+                    additions.push(fact.clone());
+                }
             }
+            sort_fact_refs(&mut additions);
+            let edit = if additions.len() > base.len() {
+                // A batch of mostly new facts is cheaper to build bottom-up
+                // than to insert through a growing tree once per fact.
+                let mut facts = Vec::with_capacity(base.len() + additions.len());
+                let mut existing = base.iter().peekable();
+                for fact in additions {
+                    while existing.peek().is_some_and(|held| **held < fact) {
+                        record_signature_work(1);
+                        facts.push(existing.next().unwrap().clone());
+                    }
+                    record_signature_work(1);
+                    facts.push(fact);
+                }
+                facts.extend(existing.cloned());
+                FactSet::from_canonical_vec(self.policy, facts).edit()
+            } else {
+                let mut edit = base.edit();
+                for fact in additions {
+                    edit.insert_new(fact);
+                }
+                edit
+            };
+            self.observations.clear();
             edit
         };
         // Domain-wise lifting runs LAST, on the deduplicated set: the
@@ -798,9 +866,19 @@ impl FactReadSet {
         // finalised signature, from every entry point, compact
         // identically. A receipt a sibling receipt consumed is already
         // inside it.
-        drop_subsumed_receipts_in(&mut edit);
-        compact_domains_in(&mut edit, &self.aggregate_basis);
-        edit.finish()
+        let receipts_changed = drop_subsumed_receipts_in(&mut edit);
+        let domains_changed = compact_domains_in(&mut edit, &self.aggregate_basis);
+        let sealed = edit.finish();
+        if !receipts_changed && !domains_changed {
+            // The union construction itself proves every input a subset.
+            // Remember that provenance without scanning the union again.
+            for run in &runs {
+                if !run.ptr_eq(&sealed) {
+                    crate::facts::fact_set::subset_memo::record_subset(run, &sealed);
+                }
+            }
+        }
+        sealed
     }
 
     /// Seal the tracer into its immutable, complete signature.
@@ -948,6 +1026,14 @@ impl FactReadSetCell {
             .absorb_canonical_signature(signature);
     }
 
+    /// Whether this scope already holds `fact`, through `&self`. See
+    /// [`FactReadSet::holds`].
+    #[inline]
+    #[must_use]
+    pub fn holds(&self, fact: &FactVersionRef) -> bool {
+        self.inner.borrow().holds(fact)
+    }
+
     /// The mark of everything observed so far, through `&self`. See
     /// [`FactReadSet::mark`].
     #[inline]
@@ -1080,7 +1166,7 @@ fn terminal_tail<'f>(facts: impl DoubleEndedIterator<Item = &'f FactVersionRef>)
 
 /// [`crate::facts::fact_cache::drop_subsumed_receipts`] on a set under
 /// construction: only its receipts (its tail) are read.
-fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
+fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) -> bool {
     let receipts: smallvec::SmallVec<[crate::facts::receipt::ResultReceipt; 2]> = edit
         .iter()
         .rev()
@@ -1094,7 +1180,7 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
         .flatten()
         .collect();
     if receipts.len() < 2 {
-        return;
+        return false;
     }
     let mut kept: Vec<FactVersionRef> = receipts
         .iter()
@@ -1104,7 +1190,7 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
     let before = kept.len();
     crate::facts::fact_cache::drop_subsumed_receipts(&mut kept);
     if kept.len() == before {
-        return;
+        return false;
     }
     for receipt in receipts {
         let fact = FactVersionRef::Receipt(receipt);
@@ -1112,21 +1198,22 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
             edit.remove(&fact);
         }
     }
+    true
 }
 
 /// [`compact_domains`] on a set under construction: a set that cannot lift
 /// (no wider than one bucket's bound and holding no aggregate) is left as
 /// it is without being read; otherwise the lifted facts are removed and the
 /// aggregates inserted, every untouched node staying shared.
-fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) {
+fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) -> bool {
     let policy = edit.policy();
     if edit.len() <= policy.precise_domain_max() && !terminal_tail(edit.iter()).1 {
-        return;
+        return false;
     }
     let before: Vec<FactVersionRef> = edit.iter().cloned().collect();
     let mut after = before.clone();
     if !compact_domains(&mut after, basis, policy) {
-        return;
+        return false;
     }
     let (mut i, mut j) = (0, 0);
     let mut removed = Vec::new();
@@ -1164,6 +1251,7 @@ fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) {
     for fact in added {
         edit.insert(fact);
     }
+    true
 }
 
 /// Seal an arbitrary fact collection as a complete signature: sort,
@@ -1389,6 +1477,65 @@ mod finalise_tests {
             large <= 6 * small,
             "canonical merge work grew from {small} to {large} over 4x input"
         );
+    }
+
+    #[test]
+    fn overlapping_batches_preserve_versions_and_shared_inputs() {
+        let policy = FactPolicy::production();
+        for count in [8, 64, 512, 2048] {
+            let base = policy.set_of((0..count).map(|index| fact(index * 2)).collect::<Vec<_>>());
+            let snapshot = base.to_vec();
+            let other = policy.set_of((0..count).map(fact).collect::<Vec<_>>());
+            let mut changed = fact(0);
+            if let FactVersionRef::FileWholeHash { hash, .. } = &mut changed {
+                *hash = [99; 16];
+            }
+            let mut read = FactReadSet::new(policy);
+            read.absorb_canonical_signature(&base);
+            read.absorb_canonical_signature(&other);
+            read.observe(changed.clone());
+            let FactReadSetFinalise::Ok(sealed) = read.finalise() else {
+                panic!("stable union must seal");
+            };
+            let expected = policy.set_of(
+                snapshot
+                    .iter()
+                    .cloned()
+                    .chain(other.iter().cloned())
+                    .chain([changed])
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(sealed, expected);
+            assert_eq!(base.to_vec(), snapshot, "shared input stays immutable");
+            assert!(crate::facts::fact_set::subset_memo::known_subset(
+                &base, &sealed
+            ));
+            assert!(crate::facts::fact_set::subset_memo::known_subset(
+                &other, &sealed
+            ));
+        }
+    }
+
+    #[test]
+    fn compacted_receipts_do_not_prove_input_membership() {
+        let policy = FactPolicy::production();
+        let child =
+            FactVersionRef::Receipt(crate::facts::receipt::ResultReceipt::new(vec![fact(0)]));
+        let parent = FactVersionRef::Receipt(crate::facts::receipt::ResultReceipt::new(vec![
+            child.clone(),
+        ]));
+        let input = policy.set_of([child.clone()]);
+        let mut read = FactReadSet::new(policy);
+        read.absorb_canonical_signature(&input);
+        read.observe(parent.clone());
+        let FactReadSetFinalise::Ok(sealed) = read.finalise() else {
+            panic!("stable receipts must seal");
+        };
+        assert!(sealed.contains(&parent));
+        assert!(!sealed.contains(&child));
+        assert!(!crate::facts::fact_set::subset_memo::known_subset(
+            &input, &sealed
+        ));
     }
 
     #[test]

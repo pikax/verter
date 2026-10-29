@@ -11102,11 +11102,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// invalidates on the target's next edit, so a warm answer can never
     /// carry a superseded version while the class file keeps its
     /// member-fact precision (an unrelated class-file edit still reuses).
+    /// Returns `false` when a referenced target's current content hash is
+    /// unavailable: the precise read declines so the whole-file path, whose
+    /// evidence does not depend on observing that version, handles it.
     fn observe_referenced_target_versions<'t>(
         &self,
         tys: impl Iterator<Item = &'t verter_type_expr::TypeExpr>,
         name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
-    ) {
+    ) -> bool {
         let mut pending: Vec<&verter_type_expr::TypeExpr> = tys.collect();
         let mut observed: Vec<&str> = Vec::new();
         while let Some(ty) = pending.pop() {
@@ -11121,14 +11124,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let canonical = root.canonical_id.as_ref();
                     if !observed.contains(&canonical) {
                         observed.push(canonical);
-                        if let Some(hash) = self.ctx.authoritative_current_content_hash(canonical) {
-                            crate::resolver_core::resolver_context::observe_fan_out(
-                                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                                    canonical_id: Arc::from(canonical),
-                                    hash,
-                                },
-                            );
-                        }
+                        let Some(hash) = self.ctx.authoritative_current_content_hash(canonical)
+                        else {
+                            return false;
+                        };
+                        crate::resolver_core::resolver_context::observe_fan_out(
+                            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                                canonical_id: Arc::from(canonical),
+                                hash,
+                            },
+                        );
                     }
                     pending.extend(type_arguments.iter());
                 }
@@ -11141,6 +11146,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => {}
             }
         }
+        true
     }
 
     /// The member-precise answer of a read of `name` that the class's own
@@ -11245,7 +11251,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !options.strict_null_checks || options.exact_optional_property_types {
             return None;
         }
-        self.observe_referenced_target_versions(referenced_tys.iter().copied(), name_resolution);
+        if !self.observe_referenced_target_versions(referenced_tys.iter().copied(), name_resolution)
+        {
+            return None;
+        }
         let context = crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Navigate,
         )

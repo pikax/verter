@@ -1,0 +1,5 @@
+error[E0599]: no method named `drive` found for mutable reference `&mut WorkspaceResolution` in the current scope
+ --> tests/compile-fail/owned_workspace_no_blocking_driver.rs:3:13
+  |
+3 |     handoff.drive();
+  |             ^^^^^ method not found in `&mut WorkspaceResolution`

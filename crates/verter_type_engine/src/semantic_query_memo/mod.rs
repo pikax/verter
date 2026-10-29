@@ -606,13 +606,13 @@ pub struct SemanticGraphStore {
     /// `debug_assertions`.
     #[cfg(any(test, feature = "test-support"))]
     invalidate_canonical_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
-    /// Per-store test-only counter: incremented by one IMMEDIATELY before
-    /// a cooperative joiner blocks on the per-entry `ready` condvar via
-    /// `wait_while` in [`Self::execute_cooperative`]. Unlike the in-flight
-    /// `Arc` strong count (which rises when a joiner merely *clones* the
-    /// entry, one step BEFORE it reaches the condvar), this counter proves
-    /// the joiner is genuinely SUSPENDED on the condvar — the precise
-    /// invariant a condvar-pairing test asserts. Read via
+    /// Per-store test-only counter: incremented by one once a cooperative
+    /// joiner has registered its waker on the flight, under the flight's
+    /// lock, so a producer publishing afterwards must wake it. Unlike the
+    /// in-flight `Arc` strong count (which rises when a joiner merely
+    /// *clones* the entry, before it waits), this counter proves the joiner
+    /// is genuinely SUSPENDED — the precise invariant a condvar-pairing test
+    /// asserts. Read via
     /// [`Self::test_joiner_on_condvar_count`].
     ///
     /// **Per-store scope (test hermeticity).** Like every other gate on
@@ -623,6 +623,15 @@ pub struct SemanticGraphStore {
     /// the production cooperative-wait path is unchanged.
     #[cfg(any(test, feature = "test-support"))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
+    /// TEST-ONLY: the lock and wake a joiner announces its suspension under, so a test can
+    /// wait for [`Self::joiner_on_condvar_count`] to rise without polling it.
+    #[cfg(any(test, feature = "test-support"))]
+    joiner_suspended: (parking_lot::Mutex<()>, parking_lot::Condvar),
+    /// TEST-ONLY: how many times a claimant has taken a reference to an in-flight entry,
+    /// announced on the paired condvar, so a test waits for an entry's strong count to rise
+    /// without polling it.
+    #[cfg(any(test, feature = "test-support"))]
+    inflight_referenced: (parking_lot::Mutex<u64>, parking_lot::Condvar),
     /// Direct-edge reverse index: each canonical names the evidence
     /// (carriers and receipts, cached or not) whose own facts read
     /// it, each consumed receipt names the evidence that consumed it, and
@@ -925,6 +934,10 @@ impl SemanticGraphStore {
             invalidate_canonical_inflight_abort_gate: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             joiner_on_condvar_count: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            joiner_suspended: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            inflight_referenced: Default::default(),
             canonical_to_entries,
             dep_signature_interner,
             project_dep_name,

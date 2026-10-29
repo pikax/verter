@@ -1282,7 +1282,9 @@ jobs:
       - uses: actions/checkout@v5
       # The native probe links with `cc`; the image is not guaranteed to ship it.
       - name: Ensure a C linker
-        run: command -v cc >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: command -v cc >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev)
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-unknown-unknown

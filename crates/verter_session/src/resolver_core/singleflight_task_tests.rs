@@ -59,6 +59,104 @@ impl Gate {
 type Group = SingleflightGroup<&'static str, usize, ()>;
 type Answer = Result<SingleflightRunResult<usize>, ()>;
 
+fn synchronous_cross_thread_cycle(group: Group) {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let group = Arc::new(group);
+    let parked = group.subscribe_joiner_park();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let mut releases = Vec::new();
+    let mut threads = Vec::new();
+    for (key, other, fallback) in [("x", "y", 20), ("y", "x", 10)] {
+        let group = group.clone();
+        let entered = entered_tx.clone();
+        let done = done_tx.clone();
+        let (release_tx, release_rx) = mpsc::channel();
+        releases.push(release_tx);
+        threads.push(std::thread::spawn(move || {
+            let answer = group.run(key, token(), || {
+                entered.send(()).map_err(|_| ())?;
+                release_rx.recv().map_err(|_| ())?;
+                let nested = group.run(other, token(), || Ok(fallback))?;
+                Ok(*nested.value + 1)
+            });
+            let _ = done.send(());
+            answer
+        }));
+    }
+    let deadline = Duration::from_secs(5);
+    let completed = (|| {
+        entered_rx.recv_timeout(deadline).ok()?;
+        entered_rx.recv_timeout(deadline).ok()?;
+        releases[0].send(()).ok()?;
+        parked.recv_timeout(deadline).ok()?;
+        releases[1].send(()).ok()?;
+        done_rx.recv_timeout(deadline).ok()?;
+        done_rx.recv_timeout(deadline).ok()?;
+        Some(())
+    })();
+
+    // Release every hold and retire parked claims before any assertion,
+    // including when cycle detection fails and both threads are waiting.
+    if completed.is_none() {
+        group.clear();
+    }
+    drop(releases);
+    let answers: Vec<_> = threads.into_iter().map(|thread| thread.join()).collect();
+    assert!(completed.is_some(), "cross-thread cycle must complete");
+    let values: Vec<_> = answers
+        .into_iter()
+        .map(|answer| {
+            *answer
+                .expect("worker returned")
+                .expect("flight answered")
+                .value
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [12, 11],
+        "only the cycle-closing join computes inline"
+    );
+    assert_eq!(group.task_registry().wait_count_for_tests(), 0);
+    assert_eq!(group.task_registry().active_task_count_for_tests(), 0);
+    assert!(group.flights.lock().lanes.is_empty());
+}
+
+#[test]
+fn default_synchronous_flights_break_cross_thread_cycles() {
+    synchronous_cross_thread_cycle(Group::default());
+}
+
+#[test]
+fn composed_synchronous_flights_break_cross_thread_cycles() {
+    synchronous_cross_thread_cycle(Group::with_task_registry(TaskRegistry::default()));
+}
+
+#[test]
+fn default_synchronous_flights_reuse_ambient_task_authority() {
+    let registry = TaskRegistry::default();
+    let caller = ExecutionScope::enter(&registry);
+    let group = Group::default();
+    let answer = group
+        .run("x", token(), || {
+            let producer = ExecutionScope::current_task().expect("producer task installed");
+            assert_ne!(producer.id(), caller.task().id());
+            let other = registry.register_task();
+            let edge = other.wait_for(&producer).expect("ambient authority reused");
+            drop(edge);
+            Ok(7)
+        })
+        .unwrap();
+    assert_eq!(*answer.value, 7);
+    assert!(group.registry.get().is_none());
+    drop(caller);
+    assert_eq!(registry.wait_count_for_tests(), 0);
+    assert_eq!(registry.active_task_count_for_tests(), 0);
+}
+
 /// One flight claim computing `value` once `gate` passes, counting computes.
 fn claim<'g>(
     group: &'g Group,

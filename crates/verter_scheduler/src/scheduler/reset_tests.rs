@@ -47,13 +47,12 @@ fn native_driver_work_waits_for_identity_and_lifecycle_publication() {
     let scheduler = scheduler();
     let _cleanup = StopDriver(Arc::clone(&scheduler));
     let (done, completed) = std::sync::mpsc::channel();
+    let waker = Waker::from(Arc::new(Completed(done)));
     let mut admission = scheduler.begin_submit_request(request("/startup.ts"));
     let Poll::Ready(mut completion) = admission.poll(Waker::noop()) else {
         panic!("empty inbox admits the request");
     };
-    assert!(completion
-        .poll(&Waker::from(Arc::new(Completed(done))))
-        .is_pending());
+    assert!(completion.poll(&waker).is_pending());
     let start = scheduler.spawn_native_driver();
     let before_start = completed.recv_timeout(std::time::Duration::from_millis(100));
     assert!(scheduler.driver_thread_id.lock().is_some());
@@ -68,13 +67,20 @@ fn native_driver_work_waits_for_identity_and_lifecycle_publication() {
         ),
         "no callback may run before lifecycle publication completes"
     );
-    completed
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .unwrap();
-    assert!(matches!(
-        completion.poll(Waker::noop()),
-        Poll::Ready(CompletionState::Ready(_))
-    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match completion.poll(&waker) {
+            Poll::Ready(state) => {
+                assert!(matches!(state, CompletionState::Ready(_)));
+                break;
+            }
+            // Producer publication is an advisory wake too. Keep the same
+            // subscription armed and wait for terminal readiness.
+            Poll::Pending => completed
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("the admitted request completes"),
+        }
+    }
 }
 
 #[test]

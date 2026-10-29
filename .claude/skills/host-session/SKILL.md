@@ -101,8 +101,8 @@ back into the host for a service it was not given.
   nested metadata evaluation and the handed-out compile producer can still
   block. The [delivery boundary](../../../docs/arch/root-continuations.md#current-delivery-boundary)
   distinguishes the current API from complete root resumability.
-- `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
-  is the only route by which a workspace receives it, both at construction and on
+- `WorkspaceServices` holds the resolve-extension policy and shared task registry.
+  `WorkspaceServices::attach` injects both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace
   Engine binds the process-local `ResolutionRetention` account at its own
   construction, and replacing it is a `test-support` seam only.
@@ -116,6 +116,63 @@ back into the host for a service it was not given.
   `.vue`/`.svelte` resolution. The NAPI and WASM bindings default to it and
   spell no framework list of their own.
 
+Resolver request flights expose owned polling and producer transfer over the
+host's shared registry. Their synchronous compatibility entries drive the same
+core. Standalone default groups reuse ambient task authority or lazily initialize
+their existing registry at the synchronous boundary; cross-thread wait cycles
+therefore use the same inline computation escape as composed groups.
+See [root continuations](../../../docs/arch/root-continuations.md#resolver-request-flights)
+for errors, cancellation, lifetime and the higher-caller conversion inventory.
+Base capture similarly exposes `VerterHost::begin_store_view`; its owned
+producer transfers snapshot or pending root-release reclamation work outside
+poll. Reset stops old subscribers while retaining any physically running claim
+until release. A final subscriber host pin protects the lowering service through
+host teardown, then uses the lowering handoff's nonjoining queue closure; held
+shard work cannot block cancellation. See [base capture](../../../docs/arch/root-continuations.md#base-store-view-capture).
+Owned declaration-lowering demands defensively refuse their waiter's already
+owned shard before admission, including all-or-none batch preflight; pure
+callbacks still must not reenter the service or host.
+Their owned poll yields `LoweringStep::{Work,Value}`. WASM transfers its pure
+inline operation as independent `LoweringWork` and observes the same retained
+reply; parser work never runs in poll. External sync drivers run that token,
+and stop after transfer detaches only the subscriber.
+Compatibility index materializers consume `LoweringStep` too: on WASM they run
+transferred work between polls before awaiting its retained reply. Raw readiness
+polling alone cannot advance an inline lease or index operation.
+Upsert retains the source-admission fence through host and workspace publication,
+then releases it before unchanged-carrier route materialization or program
+discovery joins indexed-file flights. Snapshot-fenced route work is carried out
+of the atomic phase with its old and committed source snapshots; the existing
+materializer still checks the source generation and route interface before
+publication. A flight producer may itself need the admission fence to integrate
+its scheduler snapshot.
+
+Carrier publication also shares that registry. `CarrierPublicationStore` is a
+cheap cloned handle over its existing publication/stable-parse tables, stable
+unit authority and audit log. Every constructor requires its composition root's
+task registry, and the host supplies the existing shared authority. Standalone
+callers also supply a registry; synchronous reentry follows the same task graph.
+`begin_publication` owns accepted source/context and returns a poll-only
+subscriber; its independent `PublicationProducer` transfers initial retained
+lookup/adoption, nested stable production and envelope finishing as external
+`PublicationWork`. `begin_stable_parse` exposes the child owned protocol.
+Neither poll performs backend work or enters a blocking driver. The synchronous
+`publish_or_get` drives the same continuation externally.
+
+The initiating context's cancellation belongs only to its subscriber. Producer
+P/S task and stop scopes are independent and restore before wakes. Strong
+publication delivery lasts until attached consumers drain, after which the
+existing weak terminal remains. A new attachment pins a completed live envelope
+under the subscription lock, or restarts production if that envelope expired.
+A stable parsed value carries its retirement
+interest into external Finish Work, so dropping the P continuation cannot
+unlist a parse before that work finishes. Retirement checks the exact current
+lane and live interests; all typed terminal/drop paths withdraw their own
+registrations and task pins. Existing source/grammar fences, adoption
+provenance, parser counters and complete answers on retention denial remain
+unchanged. The full result/lifetime contract and caller assignments are in
+[root continuations](../../../docs/arch/root-continuations.md#carrier-publication-and-stable-parse).
+
 The charter boundary names map onto existing owners; there are no Rust types
 called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
 `@verter/component-meta` is unrelated):
@@ -124,7 +181,7 @@ called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
 | --- | --- | --- |
 | `VerterHost` | `VerterHost` (`host_construction.rs`, `host_lifecycle.rs`) | One host; the composition root |
 | `HostServices` | `framework::HostServices` (`framework/registry.rs`): capability catalog, adapter registry, framework options | One host; composed once at construction |
-| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy | One host; attached to each workspace through `WorkspaceServices::attach` |
+| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy and shared TaskRegistry | One host; attached to each workspace through `WorkspaceServices::attach` |
 | `RequestSession` | `resolver_core::request_bound::RequestBoundAdapter<L>` over a `RequestBoundLifecycle` — `SessionRequestLifecycle<'a>` (`SessionResolverContext<'a>`) or `HostRequestLifecycle<'a>` (`HostResolverContext<'a>`) | One request; host, session view and request view are borrowed for `'a` |
 | `ProjectSession` | `meta::MetaProject` (project lifetime; terminal `shutdown`) plus `meta::MetaSession` (session lifetime; `close`, and close on drop) | Project until shutdown; session until close or drop |
 
@@ -133,6 +190,22 @@ Session lifetimes are scoped. `MetaSession` lends three audited-lane operations
 the host. Session views likewise expose no host accessor. LSP background
 admission waits on the owning server's `HandlerActivity`, held per server, not
 on process-global handler counters.
+
+Workspace resolution exposes `WorkspaceRead::begin_resolution` and
+`begin_project_resolution`. The owned subscriber transfers an independent
+producer; producer polling transfers external `ResolutionWork` slices without
+executing resolver or IO work. Flights and publication gates register readiness
+and task edges in the host's existing TaskRegistry, injected through
+`WorkspaceServices::attach`. Captured worlds, overlay input, input-budget ledger
+and filesystem discovery/frozen replay survive suspension. Directory receipts
+follow the continuation across worker migration. Shared-workspace attachment joins existing task
+cycle authorities without replacing task identities, live waits or installed
+scopes; released registration owners leave no pool history. A replaced pinned publication
+is refused at the final fence. Synchronous importer/project entries drive the
+same continuations externally. Adapter workspaces lacking this ownership protocol
+return typed `Unsupported` from the owned entry. Full result, cancellation,
+lifetime, backpressure and caller-assignment inventory:
+[`root-continuations.md`](../../../docs/arch/root-continuations.md#workspace-resolution).
 
 ## Vue Macro Codegen Producer
 
@@ -808,7 +881,7 @@ Project routing preserves bulk carrier activation and change notifications: reso
 
 ### Retention across a document lifecycle
 
-A document CLOSE is the moment its edited versions become unreachable, and the close lifecycle now releases what the session retained for them instead of leaving it to amortised sweeps: `handle_did_close` asks the indexed artifact store to reclaim retired versions no captured root still sees (`VerterHost::reclaim_retired_artifacts`), `VerterHost::evict` evicts the closed document's semantic caches (`ProjectTypeStore::close_canonical`: memo entries, union views, signature-token roots and shape-cache entries bound to its content; the nodes are destroyed as their last owner releases them, and ids are never reused), and the artifact store sweeps as soon as one file holds more than two retired versions (`RECLAIM_TRIGGER_CHAIN_LENGTH`), not only every 64 retirements. Retirements during an edit burst stay reachable from the store view published before it, so the amortised sweeps then keep them; when the store-view manager replaces that view, and again whenever it hands out its current view, it asks the store to sweep (`FileArtifactStore::reclaim_after_root_release`, a no-op unless a root was released and a sweep left versions behind), so superseded versions and their parse-snapshot leases do not outlive the next answered request even when a caller released the old view only after its replacement was published. The carrier publication store keeps at most two persisted parse candidates per file, prunes superseded lanes when a file publishes new content, and keeps exact audit counters over a bounded event window. Diagnostics publication no longer holds a mutex across the client enqueue: the send registers a cancellable slot under the diagnostics state lock, and a close CANCELS a suspended send instead of waiting for it.
+A document CLOSE is the moment its edited versions become unreachable, and the close lifecycle now releases what the session retained for them instead of leaving it to amortised sweeps: `handle_did_close` asks the indexed artifact store to reclaim retired versions no captured root still sees (`VerterHost::reclaim_retired_artifacts`), `VerterHost::evict` evicts the closed document's semantic caches (`ProjectTypeStore::close_canonical`: memo entries, union views, signature-token roots and shape-cache entries bound to its content; the nodes are destroyed as their last owner releases them, and ids are never reused), and the artifact store sweeps as soon as one file holds more than two retired versions (`RECLAIM_TRIGGER_CHAIN_LENGTH`), not only every 64 retirements. Retirements during an edit burst stay reachable from the store view published before it, so the amortised sweeps then keep them; when the store-view manager replaces that view, and again before it hands out its current view, its external producer/compatibility driver asks the store to sweep (`FileArtifactStore::reclaim_after_root_release`, a no-op unless a root was released and a sweep left versions behind), so superseded versions and their parse-snapshot leases do not outlive the next answered request even when a caller released the old view only after its replacement was published. The carrier publication store keeps at most two persisted parse candidates per file, prunes superseded lanes when a file publishes new content, and keeps exact audit counters over a bounded event window. Diagnostics publication no longer holds a mutex across the client enqueue: the send registers a cancellable slot under the diagnostics state lock, and a close CANCELS a suspended send instead of waiting for it.
 
 
 **A close evicts caches; counted ownership destroys nodes.** `VerterHost::evict` runs `ProjectTypeStore::close_canonical` synchronously: it evicts the semantic-graph and shape-cache owners bound to the closed content (memo candidates, union views, hash-cons memos, signature-token roots, shape entries) and drains the destroyed-node sidecar log. Each closed node is destroyed when its last owner lets go, so a computation still holding one keeps reading the same payload, and nodes the reload interns are never touched. There is no activity gate, no queued release and no watermark; `verter_lsp` holds the host as a plain `Arc<VerterHost>` (`documents::SharedHost`). `retention.closesApplied` / `closeElapsedMaxMicros` / `lastClose` report what closes cost, and `pendingDestroyedNodes` the bounded sidecar log.
@@ -1246,7 +1319,7 @@ Native canonical loading goes through `ensure_loaded` — the scheduler is the s
 
 **Singleflight LANE identity is NARROWER than the reuse oracle.** The coalescing-lane identity is `StoreViewCompatToken`, whose `validity_fingerprint` is the `lane_fingerprint` — delegating to `external_supersession_fingerprint`, the SAME oracle the promotion fence `is_stable` applies. The fingerprint folds ONLY the external-supersession dimensions: `store_view_epoch` + `project_generation` + workspace `content_generation` (file-set mutations — watcher recovery / dependency appearance — advance it without any host-side epoch; a snapshot's edge-currency gates evaluate against it at build time, so a cached snapshot MUST miss once it moves; a cold compute's own loads never advance it, so it cannot self-fence) + folded env hashes (`env_hash_fold`) + `project_identity` + frozen overlay identity. The additive generations (`artifact_generation` / `load_generation`) are DELIBERATELY EXCLUDED from the lane identity: a cold compute advances them through its OWN work (materialising content-addressed caches gated by `store_view_epoch`, loading its dependencies, admitting its own routes), so two identical concurrent requests snapshot at slightly different points in the load sweep — folding those generations would split them across separate lanes and spawn multiple cold winners instead of one leader + N-1 dedup-joining followers. Because the lane oracle IS the promotion oracle, a follower that joins a lane shares exactly the external dimensions the leader's promotion was gated on, so the leader's dedup-joined result is validation-equivalent for it; and a request whose snapshot externally-supersedes the leader's (an epoch / project / env / identity / overlay change, even at an equal `store_view_epoch`) gets a different lane key and forks its own lane — it never receives a result computed under a different external view. The complete `StoreViewValidationToken` (including the additive generations) REMAINS the store-view reuse/validity oracle — the `StoreViewManager` rebuilds its base snapshot on any additive-generation change; only the LANE identity was narrowed (reuse-oracle = full token; lane-identity = external fingerprint).
 
-**Base-view build:** no-torn-return (a coherent capture or `Superseded`, never a torn publishable view) and SINGLEFLIGHTED — on a token miss exactly one caller sweeps while concurrent token-miss callers wait on a condvar and clone the winner's `Arc<StoreViewSnapshot>` (no N-way parallel sweeps). The component-meta cold publish fence rechecks the computed-under token against the live host before promotion (mismatch → return-only, no shared-cache warm), keying off `externally_superseded_by` so the compute's OWN artifact publications do not self-fence.
+**Base-view build:** no-torn-return (a coherent capture or `Superseded`, never a torn publishable view) and SINGLEFLIGHTED — on a token miss exactly one caller sweeps while concurrent token-miss callers subscribe to its physical claim release and recapture the winner's `Arc<StoreViewSnapshot>` (no N-way parallel sweeps). The component-meta cold publish fence rechecks the computed-under token against the live host before promotion (mismatch → return-only, no shared-cache warm), keying off `externally_superseded_by` so the compute's OWN artifact publications do not self-fence.
 
 **Captured resolution root (C5a).** The snapshot also stamps the workspace's immutable published resolution world (`Option<Arc<verter_workspace::CapturedResolutionWorld>>`, captured O(1) in the same `PreBuildTokenInputs` read window via `WorkspaceRead::capture_resolution_world`: the current base root plus, for a session population, that session's overlay root). It is the SOLE authority for the `ResolveImportsFactRef::Resolution` arm — `HostStoreView::validates_resolution_fact` (shared by `validates_resolve_imports_domain` and its overlay-aware `_for_content_hash` sibling; `RequestStoreView` routes resolution facts straight to the base view because the completion overlay carries no resolver observations). A view with NO captured world validates no resolution fact. It stays OUT of the token because validity is fact-precise (world IDENTITY is barred from being a cross-root warm-validity oracle) and because a cold compute publishes replacement worlds through its OWN work (a first observation of any path records an evidence baseline), which would self-fence exactly like the additive generations. Residual, owned by C4/C5b: a view captured between a content mutation and the reader-driven evidence refresh holds a root that has not yet observed the change, so it keeps validating the pre-mutation witness until the refresh advances the fact. On a SESSION view, `with_session_overlay` replaces the root with the request overlay's effective world (`ResolutionOverlaySnapshot::effective_world` over the captured one) and keeps the snapshot itself in `StoreViewRoots::resolution_overlay`, so the session context resolves through, and the view validates against, one snapshot built once per request.
 

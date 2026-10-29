@@ -22,6 +22,7 @@ use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
+use verter_semantic_source::decl_lowering::LoweringStep;
 
 use crate::VerterHost;
 
@@ -900,7 +901,12 @@ impl VerterHost {
         let mut lease =
             self.decl_lowering
                 .begin_acquire_lease(&snapshot_key, &eval_source, source_type);
-        let cold_lease = std::future::poll_fn(|cx| lease.poll(cx.waker())).await.0;
+        let (cold_lease, _) = loop {
+            match std::future::poll_fn(|cx| lease.poll_step(cx.waker())).await {
+                LoweringStep::Work(work) => work.run(),
+                LoweringStep::Value(value) => break value,
+            }
+        };
         // A program refused for want of stack is not retained: the flight
         // publishes nothing for the source, never an artifact read off an
         // empty program.
@@ -1029,7 +1035,12 @@ impl VerterHost {
                 })
             },
         );
-        let outcome = std::future::poll_fn(|cx| index.poll(cx.waker())).await;
+        let outcome = loop {
+            match std::future::poll_fn(|cx| index.poll_step(cx.waker())).await {
+                LoweringStep::Work(work) => work.run(),
+                LoweringStep::Value(value) => break value,
+            }
+        };
         // The parse was already counted at lease acquisition above; the
         // cold-index run reused the pinned snapshot. A lease miss is
         // impossible by construction (`cold_lease` is held by this

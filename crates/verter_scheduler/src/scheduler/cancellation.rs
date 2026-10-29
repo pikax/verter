@@ -37,6 +37,9 @@ pub(super) struct ScopedFlightOwner {
 
 #[derive(Default)]
 pub(super) struct ScopedCacheFlightState {
+    /// Provisional producer until a subscriber claims execution. This belongs
+    /// to the live flight, not to queued envelopes that may outlive it.
+    pub(super) admission_task: Option<ExecutionTask>,
     pub(super) owners: HashMap<u64, ScopedFlightOwner>,
     pub(super) aggregate: Option<CancellationToken>,
     pub(super) dispatched: bool,
@@ -48,11 +51,28 @@ pub(super) struct ScopedCacheFlightState {
 }
 
 impl ScopedCacheFlight {
-    pub(super) fn new(delivery: Arc<DagMutex>) -> Self {
+    pub(super) fn new(
+        delivery: Arc<DagMutex>,
+        task: verter_execution::tasks::ExecutionTask,
+    ) -> Self {
         Self {
-            state: Mutex::new(ScopedCacheFlightState::default()),
+            state: Mutex::new(ScopedCacheFlightState {
+                admission_task: Some(task),
+                ..ScopedCacheFlightState::default()
+            }),
             delivery,
         }
+    }
+
+    fn clear_owners(&self, state: &mut ScopedCacheFlightState) {
+        state.admission_task = None;
+        state.producer = None;
+        for owner in state.owners.values() {
+            if let Some(registration) = &owner.aggregate_registration {
+                self.delivery.deliver(vec![registration.detach_deferred()]);
+            }
+        }
+        state.owners.clear();
     }
 
     /// Attach an owner before its inbox submission. Returns `false` only when
@@ -65,16 +85,19 @@ impl ScopedCacheFlight {
             return false;
         }
         let aggregate_registration = match state.aggregate.as_ref() {
-            Some(aggregate) => match aggregate.register_owner(request.clone()) {
-                Some(registration) => Some(registration),
-                None => {
-                    state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                    state.producer = None;
-                    state.owners.clear();
-                    self.delivery.deliver(vec![state.wakers.take()]);
-                    return false;
+            Some(aggregate) => {
+                let (owner, wakes) = aggregate.register_owner_deferred(request.clone());
+                self.delivery.deliver(vec![wakes]);
+                match owner {
+                    Some(registration) => Some(registration),
+                    None => {
+                        state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                        self.clear_owners(&mut state);
+                        self.delivery.deliver(vec![state.wakers.take()]);
+                        return false;
+                    }
                 }
-            },
+            }
             None => None,
         };
         let prior = state.owners.insert(
@@ -111,23 +134,26 @@ impl ScopedCacheFlight {
         if state.aggregate.is_some() {
             return true;
         }
-        // Owner detachment, token probes and explicit DAG cancellation can
-        // all notify aggregate subscribers. Route every path through the same
-        // deferral as flight/completion wakes before registering any owner.
         aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
             &self.delivery,
         ))));
-        let Some(registrations) =
-            aggregate.register_owners(state.owners.values().map(|owner| owner.request.clone()))
-        else {
+        let (registrations, wakes) = aggregate
+            .register_owners_deferred(state.owners.values().map(|owner| owner.request.clone()));
+        self.delivery.deliver(vec![wakes]);
+        let Some(registrations) = registrations else {
             state.terminal = Some(ScopedCacheTerminal::Cancelled);
-            state.producer = None;
-            state.owners.clear();
+            self.clear_owners(state);
             self.delivery.deliver(vec![state.wakers.take()]);
             return false;
         };
         for (owner, registration) in state.owners.values_mut().zip(registrations) {
             owner.aggregate_registration = Some(registration);
+        }
+        if aggregate.is_cancelled() {
+            state.terminal = Some(ScopedCacheTerminal::Cancelled);
+            self.clear_owners(state);
+            self.delivery.deliver(vec![state.wakers.take()]);
+            return false;
         }
         state.aggregate = Some(aggregate);
         true
@@ -138,7 +164,11 @@ impl ScopedCacheFlight {
     pub(super) fn detach_owner(&self, owner_id: u64) -> bool {
         let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
-        state.owners.remove(&owner_id);
+        if let Some(owner) = state.owners.remove(&owner_id) {
+            if let Some(registration) = &owner.aggregate_registration {
+                self.delivery.deliver(vec![registration.detach_deferred()]);
+            }
+        }
         if state.terminal.is_some() {
             return false;
         }
@@ -151,8 +181,7 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(ScopedCacheTerminal::Cancelled);
-        state.producer = None;
-        state.owners.clear();
+        self.clear_owners(&mut state);
         self.delivery.deliver(vec![state.wakers.take()]);
         true
     }
@@ -165,8 +194,7 @@ impl ScopedCacheFlight {
         if state.terminal.is_some() || aggregate.is_cancelled() {
             if state.terminal.is_none() {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.producer = None;
-                state.owners.clear();
+                self.clear_owners(&mut state);
                 self.delivery.deliver(vec![state.wakers.take()]);
             }
             return false;
@@ -190,8 +218,7 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(terminal);
-        state.producer = None;
-        state.owners.clear();
+        self.clear_owners(&mut state);
         self.delivery.deliver(vec![state.wakers.take()]);
         true
     }
