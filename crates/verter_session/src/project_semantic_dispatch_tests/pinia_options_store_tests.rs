@@ -9,7 +9,7 @@
 //! its header). Each answer is the benchmark's named demand: a probe alias
 //! resolved by name in a project of the benchmark library and the scenario,
 //! projected to its wire answer. Every store answer is TypeScript
-//! 7.1.0-beta's, read through its native API (`getTypeAtPosition` on the probe
+//! 7.0.2's, read through its native API (`getTypeAtPosition` on the probe
 //! alias's name, then `typeToString` with `NoTruncation | InTypeAlias`)
 //! over the same files under `noLib`, in all four `strictNullChecks` ×
 //! `noImplicitAny` settings, which answer alike.
@@ -66,10 +66,10 @@ const CONTRIBUTING_MODULE: &str =
 const WHOLE_STORE: &str = "[St['count'], St['items'], St['double'], St['first'], \
      ReturnType<St['increment']>, ReturnType<St['add']>, St['$id'], St['$state']]";
 
-/// The store's state as `UnwrapRef` reads it, as TypeScript 7.1.0-beta prints it.
+/// The store's state as `UnwrapRef` reads it, as TypeScript 7.0.2 prints it.
 const STATE: &str = "{ count: number; items: { id: number; }[]; name: string; }";
 
-/// `$state` as TypeScript 7.1.0-beta prints it: the unwrapped state and the
+/// `$state` as TypeScript 7.0.2 prints it: the unwrapped state and the
 /// (empty) custom-state interface applied to the declared state.
 fn custom_state() -> String {
     format!("{STATE} & PiniaCustomStateProperties<{STATE}>")
@@ -479,7 +479,7 @@ fn state_mismatch(state: &TypeExpr) -> Option<String> {
     answer_mismatch(state, &custom_state())
 }
 
-/// Measured on TypeScript 7.1.0-beta with the marker declared by the library,
+/// Measured on TypeScript 7.0.2 with the marker declared by the library,
 /// all four settings alike and free of diagnostics: the whole store is
 /// `[number, { id: number; }[], number, { id: number; }, number, { id:
 /// number; }, "counter", S & PiniaCustomStateProperties<S>]` with `S` the
@@ -494,7 +494,7 @@ fn an_options_store_answers_every_member_as_the_checker_does() {
 }
 
 /// An authored `declare global` marker types the store as the library's
-/// does. Measured on TypeScript 7.1.0-beta, all four settings, free of
+/// does. Measured on TypeScript 7.0.2, all four settings, free of
 /// diagnostics.
 #[test]
 fn an_authored_global_marker_types_the_store() {
@@ -507,7 +507,7 @@ fn an_authored_global_marker_types_the_store() {
 
 /// The global marker a module contributes beside its own module-scope
 /// `ThisType` types the store of another module, which reads the global
-/// declaration. Measured on TypeScript 7.1.0-beta, all four settings, free of
+/// declaration. Measured on TypeScript 7.0.2, all four settings, free of
 /// diagnostics.
 #[test]
 fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store() {
@@ -622,12 +622,13 @@ fn element_mismatches(
     )
 }
 
-/// The checker's store over a module-scope `ThisType` (TypeScript 7.1.0-beta,
+/// The checker's store over a module-scope `ThisType` (TypeScript 7.0.2,
 /// all four settings alike), member by member as [`WHOLE_STORE`] lists
 /// them: every member as the marker-typed store's but `increment`, which
 /// reads `this.count` off its own object literal and recovers as `any` —
 /// TS2339 at each `this.count` and `this.items` read of the actions, in
-/// every setting and no other diagnostic.
+/// every setting, plus TS7023 on `increment` under `noImplicitAny` (its
+/// return is circular through the actions object), and no other diagnostic.
 const NAMESAKE_STORE: [&str; 8] = [
     "number",
     "{ id: number; }[]",
@@ -664,7 +665,7 @@ fn a_module_scope_namesake_is_not_the_marker() {
 /// module-scope `ThisType` there: the namesake shadows the global
 /// declaration in its own module, so the store it declares answers as with
 /// a namesake alone — the checker's [`NAMESAKE_STORE`] with the same
-/// diagnostics (TypeScript 7.1.0-beta, all four settings), and the named
+/// diagnostics (TypeScript 7.0.2, all four settings), and the named
 /// demand's same refusal.
 #[test]
 fn a_namesake_shadows_its_own_modules_global_contribution() {
@@ -686,7 +687,7 @@ fn a_namesake_shadows_its_own_modules_global_contribution() {
 /// and `$state` answer as the marker-typed store's, and every getter and
 /// action is absent from the store (TS2339 at each probe reading one), the
 /// error type `any`, never the marker-typed member. Measured on
-/// TypeScript 7.1.0-beta, all four settings. The named demand refuses the
+/// TypeScript 7.0.2, all four settings. The named demand refuses the
 /// store's call, as with a namesake, for the same absent receiver member.
 #[test]
 fn an_undeclared_marker_recovers_without_inferring_through_it() {
