@@ -96,11 +96,13 @@ Canonicalisation uses transient borrowed hash sets for wide base membership and
 distinct additions. Narrow deltas probe the persistent base directly rather
 than rebuilding its index at every enclosing seal. The choice compares the
 remaining probe count times logarithmic search depth with the base width,
-after excluding inputs covered by existing subset proofs. The filtered input
-list and both hash sets are REQUIRED merge workspace living only during sealing;
-it owns no fact storage, cache identity or optional observation. Exact equality
-preserves conflicting versions. Small deltas extend the shared base tree;
-additions wider than the base are sorted and merged into a bottom-up set.
+after excluding inputs covered by existing subset proofs; a probe count
+reduced by a remembered construction delta counts only the facts it still
+probes. The filtered input list and both hash sets are REQUIRED merge
+workspace living only during sealing; it owns no fact storage, cache identity
+or optional observation. Exact equality preserves conflicting versions. Small
+deltas extend the shared base tree; additions wider than the base are sorted
+and merged into a bottom-up set.
 The additions vector retains first-seen input order, preserving ordered runs
 for sorting instead of scrambling them through hash-index iteration.
 Signature work charges base visits, input visits, sorting and merge visits.
@@ -108,6 +110,22 @@ Known subset inputs need no repeated base walk or probe.
 An unchanged union records each input as a subset using the existing weak
 storage proof memo. Receipt or domain compaction disables this inference,
 since the resulting set may have replaced an input fact.
-This prevents repeated tree-depth lookups for overlapping evidence and growing
-tree insertion for wide disjoint batches; existing growth checks detect those
-regressions but cannot perform the merge. No proof or refusal is removed.
+Two per-demand proof memos bound the repeated cost further, both keyed by
+storage address with weak handles validating liveness, both bounded by
+prune/reset caps like the subset memo, and both drained — and closed to new
+entries — the moment this thread's last tracer pops, so a finished demand
+pins no fact storage: the seal-delta memo remembers each seal's construction
+(the widest base it extended and the exact additions over it), so a later
+seal scanning that run against a base provably holding its construction base
+probes only the remembered additions; the base-index memo remembers the
+membership index a seal built for its widest base, so sibling seals extending
+the same shared run never re-walk it. A prepared-declaration read that uses
+several authored imports replays the union of exactly those segments as ONE
+combined run, cached per used-import set on the bundle, bounded, and charged
+with the bundle's own retention, so an enclosing seal merges one run per used
+set instead of one run per import.
+This prevents repeated tree-depth lookups for overlapping evidence, growing
+tree insertion for wide disjoint batches, and the once-per-enclosing-level
+re-merge of a nested scope's whole witness; existing growth checks detect
+those regressions but cannot perform the merge. No proof or refusal is
+removed.

@@ -268,19 +268,32 @@ pub(crate) fn install_delivering(cell: &FactReadSetCell) {
 }
 
 fn push_tracer(cell: &FactReadSetCell, delivers: bool) {
-    ACTIVE_TRACERS.with(|slot| {
-        slot.borrow_mut().push(ActiveTracer {
+    let demand_started = ACTIVE_TRACERS.with(|slot| {
+        let mut stack = slot.borrow_mut();
+        let first = stack.is_empty();
+        stack.push(ActiveTracer {
             cell: cell as *const FactReadSetCell,
             delivers,
         });
+        first
     });
+    if demand_started {
+        verter_session_query::facts::fact_read_set::begin_demand_fact_memos();
+    }
 }
 
-/// Pop the top-of-stack entry. Called on the installer's `Drop`.
+/// Pop the top-of-stack entry. Called on the installer's `Drop`. Popping
+/// the LAST tracer ends this thread's demand: the per-demand proof memos
+/// in the query crate pin fact storage nothing can consult again, so they
+/// stop accepting entries and drain here.
 pub(crate) fn clear() {
-    ACTIVE_TRACERS.with(|slot| {
+    let stack_now_empty = ACTIVE_TRACERS.with(|slot| {
         slot.borrow_mut().pop();
+        slot.borrow().is_empty()
     });
+    if stack_now_empty {
+        verter_session_query::facts::fact_read_set::end_demand_fact_memos();
+    }
 }
 
 /// Run `f` with no fact tracer or recorder installed, then restore the stack.
