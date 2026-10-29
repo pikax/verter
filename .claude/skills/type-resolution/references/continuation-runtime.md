@@ -241,7 +241,7 @@ non-producing arms do not constitute evidence of a converted continuation.
 
 | Resolver boundary | Current owner and reachability |
 | --- | --- |
-| Indexed input | `FamilyStep::Load` uses `begin_indexed_load`; direct `ensure_indexed_ready_serve` calls inside builders and resolver adapters are separate boundaries. |
+| Indexed input | `FamilyStep::Load` uses `begin_indexed_load`; its scheduler-backed handoff retains both source loading and the existing pollable indexed materialization under the original execution task. A source-present cold index yields on its owner shard, and cancellation/drop releases its retained flight. The handoff transfers complete indexed deliveries, including valid unpublished artifacts, into the frame’s existing reader-scoped consumed-load storage. Reads replay whole-content/route observations and preserve ReturnOnly status through the request’s original input leases. Driverless hosts still drive the serve in place. Direct `ensure_indexed_ready_serve` calls inside builders and resolver adapters remain separate synchronous boundaries. |
 | Global lookup | `FamilyStep::Global` calls `resume_family_global`, then `first_global_declaration`, synchronously. Library and program contributors can introduce source dependencies. |
 | Prepared declarations | `FamilyStep::Declarations` calls `read_class_static_declarations` synchronously. Prepared values, export fallback and constructor/body lowering are not made pollable by the surrounding static-class state machine. |
 | Route/prepared bundle planning | `frame_source_load` calls `begin_prepared_bundle_load`; `crates/verter_session/src/host_manage/prepared_decl.rs` plans/resolves routes before returning an owned load. The returned load covers only the boundary it names. |

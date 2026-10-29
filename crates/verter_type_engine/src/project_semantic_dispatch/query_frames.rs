@@ -169,7 +169,11 @@ pub(super) enum FrameBuild {
 
 /// Where a load's terminal outcome is kept for the frame that waited on it:
 /// the frame consumes it once, and never begins the same load again.
-pub(super) type LoadEnded = Arc<std::sync::OnceLock<IndexedLoadOutcome>>;
+pub(super) struct LoadCompletion {
+    outcome: IndexedLoadOutcome,
+    indexed: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+}
+pub(super) type LoadEnded = Arc<std::sync::OnceLock<LoadCompletion>>;
 
 /// The load of a file a frame waits on, and where its terminal outcome goes
 /// for the frame that consumes it.
@@ -490,7 +494,7 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     /// The awaited loads that ended without integrating their file. Each
     /// answers every read of its file by this frame's build, across steps,
     /// without letting later scope reads synchronously retry the load.
-    failed_loads: crate::resolver_core::request_ports::ConsumedLoadEnds,
+    consumed_loads: crate::resolver_core::request_ports::ConsumedLoads,
 }
 
 /// What produces a frame's demand: the family memo's producer lease, or —
@@ -1511,7 +1515,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             recording: false,
             computed_at: self.dispatch.workspace_edit(),
             awaited_loads: Vec::new(),
-            failed_loads: Vec::new(),
+            consumed_loads: Vec::new(),
         }))
     }
 }
@@ -1760,7 +1764,10 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             // A loaded file is read by the frame that waited on it.
             PendingWait::Load(wait) => {
                 return wait.load.poll(waker).map(|outcome| {
-                    let set = wait.ended.set(outcome);
+                    let set = wait.ended.set(LoadCompletion {
+                        outcome,
+                        indexed: wait.load.take_indexed_input(),
+                    });
                     verter_debug_assert!(set.is_ok(), "a load ends once");
                     External::Restart
                 })
@@ -2722,20 +2729,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    /// Take the outcomes of a frame's awaited loads that ended since its last
-    /// step: each that ended without integrating its file joins `failed`,
-    /// for the build to consume.
-    fn take_awaited_load_ends(
+    /// Retain completed load deliveries and failures for the frame's later
+    /// reads, without retrying either source loading or indexed materialization.
+    fn take_awaited_loads(
         awaited: &mut [(Arc<str>, Option<LoadEnded>)],
-        failed: &mut crate::resolver_core::request_ports::ConsumedLoadEnds,
+        failed: &mut crate::resolver_core::request_ports::ConsumedLoads,
     ) {
         for (file, ended) in awaited {
-            let Some(outcome) = ended.as_ref().and_then(|ended| ended.get().copied()) else {
+            let Some(outcome) = ended
+                .as_ref()
+                .and_then(|ended| ended.get())
+                .map(|completion| (completion.outcome, completion.indexed.clone()))
+            else {
                 continue;
             };
             *ended = None;
-            if let IndexedLoadOutcome::NotIntegrated(end) = outcome {
-                failed.push((Arc::clone(file), end));
+            use crate::resolver_core::request_ports::ConsumedLoad;
+            match outcome.0 {
+                IndexedLoadOutcome::NotIntegrated(end) => {
+                    failed.push((Arc::clone(file), ConsumedLoad::End(end)))
+                }
+                IndexedLoadOutcome::Integrated => {
+                    if let Some(serve) = &outcome.1 {
+                        failed.push((Arc::clone(file), ConsumedLoad::Indexed(serve.clone())));
+                    }
+                }
             }
         }
     }
@@ -2756,11 +2774,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A build whose files are still loading waits on each load before
         // it begins: nothing of it has run, so the step the last load
         // restarts begins it once, over loaded files.
-        Self::take_awaited_load_ends(&mut frame.awaited_loads, &mut frame.failed_loads);
+        Self::take_awaited_loads(&mut frame.awaited_loads, &mut frame.consumed_loads);
         if frame.build.is_none() {
-            if let Some(load) =
-                self.frame_source_load(&frame.key, &mut frame.awaited_loads, suspends_loads)
-            {
+            let mut consumed = std::mem::take(&mut frame.consumed_loads);
+            let load =
+                crate::resolver_core::request_ports::with_consumed_loads(&mut consumed, || {
+                    self.frame_source_load(&frame.key, &mut frame.awaited_loads, suspends_loads)
+                });
+            frame.consumed_loads = consumed;
+            if let Some(load) = load {
                 return EvalStep::Await(PendingWait::Load(load));
             }
         }
@@ -2792,9 +2814,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A load the frame waited on that ended without integrating its file
         // answers every load of it by this build, including later scope reads:
         // the terminal outcome stays with the frame until it finishes.
-        let mut failed_loads = std::mem::take(&mut frame.failed_loads);
-        let poll: FramePoll<'a> =
-            crate::resolver_core::request_ports::with_consumed_load_ends(&mut failed_loads, || {
+        let mut consumed_loads = std::mem::take(&mut frame.consumed_loads);
+        let poll: FramePoll<'a> = crate::resolver_core::request_ports::with_consumed_loads(
+            &mut consumed_loads,
+            || {
                 match frame.build.as_mut() {
                     Some(FrameBuild::Instantiate(build)) => self
                         .drain_instantiate(
@@ -2852,12 +2875,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         else {
                             unreachable!("the build was just matched")
                         };
-                        let serve = match ended.get() {
-                            Some(IndexedLoadOutcome::Integrated) => {
-                                self.ctx.ensure_indexed_ready_serve(&canonical)
+                        let completion = ended.get().expect("a load resumes after completion");
+                        let serve = match completion.outcome {
+                            IndexedLoadOutcome::Integrated => {
+                                let mut retained = completion.indexed.as_ref().map(|serve| vec![(
+                                    Arc::clone(&canonical),
+                                    crate::resolver_core::request_ports::ConsumedLoad::Indexed(serve.clone()),
+                                )]).unwrap_or_default();
+                                crate::resolver_core::request_ports::with_consumed_loads(
+                                    &mut retained,
+                                    || self.ctx.ensure_indexed_ready_serve(&canonical),
+                                )
                             }
-                            Some(IndexedLoadOutcome::NotIntegrated(_)) => None,
-                            None => unreachable!("a frame waiting on a load resumes once it ended"),
+                            IndexedLoadOutcome::NotIntegrated(_) => None,
                         };
                         let step = self.resume_family_source(*family, serve);
                         self.advance_family_frame(
@@ -2875,8 +2905,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         suspends_loads,
                     ),
                 }
-            });
-        frame.failed_loads = failed_loads;
+            },
+        );
+        frame.consumed_loads = consumed_loads;
         let step = crate::request_context::current_cold_compute_completeness();
         if step.is_partial() {
             self.fold_into_top_build_local_taint_with(true, false, step.reasons());

@@ -2151,6 +2151,15 @@ fn a_polled_root_query_released_while_pending_leaves_nothing_open() {
 mod semantic_poll_contract {
     use super::*;
 
+    // Query-seam fixtures start with indexed input; the source/index hold
+    // fixtures below exercise those earlier suspension boundaries separately.
+    fn chain_host() -> Arc<crate::VerterHost> {
+        let host = super::chain_host();
+        host.ensure_indexed_ready(TASK_FILE)
+            .expect("the query-seam fixture has indexed input");
+        host
+    }
+
     /// The truthiness classification of `string`: a query off the
     /// continuation runtime answering outside the type-node domain.
     fn classification_key(
@@ -3471,6 +3480,8 @@ mod semantic_poll_contract {
             &crate::u6_flow_shape_corpus_tests::module_script(INSTANCE_CLASS),
             crate::FileLanguage::script_ts(),
         );
+        host.ensure_indexed_ready(CONTEXTUAL_FILE)
+            .expect("the instance-surface fixture has indexed input");
         host
     }
 
@@ -3654,6 +3665,9 @@ mod semantic_poll_contract {
             &crate::u6_flow_shape_corpus_tests::module_script(STATIC_CLASSES),
             crate::FileLanguage::script_ts(),
         );
+        // These fixtures hold the base-surface read, after indexed input.
+        host.ensure_indexed_ready(CONTEXTUAL_FILE)
+            .expect("the static-surface fixture has indexed input");
         host
     }
 
@@ -4323,6 +4337,79 @@ mod semantic_poll_contract {
     }
 
     #[test]
+    fn a_declaration_with_present_source_yields_until_its_index_is_ready() {
+        let host = unloaded_owner_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
+        let counter = CountingThreadWaker::for_current_thread();
+        let waker = Waker::from(Arc::clone(&counter));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(&waker).is_pending());
+            assert!(entry.poll(&waker).is_pending());
+        }
+        held.release();
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        let synchronous = dispatch.execute_via_cold_build_helper(declaration_key(UNLOADED_OWNER));
+        assert_eq!(
+            read_summary(&dispatch, &read),
+            read_summary(&dispatch, &synchronous)
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn a_declaration_preserves_a_fenced_index_delivery_without_rebuilding_it() {
+        let host = || {
+            let host = unloaded_owner_host();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            host.test_force
+                .force_indexed_ready_serve_fence_for_tests
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            host
+        };
+        let synchronous = {
+            let host = host();
+            let view = host.resolver_store_view_read().into_owned_view();
+            let ctx = crate::resolver_core::HostResolverContext::new(
+                &host,
+                &view,
+                Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+            );
+            let dispatch = ProjectSemanticDispatch::new(&ctx);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(UNLOADED_OWNER));
+            read_summary(&dispatch, &read)
+        };
+        let host = host();
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let view = host.resolver_store_view_read().into_owned_view();
+        let ctx = crate::resolver_core::HostResolverContext::new(
+            &host,
+            &view,
+            Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+        let mut dispatch = ProjectSemanticDispatch::new(&ctx);
+        let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(Waker::noop()).is_pending());
+        }
+        held.release();
+        let read = poll_until_ready(|waker| {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(waker)
+        });
+        drop(entry);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+    }
+
+    #[test]
     fn a_declaration_whose_source_is_loading_yields_and_releases_its_retained_load() {
         let synchronous = {
             let host = unloaded_owner_host();
@@ -4427,6 +4514,8 @@ mod semantic_poll_contract {
             ),
         ]);
         assert!(host.ensure_loaded(LOCAL));
+        host.ensure_indexed_ready(LOCAL)
+            .expect("local headers are ready before the unrelated import is held");
         let gate = Arc::clone(&host.test_force.source_load_gate);
         gate.hold(UNLOADED_OWNER);
         let mut dispatch = ProjectSemanticDispatch::new(&*host);

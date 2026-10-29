@@ -37,6 +37,12 @@ pub trait IndexedLoad {
     /// load's completion. The outcome is terminal: a reader that waited on
     /// the load consumes it instead of loading the file again.
     fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<IndexedLoadOutcome>;
+
+    /// Transfer the indexed artifact computed by this load, including a
+    /// valid unpublished delivery. Source-only adapters supply no artifact.
+    fn take_indexed_input(&mut self) -> Option<IndexedInputServe> {
+        None
+    }
 }
 
 /// How an owned load ended ([`IndexedLoad::poll`]).
@@ -67,45 +73,44 @@ pub enum IndexedLoadEnd {
     Shutdown,
 }
 
-/// Owned loads that ended without integrating their file. Each outcome
-/// answers every load of that file by the waiting reader
-/// ([`consumed_load_end`]), including later scope or prepared-declaration
-/// reads. The reader owns these outcomes until it finishes; they are not
-/// a host-wide negative cache.
-pub type ConsumedLoadEnds = Vec<(Arc<str>, IndexedLoadEnd)>;
+/// One consumed load's terminal failure or complete indexed delivery.
+/// The waiting frame owns it through later scope/prepared-declaration reads;
+/// neither failures nor successful deliveries are shared cache entries.
+pub enum ConsumedLoad {
+    End(IndexedLoadEnd),
+    Indexed(IndexedInputServe),
+}
+
+pub type ConsumedLoads = Vec<(Arc<str>, ConsumedLoad)>;
 
 std::thread_local! {
-    static CONSUMED_LOAD_ENDS: std::cell::RefCell<ConsumedLoadEnds> =
+    static CONSUMED_LOADS: std::cell::RefCell<ConsumedLoads> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Run `body` — a reader that waited on owned loads, reading the files they
-/// loaded — with the loads in `ends` that ended without integrating their
-/// file answering all its loads of those files. On return `ends` keeps the
-/// outcomes for the reader's next step. Any outcome
+/// Run a waiting reader with its consumed load outcomes installed. Failures
+/// suppress retries, and indexed deliveries preserve complete ReturnOnly
+/// values without rebuilding them. On return `ends` keeps the outcomes for
+/// the reader's next step. Any outcome
 /// installed by an enclosing reader is restored, unwinding included. An
 /// empty `ends` installs nothing.
-pub(crate) fn with_consumed_load_ends<R>(
-    ends: &mut ConsumedLoadEnds,
-    body: impl FnOnce() -> R,
-) -> R {
+pub(crate) fn with_consumed_loads<R>(ends: &mut ConsumedLoads, body: impl FnOnce() -> R) -> R {
     if ends.is_empty() {
         return body();
     }
     struct Restore<'e> {
-        ends: &'e mut ConsumedLoadEnds,
-        outer: ConsumedLoadEnds,
+        ends: &'e mut ConsumedLoads,
+        outer: ConsumedLoads,
     }
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
             let outer = std::mem::take(&mut self.outer);
-            *self.ends = CONSUMED_LOAD_ENDS
+            *self.ends = CONSUMED_LOADS
                 .with(|installed| std::mem::replace(&mut *installed.borrow_mut(), outer));
         }
     }
     let installed = std::mem::take(ends);
-    let outer =
-        CONSUMED_LOAD_ENDS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), installed));
+    let outer = CONSUMED_LOADS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), installed));
     let _restore = Restore { ends, outer };
     body()
 }
@@ -116,11 +121,28 @@ pub(crate) fn with_consumed_load_ends<R>(
 /// failed load synchronously. `None` when no installed outcome names the
 /// file. Independent readers outside this scope may load the file again.
 pub fn consumed_load_end(is_file: impl Fn(&str) -> bool) -> Option<IndexedLoadEnd> {
-    CONSUMED_LOAD_ENDS.with(|slot| {
+    CONSUMED_LOADS.with(|slot| {
         let ends = slot.borrow();
         ends.iter()
             .find(|(file, _)| is_file(file))
-            .map(|(_, end)| *end)
+            .and_then(|(_, end)| match end {
+                ConsumedLoad::End(end) => Some(*end),
+                ConsumedLoad::Indexed(_) => None,
+            })
+    })
+}
+
+/// The waiting reader's retained indexed delivery, never a shared cache.
+/// Repeated reads preserve the same artifact and publication status.
+pub fn consumed_indexed_input(is_file: impl Fn(&str) -> bool) -> Option<IndexedInputServe> {
+    CONSUMED_LOADS.with(|slot| {
+        slot.borrow()
+            .iter()
+            .find(|(file, _)| is_file(file))
+            .and_then(|(_, load)| match load {
+                ConsumedLoad::Indexed(serve) => Some(serve.clone()),
+                ConsumedLoad::End(_) => None,
+            })
     })
 }
 
@@ -308,11 +330,13 @@ pub trait IndexedInputs {
 
     /// Begin making `canonical_id`'s indexed input servable without waiting
     /// for it: [`IndexedReadiness::Settled`] when
-    /// [`Self::ensure_indexed_ready_serve`] answers it without loading the
-    /// file (it is loaded, or no load can supply it), else the owned load to
-    /// wait on before serving it. The load joins the task installed on this
-    /// thread and integrates the file when it completes, exactly as
-    /// [`Self::ensure_loaded`] would; it never drives the loading stages.
+    /// [`Self::ensure_indexed_ready_serve`] can serve its current artifact,
+    /// or no load can supply it, else the owned load to wait on before
+    /// serving it. A scheduler-backed load joins the installed task, integrates
+    /// source as [`Self::ensure_loaded`] would, and retains indexed
+    /// materialization through its owner-shard handoff. Source presence alone
+    /// does not complete that handoff. Without a scheduler driver the caller
+    /// remains responsible for driving the serve in place.
     fn begin_indexed_load(&self, canonical_id: &str) -> IndexedReadiness<'_>;
 
     /// Begin the loads [`Self::prepared_decl_bundle`] of `canonical_id`

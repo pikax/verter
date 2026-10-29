@@ -199,6 +199,9 @@ impl IndexedInputs for crate::VerterHost {
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        if let Some(serve) = retained_indexed_input(self, canonical_id) {
+            return Some(serve);
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id).map(|serve| {
             super::owned_lowering_port::observe_whole_content(
                 canonical_id,
@@ -707,7 +710,11 @@ pub(crate) trait RequestBoundLifecycle: Sync {
         &self,
         canonical_id: &str,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
-        crate::VerterHost::begin_indexed_ready_load(self.host(), canonical_id)
+        crate::VerterHost::begin_indexed_ready_load_for(
+            self.host(),
+            canonical_id,
+            &self.request_view().overlay().input_artifacts,
+        )
     }
 
     fn shallow_file_state(
@@ -969,6 +976,10 @@ where
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        if let Some(serve) = retained_indexed_input(self.0.host(), canonical_id) {
+            self.0.complete_canonical(canonical_id);
+            return Some(serve);
+        }
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::ensure_indexed_ready_serve"
         );
@@ -1882,4 +1893,38 @@ where
             .request_view()
             .promote_route_completion(canonical, whole_hash, route_hash)
     }
+}
+
+/// Consume a load delivery through the same input observations as a live
+/// serve, preserving its ReturnOnly status without rematerializing it.
+fn retained_indexed_input(host: &crate::VerterHost, canonical: &str) -> Option<IndexedInputServe> {
+    let canonical = host.normalized_analysis_canonical(canonical);
+    let serve = verter_type_engine::resolver_core::request_ports::consumed_indexed_input(|file| {
+        file == canonical.as_ref()
+    })?;
+    super::owned_lowering_port::observe_whole_content(&canonical, serve.indexed.whole_hash);
+    if serve.store_published
+        && verter_type_engine::resolver_core::resolver_context::fact_tracer_installed()
+    {
+        if let Some(artifacts) = host.current_content_pinned_artifacts(&canonical) {
+            if Arc::ptr_eq(&artifacts.indexed.input_record(), &serve.indexed)
+                && host.indexed_surface_is_current(&canonical, &artifacts.indexed)
+            {
+                if let Some(fact) = crate::VerterHost::syntactic_route_interface_fact_of(
+                    Arc::from(canonical.as_ref()),
+                    &artifacts,
+                ) {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
+                    );
+                }
+            }
+        }
+    }
+    if !serve.store_published {
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+        );
+    }
+    Some(serve)
 }
