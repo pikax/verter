@@ -2374,9 +2374,10 @@ where
             .unwrap_or(0)
     }
 
-    /// TEST-ONLY: each joiner sends once immediately before parking on
-    /// the flight condvar. Interest must be armed before followers are
-    /// spawned.
+    /// TEST-ONLY: each joiner sends once per joined flight when its poll
+    /// first returns pending. Re-polls do not send duplicate receipts;
+    /// retrying an aborted flight can send a new one. Interest must be
+    /// armed before followers are spawned.
     #[cfg(test)]
     pub fn subscribe_joiner_park(&self) -> std::sync::mpsc::Receiver<()> {
         let (tx, rx) = std::sync::mpsc::channel();
