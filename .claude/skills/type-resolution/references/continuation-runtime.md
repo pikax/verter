@@ -229,7 +229,7 @@ with `crates/` are relative to the repository root.
 | `Conditional`, `ResolveCall` | `query_frames.rs`, decision/call frames | Existing seams cover selected dependencies. A call's retained argument collector does not convert all work beneath its suspension point. |
 | `FlowReturn` | `query_frames.rs`, flow frame | Selected callback-bearing roots use the flow seam; flow replay has its own driver and is not a general family continuation. |
 | `ClassifyBroadRuntime` | `broad_runtime.rs`, `build_classify_broad_runtime` | Locator rehydration loads indexed input and reads macro/path queries; its node walk also reads indexed access and evaluates carriers. This is an additional dependency-reaching family, despite its classifier result domain. |
-| `ClassifyMaterializationCycleGate` | `cycle_gate.rs`, `build_classify_materialization_cycle_gate` | Reads the root indexed input and executes hop queries while maintaining its visited set and queue. This is another dependency-reaching classifier. |
+| `ClassifyMaterializationCycleGate` | `cycle_gate.rs`, `CycleGateBuild`; `family_continuation.rs` | The root indexed input and each FIFO skeleton-instantiation hop are separate transitions. The continuation retains the queue, first-visit identities, remaining hop count, path signals, fallback reasons, dependency facts and observed self-roots. Both drivers run these stages; the typed outcome reaches the frame without a node-domain conversion. |
 
 `ReduceUnion` normalizes graph operands through canonical algebra rather than
 loading declaration bodies. `ClassifyTruthinessDomain` delegates to

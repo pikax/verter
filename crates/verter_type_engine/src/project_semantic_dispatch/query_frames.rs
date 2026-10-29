@@ -1960,7 +1960,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticQueryKey::ReduceIntersection { .. }
             | SemanticQueryKey::ResolveOverloadSet { .. }
             | SemanticQueryKey::ApparentType { .. }
-            | SemanticQueryKey::ResolveClassSurface { .. }) => {
+            | SemanticQueryKey::ResolveClassSurface { .. }
+            | SemanticQueryKey::ClassifyMaterializationCycleGate(_)) => {
                 super::family_continuation::builds_as_continuation(key)
                     && self.reads_as_frame_need(key)
                     && self
@@ -2644,6 +2645,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 FamilyStep::Done(output) => {
                     return FramePoll::Done(Box::new(self.family_value_output(key, *output)))
                 }
+                FamilyStep::Value(output) => return FramePoll::Done(output),
                 FamilyStep::Need(need, family) if self.reads_as_frame_need(&need) => {
                     *build = Some(FrameBuild::Family(family));
                     return FramePoll::Need(need);

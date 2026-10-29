@@ -4322,6 +4322,142 @@ mod semantic_poll_contract {
         assert!(graph.resident_flight_keys_for_tests().is_empty());
     }
 
+    fn cycle_gate_host() -> Arc<crate::VerterHost> {
+        unloaded_files_host(&[(
+            UNLOADED_OWNER,
+            "export interface Props { child: Child } export interface Child { value: string }",
+        )])
+    }
+
+    fn cycle_gate_keys(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let slot = |name: &str| {
+            dispatch.type_slot_for(
+                UNLOADED_OWNER,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name,
+            )
+        };
+        let root = dispatch.materialization_cycle_gate_key_for(
+            &verter_type_engine::semantic_query::DeclIdentity {
+                canonical_id: UNLOADED_OWNER.into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [0; 16],
+                decl_name: "Props".into(),
+            },
+        );
+        let child =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                slot("Child"),
+                Arc::from([]),
+                dispatch.instantiate_context_for(
+                    UNLOADED_OWNER,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Skeleton,
+                    ),
+                ),
+            ));
+        (root, child)
+    }
+
+    #[test]
+    fn a_cycle_gate_retains_completed_hops_while_a_nested_declaration_is_held() {
+        let synchronous = {
+            let host = cycle_gate_host();
+            host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (root, _) = cycle_gate_keys(&dispatch);
+            let read = dispatch.execute_via_cold_build_helper(root);
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = cycle_gate_host();
+            host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let (root, child) = cycle_gate_keys(&dispatch);
+            let (other, lease) = hold_producer(&host, graph, child);
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut entry = Some(dispatch.poll_query(root));
+            let (pending, progress, repeated) = while_held(lease, || {
+                let pending = entry.as_mut().unwrap().poll(&waker).is_pending();
+                let progress = continuation_stages(&host);
+                let repeated = entry.as_mut().unwrap().task().map(|task| {
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .unwrap()
+                    })
+                });
+                assert_eq!(
+                    continuation_stages(&host),
+                    progress,
+                    "completed hops stay retained"
+                );
+                if abandon {
+                    drop(entry.take());
+                }
+                (pending, progress, repeated)
+            });
+            assert!(pending, "a cold cycle gate yields at its nested Child hop");
+            assert_eq!(repeated, Some(true));
+            assert_eq!(
+                progress,
+                (1, 2),
+                "owner and Props completed before Child waits"
+            );
+            let read = entry.take().map(|mut entry| {
+                assert!(counter.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
+                poll_until_ready(|waker| entry.poll(waker))
+            });
+            drop(entry);
+            if let Some(read) = read {
+                assert_eq!(
+                    continuation_stages(&host),
+                    (1, 3),
+                    "no completed hop restarts"
+                );
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+            drop(other);
+        }
+    }
+
+    #[test]
+    fn a_cycle_gate_with_present_source_yields_for_indexing() {
+        let synchronous = {
+            let host = cycle_gate_host();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (root, _) = cycle_gate_keys(&dispatch);
+            let read = dispatch.execute_via_cold_build_helper(root);
+            read_summary(&dispatch, &read)
+        };
+        let host = cycle_gate_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let (root, _) = cycle_gate_keys(&dispatch);
+        let mut entry = dispatch.poll_query(root);
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(Waker::noop()).is_pending());
+            assert!(entry.poll(Waker::noop()).is_pending());
+        }
+        held.release();
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+    }
+
     fn declaration_key(file: &str) -> SemanticQueryKey {
         use verter_type_engine::semantic_query::{BinderScopeId, ResolveDeclKey, ScopeId};
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
