@@ -38,6 +38,9 @@ fn chain_host() -> Arc<crate::VerterHost> {
         &crate::u6_flow_shape_corpus_tests::module_script(CHAIN),
         crate::FileLanguage::script_ts(),
     );
+    // These tests hold semantic producers, after the independent input handoff.
+    host.ensure_indexed_ready(TASK_FILE)
+        .expect("the chain has indexed input");
     host
 }
 
@@ -252,6 +255,8 @@ fn semantic_task_partiality_returns_to_its_lender_without_tainting_the_poller() 
                     &crate::u6_flow_shape_corpus_tests::module_script(source),
                     crate::FileLanguage::script_ts(),
                 );
+                host.ensure_indexed_ready(TASK_FILE)
+                    .expect("partiality is tested after the indexed-input handoff");
                 let dispatch = ProjectSemanticDispatch::new(&*host);
                 let lender = ColdComputeCompletenessScope::enter();
                 dispatch
@@ -1533,6 +1538,8 @@ fn call_host() -> Arc<crate::VerterHost> {
         &crate::u6_flow_shape_corpus_tests::module_script(CALL),
         crate::FileLanguage::script_ts(),
     );
+    host.ensure_indexed_ready(CALL_FILE)
+        .expect("the call has indexed input before its inference is held");
     host
 }
 
@@ -2150,15 +2157,6 @@ fn a_polled_root_query_released_while_pending_leaves_nothing_open() {
 /// value domain what the synchronous full-value entry reads.
 mod semantic_poll_contract {
     use super::*;
-
-    // Query-seam fixtures start with indexed input; the source/index hold
-    // fixtures below exercise those earlier suspension boundaries separately.
-    fn chain_host() -> Arc<crate::VerterHost> {
-        let host = super::chain_host();
-        host.ensure_indexed_ready(TASK_FILE)
-            .expect("the query-seam fixture has indexed input");
-        host
-    }
 
     /// The truthiness classification of `string`: a query off the
     /// continuation runtime answering outside the type-node domain.
@@ -5039,6 +5037,48 @@ mod semantic_poll_contract {
         (apparent, interface)
     }
 
+    fn cycle_hop_host() -> Arc<crate::VerterHost> {
+        let host = chain_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            TASK_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(
+                "type Root = { child: Child }; type Child = { value: string };",
+            ),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(TASK_FILE)
+            .expect("indexed declarations");
+        host
+    }
+
+    fn cycle_hop_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        use verter_type_engine::semantic_query::{DeclIdentity, InstantiateKey};
+        let identity = |name: &str| DeclIdentity {
+            canonical_id: TASK_FILE.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host.ensure_indexed_ready(TASK_FILE).unwrap().whole_hash,
+            decl_name: name.into(),
+        };
+        let child = identity("Child");
+        (
+            dispatch.materialization_cycle_gate_key_for(&identity("Root")),
+            SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(child.canonical_id, child.owner, child.decl_name),
+                Arc::from([]),
+                dispatch.instantiate_context_for(
+                    TASK_FILE,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Skeleton,
+                    ),
+                ),
+            )),
+        )
+    }
+
     /// One suspension seam of a family built as a continuation: the root a
     /// consumer reads, the dependency another task holds at that seam, and
     /// the stages — builds begun, stages resumed with a read — the root runs
@@ -5055,7 +5095,7 @@ mod semantic_poll_contract {
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 10] = [
+    const HELD_SEAMS: [HeldSeam; 11] = [
         HeldSeam {
             seam: "a macro payload's props intersection",
             host: chain_host,
@@ -5112,6 +5152,14 @@ mod semantic_poll_contract {
             // The list is read before the set waits on its composite.
             before_seam: (1, 1),
             in_all: (1, 2),
+        },
+        HeldSeam {
+            seam: "a cycle classification's later declaration hop",
+            host: cycle_hop_host,
+            keys: cycle_hop_keys,
+            expression_site: true,
+            before_seam: (1, 2),
+            in_all: (1, 3),
         },
         HeldSeam {
             seam: "an apparent type's anchor list",
