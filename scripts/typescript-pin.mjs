@@ -32,6 +32,8 @@
  *       recorded in the guard baseline, or when the baseline records more than
  *       remains (it can only shrink). --write-baseline rewrites the baseline
  *       from the tree, keeping the recorded reason of every surviving entry.
+ *       Standalone `// Oracle comparison: TypeScript X.Y.Z.` comments label
+ *       comparison provenance and are exempt (see guardCount); pins are not.
  */
 
 import { execFileSync, execSync } from "node:child_process";
@@ -635,13 +637,21 @@ function guardFiles(root) {
     .filter((p) => !GUARD_SKIP.some((re) => re.test(p)));
 }
 
-/** Count the guarded lines of one file's text. */
+/**
+ * Count the guarded lines of one file's text. An intentional comparison to
+ * another oracle version uses a standalone line comment, for example:
+ * `/// Oracle comparison: TypeScript 7.0.2.`
+ * This labels measurement provenance, not the configured toolchain. Only that
+ * exact comment form is exempt: adjoining code, commands and unlabelled prose
+ * still count, and checkPins continues to validate every configured pin.
+ */
 export function guardCount(path, text) {
   // A crate manifest's dependency table names third-party versions only.
   const engine =
     ENGINE_PATHS.some((prefix) => path.startsWith(prefix)) && !path.endsWith("Cargo.toml");
   let count = 0;
   for (const line of text.split("\n")) {
+    if (/^\s*\/\/[/!]? Oracle comparison: TypeScript \d+\.\d+\.\d+\.\s*$/.test(line)) continue;
     if (CONTEXT_PATTERNS.some((re) => re.test(line)) || (engine && BARE_PATTERN.test(line)))
       count++;
   }

@@ -8,8 +8,10 @@
 //! The scenario is `fixtures/pinia_options_store.ts`, a reconstruction (see
 //! its header). Each answer is the benchmark's named demand: a probe alias
 //! resolved by name in a project of the benchmark library and the scenario,
-//! projected to its wire answer. Every store answer is TypeScript
-//! 7.0.2's, read through its native API (`getTypeAtPosition` on the probe
+//! projected to its wire answer.
+//! Oracle comparison: TypeScript 7.0.2.
+//! Every answer below was read through that version's native API
+//! (`getTypeAtPosition` on the probe
 //! alias's name, then `typeToString` with `NoTruncation | InTypeAlias`)
 //! over the same files under `noLib`, in all four `strictNullChecks` ×
 //! `noImplicitAny` settings, which answer alike.
@@ -66,10 +68,10 @@ const CONTRIBUTING_MODULE: &str =
 const WHOLE_STORE: &str = "[St['count'], St['items'], St['double'], St['first'], \
      ReturnType<St['increment']>, ReturnType<St['add']>, St['$id'], St['$state']]";
 
-/// The store's state as `UnwrapRef` reads it, as TypeScript 7.0.2 prints it.
+/// The store's state as `UnwrapRef` reads it, as TypeScript prints it.
 const STATE: &str = "{ count: number; items: { id: number; }[]; name: string; }";
 
-/// `$state` as TypeScript 7.0.2 prints it: the unwrapped state and the
+/// `$state` as TypeScript prints it: the unwrapped state and the
 /// (empty) custom-state interface applied to the declared state.
 fn custom_state() -> String {
     format!("{STATE} & PiniaCustomStateProperties<{STATE}>")
@@ -479,7 +481,7 @@ fn state_mismatch(state: &TypeExpr) -> Option<String> {
     answer_mismatch(state, &custom_state())
 }
 
-/// Measured on TypeScript 7.0.2 with the marker declared by the library,
+/// Measured on TypeScript with the marker declared by the library,
 /// all four settings alike and free of diagnostics: the whole store is
 /// `[number, { id: number; }[], number, { id: number; }, number, { id:
 /// number; }, "counter", S & PiniaCustomStateProperties<S>]` with `S` the
@@ -494,7 +496,7 @@ fn an_options_store_answers_every_member_as_the_checker_does() {
 }
 
 /// An authored `declare global` marker types the store as the library's
-/// does. Measured on TypeScript 7.0.2, all four settings, free of
+/// does. Measured on TypeScript, all four settings, free of
 /// diagnostics.
 #[test]
 fn an_authored_global_marker_types_the_store() {
@@ -507,7 +509,7 @@ fn an_authored_global_marker_types_the_store() {
 
 /// The global marker a module contributes beside its own module-scope
 /// `ThisType` types the store of another module, which reads the global
-/// declaration. Measured on TypeScript 7.0.2, all four settings, free of
+/// declaration. Measured on TypeScript, all four settings, free of
 /// diagnostics.
 #[test]
 fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store() {
@@ -622,7 +624,7 @@ fn element_mismatches(
     )
 }
 
-/// The checker's store over a module-scope `ThisType` (TypeScript 7.0.2,
+/// The checker's store over a module-scope `ThisType` (TypeScript,
 /// all four settings alike), member by member as [`WHOLE_STORE`] lists
 /// them: every member as the marker-typed store's but `increment`, which
 /// reads `this.count` off its own object literal and recovers as `any` —
@@ -665,7 +667,7 @@ fn a_module_scope_namesake_is_not_the_marker() {
 /// module-scope `ThisType` there: the namesake shadows the global
 /// declaration in its own module, so the store it declares answers as with
 /// a namesake alone — the checker's [`NAMESAKE_STORE`] with the same
-/// diagnostics (TypeScript 7.0.2, all four settings), and the named
+/// diagnostics (TypeScript, all four settings), and the named
 /// demand's same refusal.
 #[test]
 fn a_namesake_shadows_its_own_modules_global_contribution() {
@@ -687,7 +689,7 @@ fn a_namesake_shadows_its_own_modules_global_contribution() {
 /// and `$state` answer as the marker-typed store's, and every getter and
 /// action is absent from the store (TS2339 at each probe reading one), the
 /// error type `any`, never the marker-typed member. Measured on
-/// TypeScript 7.0.2, all four settings. The named demand refuses the
+/// TypeScript, all four settings. The named demand refuses the
 /// store's call, as with a namesake, for the same absent receiver member.
 #[test]
 fn an_undeclared_marker_recovers_without_inferring_through_it() {
@@ -730,7 +732,7 @@ fn an_unrelated_store_refusal_is_not_the_recovery_refusal() {
 }
 
 /// A marked store whose `first` getter reads a name nothing declares,
-/// `(state) => missingDependency` — TS2304 alone in TypeScript 7.0.2, every
+/// `(state) => missingDependency` — TS2304 alone in TypeScript, every
 /// other member answering as the marker-typed store's — refuses its
 /// `defineStore` call too, every member propagating the same miss. Its cause
 /// is that context-sensitive call's own refusal, never an absent receiver
@@ -762,8 +764,7 @@ fn a_marked_stores_missing_dependency_is_not_the_recovery_refusal() {
 /// (`PropertyKey`) reads as the union it names — Pinia's `StateTree`, the
 /// constraint of a store's `S` — and a literal key is one property whether
 /// either side spells it as a number or a string, a required one an
-/// optional source member does not carry. Measured on TypeScript
-/// 7.0.2, all four settings.
+/// optional source member does not carry. Measured on TypeScript, all four settings.
 #[test]
 fn a_record_over_index_keys_relates_through_its_index_signatures() {
     let failures = Project::module(
@@ -855,7 +856,7 @@ fn nested_union_aliases_contribute_every_record_and_mapped_key() {
 /// parameter: over an object literal type, over an interface applied to
 /// the parameter (whose keys are its declared members, `S` open), and over
 /// one extending a generic base (whose `Pick` reads the modifiers it
-/// declares). Measured on TypeScript 7.0.2, all four settings.
+/// declares). Measured on TypeScript, all four settings.
 #[test]
 fn a_call_infers_through_pick_and_omit_of_its_parameter() {
     let failures = Project::module(
@@ -890,7 +891,7 @@ fn a_call_infers_through_pick_and_omit_of_its_parameter() {
 /// any) | (() => any)` is typed by the first arm, as a Pinia getter is by
 /// `_GettersTree`, while a callback with a defaulted parameter requires
 /// none and reads no contextual signature from the two differing arms.
-/// Measured on TypeScript 7.0.2, all four settings.
+/// Measured on TypeScript, all four settings.
 #[test]
 fn a_callback_takes_the_union_arm_its_arity_admits() {
     let failures = Project::module(
@@ -916,7 +917,7 @@ fn a_callback_takes_the_union_arm_its_arity_admits() {
 /// A statement call through an object literal's `this`, which has no
 /// explicit type (`getExplicitThisType`), neither asserts nor ends the
 /// path: the method's return is complete, so `ReturnType` reads it off
-/// the inferred object. Measured on TypeScript 7.0.2, all four settings.
+/// the inferred object. Measured on TypeScript, all four settings.
 #[test]
 fn a_call_through_a_contextual_this_has_no_effects() {
     let failures = Project::module(
@@ -931,7 +932,7 @@ fn a_call_through_a_contextual_this_has_no_effects() {
 /// A contextual signature's `this` parameter gives an object literal
 /// method's `this` an explicit type, so a statement call through it reads
 /// that type's effects signature: `this.check(x)` against `check(x:
-/// unknown): asserts x is string` narrows `x`, and TypeScript 7.0.2
+/// unknown): asserts x is string` narrows `x`, and TypeScript
 /// answers `string` for the method's return, free of diagnostics, all four
 /// settings. The named demand does not read that assertion: it keeps the
 /// typed guard-narrowing gap on the function's shared flow result, never
@@ -976,7 +977,7 @@ fn a_call_through_a_contextual_signatures_explicit_this_keeps_its_effects() {
 /// to: `[Box<{ a: 1 }>['v']]` over `v: Unwrap<T>`, a conditional alias, is
 /// `[{ a: 1; }]` as `Box<{ a: 1 }>['v']` alone is, never the application
 /// kept as a name. An interface the member applies keeps its name. Measured
-/// on TypeScript 7.0.2, all four settings.
+/// on TypeScript, all four settings.
 #[test]
 fn a_nested_access_reads_through_a_transparent_alias_member() {
     let failures = Project::module(
@@ -998,7 +999,7 @@ fn a_nested_access_reads_through_a_transparent_alias_member() {
 /// `m: { a: 1 } & E<{ a: 1 }>` answers `{ a: 1 } & E<{ a: 1 }>` as the
 /// bare alias does — never the application's structural surface alone,
 /// which assignability could not tell apart — and a member demand still
-/// reads through the intersection. Measured on TypeScript 7.0.2, all four
+/// reads through the intersection. Measured on TypeScript, all four
 /// settings.
 #[test]
 fn a_nested_access_keeps_an_intersections_generic_interface_contributor() {
