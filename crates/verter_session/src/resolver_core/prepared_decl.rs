@@ -1449,6 +1449,49 @@ struct ResolutionWitnessSegment {
 /// bundle's own retention, never the witness a read carries.
 const COMBINED_WITNESS_CAP: usize = 32;
 
+/// The one run a used-import set replays as: its own self-charged cell, so
+/// a combined witness is retained only while the account has room for it.
+struct CombinedWitness(verter_session_query::facts::fact_set::FactSet);
+
+impl verter_retention::heap_size::HeapSize for CombinedWitness {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        verter_session_query::retention::allocation::fact_slice_bytes(&self.0, meter.handles())
+    }
+}
+
+/// The bundle's combined witnesses by used-import set. Its table is
+/// allocated once, at the cap, and charged by its own cell on first use;
+/// each entry is its own held cell, so no growth goes unaccounted.
+struct CombinedWitnessTable {
+    entries: parking_lot::Mutex<FxHashMap<u128, Held<CombinedWitness>>>,
+}
+
+impl CombinedWitnessTable {
+    fn new() -> Self {
+        Self {
+            entries: parking_lot::Mutex::new(FxHashMap::with_capacity_and_hasher(
+                COMBINED_WITNESS_CAP,
+                Default::default(),
+            )),
+        }
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for CombinedWitnessTable {
+    fn heap_size<'t>(
+        &'t self,
+        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        verter_retention::heap_size::hash_table_bytes(
+            self.entries.lock().capacity(),
+            std::mem::size_of::<(u128, Held<CombinedWitness>)>(),
+        )
+    }
+}
+
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -1467,13 +1510,10 @@ pub struct PreparedDeclBundle {
     /// shared run — recognized by storage on every later read of the same
     /// import set — instead of one run per specifier, so an enclosing
     /// scope's seal merges one run per used set rather than one per
-    /// import. Lazily filled, bounded by [`COMBINED_WITNESS_CAP`] and
-    /// charged with the bundle's own retention.
-    combined_witnesses: OnceLock<
-        parking_lot::Mutex<
-            rustc_hash::FxHashMap<u128, verter_session_query::facts::fact_set::FactSet>,
-        >,
-    >,
+    /// import. Lazily filled and bounded by [`COMBINED_WITNESS_CAP`]; the
+    /// table and every witness it commits are cells of their own, held
+    /// refusably on the bundle's account.
+    combined_witnesses: OnceLock<Held<CombinedWitnessTable>>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1521,7 +1561,7 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
         let Self {
             input_projection: _,
             resolution_facts,
-            combined_witnesses,
+            combined_witnesses: _,
             account: _,
             owner_whole_hash: _,
             prepared_type_decls,
@@ -1548,30 +1588,11 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
                         .sum::<usize>()
             })
             .unwrap_or(0);
-        // The combined-witness cache is the bundle's own retention too: its
-        // table and each combined set's slice or tree storage, with the
-        // facts themselves already charged through the segments' aliases.
-        let combined = combined_witnesses.get().map_or(0, |cache| {
-            let cache = cache.lock();
-            verter_retention::heap_size::hash_table_bytes(
-                cache.capacity(),
-                std::mem::size_of::<(u128, verter_session_query::facts::fact_set::FactSet)>(),
-            ) + cache
-                .values()
-                .map(|facts| {
-                    verter_session_query::retention::allocation::fact_slice_bytes(
-                        facts,
-                        meter.handles(),
-                    )
-                })
-                .sum::<usize>()
-        });
         prepared_type_decls.heap_size(meter)
             + prepared_value_decls.heap_size(meter)
             + dep_edges.heap_size(meter)
             + owner_scopes.heap_size(meter)
             + segments
-            + combined
     }
 }
 
@@ -1726,6 +1747,13 @@ impl PreparedDeclBundle {
         }
     }
 
+    /// This bundle, retaining what it commits after admission on `account`.
+    #[cfg(test)]
+    pub(crate) fn charged_to_for_tests(mut self, account: StoreAccount) -> Self {
+        self.account = account;
+        self
+    }
+
     /// Observe the owner's whole import-route witness, for a read whose
     /// import use is not known.
     pub(crate) fn observe_read(&self) {
@@ -1800,11 +1828,16 @@ impl PreparedDeclBundle {
         segments: &[ResolutionWitnessSegment],
         mask: u128,
     ) -> verter_session_query::facts::fact_set::FactSet {
-        let cache = self
-            .combined_witnesses
-            .get_or_init(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
-        if let Some(combined) = cache.lock().get(&mask) {
-            return combined.clone();
+        let table = match self.combined_witnesses.get() {
+            Some(table) => Some(table),
+            None => Held::retain(CachedValue::new(CombinedWitnessTable::new()), &self.account)
+                .ok()
+                .map(|held| self.combined_witnesses.get_or_init(|| held)),
+        };
+        if let Some(table) = table {
+            if let Some(held) = table.value.entries.lock().get(&mask) {
+                return held.value.0.clone();
+            }
         }
         let policy = segments[0].facts.policy();
         let mut facts = Vec::new();
@@ -1814,9 +1847,18 @@ impl PreparedDeclBundle {
             }
         }
         let combined = policy.set_of(facts);
-        let mut cache = cache.lock();
-        if cache.len() < COMBINED_WITNESS_CAP {
-            cache.insert(mask, combined.clone());
+        // Retained only while the account admits it; a refused witness is
+        // this read's alone and a later read builds it again.
+        if let Some(table) = table {
+            let mut entries = table.value.entries.lock();
+            if entries.len() < COMBINED_WITNESS_CAP && !entries.contains_key(&mask) {
+                if let Ok(held) = Held::retain(
+                    CachedValue::new(CombinedWitness(combined.clone())),
+                    &self.account,
+                ) {
+                    entries.insert(mask, held);
+                }
+            }
         }
         combined
     }

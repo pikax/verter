@@ -572,9 +572,13 @@ impl FactReadSet {
     #[inline]
     pub fn observe_borrowed_signature(&mut self, sig: &[FactVersionRef]) {
         self.observations.reserve(sig.len());
+        // A canonical signature holds each fact once, so a fact is matched
+        // against what was observed before the signature, never against
+        // the facts this call has just taken from the same signature.
+        let before = self.observations.len();
         let mut compared = 0;
         for fact in sig {
-            let (seen, comparisons) = self.recently_observed(fact);
+            let (seen, comparisons) = self.recently_observed_before(fact, before);
             compared += comparisons;
             if !seen {
                 self.observations.push(fact.clone());
@@ -587,7 +591,14 @@ impl FactReadSet {
     /// with the number of comparisons that decided it.
     #[inline]
     fn recently_observed(&self, fact: &FactVersionRef) -> (bool, usize) {
-        let window = &self.observations[self.observations.len().saturating_sub(RECENT_WINDOW)..];
+        self.recently_observed_before(fact, self.observations.len())
+    }
+
+    /// [`Self::recently_observed`] over the observations before the first
+    /// `end`.
+    #[inline]
+    fn recently_observed_before(&self, fact: &FactVersionRef, end: usize) -> (bool, usize) {
+        let window = &self.observations[end.saturating_sub(RECENT_WINDOW)..end];
         match window.iter().rposition(|observed| observed == fact) {
             Some(position) => (true, window.len() - position),
             None => (false, window.len()),
@@ -883,9 +894,7 @@ impl FactReadSet {
                 FactSet::from_canonical_vec(self.policy, facts).edit()
             } else {
                 let mut edit = base.edit();
-                for fact in additions {
-                    edit.insert_new(fact);
-                }
+                edit.insert_new_run(additions);
                 edit
             };
             self.observations.clear();

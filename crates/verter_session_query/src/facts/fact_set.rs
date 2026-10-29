@@ -689,6 +689,30 @@ impl FactSetEdit {
         }
     }
 
+    /// Add the strictly increasing `facts`, all proven absent from this
+    /// unchanged edit: a tree takes them in one descent rather than one
+    /// search per fact.
+    pub(crate) fn insert_new_run(&mut self, facts: Vec<FactVersionRef>) {
+        if facts.len() > 1 {
+            if let Work::Tree {
+                root,
+                digest,
+                changed,
+            } = self.work_mut()
+            {
+                for fact in &facts {
+                    *digest = digest.wrapping_add(fact_digest(fact));
+                }
+                *changed = true;
+                fact_tree::insert_run(root, &facts);
+                return;
+            }
+        }
+        for fact in facts {
+            self.insert_new(fact);
+        }
+    }
+
     /// Remove `fact`; whether it was held.
     pub fn remove(&mut self, fact: &FactVersionRef) -> bool {
         if !self.contains(fact) {
