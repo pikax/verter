@@ -353,12 +353,17 @@ pub fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
 /// the first delivering scope), so a fact the innermost scope holds
 /// arrived through a fan-out that reached every other active cell too: a
 /// producer that re-derives it can skip recording it again without
-/// leaving any enclosing scope's sealed signature without it.
+/// leaving any enclosing scope's sealed signature without it. While a read
+/// recorder is active nothing is held: the recorder mints its own receipt
+/// from the fan-out alone.
 #[inline]
 pub(crate) fn tracer_holds_fact(
     fact: &verter_session_query::facts::fact_cache::FactVersionRef,
 ) -> bool {
-    current_tracer().is_some_and(|tracer| tracer.holds(fact))
+    // A recorder receives facts only through the fan-out, so a fact the
+    // tracer already holds is still delivered while one is recording.
+    ACTIVE_RECORDERS.with(|slot| slot.borrow().is_empty())
+        && current_tracer().is_some_and(|tracer| tracer.holds(fact))
 }
 
 /// Fan an observed fact into every active tracer that must observe it (see
