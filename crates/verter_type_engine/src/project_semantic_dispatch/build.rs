@@ -894,6 +894,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveDeclKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.drive_family_in_place(self.begin_resolve_decl(key))
+    }
+
+    /// Resolve the local headers and route once, retaining the selected
+    /// target across its semantic read. Route preparation is still a driver
+    /// port operation; the target build itself is an owned family need.
+    pub(super) fn begin_resolve_decl(
+        &self,
+        key: &ResolveDeclKey,
+    ) -> super::family_continuation::FamilyStep {
+        use super::family_continuation::{FamilyBuild, FamilyStep};
+        self.graph().record_continuation_begun();
         verter_audit::attribute_scope!(ResolveDecl);
         // Self-version rooting: observe the scope canonical.s
         // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the
@@ -913,7 +925,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|serve| serve.indexed)
         {
             Some(indexed) => indexed,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            None => {
+                return FamilyStep::Done(Box::new(
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                ))
+            }
         };
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
@@ -977,21 +993,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // self-roots, so a content edit to EITHER the
                         // barrel's re-export clause or the defining file
                         // misses the warm read.
-                        let inner = self.build_resolve_decl(&resolved_key);
-                        let barrel_root = (key.scope.canonical_id.clone(), observed_hash);
-                        let mut roots = inner.observed_self_roots.clone();
-                        if !roots
-                            .iter()
-                            .any(|(c, h)| *c == barrel_root.0 && *h == barrel_root.1)
-                        {
-                            roots.push(barrel_root);
-                        }
-                        return inner.with_observed_self_roots(roots);
+                        return FamilyStep::Need(
+                            SemanticQueryKey::ResolveDecl(resolved_key),
+                            Box::new(FamilyBuild::ResolveDecl((
+                                key.scope.canonical_id.clone(),
+                                observed_hash,
+                            ))),
+                        );
                     }
                 }
             }
             if !(has_export || has_import_local) {
-                return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                return FamilyStep::Done(Box::new(
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                ));
             }
             // The export graph could not resolve the defining site (e.g. an
             // unresolvable specifier): fall through to the legacy
@@ -1024,11 +1039,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }),
             scope,
         );
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(node_id),
-            signature,
+        FamilyStep::Done(Box::new(
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node_id),
+                signature,
+            ))
+            .with_observed_self_roots([(key.scope.canonical_id.clone(), observed_hash)]),
         ))
-        .with_observed_self_roots([(key.scope.canonical_id.clone(), observed_hash)])
     }
 
     /// `typeof`-rooted declaration lookup. Shape mirrors [`Self::build_resolve_decl`]

@@ -241,6 +241,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
 /// A family build between two of its stages: what the stages before the
 /// read it waits on computed.
 pub(super) enum FamilyBuild {
+    ResolveDecl(crate::semantic_query_memo::ObservedGraphSelfRoot),
     CycleGate(Box<super::cycle_gate::CycleGateBuild>),
     MacroPayload(MacroPayloadBuild),
     ReduceIntersection(ReduceIntersectionBuild),
@@ -276,7 +277,8 @@ impl FamilyBuild {
             | Self::ReduceIntersection(_)
             | Self::ClassInstanceSurface(_)
             | Self::ClassStaticSurface(_)
-            | Self::CycleGate(_) => false,
+            | Self::CycleGate(_)
+            | Self::ResolveDecl(_) => false,
         }
     }
 }
@@ -336,6 +338,7 @@ static_assertions::assert_not_impl_any!(FamilyStep: Clone, Copy);
 pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
     match key {
         SemanticQueryKey::ResolveMacroPayload { .. }
+        | SemanticQueryKey::ResolveDecl(_)
         | SemanticQueryKey::ReduceIntersection { .. }
         | SemanticQueryKey::ApparentType { .. }
         | SemanticQueryKey::ResolveClassSurface { .. }
@@ -358,6 +361,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     #[inline(never)]
     pub(super) fn begin_family_build(&self, key: &SemanticQueryKey) -> Option<FamilyStep> {
         match key {
+            SemanticQueryKey::ResolveDecl(key) => Some(self.begin_resolve_decl(key)),
             SemanticQueryKey::ClassifyMaterializationCycleGate(key) => {
                 Some(self.continuation_stage().begin_cycle_gate(key))
             }
@@ -428,6 +432,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
+            FamilyBuild::ResolveDecl(root) => {
+                let read = super::narrow_value_cache_read(read);
+                let completeness = read.fact_status.completeness();
+                let mut roots = vec![root];
+                if let QueryResult::Value(node) = &read.value {
+                    roots.extend(self.observed_self_roots_from_nodes([*node]));
+                }
+                let mut output: QueryBuildOutput = (read.value, read.dep_signature).into();
+                output.cache_suppress = read.cache_suppress;
+                output.merge_completeness(completeness);
+                FamilyStep::Done(Box::new(output.with_observed_self_roots(roots)))
+            }
             FamilyBuild::CycleGate(build) => self
                 .continuation_stage()
                 .resume_cycle_gate_hop(*build, super::narrow_value_cache_read(read)),
@@ -470,6 +486,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::MacroPayload(build) => self
                 .continuation_stage()
                 .resume_macro_payload_owner(build, serve),
+            FamilyBuild::ResolveDecl(_) => unreachable!("a declaration target is a query read"),
             FamilyBuild::ReduceIntersection(_) => {
                 unreachable!("an intersection reduction reads no file")
             }
@@ -501,7 +518,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | FamilyBuild::OverloadSet(_)
             | FamilyBuild::ClassInstanceSurface(_)
             | FamilyBuild::ClassStaticSurface(_)
-            | FamilyBuild::CycleGate(_) => {
+            | FamilyBuild::CycleGate(_)
+            | FamilyBuild::ResolveDecl(_) => {
                 unreachable!("only an apparent type looks a global declaration up")
             }
         }
@@ -523,7 +541,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | FamilyBuild::OverloadSet(_)
             | FamilyBuild::ApparentType(_)
             | FamilyBuild::ClassInstanceSurface(_)
-            | FamilyBuild::CycleGate(_) => {
+            | FamilyBuild::CycleGate(_)
+            | FamilyBuild::ResolveDecl(_) => {
                 unreachable!("only a class's static surface reads declarations in place")
             }
         }

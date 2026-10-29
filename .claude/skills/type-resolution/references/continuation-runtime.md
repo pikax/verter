@@ -189,7 +189,11 @@ predicate includes framework and augmentation declarations. A nonlocal lookup
 waits on the prepared bundle's owned route-source handoff before its builder
 starts, so a direct imported declaration does not block the polling thread.
 This preflight does not convert the remaining route/preparation operations
-into owned continuations. The frame retains a terminal load failure so its
+into owned continuations. After selecting a defining declaration, the family
+retains the barrel's observed content version and requests the target through
+an owned semantic need. Both drivers resume with that delivery rather than
+recursively building the target; a held target memo producer therefore yields
+at the production poll. The frame retains a terminal load failure so its
 builder cannot retry the missing source through the synchronous loader.
 
 ## Dependency-reaching entry inventory
@@ -216,7 +220,7 @@ with `crates/` are relative to the repository root.
 | `ResolveClassSurface(Instance)` | `continuation_stages.rs`, `ClassInstanceSurfaceBuild` | Declaring-file load and instance instantiation are transitions. |
 | `ResolveClassSurface(Static)` | `continuation_stages.rs`, `ClassStaticSurfaceBuild`; `build.rs`, `read_class_static_declarations` | File loads and base-surface needs retain state, but owner preparation, constructor lowering, heritage classification and final specialization execute in place. |
 | `Instantiate`, `TypeOf` | `query_frames.rs` | Frame and initializer transitions cover selected loads and nested evaluations; lowerers and resolver adapters reached inside a step can still read in place. |
-| `ResolveDecl` | `query_frames.rs`, `frame_source_load`; `build.rs`, `build_resolve_decl` | Source/direct-import preload can suspend; route/preparation and recursive target building remain synchronous. |
+| `ResolveDecl` | `query_frames.rs`, `frame_source_load`; `build.rs`, `begin_resolve_decl`; `family_continuation.rs` | Source/direct-import preload and the selected target's semantic read can suspend. The selected target and barrel observation survive the wait; route/preparation still runs in place. |
 | `ProjectPath` (also canonicalized `ProjectMember` and `IndexedAccess`) | `build.rs`, `build_project_path`; `walk.rs`, `PathWalker` | Walker positions, resolved operands and completed projections are stack-local outside the existing projection seams. |
 | `MappedType`, `KeyOf` | `build.rs`, `build_mapped_type`, `build_key_of` | Source expansion, key enumeration and per-member reduction can reach nested queries in place. |
 | `TemplateLiteralReduce` | `build.rs`, `reduce_template_literal_nodes` | Interpolant planning and the final `ReduceUnion` read run in place; a product cursor alone is not an owned suspended build. |

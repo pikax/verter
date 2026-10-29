@@ -5127,6 +5127,20 @@ mod semantic_poll_contract {
         )
     }
 
+    fn routed_declaration_host() -> Arc<crate::VerterHost> {
+        let host = unloaded_files_host(&[
+            (UNLOADED_OWNER, "export interface Props { a: string }"),
+            (
+                "/semantic-task/decl-importer.ts",
+                "export * from './owner';",
+            ),
+        ]);
+        host.ensure_indexed_ready("/semantic-task/decl-importer.ts")
+            .unwrap();
+        host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+        host
+    }
+
     /// One suspension seam of a family built as a continuation: the root a
     /// consumer reads, the dependency another task holds at that seam, and
     /// the stages — builds begun, stages resumed with a read — the root runs
@@ -5143,7 +5157,20 @@ mod semantic_poll_contract {
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 11] = [
+    const HELD_SEAMS: [HeldSeam; 12] = [
+        HeldSeam {
+            seam: "a routed declaration's defining declaration",
+            host: routed_declaration_host,
+            keys: |_, _| {
+                (
+                    declaration_key("/semantic-task/decl-importer.ts"),
+                    declaration_key(UNLOADED_OWNER),
+                )
+            },
+            expression_site: false,
+            before_seam: (1, 0),
+            in_all: (2, 1),
+        },
         HeldSeam {
             seam: "a macro payload's props intersection",
             host: chain_host,
@@ -5537,7 +5564,7 @@ mod semantic_poll_contract {
     #[test]
     fn an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more(
     ) {
-        let seam = &HELD_SEAMS[5];
+        let seam = &HELD_SEAMS[6];
         let (synchronous, _) = synchronous_across(seam);
         let host = (seam.host)();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
