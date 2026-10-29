@@ -1276,6 +1276,13 @@ not grow the outer tracer per read. The window bounds insertion work; it
 does not bound the answer or replace final canonicalization. Distinct versions
 of the same fact remain distinct observations.
 
+Canonical merging excludes runs covered by existing subset proofs before
+choosing its membership strategy. Narrow deltas probe the persistent base
+directly; wide overlap builds a temporary borrowed membership index. The
+choice compares remaining probe count times logarithmic search depth with
+base width. Both paths preserve the same exact union, conflicting versions,
+compaction, mutation instability and refusal propagation.
+
 Per-query frame cost: every cold query seals its tracer, builds its completed
 carrier and registers its memo candidate, so these steps copy nothing per fact
 beyond the output they own. `FactReadSet::finalise` merges absorbed canonical

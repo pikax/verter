@@ -92,15 +92,19 @@ trace or enable flag; they only bound the required observations' cost. Every
 embedded version observation remains unconditional at the close that retains
 a reference the scope does not already hold.
 
-Canonicalisation uses transient borrowed hash sets for base membership and
-distinct additions. This REQUIRED merge workspace lives only during sealing;
+Canonicalisation uses transient borrowed hash sets for wide base membership and
+distinct additions. Narrow deltas probe the persistent base directly rather
+than rebuilding its index at every enclosing seal. The choice compares the
+remaining probe count times logarithmic search depth with the base width,
+after excluding inputs covered by existing subset proofs. The filtered input
+list and both hash sets are REQUIRED merge workspace living only during sealing;
 it owns no fact storage, cache identity or optional observation. Exact equality
 preserves conflicting versions. Small deltas extend the shared base tree;
 additions wider than the base are sorted and merged into a bottom-up set.
 The additions vector retains first-seen input order, preserving ordered runs
 for sorting instead of scrambling them through hash-index iteration.
 Signature work charges base visits, input visits, sorting and merge visits.
-The base index is lazy, so known subset inputs need no repeated base walk.
+Known subset inputs need no repeated base walk or probe.
 An unchanged union records each input as a subset using the existing weak
 storage proof memo. Receipt or domain compaction disables this inference,
 since the resulting set may have replaced an input fact.

@@ -795,28 +795,40 @@ impl FactReadSet {
                 }
             }
             let base = &runs[widest];
-            // Compare borrowed facts by hash/equality once, independently of
-            // whether the base uses a slice or a tree. Repeated tree probes
-            // for overlapping runs otherwise multiply the merge by depth.
-            let base_facts = std::cell::LazyCell::new(|| {
+            let merge_runs: SmallVec<[&FactSet; 4]> = runs
+                .iter()
+                .enumerate()
+                .filter(|(index, run)| {
+                    *index != widest
+                        && !run.ptr_eq(base)
+                        && !crate::facts::fact_set::subset_memo::known_subset(run, base)
+                })
+                .map(|(_, run)| run)
+                .collect();
+            // A narrow delta probes the persistent base directly. Indexing
+            // the whole base for each enclosing seal would walk every prefix
+            // again. For wide overlap, one index replaces repeated searches.
+            let probes =
+                self.observations.len() + merge_runs.iter().map(|run| run.len()).sum::<usize>();
+            let index_base = probes.saturating_mul(base.len().ilog2() as usize + 1) >= base.len();
+            let base_facts = index_base.then(|| {
                 record_signature_work(base.len());
                 base.iter().collect::<rustc_hash::FxHashSet<_>>()
             });
+            let contains = |fact: &FactVersionRef| {
+                base_facts
+                    .as_ref()
+                    .map_or_else(|| base.contains(fact), |facts| facts.contains(fact))
+            };
             let mut added = rustc_hash::FxHashSet::default();
             // Preserve the canonical input runs' order for the final sort.
             // Iterating the hash index would scramble those ordered runs.
             let mut additions = Vec::new();
-            for (index, run) in runs.iter().enumerate() {
-                if index == widest
-                    || run.ptr_eq(base)
-                    || crate::facts::fact_set::subset_memo::known_subset(run, base)
-                {
-                    continue;
-                }
+            for run in merge_runs {
                 let mut held_all = true;
                 for fact in run.iter() {
                     record_signature_work(1);
-                    if !base_facts.contains(fact) {
+                    if !contains(fact) {
                         held_all = false;
                         if added.insert(fact) {
                             additions.push(fact.clone());
@@ -829,7 +841,7 @@ impl FactReadSet {
             }
             for fact in &self.observations {
                 record_signature_work(1);
-                if !base_facts.contains(fact) && added.insert(fact) {
+                if !contains(fact) && added.insert(fact) {
                     additions.push(fact.clone());
                 }
             }
@@ -1449,6 +1461,32 @@ mod finalise_tests {
             assert!(facts.contains(&changed));
             assert!(signature.iter().all(|fact| facts.contains(fact)));
         }
+    }
+
+    #[test]
+    fn narrow_deltas_do_not_walk_the_shared_base() {
+        let policy = FactPolicy::with_widths(crate::facts::policy::FactWidths {
+            fresh_slice_max: 32,
+            ..crate::facts::policy::FactWidths::PRODUCTION
+        })
+        .unwrap();
+        let work = [128, 2048].map(|count| {
+            let base = policy.set_of((0..count).map(fact).collect::<Vec<_>>());
+            let mut read = FactReadSet::new(policy);
+            read.absorb_canonical_signature(&base);
+            let added = fact(count);
+            read.observe(added.clone());
+            let before = signature_work_for_tests();
+            let FactReadSetFinalise::Ok(sealed) = read.finalise() else {
+                panic!("stable delta must seal");
+            };
+            let work = signature_work_for_tests() - before;
+            assert_eq!(sealed.len(), count + 1);
+            assert!(sealed.contains(&added));
+            assert!(base.iter().all(|held| sealed.contains(held)));
+            work
+        });
+        assert!(work[1] <= work[0] * 2, "narrow delta work: {work:?}");
     }
 
     #[test]
