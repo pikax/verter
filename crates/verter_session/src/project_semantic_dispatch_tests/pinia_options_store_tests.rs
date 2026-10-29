@@ -730,7 +730,7 @@ fn an_unrelated_store_refusal_is_not_the_recovery_refusal() {
 }
 
 /// A marked store whose `first` getter reads a name nothing declares,
-/// `(state) => missingDependency` — TS2304 alone in TypeScript 7.1.0-beta, every
+/// `(state) => missingDependency` — TS2304 alone in TypeScript 7.0.2, every
 /// other member answering as the marker-typed store's — refuses its
 /// `defineStore` call too, every member propagating the same miss. Its cause
 /// is that context-sensitive call's own refusal, never an absent receiver
@@ -763,7 +763,7 @@ fn a_marked_stores_missing_dependency_is_not_the_recovery_refusal() {
 /// constraint of a store's `S` — and a literal key is one property whether
 /// either side spells it as a number or a string, a required one an
 /// optional source member does not carry. Measured on TypeScript
-/// 7.1.0-beta, all four settings.
+/// 7.0.2, all four settings.
 #[test]
 fn a_record_over_index_keys_relates_through_its_index_signatures() {
     let failures = Project::module(
@@ -855,7 +855,7 @@ fn nested_union_aliases_contribute_every_record_and_mapped_key() {
 /// parameter: over an object literal type, over an interface applied to
 /// the parameter (whose keys are its declared members, `S` open), and over
 /// one extending a generic base (whose `Pick` reads the modifiers it
-/// declares). Measured on TypeScript 7.1.0-beta, all four settings.
+/// declares). Measured on TypeScript 7.0.2, all four settings.
 #[test]
 fn a_call_infers_through_pick_and_omit_of_its_parameter() {
     let failures = Project::module(
@@ -890,7 +890,7 @@ fn a_call_infers_through_pick_and_omit_of_its_parameter() {
 /// any) | (() => any)` is typed by the first arm, as a Pinia getter is by
 /// `_GettersTree`, while a callback with a defaulted parameter requires
 /// none and reads no contextual signature from the two differing arms.
-/// Measured on TypeScript 7.1.0-beta, all four settings.
+/// Measured on TypeScript 7.0.2, all four settings.
 #[test]
 fn a_callback_takes_the_union_arm_its_arity_admits() {
     let failures = Project::module(
@@ -916,7 +916,7 @@ fn a_callback_takes_the_union_arm_its_arity_admits() {
 /// A statement call through an object literal's `this`, which has no
 /// explicit type (`getExplicitThisType`), neither asserts nor ends the
 /// path: the method's return is complete, so `ReturnType` reads it off
-/// the inferred object. Measured on TypeScript 7.1.0-beta, all four settings.
+/// the inferred object. Measured on TypeScript 7.0.2, all four settings.
 #[test]
 fn a_call_through_a_contextual_this_has_no_effects() {
     let failures = Project::module(
@@ -931,7 +931,7 @@ fn a_call_through_a_contextual_this_has_no_effects() {
 /// A contextual signature's `this` parameter gives an object literal
 /// method's `this` an explicit type, so a statement call through it reads
 /// that type's effects signature: `this.check(x)` against `check(x:
-/// unknown): asserts x is string` narrows `x`, and TypeScript 7.1.0-beta
+/// unknown): asserts x is string` narrows `x`, and TypeScript 7.0.2
 /// answers `string` for the method's return, free of diagnostics, all four
 /// settings. The named demand does not read that assertion: it keeps the
 /// typed guard-narrowing gap on the function's shared flow result, never
@@ -976,7 +976,7 @@ fn a_call_through_a_contextual_signatures_explicit_this_keeps_its_effects() {
 /// to: `[Box<{ a: 1 }>['v']]` over `v: Unwrap<T>`, a conditional alias, is
 /// `[{ a: 1; }]` as `Box<{ a: 1 }>['v']` alone is, never the application
 /// kept as a name. An interface the member applies keeps its name. Measured
-/// on TypeScript 7.1.0-beta, all four settings.
+/// on TypeScript 7.0.2, all four settings.
 #[test]
 fn a_nested_access_reads_through_a_transparent_alias_member() {
     let failures = Project::module(
@@ -998,7 +998,7 @@ fn a_nested_access_reads_through_a_transparent_alias_member() {
 /// `m: { a: 1 } & E<{ a: 1 }>` answers `{ a: 1 } & E<{ a: 1 }>` as the
 /// bare alias does — never the application's structural surface alone,
 /// which assignability could not tell apart — and a member demand still
-/// reads through the intersection. Measured on TypeScript 7.1.0-beta, all four
+/// reads through the intersection. Measured on TypeScript 7.0.2, all four
 /// settings.
 #[test]
 fn a_nested_access_keeps_an_intersections_generic_interface_contributor() {
