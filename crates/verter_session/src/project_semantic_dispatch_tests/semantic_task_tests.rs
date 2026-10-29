@@ -4638,6 +4638,54 @@ mod semantic_poll_contract {
     }
 
     #[test]
+    fn an_imported_declaration_with_present_source_yields_for_indexing() {
+        const IMPORTER: &str = "/semantic-task/decl-importer.ts";
+        let make_host = || {
+            let host = unloaded_files_host(&[
+                (UNLOADED_OWNER, "export interface Props { a: string }"),
+                (
+                    IMPORTER,
+                    "import { Props } from './owner'; export { Props };",
+                ),
+            ]);
+            host.ensure_indexed_ready(IMPORTER).unwrap();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            host
+        };
+        let synchronous = {
+            let host = make_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(IMPORTER));
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = make_host();
+            let mut held = host.decl_lowering.hold_workers_for_tests();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let mut entry = dispatch.poll_query(declaration_key(IMPORTER));
+            {
+                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                assert!(entry.poll(Waker::noop()).is_pending());
+                assert!(entry.poll(Waker::noop()).is_pending());
+            }
+            if abandon {
+                drop(entry);
+                held.release();
+            } else {
+                held.release();
+                let read = poll_until_ready(|waker| {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(waker)
+                });
+                drop(entry);
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+        }
+    }
+
+    #[test]
     fn a_local_declaration_does_not_load_its_unrelated_imports() {
         const LOCAL: &str = "/semantic-task/local-decl.ts";
         let host = unloaded_files_host(&[
