@@ -4,6 +4,75 @@ use super::*;
 use std::task::{Poll, Waker};
 use verter_execution::wake::{WakeRegistration, WakerSet};
 
+/// One owned request, spanning inbox backpressure and the admitted producer's
+/// completion. Only external drivers execute stages; polling cannot access a
+/// blocking handle. Cancellation withdraws this subscriber without stopping
+/// shared stage work or another request's subscriber.
+pub struct OwnedSchedulerRequest {
+    admission: Option<PendingSubmission>,
+    completion: crate::job::OwnedCompletionSubscription<RequestResult>,
+    scheduler: Option<Arc<Scheduler>>,
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
+    finished: bool,
+}
+
+impl OwnedSchedulerRequest {
+    pub(super) fn new(
+        scheduler: &Arc<Scheduler>,
+        request: Request,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: CancellationToken,
+    ) -> Self {
+        let (submission, handle) = scheduler.prepare_request_submission(request);
+        Self {
+            admission: Some(PendingSubmission::new(&scheduler.inbox, Some(submission))),
+            completion: handle
+                .subscribe()
+                .owned_producer(waiter, cancellation.clone()),
+            scheduler: Some(Arc::clone(scheduler)),
+            stop: Some(cancellation.subscribe()),
+            finished: false,
+        }
+    }
+
+    /// Retain one queue offer on backpressure and subscribe to completion under
+    /// its producer lock. Terminal and stop paths release the owned wait edge.
+    pub fn poll(
+        &mut self,
+        waker: &Waker,
+    ) -> Poll<Result<CompletionState<RequestResult>, verter_execution::dependency::DependencyStop>>
+    {
+        assert!(!self.finished, "request already completed");
+        if self
+            .stop
+            .as_mut()
+            .is_some_and(|stop| stop.poll(waker).is_ready())
+        {
+            self.admission = None;
+            self.finished = true;
+            self.scheduler = None;
+            self.stop = None;
+            return self.completion.poll(waker);
+        }
+        if let Some(admission) = &mut self.admission {
+            let scheduler = self.scheduler.as_ref().expect("live request");
+            match admission.poll(scheduler, waker) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(())) => scheduler.record_inbox_submission(),
+                Poll::Ready(Err(submission)) => scheduler.shutdown_drained_submission(*submission),
+            }
+            self.admission = None;
+            self.stop = None;
+        }
+        let result = self.completion.poll(waker);
+        self.finished = result.is_ready();
+        if self.finished {
+            self.scheduler = None;
+        }
+        result
+    }
+}
+
 /// One request or atomic batch waiting to enter the scheduler inbox.
 ///
 /// `poll` never drives a stage or waits for a dependency. A full inbox retains

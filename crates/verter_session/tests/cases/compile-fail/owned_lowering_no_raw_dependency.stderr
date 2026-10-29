@@ -1,0 +1,5 @@
+error[E0616]: field `dependency` of struct `OwnedLoweringHandoff` is private
+ --> tests/cases/compile-fail/owned_lowering_no_raw_dependency.rs:4:21
+  |
+4 |     let _ = handoff.dependency;
+  |                     ^^^^^^^^^^ private field

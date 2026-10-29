@@ -18,6 +18,8 @@ use verter_type_engine::semantic_query_memo::{
 const ICON: &str = "/src/types/icon.ts";
 const HANG_BOUND: Duration = Duration::from_secs(10);
 
+// Setup may still have an asynchronous indexing task. Once the demand finishes,
+// require no task or wait to remain; a setup count is not a stable baseline.
 fn host() -> VerterHost {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host.upsert(UpsertRequest {
@@ -93,7 +95,6 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
     let joins_before = joined_waits(graph);
-    let waits_before = graph.wait_graph_counts_for_tests();
 
     let (observed, answers, held_flight) = std::thread::scope(|threads| {
         let rendezvous = graph.arm_flight_rendezvous(key.clone());
@@ -141,7 +142,7 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
     );
     assert_eq!(
         graph.wait_graph_counts_for_tests(),
-        waits_before,
+        (0, 0),
         "no task or wait registration outlives the requests"
     );
 }
@@ -188,7 +189,6 @@ fn a_failed_assertion_while_the_producer_is_held_releases_it_and_retains_nothing
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
-    let waits_before = graph.wait_graph_counts_for_tests();
     // The held flight's weak name must escape the unwind so destruction is
     // observed independently of the flight table.
     let held_flight = std::sync::Mutex::new(None);
@@ -217,7 +217,7 @@ fn a_failed_assertion_while_the_producer_is_held_releases_it_and_retains_nothing
     );
     assert_eq!(
         graph.wait_graph_counts_for_tests(),
-        waits_before,
+        (0, 0),
         "no task or wait registration outlives the unwind"
     );
     request_icon_box(&host);
@@ -228,7 +228,6 @@ fn an_abandoned_rendezvous_releases_its_parked_producer() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
-    let waits_before = graph.wait_graph_counts_for_tests();
     let (held_flight, answer) = std::thread::scope(|threads| {
         let rendezvous = graph.arm_flight_rendezvous(key.clone());
         let producer = threads.spawn(|| request_icon_box(&host));
@@ -250,7 +249,7 @@ fn an_abandoned_rendezvous_releases_its_parked_producer() {
     );
     assert_eq!(
         graph.wait_graph_counts_for_tests(),
-        waits_before,
+        (0, 0),
         "no task or wait registration outlives the abandoned schedule"
     );
     assert_eq!(request_icon_box(&host), answer);
@@ -367,7 +366,6 @@ fn cancelling_the_parked_producer_and_its_subscriber_returns_both() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
-    let waits_before = graph.wait_graph_counts_for_tests();
 
     let (held_flight, answers) = std::thread::scope(|threads| {
         let rendezvous = graph.arm_flight_rendezvous(key.clone());
@@ -405,7 +403,7 @@ fn cancelling_the_parked_producer_and_its_subscriber_returns_both() {
     );
     assert_eq!(
         graph.wait_graph_counts_for_tests(),
-        waits_before,
+        (0, 0),
         "no task or wait registration outlives the cancelled schedule"
     );
     // The store still answers after the cancelled schedule.

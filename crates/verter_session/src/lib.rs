@@ -319,6 +319,8 @@ pub(crate) mod host_executor;
 mod host_executor_lowering_tests;
 pub mod host_flow_return_audit;
 mod host_lifecycle;
+mod host_load;
+pub use host_load::{HostLoadCommit, HostLoadError, HostLoadHandoff};
 pub mod host_lsp_audit;
 pub mod host_manage;
 pub mod host_mcp_audit;
@@ -386,6 +388,9 @@ mod resolver_core_tests;
 mod resolver_store;
 pub use host_views::CommittedSourceContent;
 pub use resolver_store::{HostAuthority, HostAuthorityView};
+pub use resolver_store::{
+    StoreViewError, StoreViewHandoff, StoreViewProducer, StoreViewStep, StoreViewValue,
+};
 #[cfg(test)]
 mod resolver_store_tests;
 pub mod route_analysis_inputs;

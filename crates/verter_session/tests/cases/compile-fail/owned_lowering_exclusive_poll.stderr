@@ -1,0 +1,10 @@
+error[E0596]: cannot borrow `*handoff` as mutable, as it is behind a `&` reference
+ --> tests/cases/compile-fail/owned_lowering_exclusive_poll.rs:4:5
+  |
+4 |     handoff.poll(std::task::Waker::noop());
+  |     ^^^^^^^ `handoff` is a `&` reference, so it cannot be borrowed as mutable
+  |
+help: consider changing this to be a mutable reference
+  |
+3 | fn cannot_share(handoff: &mut OwnedLoweringHandoff<LeaseHandoff<usize>>) {
+  |                           +++

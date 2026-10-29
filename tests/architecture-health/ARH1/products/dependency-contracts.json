@@ -350,7 +350,7 @@
           "crates/verter_session/src/host_batch_coordinator.rs",
           "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
           "crates/verter_session/src/host_construction.rs",
-          "crates/verter_session/src/host_lifecycle.rs",
+          "crates/verter_session/src/host_load.rs",
           "crates/verter_session/src/host_manage/component_meta_extract_tests.rs",
           "crates/verter_session/src/host_upsert.rs",
           "crates/verter_session/src/host_views.rs",
@@ -368,6 +368,7 @@
           "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
+          "crates/verter_session/tests/cases/compile-fail/owned_scheduler_request_no_blocking_driver.rs",
           "crates/verter_session/tests/cases/compile-fail/root_poll_no_blocking_driver.rs",
           "crates/verter_session/tests/cases/compile-fail/scoped_handoff_no_blocking_scheduler.rs",
           "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
@@ -467,6 +468,33 @@
           "rules": [
             "inline-driver variant with the same injected executor and shared task registry as with_executor_and_task_registry",
             "no driver thread is created; native pools are injected and wasm32 carries no pool parameter"
+          ]
+        },
+        {
+          "constructor": "with_executor_and_task_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "the host injects its shared task registry as the cycle authority for scoped producers and semantic dependencies",
+            "same injected executor, pools and native driver capability as with_executor; no additional pool or semantic computation"
+          ]
+        },
+        {
+          "constructor": "new_sync_with_executor_and_task_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "the externally driven scheduler shares the host task registry without constructing another cycle authority",
+            "same injected executor and native pool capability as new_sync_with_executor; no driver thread or new pool"
           ]
         }
       ],
@@ -575,6 +603,8 @@
           "dispatch_for_pending_dependency",
           "submit_request",
           "begin_submit_request",
+          "begin_owned_request",
+          "enter_execution_scope",
           "submit_batch_atomic",
           "begin_submit_batch_atomic",
           "wait_batch",
@@ -605,6 +635,7 @@
           "remove",
           "close_file",
           "has_driver_thread",
+          "pump_owned_dependency",
           "driver_loop_native",
           "drive_one",
           "drive_all",

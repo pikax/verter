@@ -695,6 +695,7 @@ impl Scheduler {
             && dag.has_pending_deps(&analysis_gate)
         {
             dag.upgrade_priority(&analysis_gate, effective_priority);
+            dag.bind_file_producer(&analysis_gate);
             return;
         }
 

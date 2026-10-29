@@ -37,6 +37,440 @@ fn fill(scheduler: &Scheduler) {
     }
 }
 
+#[test]
+fn owned_request_tracks_each_gating_prerequisite_before_its_own_stage() {
+    use crate::dag::{DepKey, FileStageKey, WorkKind, WorkNodeIdentity};
+    #[derive(Clone, Copy)]
+    enum Release {
+        Complete,
+        Cancel,
+        Fail,
+    }
+    for release in [Release::Complete, Release::Cancel, Release::Fail] {
+        let scheduler = scheduler();
+        let identity = |canonical: &str| WorkNodeIdentity::FileStage {
+            canonical: Arc::from(canonical),
+            incarnation: 1,
+            generation: 1,
+            stage: FileStageKey::Analysis,
+        };
+        let first = identity("/a.ts");
+        let second = identity("/b.ts");
+        let owner = identity("/owner.ts");
+        let (handle, sender) = completion_pair();
+        {
+            let mut dag = scheduler.dag.lock();
+            for dependency in [&first, &second] {
+                dag.submit(
+                    dependency.clone(),
+                    WorkKind::Analysis,
+                    Priority::Interactive,
+                    vec![],
+                    None,
+                );
+            }
+            dag.submit(
+                owner.clone(),
+                WorkKind::Analysis,
+                Priority::Interactive,
+                vec![
+                    DepKey::from_identity(&first),
+                    DepKey::from_identity(&second),
+                ],
+                None,
+            );
+            let _ = dag.register_request(
+                &Arc::from("/owner.ts"),
+                1,
+                TargetStage::Analysis,
+                sender.clone(),
+                None,
+            );
+            dag.bind_file_producer(&owner);
+        }
+        let waiter = scheduler.task_registry.register_task();
+        let mut completion = handle
+            .subscribe()
+            .owned_producer(waiter.clone(), CancellationToken::new());
+        for expected in [&first, &second, &owner] {
+            assert!(completion.poll(Waker::noop()).is_pending());
+            let job = scheduler
+                .dag
+                .lock()
+                .next_ready()
+                .expect("next prerequisite becomes ready");
+            assert_eq!(&job.identity, expected);
+            assert!(
+                job.execution_task.wait_for(&waiter).is_err(),
+                "the actual prerequisite cannot wait back on its root"
+            );
+            let mut dag = scheduler.dag.lock();
+            if expected == &first {
+                match release {
+                    Release::Complete => {
+                        dag.complete(expected);
+                    }
+                    Release::Cancel => {
+                        dag.cancel(expected);
+                    }
+                    Release::Fail => {
+                        dag.fanout_analysis_failure_to_waiters(
+                            &Arc::from("/a.ts"),
+                            1,
+                            1,
+                            &crate::job::SchedulerError::FileNotFound {
+                                file_id: "/a.ts".into(),
+                            },
+                        );
+                        dag.cancel(expected);
+                    }
+                }
+            } else {
+                dag.complete(expected);
+            }
+        }
+        sender.send(CompletionState::Shutdown);
+        assert!(matches!(
+            completion.poll(Waker::noop()),
+            Poll::Ready(Ok(CompletionState::Shutdown))
+        ));
+        assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+    }
+}
+
+#[test]
+fn owned_request_tracks_source_before_a_transitive_analysis_producer_is_admitted() {
+    use crate::dag::{DepKey, FileStageKey, WorkKind, WorkNodeIdentity};
+    let scheduler = scheduler();
+    let identity = |canonical: &str, stage| WorkNodeIdentity::FileStage {
+        canonical: Arc::from(canonical),
+        incarnation: 1,
+        generation: 1,
+        stage,
+    };
+    let source = identity("/dependency.ts", FileStageKey::Source);
+    let analysis = identity("/dependency.ts", FileStageKey::Analysis);
+    let owner = identity("/owner.ts", FileStageKey::Analysis);
+    let (handle, sender) = completion_pair();
+    {
+        let mut dag = scheduler.dag.lock();
+        dag.submit(
+            source.clone(),
+            WorkKind::Load,
+            Priority::Interactive,
+            vec![],
+            None,
+        );
+        dag.submit(
+            owner.clone(),
+            WorkKind::Analysis,
+            Priority::Interactive,
+            vec![DepKey::from_identity(&analysis)],
+            None,
+        );
+        let _ = dag.register_request(
+            &Arc::from("/owner.ts"),
+            1,
+            TargetStage::Analysis,
+            sender.clone(),
+            None,
+        );
+        dag.bind_file_producer(&owner);
+    }
+    let waiter = scheduler.task_registry.register_task();
+    let mut completion = handle
+        .subscribe()
+        .owned_producer(waiter.clone(), CancellationToken::new());
+    assert!(completion.poll(Waker::noop()).is_pending());
+    let source_job = scheduler
+        .dag
+        .lock()
+        .next_ready()
+        .expect("Source exists before Analysis");
+    assert!(source_job.execution_task.wait_for(&waiter).is_err());
+    {
+        let mut dag = scheduler.dag.lock();
+        dag.submit(
+            analysis.clone(),
+            WorkKind::Analysis,
+            Priority::Interactive,
+            vec![],
+            None,
+        );
+        dag.bind_file_producer(&analysis);
+        dag.complete(&source);
+    }
+    assert!(completion.poll(Waker::noop()).is_pending());
+    let analysis_job = scheduler
+        .dag
+        .lock()
+        .next_ready()
+        .expect("late Analysis is ready");
+    assert!(analysis_job.execution_task.wait_for(&waiter).is_err());
+    scheduler.dag.lock().complete(&analysis);
+    sender.send(CompletionState::Shutdown);
+    assert!(matches!(
+        completion.poll(Waker::noop()),
+        Poll::Ready(Ok(CompletionState::Shutdown))
+    ));
+}
+
+#[test]
+fn owned_request_rebinds_after_scoped_producer_authority_is_installed() {
+    use crate::dag::{DepKey, FileStageKey, WorkKind, WorkNodeIdentity};
+    let scheduler = scheduler();
+    let cache = WorkNodeIdentity::CacheNode {
+        cache_id: crate::cache_id::SchedulerCacheId(17),
+        key_hash: [1; 16],
+        view_epoch: 1,
+        snapshot_pin_id: crate::dag::PinId(1),
+    };
+    let owner = WorkNodeIdentity::FileStage {
+        canonical: Arc::from("/owner.ts"),
+        incarnation: 1,
+        generation: 1,
+        stage: FileStageKey::Analysis,
+    };
+    let (handle, sender) = completion_pair();
+    {
+        let mut dag = scheduler.dag.lock();
+        dag.submit_cache(cache.clone(), Priority::Interactive, None);
+        dag.submit(
+            owner.clone(),
+            WorkKind::Analysis,
+            Priority::Interactive,
+            vec![DepKey::from_identity(&cache)],
+            None,
+        );
+        let _ = dag.register_request(
+            &Arc::from("/owner.ts"),
+            1,
+            TargetStage::Analysis,
+            sender.clone(),
+            None,
+        );
+        dag.bind_file_producer(&owner);
+    }
+    let waiter = scheduler.task_registry.register_task();
+    let mut completion = handle
+        .subscribe()
+        .owned_producer(waiter.clone(), CancellationToken::new());
+    let counter = Arc::new(CountWake::default());
+    let waker = Waker::from(counter.clone());
+    assert!(completion.poll(&waker).is_pending());
+    let producer = scheduler.task_registry.register_task();
+    scheduler
+        .dag
+        .lock()
+        .set_execution_task(&cache, producer.clone());
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "installing the real authority wakes dependent roots"
+    );
+    assert!(completion.poll(&waker).is_pending());
+    assert!(
+        producer.wait_for(&waiter).is_err(),
+        "the real scoped producer owns the dependency cycle edge"
+    );
+    sender.send(CompletionState::Shutdown);
+    assert!(matches!(
+        completion.poll(&waker),
+        Poll::Ready(Ok(CompletionState::Shutdown))
+    ));
+}
+
+#[test]
+fn owned_request_cancellation_detaches_before_admission_without_driving() {
+    use verter_execution::dependency::DependencyStop;
+    let scheduler = scheduler();
+    fill(&scheduler);
+    let waiter = scheduler.task_registry.register_task();
+    let stop = CancellationToken::new();
+    let counter = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let mut request = scheduler.begin_owned_request(request("/owned.ts"), waiter, stop.clone());
+    let (send, receive) = std::sync::mpsc::channel();
+    let poll_waker = waker.clone();
+    let poller = std::thread::spawn(move || {
+        let result = request.poll(&poll_waker);
+        let _ = send.send((request, result));
+    });
+    let polled = receive.recv_timeout(std::time::Duration::from_secs(1));
+    // Release before joining on every assertion path, including a planted
+    // blocking offer. Capture the depth before releasing the held dependency.
+    let depth = scheduler.inbox.receiver.len();
+    if polled.is_err() {
+        scheduler.drain_inbox();
+    }
+    poller.join().unwrap();
+    let (mut request, result) =
+        polled.expect("owned admission must return before capacity release");
+    assert!(result.is_pending());
+    assert_eq!(depth, SUBMISSION_INBOX_CAPACITY);
+    stop.cancel();
+    assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        request.poll(&waker),
+        Poll::Ready(Err(DependencyStop::Cancelled))
+    ));
+    scheduler.drain_inbox();
+    assert!(scheduler.try_get_source("/owned.ts").is_none());
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+    assert_eq!(scheduler.inbox.space.lock().len(), 0);
+}
+
+#[test]
+fn owned_request_drop_withdraws_capacity_subscription_while_handle_remains_live() {
+    let scheduler = scheduler();
+    fill(&scheduler);
+    let mut request = scheduler.begin_owned_request(
+        request("/drop-owned.ts"),
+        scheduler.task_registry.register_task(),
+        CancellationToken::new(),
+    );
+    assert!(request.poll(Waker::noop()).is_pending());
+    assert_eq!(scheduler.inbox.space.lock().len(), 1);
+    drop(request);
+    assert_eq!(scheduler.inbox.space.lock().len(), 0);
+    scheduler.drain_inbox();
+    assert!(scheduler.try_get_source("/drop-owned.ts").is_none());
+}
+
+#[test]
+fn owned_request_capacity_wake_precedes_producer_and_completion_wakes() {
+    let scheduler = scheduler();
+    fill(&scheduler);
+    let counter = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let mut request = scheduler.begin_owned_request(
+        request("/wake-owned.ts"),
+        scheduler.task_registry.register_task(),
+        CancellationToken::new(),
+    );
+    assert!(request.poll(&waker).is_pending());
+    scheduler.drain_inbox();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "capacity release wakes the retained offer"
+    );
+    assert!(request.poll(&waker).is_pending());
+    scheduler.drain_inbox();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        2,
+        "real producer binding wakes completion"
+    );
+    assert!(request.poll(&waker).is_pending());
+    assert!(scheduler.drive_one());
+    scheduler.drain_inbox();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        3,
+        "terminal completion wakes the waiter"
+    );
+    assert!(matches!(
+        request.poll(&waker),
+        Poll::Ready(Ok(CompletionState::Ready(_)))
+    ));
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
+fn owned_request_source_executes_as_the_waited_producer_and_refuses_a_mixed_cycle() {
+    use verter_execution::tasks::{ExecutionScope, ExecutionTask};
+    struct CycleLoader {
+        parent: ExecutionTask,
+    }
+    impl SourceLoader for CycleLoader {
+        fn load(&self, _: &str) -> Option<Arc<str>> {
+            let producer = ExecutionScope::current(self.parent.registry())
+                .expect("stage installs its actual execution task");
+            assert!(!producer.same_task(&self.parent));
+            assert!(
+                producer.wait_for(&self.parent).is_err(),
+                "parent is already waiting on this stage"
+            );
+            Some(Arc::from("export const n = 1;"))
+        }
+        fn exists(&self, _: &str) -> bool {
+            true
+        }
+        fn classify(&self, _: &str) -> verter_language::FileLanguage {
+            verter_language::FileLanguage::script_ts()
+        }
+        fn realpath(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+    let registry = verter_execution::tasks::TaskRegistry::default();
+    let parent = registry.register_task();
+    let scheduler = Scheduler::new_sync_with_executor_and_task_registry(
+        SchedulerConfig::default(),
+        Arc::new(CycleLoader {
+            parent: parent.clone(),
+        }),
+        Arc::new(DefaultExecutor),
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::SchedulerCpuPool::new(
+            1,
+            SchedulerConfig::default().resolved_dag_budget().cpu as usize,
+        ),
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::SchedulerIoPool::new(
+            1,
+            SchedulerConfig::default().resolved_dag_budget().io as usize,
+        ),
+        registry,
+    );
+    let mut input = request("/mixed.ts");
+    input.source = None;
+    let mut request = scheduler.begin_owned_request(input, parent, CancellationToken::new());
+    assert!(request.poll(Waker::noop()).is_pending());
+    scheduler.drain_inbox();
+    assert!(request.poll(Waker::noop()).is_pending());
+    assert!(scheduler.drive_one());
+    scheduler.drain_inbox();
+    assert!(matches!(
+        request.poll(Waker::noop()),
+        Poll::Ready(Ok(CompletionState::Ready(_)))
+    ));
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
+fn owned_request_tracks_real_stage_owners_and_preserves_a_live_sibling() {
+    use verter_execution::dependency::DependencyStop;
+    let scheduler = scheduler();
+    let first = scheduler.task_registry.register_task();
+    let second = scheduler.task_registry.register_task();
+    let stop = CancellationToken::new();
+    let mut a = scheduler.begin_owned_request(request("/owned.ts"), first, stop.clone());
+    let mut sibling_request = request("/owned.ts");
+    sibling_request.source = None;
+    let mut b = scheduler.begin_owned_request(sibling_request, second, CancellationToken::new());
+    assert!(a.poll(Waker::noop()).is_pending());
+    assert!(b.poll(Waker::noop()).is_pending());
+    scheduler.drain_inbox();
+    assert!(a.poll(Waker::noop()).is_pending());
+    assert!(b.poll(Waker::noop()).is_pending());
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 2);
+    stop.cancel();
+    assert!(matches!(
+        a.poll(Waker::noop()),
+        Poll::Ready(Err(DependencyStop::Cancelled))
+    ));
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 1);
+    assert!(scheduler.drive_one());
+    scheduler.drain_inbox();
+    assert!(matches!(
+        b.poll(Waker::noop()),
+        Poll::Ready(Ok(CompletionState::Ready(_)))
+    ));
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 0);
+}
+
 fn finish(
     scheduler: &Arc<Scheduler>,
     subscription: &mut CompletionSubscription<RequestResult>,
