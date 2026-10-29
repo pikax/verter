@@ -1479,8 +1479,12 @@ pub(crate) mod base_index {
     const SOFT_CAP: usize = 4096;
     const HARD_CAP: usize = 8192;
 
+    /// One remembered index: the weak handle of the base it indexes, and
+    /// the index itself.
+    type BaseIndexEntry = (StorageWeak, Arc<FxHashSet<FactVersionRef>>);
+
     thread_local! {
-        static INDEXES: RefCell<FxHashMap<usize, (StorageWeak, Arc<FxHashSet<FactVersionRef>>)>> =
+        static INDEXES: RefCell<FxHashMap<usize, BaseIndexEntry>> =
             RefCell::new(FxHashMap::default());
     }
 
@@ -1531,11 +1535,11 @@ pub(crate) mod base_index {
     }
 }
 
-/// Whether a demand's tracers are installed on this thread, so the
-/// per-demand proof memos accept entries: entries created outside a
-/// demand (a finalisation that outlives its tracer) could never be
-/// consulted before the next demand drains them, and would pin fact
-/// storage for nothing.
+// Whether a demand's tracers are installed on this thread, so the
+// per-demand proof memos accept entries: entries created outside a
+// demand (a finalisation that outlives its tracer) could never be
+// consulted before the next demand drains them, and would pin fact
+// storage for nothing.
 thread_local! {
     static DEMAND_MEMOS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
