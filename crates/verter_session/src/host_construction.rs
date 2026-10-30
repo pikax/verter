@@ -26,7 +26,7 @@ use crate::shared::default_shared;
 use crate::types::{HostConfig, HostMetrics};
 use crate::{host_executor, VerterHost};
 
-fn is_ambient_declaration_canonical(canonical: &str) -> bool {
+pub(crate) fn is_ambient_declaration_canonical(canonical: &str) -> bool {
     canonical.starts_with("ambient:/")
         || canonical.ends_with(".d.ts")
         || canonical.ends_with(".d.tsx")

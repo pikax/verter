@@ -69,6 +69,38 @@ use verter_scheduler::invalidation::Hash16;
 use crate::file_artifact_store::{FileFacts, ProjectIdentity};
 use verter_session_query::source::env_identity::SourceEnvIdentity;
 
+// The capture vocabulary cannot upgrade this capability to an enumerable
+// scheduler. Payload access remains an exact, version-checked point read.
+mod source_header_reader {
+    use std::sync::{Arc, Weak};
+    use verter_scheduler::{invalidation::Hash16, node::SourceVersion, scheduler::Scheduler};
+
+    #[derive(Clone, Default)]
+    pub(super) struct Reader(Weak<Scheduler>);
+
+    impl Reader {
+        pub(super) fn capture(scheduler: &Arc<Scheduler>) -> Self {
+            Self(Arc::downgrade(scheduler))
+        }
+
+        pub(super) fn direct_export_hash(
+            &self,
+            canonical: &str,
+            whole_hash: Hash16,
+            version: SourceVersion,
+            name: &str,
+        ) -> Option<Hash16> {
+            let source = self.0.upgrade()?.try_get_source(canonical)?;
+            if source.whole_hash != whole_hash || source.version() != version {
+                return None;
+            }
+            let data = source.downcast_data::<crate::host_executor::HostSourceData>()?;
+            crate::resolver_store::direct_declaration_export_proof(&data.parse, name)
+                .map(|(_, hash)| hash)
+        }
+    }
+}
+
 // ── Owner-visit instrumentation ──
 
 thread_local! {
@@ -144,12 +176,9 @@ impl Drop for StoreViewBuildScope {
 
 /// Record one owner access through the captured roots.
 ///
-/// Called at the two entry points that make up the ENTIRE root read
-/// surface — [`StoreViewRoots::resolve_canonical`] and
-/// [`StoreViewRoots::augmentation_fingerprint`]. Every other read in this
-/// module is a private helper reachable only through one of them, so
-/// instrumenting the pair covers the boundary exhaustively rather than
-/// covering a hand-picked call site.
+/// Covers canonical, source-header, augmentation, program-order and
+/// per-symbol contributor root reads. The source-header hook is optional
+/// observation instrumentation; its version proof is unconditional.
 fn note_owner_visit() {
     if BUILD_SCOPE_DEPTH.with(Cell::get) > 0 {
         OWNER_VISITS_IN_BUILD.with(|cell| cell.set(cell.get().saturating_add(1)));
@@ -424,6 +453,10 @@ impl ProjectEnvRoot {
 /// from a host carries all of them.
 #[derive(Clone, Default)]
 pub(crate) struct StoreViewRoots {
+    /// Supplies a source-header payload only when its content matches the
+    /// captured authority. A view must not prolong scheduler execution;
+    /// unavailable payloads fail validation closed.
+    source_header_reader: source_header_reader::Reader,
     /// Scheduler SOURCE membership as of capture. `lookup` is an as-of
     /// read sealed to the root's epoch; there is no path to the live
     /// directory through it.
@@ -561,6 +594,7 @@ enum WholeHashAuthority {
 /// that remains.
 #[derive(Clone)]
 pub(crate) struct RootCapture {
+    source_header_reader: source_header_reader::Reader,
     programs: crate::program_order::ProgramMembershipRoot,
     source_root: Arc<verter_scheduler::source_root::SchedulerSourceRoot>,
     artifact_root: Arc<crate::file_artifact_store::FileArtifactRoot>,
@@ -593,6 +627,7 @@ impl RootCapture {
     pub(crate) fn capture(host: &crate::VerterHost) -> Self {
         let workspace = host.workspace();
         Self {
+            source_header_reader: source_header_reader::Reader::capture(&host.scheduler),
             programs: host
                 .project_type_store()
                 .indexed()
@@ -649,6 +684,7 @@ impl StoreViewRoots {
         project_generation: u64,
     ) -> Self {
         Self {
+            source_header_reader: capture.source_header_reader.clone(),
             source_root: Some(Arc::clone(&capture.source_root)),
             artifact_root: Some(Arc::clone(&capture.artifact_root)),
             project_env_root: Arc::new({
@@ -671,6 +707,46 @@ impl StoreViewRoots {
             workspace: Some(Arc::clone(&capture.workspace)),
             strict_self_root_generation: capture.strict_self_root_generation,
         }
+    }
+
+    /// Read only the header payload for an already-proved content identity.
+    /// The live reader supplies bytes, never membership or currentness: a
+    /// different live version or a missing scheduler cannot certify this view.
+    pub(crate) fn direct_declaration_export_hash_for_content(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        admitted_version: Option<verter_scheduler::node::SourceVersion>,
+        name: &str,
+    ) -> Option<Hash16> {
+        #[cfg(any(test, feature = "semantic-observe"))]
+        note_owner_visit();
+        // A base parser payload cannot certify a session overlay, including
+        // a same-byte overlay with a different language or owner surface.
+        if self
+            .session_root
+            .as_ref()
+            .is_some_and(|root| root.canonicals.contains_key(canonical))
+        {
+            return None;
+        }
+        let root = self.source_root()?;
+        if root.is_exhausted() {
+            return None;
+        }
+        let expected = admitted_version.or_else(|| match root.lookup(canonical) {
+            verter_scheduler::source_root::SourceStateAt::Present {
+                incarnation,
+                generation,
+                whole_hash: captured_hash,
+            } if captured_hash == whole_hash => Some(verter_scheduler::node::SourceVersion {
+                incarnation,
+                generation,
+            }),
+            _ => None,
+        })?;
+        self.source_header_reader
+            .direct_export_hash(canonical, whole_hash, expected, name)
     }
 
     /// Exact O(1) identity of this sealed view's strict self-root world.

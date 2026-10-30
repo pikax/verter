@@ -435,6 +435,7 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
         Some(unresolved_reach::NodeStructureBits {
             unresolved: None,
             inert: Some(true),
+            versioned_ref: None,
         })
     );
     assert!(!store.node_reaches_unresolved(array));
@@ -443,6 +444,7 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
         Some(unresolved_reach::NodeStructureBits {
             unresolved: Some(false),
             inert: Some(true),
+            versioned_ref: None,
         }),
         "both bits sit in the node's one entry"
     );
@@ -451,6 +453,7 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
         Some(unresolved_reach::NodeStructureBits {
             unresolved: Some(false),
             inert: Some(true),
+            versioned_ref: None,
         })
     );
     assert_eq!(

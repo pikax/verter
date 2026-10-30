@@ -642,7 +642,8 @@ fn facts_for(signature: &[FactVersionRef], canonical: &str) -> Vec<FactVersionRe
 
 /// `true` for the facts EVERY file reached through an import route
 /// contributes regardless of whether its declarations were ever read:
-/// the route target's whole-hash and its syntactic route interface.
+/// the route target's whole-hash, its syntactic route interface and the
+/// direct-declaration-export existence proof of the imported name.
 /// These are the *import* facts a demanded resolution legitimately
 /// traces; anything beyond them means the resolver entered the file to
 /// read a declaration.
@@ -650,7 +651,10 @@ fn is_import_route_floor_fact(fact: &FactVersionRef) -> bool {
     match fact {
         FactVersionRef::FileWholeHash { .. } => true,
         FactVersionRef::Parse(parse) => {
-            matches!(parse.key, FactKey::SyntacticRouteInterface)
+            matches!(
+                parse.key,
+                FactKey::SyntacticRouteInterface | FactKey::DirectDeclarationExport { .. }
+            )
         }
         _ => false,
     }

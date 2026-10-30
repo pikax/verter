@@ -2344,6 +2344,17 @@ impl HostStoreView {
         self.snapshot.roots.is_tombstoned(canonical_id)
     }
 
+    /// Whether a session layer of this view replaces or deletes `canonical`,
+    /// so the host's own content is not this view's answer for it.
+    pub(crate) fn session_masks(&self, canonical_id: &str) -> bool {
+        self.snapshot
+            .roots
+            .session_root
+            .as_ref()
+            .is_some_and(|session| session.canonicals.contains_key(canonical_id))
+            || self.is_tombstoned(canonical_id)
+    }
+
     /// Cap the captured workspace's freshness-history retirement at this
     /// view's captured content generation while the returned lease lives.
     ///
@@ -2924,6 +2935,54 @@ pub(crate) fn syntactic_route_interface_hash(
     })
 }
 
+/// Exact owner and content-free proof of one direct declaration export.
+/// Source spans establish containment, but neither offsets nor declaration
+/// body hashes enter the proof. Local export lists require canonical routing.
+pub(crate) fn direct_declaration_export_proof(
+    parse: &crate::types::ParseSnapshot,
+    name: &str,
+) -> Option<(verter_type_expr::TopLevelOwnerId, Hash16)> {
+    let mut exports = parse
+        .export_signatures
+        .iter()
+        .filter(|export| export.name == name);
+    let export = exports.next()?;
+    if exports.next().is_some() || export.reexport_source.is_some() {
+        return None;
+    }
+    let mut exact_owner = None;
+    let mut capabilities = 0u8;
+    for declaration in parse
+        .script_analysis
+        .declaration_entries
+        .iter()
+        .filter(|declaration| {
+            declaration.name == name
+                && declaration.span.start <= export.span.start
+                && export.span.end <= declaration.span.end
+        })
+    {
+        match exact_owner {
+            Some(owner) if owner != declaration.owner => return None,
+            _ => exact_owner = Some(declaration.owner),
+        }
+        capabilities |= match declaration.kind {
+            verter_session_query::analysis::types::LocalDeclarationKind::Type => 1,
+            verter_session_query::analysis::types::LocalDeclarationKind::Value => 2,
+            verter_session_query::analysis::types::LocalDeclarationKind::TypeAndValue => 3,
+        };
+    }
+    let owner = exact_owner?;
+    let hash = hash16_from_sorted(|hasher| {
+        b"verter:direct-declaration-export:v1".hash(hasher);
+        name.hash(hasher);
+        owner.hash(hasher);
+        capabilities.hash(hasher);
+        export.is_type.hash(hasher);
+    });
+    Some((owner, hash))
+}
+
 /// Rebuild an [`AugmentationTargetKind`](crate::file_artifact_store::AugmentationTargetKind)
 /// from the parallel-fields shape the parse-domain
 /// `FactKey::ModuleAugmentationIndexShape` carries.
@@ -2935,7 +2994,7 @@ pub(crate) fn syntactic_route_interface_hash(
 ///
 /// Returns `None` when the payload does not match the tag — a malformed
 /// shape names no entry, and the validator fails closed on it.
-fn augmentation_target_kind_from_shape(
+pub(crate) fn augmentation_target_kind_from_shape(
     tag: verter_session_query::facts::registry::AugmentationTargetKindTag,
     external_specifier: Option<&str>,
     resolved_relative_canonical: Option<&str>,
@@ -3436,6 +3495,16 @@ impl HostStoreView {
         &self,
         fact: &verter_session_query::facts::fact_cache::ParseFactRef,
     ) -> LeafCheck {
+        if matches!(
+            fact.key,
+            verter_session_query::facts::FactKey::DirectDeclarationExport { .. }
+        ) {
+            return self.check_direct_declaration_export_for_content(
+                fact,
+                self.whole_hash(&fact.canonical_id),
+                None,
+            );
+        }
         const ZERO_HASH: Hash16 = [0u8; 16];
         let resolved = self.canonical_view(&fact.canonical_id);
         let facts = match resolved.file_facts.as_ref() {
@@ -3452,6 +3521,34 @@ impl HostStoreView {
         // (the side-store is Arc-shared with the snapshot's `FileFacts`
         // clone).
         check_parse_fact(facts.lookup_or_compute_read(&fact.key), fact)
+    }
+
+    /// A source-header fact is available without an indexed artifact, but
+    /// only for content established by this view or its completion overlay.
+    pub(crate) fn check_direct_declaration_export_for_content(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ParseFactRef,
+        whole_hash: Option<Hash16>,
+        admitted_version: Option<verter_scheduler::node::SourceVersion>,
+    ) -> LeafCheck {
+        let verter_session_query::facts::FactKey::DirectDeclarationExport { name } = &fact.key
+        else {
+            return LeafCheck::Invalid;
+        };
+        if self.is_tombstoned(&fact.canonical_id) {
+            return LeafCheck::Invalid;
+        }
+        let current = whole_hash.and_then(|hash| {
+            self.snapshot
+                .roots
+                .direct_declaration_export_hash_for_content(
+                    &fact.canonical_id,
+                    hash,
+                    admitted_version,
+                    name.as_ref(),
+                )
+        });
+        LeafCheck::of(current == Some(fact.expected_hash))
     }
 
     /// [`StoreView::validates_program_analysis_domain`], telling a fact

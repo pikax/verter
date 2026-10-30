@@ -268,19 +268,58 @@ pub(crate) fn install_delivering(cell: &FactReadSetCell) {
 }
 
 fn push_tracer(cell: &FactReadSetCell, delivers: bool) {
-    ACTIVE_TRACERS.with(|slot| {
-        slot.borrow_mut().push(ActiveTracer {
+    let demand_started = ACTIVE_TRACERS.with(|slot| {
+        let mut stack = slot.borrow_mut();
+        let first = stack.is_empty();
+        stack.push(ActiveTracer {
             cell: cell as *const FactReadSetCell,
             delivers,
         });
+        first
     });
+    if demand_started {
+        verter_session_query::facts::fact_read_set::begin_demand_fact_memos();
+    }
 }
 
-/// Pop the top-of-stack entry. Called on the installer's `Drop`.
+/// Pop the top-of-stack entry. Called on the installer's `Drop`. Popping
+/// the LAST tracer ends this thread's demand: the per-demand proof memos
+/// in the query crate pin fact storage nothing can consult again, so they
+/// stop accepting entries and drain here.
 pub(crate) fn clear() {
-    ACTIVE_TRACERS.with(|slot| {
+    let stack_now_empty = ACTIVE_TRACERS.with(|slot| {
         slot.borrow_mut().pop();
+        slot.borrow().is_empty()
     });
+    if stack_now_empty {
+        verter_session_query::facts::fact_read_set::end_demand_fact_memos();
+    }
+}
+
+/// Run `f` with no fact tracer or recorder installed, then restore the stack.
+///
+/// For work that serves the cache's own validation rather than the enclosing
+/// computation: whatever it reads is not a dependency of the answer being
+/// computed, so it must reach no enclosing read set.
+pub(crate) fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
+    type Suspended = (
+        SmallVec<[ActiveTracer; 8]>,
+        SmallVec<[*const FactReadRecorder; 4]>,
+    );
+    struct Restore(Option<Suspended>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some((tracers, recorders)) = self.0.take() {
+                ACTIVE_TRACERS.with(|slot| *slot.borrow_mut() = tracers);
+                ACTIVE_RECORDERS.with(|slot| *slot.borrow_mut() = recorders);
+            }
+        }
+    }
+    let _restore = Restore(Some((
+        ACTIVE_TRACERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+        ACTIVE_RECORDERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+    )));
+    f()
 }
 
 /// Return the top-of-stack tracer, or `None` when the stack is empty.
@@ -305,6 +344,26 @@ pub fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
             _ => None,
         }
     })
+}
+
+/// Whether the innermost active tracer already holds `fact` — its own
+/// observation or an absorbed canonical run.
+///
+/// Every fact reaches the cells on the stack through one fan-out (down to
+/// the first delivering scope), so a fact the innermost scope holds
+/// arrived through a fan-out that reached every other active cell too: a
+/// producer that re-derives it can skip recording it again without
+/// leaving any enclosing scope's sealed signature without it. While a read
+/// recorder is active nothing is held: the recorder mints its own receipt
+/// from the fan-out alone.
+#[inline]
+pub(crate) fn tracer_holds_fact(
+    fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+) -> bool {
+    // A recorder receives facts only through the fan-out, so a fact the
+    // tracer already holds is still delivered while one is recording.
+    ACTIVE_RECORDERS.with(|slot| slot.borrow().is_empty())
+        && current_tracer().is_some_and(|tracer| tracer.holds(fact))
 }
 
 /// Fan an observed fact into every active tracer that must observe it (see
@@ -343,6 +402,20 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
             cell.observe(fact);
             return;
         }
+    }
+}
+
+/// [`observe_fan_out`] for a fact whose construction allocates: `make` runs
+/// only while a tracer or recorder is installed, so an unobserved read pays
+/// no allocation for a fact nobody receives.
+#[inline]
+pub(crate) fn observe_fan_out_lazy(make: impl FnOnce() -> FactVersionRef) {
+    let observed = ACTIVE_TRACERS.with(|slot| !slot.borrow().is_empty())
+        || ACTIVE_RECORDERS.with(|slot| !slot.borrow().is_empty());
+    if observed {
+        observe_fan_out(make());
+    } else {
+        verter_audit::attribute_n!(FactObserve, 1);
     }
 }
 
@@ -500,6 +573,33 @@ mod propagation_tests {
 #[cfg(test)]
 mod recorder_tests {
     use super::*;
+
+    #[test]
+    fn a_late_recorder_receives_a_fact_the_tracer_already_holds() {
+        let fact = FactVersionRef::FileWholeHash {
+            canonical_id: "/retained.ts".into(),
+            hash: [7; 16],
+        };
+        let recorder = FactReadRecorder::default();
+        crate::resolver_core::resolver_context::with_fact_tracer_cell(
+            Default::default(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+            |_| {
+                observe_fan_out(fact.clone());
+                assert!(tracer_holds_fact(&fact));
+                {
+                    let _scope = install_recorder(&recorder);
+                    if !tracer_holds_fact(&fact) {
+                        observe_fan_out(fact.clone());
+                    }
+                }
+                assert!(tracer_holds_fact(&fact));
+            },
+        );
+        let (facts, non_cacheable) = recorder.into_parts();
+        assert_eq!(facts, vec![fact]);
+        assert!(!non_cacheable);
+    }
 
     /// A recorder sees what the tracers see, but is never one: the tracer
     /// stays the top scope and still owns a local-only mark.

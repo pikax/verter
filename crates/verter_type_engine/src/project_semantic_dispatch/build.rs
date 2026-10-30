@@ -7193,7 +7193,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .reverse_dependency_canonicals(decl_canonical.as_ref())
             {
-                let _ = self.transaction_indexed_record(&rdep);
+                let _ = self.ctx.source_is_available(&rdep);
             }
         };
 
@@ -7227,7 +7227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // does it: an augmenting block lives in a file that depends on the
         // augmented module.
         for rdep in self.ctx.reverse_dependency_canonicals(decl_canonical) {
-            let _ = self.transaction_indexed_record(&rdep);
+            let _ = self.ctx.source_is_available(&rdep);
         }
         self.collect_augmentation_contributions(
             AugmentationContribution::FunctionSignatures,
@@ -7659,7 +7659,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// file context (typed-IR `augmentation_scopes` inventory — never a source
     /// scan), and returns the ordered contributor nodes plus their per-augmenter
     /// `FileWholeHash` self-roots. Augmenter order is the stable
-    /// `(canonical, parse_stable_hash)` key (`AugmenterSet.entries` is pre-sorted
+    /// `canonical` key (`AugmenterSet.entries` is pre-sorted
     /// that way — deterministic, discovery-order-independent).
     ///
     /// Observes the augmenter-set fingerprint (`ModuleAugmentationIndexShape`)
@@ -7725,8 +7725,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         // Fact rail, part 1 — the augmenter-set shape fact (invalidates on
-        // augmenter add/remove/reorder and on any augmenter's
-        // `parse_stable_hash` move). Observed onto the active tracer so it
+        // augmenter add/remove/reorder and binding-owner/name/space changes). Observed onto the active tracer so it
         // enters this build's `ReadSetSignature.facts`.
         //
         // Observed HERE, immediately after the index read and BEFORE every
@@ -7737,7 +7736,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //   - non-empty set, no contributor for this declaration: the set is
         //     keyed by target MODULE, not by declaration, so an existing
         //     augmenter GAINING this declaration moves the set fingerprint
-        //     (it folds each augmenter's `parse_stable_hash`).
+        //     (it folds each augmenter's matching binding membership).
         // A cacheable "no augmentation" surface published without this fact
         // has nothing keyed on the augmenter set and serves stale once either
         // of those happens.
@@ -7817,6 +7816,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if augmenter_set.entries.is_empty() && !has_file_scope {
             return Some(FoldedAugmentation::Absent);
         }
+
+        // An empty, nongeneric interface adds neither a member nor a
+        // diagnostic-producing evaluation to a nongeneric class. Establish
+        // the base header inside this fold's recorded reads, so a cached
+        // absence cannot outlive a change to the class's binder frame.
+        let neutral_class_base = contribution == AugmentationContribution::TypeBody
+            && matches!(&target, AugmentationTargetKind::ResolvedRelativeCanonical(canonical)
+                if self.ctx.prepared_type_decl_return_only(canonical,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(), decl_name)
+                    .is_some_and(|base| base.kind == verter_session_query::declarations::TypeDeclKind::Class
+                        && base.type_parameters.is_empty()));
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
         // A type body's contributions are planned here and projected under
@@ -8294,6 +8304,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 },
                             );
+                        if neutral_class_base
+                            && aug_prepared.kind
+                                == verter_session_query::declarations::TypeDeclKind::Interface
+                            && aug_prepared.type_parameters.is_empty()
+                            && aug_prepared.member_index.is_empty()
+                        {
+                            let empty = |body: &TypeExpr| {
+                                matches!(body,
+                                TypeExpr::Object(object) if object.properties.is_empty())
+                            };
+                            if self.ctx.deref_authored_body(&indexed.shallow_state, &locator).is_ok_and(|body| {
+                                body.type_parameters.is_empty() && match &body.shape {
+                                    verter_session_query::source::deref::DerefedBodyShape::Single(body) => empty(body),
+                                    verter_session_query::source::deref::DerefedBodyShape::Merged(bodies) => !bodies.is_empty() && bodies.iter().all(empty),
+                                }
+                            }) {
+                                // The exact body port already observed content.
+                                // Keep the previous source-environment/refusal
+                                // rail even though no graph body is demanded.
+                                if crate::fact_signature_helpers::observe_file_source_env_from_artifact_key(
+                                    self.ctx, Some(&effective_artifact_key)).is_none() {
+                                    source_env_unobservable = true;
+                                }
+                                continue;
+                            }
+                        }
                         let shape = self.fetch_located_shape(locator);
                         context_free &= shape.is_some();
                         planned_bodies.push(PlannedContributorBody {
@@ -8502,14 +8538,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
 
         // Persist any healed exact keys back into the cached `AugmenterSet`.
-        // The augmenter-set fingerprint folds `parse_stable_hash` (NOT
-        // `content_hash`), and a stale key is healed only when the augmenter's
-        // `parse_stable_hash` is unchanged — so the rebuilt set carries the
-        // SAME fingerprint and the same per-entry `parse_stable_hash`; only the
-        // `artifact_key` content-hash dimension advances. Re-publishing under
-        // the identical fingerprint keeps every recorded
-        // `ModuleAugmentationIndexShape` signature valid while making the next
-        // stitch hit the fast exact-key path (mirrors the names stitch).
+        // Content changes can advance an exact artifact locator while keeping
+        // population membership identical. Each served artifact independently
+        // observed its content; the conditional refresh preserves the recorded
+        // population fingerprint without replacing a concurrent population.
         // A fold that consumed a read the process did not keep — an
         // unretained or refused resolution among them — answers this request
         // only: nothing it derived, healed keys included, enters the index.
@@ -10868,6 +10900,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<ClassMemberStep> {
+        let takes_augmentation = self.class_takes_module_augmentation(canonical, class);
+        if !takes_augmentation {
+            if let Some(input) = self.ctx.class_member_input(canonical, owner, class, name) {
+                if let verter_session_query::source::deref::DerefedBodyShape::Single(
+                    TypeExpr::Object(ref members),
+                ) = input.selected.shape
+                {
+                    if let Some(node) = self.precise_class_member_read(
+                        canonical,
+                        owner,
+                        name,
+                        members,
+                        &input.name_resolution,
+                    ) {
+                        return Some(ClassMemberStep::Declared(node));
+                    }
+                }
+            }
+        }
         let prepared = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, class)?;
@@ -10890,17 +10941,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let TypeExpr::Object(ref members) = members else {
             return None;
         };
-        if let Some(node) = self.reference_free_class_member_read(
-            canonical,
-            owner,
-            class,
-            name,
-            members,
-            serve.indexed.whole_hash,
-            &prepared.name_resolution,
-        ) {
-            return Some(ClassMemberStep::Declared(node));
-        }
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
@@ -11018,7 +11058,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // interface C { … } }`) declares members its own body does not, so a read its own body
         // does not answer and that is about to follow `extends` decides it: only
         // the whole declaration, which merges the augmentations, answers.
-        if self.class_takes_module_augmentation(canonical, class) {
+        if takes_augmentation {
             return None;
         }
         // An inherited member reads off the base the class extends: its
@@ -11049,11 +11089,71 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(ClassMemberStep::Inherited { heritage, base })
     }
 
+    /// Observe the content version of every imported head the precise
+    /// member path embeds by reference.
+    ///
+    /// The precise read is the class file's exact-member proof, but a
+    /// reference-typed member value interns the target declaration's
+    /// `DeclIdentity` — its live whole hash — into every answer that
+    /// serves the reference, and for a consumer that never reads the
+    /// target's members that identity is the answer's ONLY contact with
+    /// the target file. Fanning the target's `FileWholeHash` here makes
+    /// the embedding tracked: the enclosing computation's read set
+    /// invalidates on the target's next edit, so a warm answer can never
+    /// carry a superseded version while the class file keeps its
+    /// member-fact precision (an unrelated class-file edit still reuses).
+    /// Returns `false` when a referenced target's current content hash is
+    /// unavailable: the precise read declines so the whole-file path, whose
+    /// evidence does not depend on observing that version, handles it.
+    fn observe_referenced_target_versions<'t>(
+        &self,
+        tys: impl Iterator<Item = &'t verter_type_expr::TypeExpr>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    ) -> bool {
+        let mut pending: Vec<&verter_type_expr::TypeExpr> = tys.collect();
+        let mut observed: Vec<&str> = Vec::new();
+        while let Some(ty) = pending.pop() {
+            match ty {
+                verter_type_expr::TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    let Some(root) = name_resolution.get(name.as_ref()) else {
+                        continue;
+                    };
+                    let canonical = root.canonical_id.as_ref();
+                    if !observed.contains(&canonical) {
+                        observed.push(canonical);
+                        let Some(hash) = self.ctx.authoritative_current_content_hash(canonical)
+                        else {
+                            return false;
+                        };
+                        crate::resolver_core::resolver_context::observe_fan_out(
+                            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                                canonical_id: Arc::from(canonical),
+                                hash,
+                            },
+                        );
+                    }
+                    pending.extend(type_arguments.iter());
+                }
+                verter_type_expr::TypeExpr::Union(arms) => pending.extend(arms.iter()),
+                verter_type_expr::TypeExpr::Parenthesized(inner) => pending.push(inner),
+                verter_type_expr::TypeExpr::Array { element, .. } => pending.push(element),
+                verter_type_expr::TypeExpr::Tuple { elements, .. } => {
+                    pending.extend(elements.iter().map(|element| &element.ty))
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// The member-precise answer of a read of `name` that the class's own
     /// elements declare, when every element declaring it is a property
     /// whose type names nothing: no reference, type parameter, `this`,
     /// `typeof` or operator — only keywords, literals and unions, arrays
-    /// and tuples of them ([`is_reference_free_member_type`]). Such a type
+    /// and tuples of them (the independent-member type predicate). Such a type
     /// is fixed by the elements' own text, so the read roots on the class's
     /// `Member` fact for the name (the declaring elements and the `extends`
     /// reference, observed at `observed_hash`) instead of the file's whole
@@ -11064,40 +11164,78 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// to an element declaring the name, to how many elements do, or to the
     /// `extends` clause moves it.
     ///
-    /// `None` keeps the whole-file read: a method, accessor or a property
-    /// whose type references anything, a carrier-owned (non-file) owner, or
-    /// a fact the observed content cannot produce.
+    /// Unsupported signatures and binding-sensitive types keep the general
+    /// content path. Imported heads are accepted only from the source port's
+    /// exact resolved map; no file-scope fallback runs under Global.
     #[allow(clippy::too_many_arguments)]
-    fn reference_free_class_member_read(
+    fn precise_class_member_read(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        class: &str,
         name: &str,
         members: &verter_type_expr::ObjectExpr,
-        observed_hash: verter_session_query::analysis::types::Hash16,
         name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     ) -> Option<SemanticNodeId> {
         if owner != verter_type_expr::TopLevelOwnerId::ordinary_file() {
             return None;
         }
         let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
-        let mut declaring: Vec<&verter_type_expr::ObjectProperty> = Vec::new();
+        let mut declaring = Vec::new();
+        let mut referenced_tys: Vec<&verter_type_expr::TypeExpr> = Vec::new();
         for member in members.properties.iter() {
             match member {
                 ObjectMember::Property(property) => {
                     if property.key.cloned_known().as_ref() != Some(&key) {
                         continue;
                     }
-                    if !is_reference_free_member_type(&property.ty) {
+                    if !is_independent_member_type(&property.ty, name_resolution) {
                         return None;
                     }
-                    declaring.push(property);
+                    referenced_tys.push(&property.ty);
+                    declaring.push((
+                        property.ty.clone(),
+                        property.optional,
+                        property.readonly,
+                        None,
+                        false,
+                        property.visibility,
+                    ));
                 }
                 ObjectMember::Method(method)
                     if method.key.cloned_known().as_ref() == Some(&key) =>
                 {
-                    return None;
+                    let function = &method.function;
+                    if function.flow_return.is_some()
+                        || !function.type_parameters.is_empty()
+                        || function.predicate.is_some()
+                        || !function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|ty| is_independent_member_type(ty, name_resolution))
+                        || !function.parameters.iter().all(|parameter| {
+                            is_independent_member_type(&parameter.ty, name_resolution)
+                        })
+                    {
+                        return None;
+                    }
+                    referenced_tys.extend(function.return_type.as_deref());
+                    referenced_tys
+                        .extend(function.parameters.iter().map(|parameter| &parameter.ty));
+                    declaring.push((
+                        TypeExpr::Function(Arc::new({
+                            let mut signature = function.clone();
+                            signature.spans = Default::default();
+                            for parameter in &mut signature.parameters {
+                                parameter.span = None;
+                            }
+                            signature
+                        })),
+                        method.optional,
+                        false,
+                        Some(method.method_kind),
+                        method.has_implementation_body,
+                        method.visibility,
+                    ));
                 }
                 _ => {}
             }
@@ -11113,22 +11251,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !options.strict_null_checks || options.exact_optional_property_types {
             return None;
         }
-        let fact = self.ctx.parse_fact_for_observed_content(
-            canonical,
-            observed_hash,
-            verter_session_query::facts::FactKey::Member {
-                exporter: verter_session_query::facts::registry::InternedName::from(class),
-                name: verter_type_expr::facts::FactPropertyKey::identifier(name),
-                space: verter_session_query::facts::SymbolSpace::Type,
-            },
-            verter_session_query::facts::FactLane::Semantic,
-        )?;
-        if fact.expected_hash == [0u8; 16] {
+        if !self.observe_referenced_target_versions(referenced_tys.iter().copied(), name_resolution)
+        {
             return None;
         }
-        crate::resolver_core::resolver_context::observe_fan_out(
-            verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
-        );
         let context = crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Navigate,
         )
@@ -11139,32 +11265,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         let own: Vec<SurfaceEntry> = declaring
             .into_iter()
-            .map(|property| {
-                let value = self.shallow_lower_type_expr_with_context(
-                    &property.ty,
-                    &env,
-                    &NodeScopeId::Global,
-                    name_resolution,
-                    None,
-                    &shadowing,
-                    &mut substitutions,
-                    context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
-                );
-                SurfaceEntry::Member(SurfaceMember {
-                    key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
-                    value,
-                    optional: property.optional,
-                    readonly: property.readonly,
-                    method_kind: None,
-                    has_implementation_body: false,
-                    visibility: property.visibility,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: Some(Arc::<str>::from(canonical).into()),
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
-                    merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
-                })
-            })
+            .map(
+                |(ty, optional, readonly, method_kind, has_implementation_body, visibility)| {
+                    let value = self.shallow_lower_type_expr_with_context(
+                        &ty,
+                        &env,
+                        &NodeScopeId::Global,
+                        name_resolution,
+                        None,
+                        &shadowing,
+                        &mut substitutions,
+                        context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                    );
+                    SurfaceEntry::Member(SurfaceMember {
+                        key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
+                        value,
+                        optional,
+                        readonly,
+                        method_kind,
+                        has_implementation_body,
+                        visibility,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        spans: verter_type_expr::MemberSpans::default(),
+                        declaration_origin: Some(Arc::<str>::from(canonical).into()),
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::default(),
+                        merge_role: context
+                            .stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                    })
+                },
+            )
             .collect();
         Some(self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
@@ -11182,7 +11312,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // module, indexed before the augmentation index is read — as the
         // declaration's own stitch reads it.
         for rdep in self.ctx.reverse_dependency_canonicals(canonical) {
-            let _ = self.transaction_indexed_record(&rdep);
+            // Populate the target's contributor index; no source payload is
+            // consumed here. The following population observation owns its
+            // membership, and actual contributions own their content reads.
+            let _ = self.ctx.source_is_available(&rdep);
         }
         let canonical_text: Arc<str> = Arc::from(canonical);
         let target =
@@ -22055,27 +22188,11 @@ const LIB_AWAITED_ENTRY_DEPTH: u32 = 2;
 /// operator, an object or function type (whose members carry declaration
 /// origins) — is not, nor is a type wider than a small fixed number of
 /// nodes.
-fn is_reference_free_member_type(ty: &TypeExpr) -> bool {
-    const MAX_NODES: usize = 64;
-    let mut pending: Vec<&TypeExpr> = vec![ty];
-    let mut visited = 0usize;
-    while let Some(ty) = pending.pop() {
-        visited += 1;
-        if visited > MAX_NODES {
-            return false;
-        }
-        match ty {
-            TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {}
-            TypeExpr::Union(arms) => pending.extend(arms.iter()),
-            TypeExpr::Parenthesized(inner) => pending.push(inner),
-            TypeExpr::Array { element, .. } => pending.push(element),
-            TypeExpr::Tuple { elements, .. } => {
-                pending.extend(elements.iter().map(|element| &element.ty));
-            }
-            _ => return false,
-        }
-    }
-    true
+fn is_independent_member_type(
+    ty: &TypeExpr,
+    name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+) -> bool {
+    verter_session_query::source::deref::independent_class_member_type(ty, name_resolution)
 }
 
 /// What one class of an inheritance path answers for a demanded member

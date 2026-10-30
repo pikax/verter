@@ -1783,3 +1783,71 @@ fn a_declaration_the_account_refuses_is_returned_complete_and_charged_to_its_cal
     drop(cache);
     assert_eq!(account.snapshot().pinned_bytes, 0);
 }
+
+/// A combined witness is retained work: it is charged to the bundle's
+/// account when committed, and an account without room leaves the read's
+/// complete witness uncached rather than growing the bundle past what
+/// admission measured.
+#[test]
+fn combined_witnesses_commit_only_while_the_account_admits_them() {
+    use verter_retention::{RetentionLimits, SemanticRetentionAccount};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+
+    let facts = |tag: &str| -> Vec<FactVersionRef> {
+        (0..8)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: Arc::from(format!("/{tag}-{index}.ts")),
+                hash: [index as u8; 16],
+            })
+            .collect()
+    };
+    let bundle_on = |account: &Arc<SemanticRetentionAccount>| {
+        let bundle = build_prepared_decl_bundle(
+            "/owner.ts",
+            ShallowFileState::service_backed_for_test(""),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            ImportCanonicalization::default(),
+            &test_interner(),
+        )
+        .charged_to_for_tests(StoreAccount::new(Arc::clone(account)));
+        bundle.seal_resolution_segments(
+            verter_session_query::facts::policy::FactPolicy::production(),
+            Some(vec![("./a".into(), facts("a")), ("./b".into(), facts("b"))]),
+        );
+        bundle
+    };
+    let witness_of = |bundle: &PreparedDeclBundle| {
+        let segments = bundle.resolution_facts.get().expect("sealed segments");
+        bundle.combined_witness(segments, 0b11)
+    };
+
+    let roomy = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let admitted = bundle_on(&roomy);
+    let before = roomy.snapshot().retained_bytes;
+    let combined = witness_of(&admitted);
+    assert_eq!(combined.len(), 16, "the union of both used imports");
+    let charged = roomy.snapshot().retained_bytes - before;
+    assert!(charged > 0, "the committed witness is charged");
+    let again = witness_of(&admitted);
+    assert!(
+        again.ptr_eq(&combined),
+        "a later read replays the committed run"
+    );
+    assert_eq!(roomy.snapshot().retained_bytes - before, charged);
+    drop(admitted);
+    assert_eq!(roomy.snapshot().retained_bytes, before);
+
+    let full = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let refused = bundle_on(&full);
+    let uncached = witness_of(&refused);
+    assert_eq!(uncached.len(), 16, "refusal never narrows the witness");
+    assert_eq!(full.snapshot().retained_bytes, 0, "nothing was retained");
+    assert!(
+        !witness_of(&refused).ptr_eq(&uncached),
+        "a refused witness is rebuilt, never cached"
+    );
+}

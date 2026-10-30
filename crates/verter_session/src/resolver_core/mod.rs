@@ -43,6 +43,7 @@ pub mod fact_read_set;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 mod owned_lowering_port;
+pub(crate) use owned_lowering_port::observe_whole_content;
 pub(crate) mod request_bound;
 pub(crate) mod request_store_view;
 pub mod route_db;

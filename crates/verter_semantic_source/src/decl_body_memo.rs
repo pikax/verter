@@ -58,9 +58,10 @@ use verter_session_query::declarations::{
     ValueDeclGroup, ValueDeclKind,
 };
 use verter_session_query::facts::{
-    compute_class_member_read_hash, compute_semantic_hash, produce_shallow_route_facts,
-    type_body_fingerprint, value_body_fingerprint, CrossDeclLens, EmptyRouteFactLens, HashOutcome,
-    RouteFactLens, TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput,
+    compute_class_member_read_hash, compute_display_hash, compute_semantic_hash,
+    produce_shallow_route_facts, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
+    EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
+    ValueBodyFingerprintInput,
 };
 use verter_session_query::source::transient_parts::{TransientTypeParts, TransientValueParts};
 use verter_session_query::type_solver::prepared::{
@@ -3019,6 +3020,18 @@ impl DeclBodyMemo {
         class: &str,
         member: &str,
     ) -> SourceRead<Option<HashOutcome>> {
+        self.class_member_read_hashes_in(owner, class, member)
+            .map(|hashes| hashes.map(|(semantic, _)| semantic))
+    }
+
+    /// Both fact lanes from one retained selection and binder frame. The
+    /// display lane adds graph-preserved cosmetic names without source offsets.
+    pub fn class_member_read_hashes_in(
+        &self,
+        owner: TopLevelOwnerId,
+        class: &str,
+        member: &str,
+    ) -> SourceRead<Option<(HashOutcome, HashOutcome)>> {
         let refused = || {
             DemandOutcome::<()>::LeaseMiss
                 .into_source_read()
@@ -3046,7 +3059,22 @@ impl DeclBodyMemo {
         // One fingerprint per declaring element, in selection (source) order:
         // an object-level hash would sort the members and lose which
         // declaration comes first.
-        let elements: Vec<HashOutcome> = match &elements.body {
+        let hash_in_header_scope = |body: &TypeExpr| {
+            // Reuse one grammar's binder frame for both existing fact lanes.
+            let framed = (!elements.type_parameters.is_empty()).then(|| {
+                TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+                    Vec::new(),
+                    Some(Arc::new(body.clone())),
+                    elements.type_parameters.clone(),
+                )))
+            });
+            let body = framed.as_ref().unwrap_or(body);
+            (
+                compute_semantic_hash(body, space, &lens),
+                compute_display_hash(body, space, &lens),
+            )
+        };
+        let elements: Vec<(HashOutcome, HashOutcome)> = match &elements.body {
             TypeExpr::Object(object) => object
                 .properties
                 .iter()
@@ -3055,15 +3083,22 @@ impl DeclBodyMemo {
                         empty_literal: false,
                         properties: vec![member.clone()],
                     }));
-                    compute_semantic_hash(&single, space, &lens)
+                    hash_in_header_scope(&single)
                 })
                 .collect(),
-            other => vec![compute_semantic_hash(other, space, &lens)],
+            other => vec![hash_in_header_scope(other)],
         };
-        let heritage = heritage.map(|heritage| compute_semantic_hash(&heritage.body, space, &lens));
-        SourceRead::clean(Some(compute_class_member_read_hash(
-            &elements,
-            heritage.as_ref(),
+        let (elements, display_elements): (Vec<_>, Vec<_>) = elements.into_iter().unzip();
+        let heritage = heritage.map(|heritage| hash_in_header_scope(&heritage.body));
+        SourceRead::clean(Some((
+            compute_class_member_read_hash(
+                &elements,
+                heritage.as_ref().map(|(semantic, _)| semantic),
+            ),
+            compute_class_member_read_hash(
+                &display_elements,
+                heritage.as_ref().map(|(_, display)| display),
+            ),
         )))
     }
 
@@ -4216,6 +4251,12 @@ pub fn fold_flow_body_env_identity(
 /// ([`WalkedRead`]); the request-side capability that serves these reads to
 /// the engine applies it.
 impl IndexedExpressionDemand {
+    /// Identity of the exact retained source every demand reads. Consumers
+    /// use this provenance when replaying required dependency observations.
+    pub fn source_identity(&self) -> &SnapshotKey {
+        &self.snapshot.key
+    }
+
     pub fn function_program_index(
         &self,
     ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {

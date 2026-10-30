@@ -79,6 +79,11 @@ impl StructureBits {
         self.settle_growth();
     }
 
+    fn set_versioned_ref(&mut self, node: SemanticNodeId, bit: bool) {
+        self.entries.entry(node).or_default().versioned_ref = Some(bit);
+        self.settle_growth();
+    }
+
     fn settle_growth(&mut self) {
         let capacity = self.entries.capacity();
         if capacity > self.backing_capacity {
@@ -152,6 +157,9 @@ pub struct NodeStructureBits {
     pub unresolved: Option<bool>,
     /// [`SemanticGraphStore::node_is_inert_structure`], once decided.
     pub inert: Option<bool>,
+    /// [`SemanticGraphStore::node_reaches_versioned_reference`], once
+    /// decided.
+    pub versioned_ref: Option<bool>,
 }
 
 impl SemanticGraphStore {
@@ -254,6 +262,125 @@ impl SemanticGraphStore {
             }
             local.get(&root).copied().unwrap_or(true)
         }
+    }
+
+    construction_ordinal_seam! {
+        /// Whether the VALUE `root` denotes REACHES a versioned reference —
+        /// a `DeclRef` or `InstantiationRef` whose embedded identity carries
+        /// a non-zero whole-file content version.
+        ///
+        /// The retained-reference observation at a cold-build close uses
+        /// this to walk only the spine of a value that can intern one, in
+        /// the same retained topology it descends
+        /// ([`SemanticNodeData::for_each_retained_child`]), so a value of
+        /// pure local structure — a deferred-operator chain over
+        /// primitives, for instance — costs the close one memo read, not a
+        /// walk of its whole node graph. Like the unresolved bit, this is a
+        /// pure INDUCTIVE function of the immutable node id
+        /// (`self_bit(n) || any(bit(child))`), memoized per id in the same
+        /// per-node entry ([`NodeStructureBits`]) and decided once for the
+        /// lifetime of the store. A carrier's own head sets the bit (its
+        /// identity is the versioned thing); its locally-supplied type
+        /// arguments still descend.
+        fn node_reaches_versioned_reference(&self, root: SemanticNodeId) -> bool {
+            if let Some(bit) = self
+                .unresolved_reach
+                .lock()
+                .get(&root)
+                .and_then(|bits| bits.versioned_ref)
+            {
+                return bit;
+            }
+            struct Frame {
+                node: SemanticNodeId,
+                children: Vec<SemanticNodeId>,
+                next: usize,
+                bit: bool,
+            }
+            let mut local: FxHashMap<SemanticNodeId, bool> = FxHashMap::default();
+            let mut on_path: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+            // The interner cannot produce a back edge (a node's children
+            // are interned before it), so this never fires in production;
+            // if it ever did, the computation answers without poisoning
+            // the store's memo.
+            let mut cycle_seen = false;
+            let (children, bit) = self.node_versioned_ref_step(root);
+            let mut stack: Vec<Frame> = vec![Frame {
+                node: root,
+                children,
+                next: 0,
+                bit,
+            }];
+            on_path.insert(root);
+            while let Some(frame) = stack.last_mut() {
+                // Short-circuit: a decided-true frame needs no further child.
+                if frame.bit || frame.next >= frame.children.len() {
+                    let (node, bit) = (frame.node, frame.bit);
+                    stack.pop();
+                    on_path.remove(&node);
+                    local.insert(node, bit);
+                    if !cycle_seen {
+                        self.unresolved_reach.lock().set_versioned_ref(node, bit);
+                        self.track_structure_bits(node);
+                    }
+                    if let Some(parent) = stack.last_mut() {
+                        parent.bit |= bit;
+                    }
+                    continue;
+                }
+                let child = frame.children[frame.next];
+                frame.next += 1;
+                if let Some(&known) = local.get(&child) {
+                    frame.bit |= known;
+                    continue;
+                }
+                let memoized = self
+                    .unresolved_reach
+                    .lock()
+                    .get(&child)
+                    .and_then(|bits| bits.versioned_ref);
+                if let Some(known) = memoized {
+                    frame.bit |= known;
+                    continue;
+                }
+                if on_path.contains(&child) {
+                    cycle_seen = true;
+                    continue;
+                }
+                let (children, bit) = self.node_versioned_ref_step(child);
+                on_path.insert(child);
+                stack.push(Frame {
+                    node: child,
+                    children,
+                    next: 0,
+                    bit,
+                });
+            }
+            local.get(&root).copied().unwrap_or(false)
+        }
+    }
+
+    /// One node's own versioned-reference bit plus the retained children
+    /// the reference-version walk descends into — exactly the topology
+    /// [`SemanticNodeData::for_each_retained_child`] enumerates, so the bit
+    /// and the walk can never disagree about what a value retains.
+    fn node_versioned_ref_step(&self, node: SemanticNodeId) -> (Vec<SemanticNodeId>, bool) {
+        let Some(data) = self.node_data(node) else {
+            return (Vec::new(), false);
+        };
+        let mut versioned = false;
+        match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => {
+                versioned = identity.whole_hash != [0u8; 16];
+            }
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                versioned = base.whole_hash != [0u8; 16];
+            }
+            _ => {}
+        }
+        let mut children = Vec::new();
+        data.for_each_retained_child(|child| children.push(child));
+        (children, versioned)
     }
 
     /// One node's own unresolved bit plus the children the reach walk

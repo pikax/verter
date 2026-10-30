@@ -3971,6 +3971,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // consumes the computed step.
                         self_step = Some(relation_step_from_payload(&payload));
                         settles.push(!recursion_uses[position].context_dependent);
+                        self.observe_retained_reference_versions(
+                            &crate::semantic_query::SemanticQueryValue::Relation(payload.clone()),
+                        );
                         completed.push(CompletedSccMember {
                             key,
                             payload,
@@ -3979,6 +3982,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 } else if !session_delta {
                     settles.push(!recursion_uses[position].context_dependent);
+                    self.observe_retained_reference_versions(
+                        &crate::semantic_query::SemanticQueryValue::Relation(payload.clone()),
+                    );
                     completed.push(CompletedSccMember {
                         key,
                         payload,
@@ -4087,6 +4093,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 match verdict {
                     Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
+                        // The batch publishes under the root carrier's read
+                        // set: every version this member's value embeds is
+                        // observed into it before the member leaves.
+                        self.observe_retained_reference_versions(
+                            &crate::semantic_query::SemanticQueryValue::FlowReturn(
+                                verter_session_query::retention::owned::Owned::new(
+                                    proof.value().clone(),
+                                ),
+                            ),
+                        );
                         proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
                             key: member.key,
                             result: proof,
@@ -4186,12 +4202,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // provenance and is not the admission oracle.
                     match crate::semantic_query::AdmissibleCallResult::new(result, state.proof_complete)
                     {
-                        Some(result) => txn.call.completed_members.push(CompletedResolveCallMember {
-                            key,
-                            result,
-                            inline_flight: state.inline_flight,
-                            self_roots: state.self_roots,
-                        }.held(self.graph().store())),
+                        Some(result) => {
+                            self.observe_retained_reference_versions(
+                                &crate::semantic_query::SemanticQueryValue::ResolveCall(
+                                    verter_session_query::retention::owned::Owned::new(
+                                        result.get().clone(),
+                                    ),
+                                ),
+                            );
+                            txn.call.completed_members.push(CompletedResolveCallMember {
+                                key,
+                                result,
+                                inline_flight: state.inline_flight,
+                                self_roots: state.self_roots,
+                            }.held(self.graph().store()));
+                        }
                         _ => rootless_flights.push(state.inline_flight),
                     }
                 }

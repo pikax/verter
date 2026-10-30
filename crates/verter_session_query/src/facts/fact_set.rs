@@ -326,6 +326,18 @@ impl FactSet {
         }
     }
 
+    /// A weak handle to the set's storage, for a memo that must recognise
+    /// the same allocation later without keeping it alive. While the
+    /// allocation lives, its address is its identity; once freed, the
+    /// handle reports no address rather than risk a reused one.
+    #[must_use]
+    pub(crate) fn storage_weak(&self) -> StorageWeak {
+        match &self.repr {
+            Repr::Flat(facts) => StorageWeak::Flat(Arc::downgrade(facts)),
+            Repr::Tree(tree) => StorageWeak::Tree(Arc::downgrade(tree)),
+        }
+    }
+
     /// Whether every fact of `other` is in this set.
     #[must_use]
     pub fn is_superset(&self, other: &Self) -> bool {
@@ -641,6 +653,14 @@ impl FactSetEdit {
         if self.contains(&fact) {
             return false;
         }
+        self.insert_new(fact);
+        true
+    }
+
+    /// Add `fact` a caller just proved absent from this unchanged edit (an
+    /// ordered merge scan, say): the containment re-check is skipped, not
+    /// re-derived.
+    pub(crate) fn insert_new(&mut self, fact: FactVersionRef) {
         let inline = self.base.policy.extension_slice_max();
         match self.work_mut() {
             Work::Unchanged => unreachable!("work_mut never leaves the edit unchanged"),
@@ -667,7 +687,30 @@ impl FactSetEdit {
                 fact_tree::insert(root, fact);
             }
         }
-        true
+    }
+
+    /// Add the strictly increasing `facts`, all proven absent from this
+    /// unchanged edit: a tree takes them in one descent rather than one
+    /// search per fact.
+    pub(crate) fn insert_new_run(&mut self, facts: Vec<FactVersionRef>) {
+        if facts.len() > 1 {
+            if let Work::Tree {
+                root,
+                digest,
+                changed,
+            } = self.work_mut()
+            {
+                for fact in &facts {
+                    *digest = digest.wrapping_add(fact_digest(fact));
+                }
+                *changed = true;
+                fact_tree::insert_run(root, &facts);
+                return;
+            }
+        }
+        for fact in facts {
+            self.insert_new(fact);
+        }
     }
 
     /// Remove `fact`; whether it was held.
@@ -986,3 +1029,99 @@ impl std::fmt::Debug for FactSet {
 #[cfg(test)]
 #[path = "fact_set_tests.rs"]
 mod tests;
+
+/// A weak handle to one set's storage allocation, for
+/// [`subset_memo`]: it recognises the same allocation while it lives and
+/// reports nothing once freed, so an address is never mistaken for a
+/// reused one.
+pub(crate) enum StorageWeak {
+    Flat(std::sync::Weak<[FactVersionRef]>),
+    Tree(std::sync::Weak<TreeStorage>),
+}
+
+impl StorageWeak {
+    /// The address of the still-live allocation, or `None` once freed.
+    pub(crate) fn address_while_alive(&self) -> Option<usize> {
+        match self {
+            Self::Flat(weak) => weak
+                .upgrade()
+                .map(|alive| Arc::as_ptr(&alive).cast::<FactVersionRef>() as usize),
+            Self::Tree(weak) => weak.upgrade().map(|alive| Arc::as_ptr(&alive) as usize),
+        }
+    }
+}
+
+/// Proofs that one canonical run is a subset of another, remembered by
+/// storage address: the SAME retained run objects are merged into scope
+/// after scope, and a scope that already holds a run's superset re-merges
+/// nothing. A proof is recorded only after an exact ordered scan
+/// established it, and stays valid because a sealed set's storage never
+/// mutates; the weak handles validate liveness, so a freed allocation —
+/// whose address a later one may reuse — can never make a false proof.
+pub(crate) mod subset_memo {
+    use super::{FactSet, StorageWeak};
+    use rustc_hash::FxHashMap;
+    use std::cell::RefCell;
+
+    /// Entries beyond this are pruned of dead handles; a memo still past
+    /// [`HARD_CAP`] after pruning starts again. Both are deterministic
+    /// functions of the merge sequence, so a demand's charge is stable.
+    const SOFT_CAP: usize = 4096;
+    const HARD_CAP: usize = 8192;
+
+    thread_local! {
+        static PROOFS: RefCell<FxHashMap<(usize, usize), (StorageWeak, StorageWeak)>> =
+            RefCell::new(FxHashMap::default());
+    }
+
+    /// Whether `run ⊆ base` is already proven for these exact storages.
+    pub(crate) fn known_subset(run: &FactSet, base: &FactSet) -> bool {
+        known_subset_address(run.address(), base)
+    }
+
+    /// [`known_subset`] where the contained set is named by the address its
+    /// own weak handle resolved to: the entry's weak handles still validate
+    /// that both allocations of the proof are the live ones at those
+    /// addresses.
+    pub(crate) fn known_subset_address(run_address: usize, base: &FactSet) -> bool {
+        let key = (run_address, base.address());
+        PROOFS.with(|proofs| {
+            let mut proofs = proofs.borrow_mut();
+            let Some((run_weak, base_weak)) = proofs.get(&key) else {
+                return false;
+            };
+            let alive = run_weak
+                .address_while_alive()
+                .is_some_and(|live| live == run_address)
+                && base_weak
+                    .address_while_alive()
+                    .is_some_and(|live| live == key.1);
+            if alive {
+                true
+            } else {
+                proofs.remove(&key);
+                false
+            }
+        })
+    }
+
+    /// Record that an exact scan found `run ⊆ base`.
+    pub(crate) fn record_subset(run: &FactSet, base: &FactSet) {
+        PROOFS.with(|proofs| {
+            let mut proofs = proofs.borrow_mut();
+            if proofs.len() >= SOFT_CAP {
+                proofs.retain(|_, (run_weak, base_weak)| {
+                    run_weak.address_while_alive().is_some()
+                        && base_weak.address_while_alive().is_some()
+                });
+            }
+            if proofs.len() >= HARD_CAP {
+                proofs.clear();
+            }
+            proofs.insert(
+                (run.address(), base.address()),
+                (run.storage_weak(), base.storage_weak()),
+            );
+        });
+    }
+}

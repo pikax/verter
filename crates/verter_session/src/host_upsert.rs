@@ -1133,7 +1133,19 @@ impl VerterHost {
                     && crate::global_contributors::source_may_have_file_scope_global_contribution(
                         req.source.as_ref(),
                     ));
-        if pending_overlay {
+        // Retraction is also a population change: the new source can stop
+        // classifying as a contributor altogether. Preserve lazy indexing,
+        // but queue the old contributor's removal for the same source owner.
+        let prior_contributor =
+            (crate::host_construction::is_ordinary_typescript_canonical(&canonical_id)
+                || crate::host_construction::is_ambient_declaration_canonical(&canonical_id))
+                && old_source_snap.as_ref().is_some_and(|old| {
+                    crate::global_contributors::source_has_ambient_contribution(&old.source)
+                || crate::global_contributors::source_may_have_file_scope_global_contribution(
+                    &old.source,
+                )
+                });
+        if pending_overlay || prior_contributor {
             self.project_type_store()
                 .indexed()
                 .global_contributor_index()

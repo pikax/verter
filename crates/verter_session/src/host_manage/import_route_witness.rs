@@ -74,6 +74,14 @@ thread_local! {
     };
 }
 
+/// An owner's import-route witness: every observation, and the same
+/// observations grouped by the authored specifier whose resolution recorded
+/// them.
+pub(crate) struct ImportRouteWitness {
+    pub(crate) flat: Vec<FactVersionRef>,
+    pub(crate) segments: Vec<(String, Vec<FactVersionRef>)>,
+}
+
 /// A scope that collects the observation signatures of every resolution
 /// admitted on this thread while it is installed.
 ///
@@ -94,6 +102,11 @@ impl ResolutionWitnessScope {
         WITNESS_FRAMES.with(|frames| frames.borrow_mut().push(Vec::new()));
         WITNESS_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
         Self
+    }
+
+    /// How many observations this frame has recorded so far.
+    pub(crate) fn len(&self) -> usize {
+        WITNESS_FRAMES.with(|frames| frames.borrow().last().map_or(0, Vec::len))
     }
 
     /// The observations recorded into this frame so far.
@@ -307,6 +320,17 @@ impl VerterHost {
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<Vec<FactVersionRef>> {
+        self.owner_import_route_segments_in::<M>(observation, canonical_id)
+            .map(|witness| witness.flat)
+    }
+
+    /// [`Self::owner_import_route_witness_in`] with the evidence grouped by
+    /// the authored specifier that produced it.
+    pub(crate) fn owner_import_route_segments_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<ImportRouteWitness> {
         let specifiers = self.authored_import_specifiers_in::<M>(observation, canonical_id)?;
         self.import_route_witness_for_lanes(canonical_id, &specifiers)
     }
@@ -325,14 +349,15 @@ impl VerterHost {
             String,
             Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
-    ) -> Option<Vec<FactVersionRef>> {
+    ) -> Option<ImportRouteWitness> {
         #[cfg(test)]
         if self
             .test_force
             .force_import_route_witness_refusal_for_tests
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            return self.decline_import_route_witness();
+            self.decline_import_route_witness();
+            return None;
         }
         self.observed_import_route_witness(canonical_id, specifiers)
     }
@@ -352,10 +377,11 @@ impl VerterHost {
             String,
             Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
-    ) -> Option<Vec<FactVersionRef>> {
+    ) -> Option<ImportRouteWitness> {
         let observation = self.import_route_observation(canonical_id, specifiers);
         if observation.refused {
-            return self.decline_import_route_witness();
+            self.decline_import_route_witness();
+            return None;
         }
         // A witness roots a retained entry, and an unretained resolution is
         // one no entry may root on. The answer itself is complete and
@@ -374,13 +400,28 @@ impl VerterHost {
         let observed = &observation.observed;
         let mut seen: rustc_hash::FxHashSet<FactVersionRef> =
             rustc_hash::FxHashSet::with_capacity_and_hasher(observed.len(), Default::default());
-        let mut witness: Vec<FactVersionRef> = Vec::with_capacity(observed.len());
+        let mut flat: Vec<FactVersionRef> = Vec::with_capacity(observed.len());
         for fact in observed.iter().cloned() {
             if seen.insert(fact.clone()) {
-                witness.push(fact);
+                flat.push(fact);
             }
         }
-        Some(witness)
+        // The same observations grouped by the specifier whose resolution
+        // recorded them, so a consumer that uses only some imports replays
+        // only those imports' evidence.
+        let mut segments: Vec<(String, Vec<FactVersionRef>)> = Vec::new();
+        for (specifier, span) in &observation.segments {
+            let facts = observed[span.clone()].iter().cloned();
+            match segments.iter_mut().find(|(known, _)| known == specifier) {
+                Some((_, grouped)) => grouped.extend(facts),
+                None => segments.push((specifier.clone(), facts.collect())),
+            }
+        }
+        for (_, grouped) in &mut segments {
+            let mut seen_in_segment: rustc_hash::FxHashSet<FactVersionRef> = Default::default();
+            grouped.retain(|fact| seen_in_segment.insert(fact.clone()));
+        }
+        Some(ImportRouteWitness { flat, segments })
     }
 
     /// The resolution of `specifiers` a witness is built from: the one the
@@ -418,7 +459,9 @@ impl VerterHost {
             let scope = ResolutionWitnessScope::enter();
             let mut refused = false;
             let mut unretained = false;
+            let mut segments = Vec::with_capacity(specifiers.len());
             for (specifier, lane) in specifiers {
+                let start = scope.len();
                 match self.generation_current_route_resolution_in(
                     None,
                     canonical_id,
@@ -437,11 +480,13 @@ impl VerterHost {
                         refused = true;
                     }
                 }
+                segments.push((specifier.clone(), start..scope.len()));
             }
             std::sync::Arc::new(ImportRouteObservation {
                 refused,
                 unretained,
                 observed: scope.collected(),
+                segments,
             })
         };
         if let (Some(request), Some(key)) = (request, key) {
@@ -486,7 +531,7 @@ impl VerterHost {
     ) -> Option<usize> {
         let specifiers = self.authored_import_specifiers(canonical_id)?;
         self.observed_import_route_witness(canonical_id, &specifiers)
-            .map(|witness| witness.len())
+            .map(|witness| witness.flat.len())
     }
 
     /// Observe the owner's import-route witness onto the ACTIVE fact
