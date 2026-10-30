@@ -757,8 +757,12 @@ test("every lane Cargo target links inside Windows MAX_PATH from a nested orches
   for (const [lane, profileDir] of [
     [layout.surface1, "debug"],
     [layout.shippedCfg, "no-debug-assertions"],
-    [layout.wasmJsBoundary, "debug"],
+    [layout.wasmJsBoundary, "wasm-test"],
   ]) {
+    if (lane === layout.wasmJsBoundary) {
+      const args = buildWasmLaneTestArgs({ packageName: "verter_wasm" });
+      assert.equal(profileDir, args[args.indexOf("--profile") + 1]);
+    }
     const laneChars = 1 + relative(runnerTarget, lane.targetDir).length;
     const projected = runnerRootChars + laneChars + deepestBuildScriptChars(profileDir);
     assert.ok(
