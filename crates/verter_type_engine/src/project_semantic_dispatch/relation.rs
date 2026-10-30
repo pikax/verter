@@ -3971,6 +3971,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // consumes the computed step.
                         self_step = Some(relation_step_from_payload(&payload));
                         settles.push(!recursion_uses[position].context_dependent);
+                        self.observe_retained_reference_versions(
+                            &crate::semantic_query::SemanticQueryValue::Relation(payload.clone()),
+                        );
                         completed.push(CompletedSccMember {
                             key,
                             payload,
@@ -3979,6 +3982,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 } else if !session_delta {
                     settles.push(!recursion_uses[position].context_dependent);
+                    self.observe_retained_reference_versions(
+                        &crate::semantic_query::SemanticQueryValue::Relation(payload.clone()),
+                    );
                     completed.push(CompletedSccMember {
                         key,
                         payload,

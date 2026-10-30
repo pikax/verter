@@ -225,6 +225,52 @@ fn a_second_task_on_the_same_thread_follows_a_suspended_leader() {
     assert_eq!(registry.wait_count_for_tests(), 0);
 }
 
+/// A driver's extra polls must not masquerade as additional parked callers.
+#[test]
+fn joiner_park_receipt_is_sent_once_per_join_not_per_poll() {
+    let registry = TaskRegistry::default();
+    let group = Group::with_task_registry(registry.clone());
+    let parked = group.subscribe_joiner_park();
+    let (leading, following) = (registry.register_task(), registry.register_task());
+    let (gate, computes) = (Gate::default(), AtomicUsize::new(0));
+    let mut leader = pin!(claim(&group, "k", gate.clone(), &computes, 1));
+    let mut follower = pin!(claim(&group, "k", Gate::default(), &computes, 2));
+    assert!(poll_as(&registry, &leading, leader.as_mut()).is_pending());
+    assert!(poll_as(&registry, &following, follower.as_mut()).is_pending());
+    assert_eq!(parked.try_recv(), Ok(()));
+    for _ in 0..31 {
+        assert!(poll_as(&registry, &following, follower.as_mut()).is_pending());
+    }
+    assert_eq!(
+        parked.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty),
+        "repeated pending polls are still only one follower"
+    );
+    let second = registry.register_task();
+    let mut another = pin!(claim(&group, "k", Gate::default(), &computes, 3));
+    assert!(poll_as(&registry, &second, another.as_mut()).is_pending());
+    assert_eq!(
+        parked.try_recv(),
+        Ok(()),
+        "a distinct follower sends a receipt"
+    );
+    gate.release();
+    assert_eq!(
+        answered(poll_as(&registry, &leading, leader.as_mut())),
+        (SingleflightRole::Leader, 1)
+    );
+    assert_eq!(
+        answered(poll_as(&registry, &following, follower.as_mut())),
+        (SingleflightRole::Follower, 1)
+    );
+    assert_eq!(
+        answered(poll_as(&registry, &second, another.as_mut())),
+        (SingleflightRole::Follower, 1)
+    );
+    assert_eq!(computes.load(Ordering::SeqCst), 1);
+    assert_eq!(registry.wait_count_for_tests(), 0);
+}
+
 /// The task that leads a suspended flight and claims it again — same-path
 /// re-entry — computes inline as a nested leader instead of waiting on
 /// itself.

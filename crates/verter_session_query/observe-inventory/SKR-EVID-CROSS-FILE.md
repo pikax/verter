@@ -56,14 +56,11 @@ optional counter or trace is added.
 | Exact served augmentation artifact port | Augmentation content and negative named-contribution reads | REQUIRED | Existing current artifact key and retained payload; whole-content observation precedes delivery; no canonical-wide scan | session `owned_lowering_port.rs`, `file_artifact_store.rs` | always |
 | `AnalysisSourceRevision::whole_hash`, analysis/structure content observation | Standalone snapshot consumers | REQUIRED | Existing exact snapshot revision, or a hash of the actually retained registered structure bytes; unstamped revisions refuse retention | query `analysis/file_analysis.rs`, session read ports | always |
 | Population-only candidate loads and carrier identity hash reads | Augmentation discovery and lazy reference identity | REQUIRED | Existing overlay-aware availability/identity services; no broad content payload is exposed. A precise member read that embeds a referenced target's identity observes that target's exact current `FileWholeHash` — the identity is a reference-only consumer's sole contact with the target — while payload-reading consumers keep their own content proof | engine `build.rs`, `carrier.rs` | always |
-
 | Authority-first augmentation candidate selection | Target population discovery | REQUIRED | Warm sets reacquire only their known contributors; cold overlay/base key selection precedes matching; exact source owner rejects unavailable or fenced serves; unrelated noncontributors are skipped | session `file_artifact_store.rs`, `source_augmentation.rs` | always |
 | Neutral empty-interface suffix guard | Augmentation fold graph-work cutoff | REQUIRED | Recorded nongeneric class header and exact retained empty interface body, population and source environment; no cached body or new mode | engine `build.rs` | always |
 | Empty versus nonempty suffix graph-work control | Regression tests | OPTIONAL | Existing graph stats under captured execution; no new production counter | session `class_member_evidence_tests.rs` | default-off `semantic-observe` |
-
 | `Walker::lane`, `compute_display_hash`, `class_member_read_hashes_in` and Member Display observation | Source-independent class-member graph payloads | REQUIRED | One bounded shared grammar and retained selection, with existing FactLane determining cosmetic-name hashing; no new query mode/store; both lanes refuse on budget exhaustion | query `facts/hashing.rs`, semantic source `decl_body_memo.rs`, session `fact_emission.rs`, `owned_lowering_port.rs` | always |
 | Old-or-new contributor queue predicate | Lazy canonical population retraction | REQUIRED | Reads exact retained previous snapshot and committed new source through existing classifiers; pending source identity lives in the existing ingestion queue | session `host_upsert.rs`, `host_construction.rs` | always |
-
 | Cold population `scan_root`, installer `scan_state`, `populate_augmenter_set_at_root` | Atomic publication against candidate-corpus changes | REQUIRED | Existing fully-applied artifact-root lease lives for one scan; existing registry mutex covers own-only epoch admission through insertion and releases before epoch completion; callbacks hold no storage guards; no new store/counter | session `source_augmentation.rs`, `file_artifact_store.rs` | always |
 
 Required proof hooks are unconditional. Work controls use existing counters and
@@ -81,13 +78,52 @@ the base parser payload, even if its bytes match.
 | item | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `NodeStructureBits::versioned_ref`, `node_reaches_versioned_reference` | Bounds the retained-reference version observation at every cold-build close: a value whose retained closure reaches no versioned `DeclRef`/`InstantiationRef` costs one memo read, and the walk descends only ref-reaching structure | REQUIRED | Pure inductive per-node bit in the existing append-only arena sidecar; decided once per node id, dropped with the node | engine `semantic_query_memo/unresolved_reach.rs`, `project_semantic_dispatch/arena_ops.rs` | always |
-| `FactReadSet::holds`, `tracer_holds_fact` | Skips re-recording an embedded version fact the active tracer already holds through a delivered or absorbed witness; the sealed signature keeps the same union | REQUIRED | Read-only query over the live tracer's observations and absorbed runs; no stored state | query `facts/fact_read_set.rs`, engine `fact_tracing/tracing.rs`, `resolver_core/resolver_context.rs` | always |
+| `FactReadSet::holds`, `tracer_holds_fact` | Skips re-recording an embedded version fact the active tracer already holds through a delivered or absorbed witness only when no recorder is active; late recorders still receive the fact and the sealed signature keeps the same union | REQUIRED | Read-only query over the live tracer's observations and absorbed runs; no stored state | query `facts/fact_read_set.rs`, engine `fact_tracing/tracing.rs`, `resolver_core/resolver_context.rs` | always |
 | `FactReadSet::run_addresses` | Recognises a replayed canonical signature the scope already absorbed by storage address, so a warm read's repeated replays grow neither the run list nor comparison work | REQUIRED | Per-tracer index mirroring `canonical_runs`; inserted and removed with its runs and cleared at canonicalisation | query `facts/fact_read_set.rs` | always |
 | Nested ResolveCall root member version observation at queue time | The drain publishes the member under the enclosing root carrier's read set | REQUIRED | Same observation as the batch members in `relation.rs`, performed before the member leaves the frame | engine `project_semantic_dispatch/call_resolve.rs` | always |
 | `PreparedDeclBundle` resolution-segment retention charge | Shared-cache admission and bundle readers see the segments' vector, specifier and narrow fact-slice bytes | REQUIRED | Charged with the bundle's own retention via the existing heap meter; wide tree-sealed sets keep their own charge | session `resolver_core/prepared_decl.rs` | always |
-| `subset_memo` (`FactSet::storage_weak`) | Canonicalisation skips a non-base run an exact ordered scan already proved contained in the base run it seals against, so a replayed run a held seal covers is not re-merged; the sealed signature keeps the same union | REQUIRED | Bounded per-thread proof map from run-storage address pair to weak handles of both allocations; entries die with their storages, prune at 4096 entries and reset at 8192 | query `facts/fact_set.rs`, `facts/fact_read_set.rs` | always |
+| `subset_memo` (`FactSet::storage_weak`) | Canonicalisation skips a non-base run an exact membership scan or unchanged union construction already proved contained in the base run it seals against, so a replayed run a held seal covers is not re-merged; the sealed signature keeps the same union | REQUIRED | Bounded per-thread proof map from run-storage address pair to weak handles of both allocations; entries die with their storages, prune at 4096 entries and reset at 8192 | query `facts/fact_set.rs`, `facts/fact_read_set.rs` | always |
 
 The versioned-reference bit and the address index add no optional counter,
 trace or enable flag; they only bound the required observations' cost. Every
 embedded version observation remains unconditional at the close that retains
 a reference the scope does not already hold.
+
+Canonicalisation uses transient borrowed hash sets for wide base membership and
+distinct additions. Narrow deltas probe the persistent base directly rather
+than rebuilding its index at every enclosing seal. The choice compares the
+remaining probe count times logarithmic search depth with the base width,
+after excluding inputs covered by existing subset proofs; a probe count
+reduced by a remembered construction delta counts only the facts it still
+probes. The filtered input list and both hash sets are REQUIRED merge
+workspace living only during sealing; it owns no fact storage, cache identity
+or optional observation. Exact equality preserves conflicting versions. Small
+deltas extend the shared base tree; additions wider than the base are sorted
+and merged into a bottom-up set.
+The additions vector retains first-seen input order, preserving ordered runs
+for sorting instead of scrambling them through hash-index iteration.
+Signature work charges base visits, input visits, sorting and merge visits.
+Known subset inputs need no repeated base walk or probe.
+An unchanged union records each input as a subset using the existing weak
+storage proof memo. Receipt or domain compaction disables this inference,
+since the resulting set may have replaced an input fact.
+Two per-demand proof memos bound the repeated cost further, both keyed by
+storage address with weak handles validating liveness, both bounded by
+prune/reset caps like the subset memo, and both drained — and closed to new
+entries — the moment this thread's last tracer pops, so a finished demand
+pins no fact storage: the seal-delta memo remembers each seal's construction
+(the widest base it extended and the exact additions over it), so a later
+seal scanning that run against a base provably holding its construction base
+probes only the remembered additions; the base-index memo remembers the
+membership index a seal built for its widest base, so sibling seals extending
+the same shared run never re-walk it. A prepared-declaration read that uses
+several authored imports replays the union of exactly those segments as ONE
+combined run, cached per used-import set on the bundle and bounded. The lazy
+table and each combined witness are separately admitted `Held` cells on the
+bundle's `StoreAccount`; refused admission returns complete evidence uncached.
+Thus an enclosing seal merges one run per used set instead of one run per import.
+This prevents repeated tree-depth lookups for overlapping evidence, growing
+tree insertion for wide disjoint batches, and the once-per-enclosing-level
+re-merge of a nested scope's whole witness; existing growth checks detect
+those regressions but cannot perform the merge. No proof or refusal is
+removed.

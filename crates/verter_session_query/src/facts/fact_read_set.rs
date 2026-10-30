@@ -572,9 +572,13 @@ impl FactReadSet {
     #[inline]
     pub fn observe_borrowed_signature(&mut self, sig: &[FactVersionRef]) {
         self.observations.reserve(sig.len());
+        // A canonical signature holds each fact once, so a fact is matched
+        // against what was observed before the signature, never against
+        // the facts this call has just taken from the same signature.
+        let before = self.observations.len();
         let mut compared = 0;
         for fact in sig {
-            let (seen, comparisons) = self.recently_observed(fact);
+            let (seen, comparisons) = self.recently_observed_before(fact, before);
             compared += comparisons;
             if !seen {
                 self.observations.push(fact.clone());
@@ -587,7 +591,14 @@ impl FactReadSet {
     /// with the number of comparisons that decided it.
     #[inline]
     fn recently_observed(&self, fact: &FactVersionRef) -> (bool, usize) {
-        let window = &self.observations[self.observations.len().saturating_sub(RECENT_WINDOW)..];
+        self.recently_observed_before(fact, self.observations.len())
+    }
+
+    /// [`Self::recently_observed`] over the observations before the first
+    /// `end`.
+    #[inline]
+    fn recently_observed_before(&self, fact: &FactVersionRef, end: usize) -> (bool, usize) {
+        let window = &self.observations[end.saturating_sub(RECENT_WINDOW)..end];
         match window.iter().rposition(|observed| observed == fact) {
             Some(position) => (true, window.len() - position),
             None => (false, window.len()),
@@ -773,6 +784,10 @@ impl FactReadSet {
         self.rewrites = self.rewrites.wrapping_add(1);
         let runs = std::mem::take(&mut self.canonical_runs);
         self.run_addresses.clear();
+        // The construction this seal will remember, when it extends a
+        // widest base: that base, and the additions it introduced over it.
+        let mut delta_base: Option<&FactSet> = None;
+        let mut sealed_delta: Option<std::sync::Arc<[FactVersionRef]>> = None;
         let mut edit = if runs.is_empty() {
             // Nothing absorbed: the local observations are the whole set.
             // Observations held inline are copied straight into the set's
@@ -786,9 +801,8 @@ impl FactReadSet {
                 FactSet::from_canonical_slice(self.policy, &local).edit()
             }
         } else {
-            // The widest absorbed run is the base, shared; every other run
-            // and every local observation is inserted into it, so the set
-            // pays only for what the base lacks.
+            // Extend the widest shared run for a small delta; bulk-build
+            // when the distinct additions outnumber the base facts.
             let mut widest = 0;
             for (index, run) in runs.iter().enumerate() {
                 if run.len() > runs[widest].len() {
@@ -796,39 +810,94 @@ impl FactReadSet {
                 }
             }
             let base = &runs[widest];
-            let mut edit = base.edit();
-            // Whether the edit is still exactly the base: while no run has
-            // added a fact yet, a run the scan found wholly held was wholly
-            // held by the BASE, which is what the subset memo records.
-            let mut edit_still_base = true;
-            for (index, run) in runs.iter().enumerate() {
-                if index == widest || run.ptr_eq(base) {
-                    continue;
+            let merge_runs: SmallVec<[&FactSet; 4]> = runs
+                .iter()
+                .enumerate()
+                .filter(|(index, run)| {
+                    *index != widest
+                        && !run.ptr_eq(base)
+                        && !crate::facts::fact_set::subset_memo::known_subset(run, base)
+                })
+                .map(|(_, run)| run)
+                .collect();
+            // A run whose recorded construction base `base` provably
+            // contains by an exact remembered proof contributes only
+            // the additions that run sealed over that base: every other
+            // fact of it is already proven inside `base`, and re-walking
+            // it is the once-per-enclosing-level re-merge.
+            let residuals: SmallVec<[_; 4]> = merge_runs
+                .iter()
+                .map(|run| seal_delta::unproven_facts(run, base))
+                .collect();
+            // A narrow delta probes the persistent base directly. Indexing
+            // the whole base for each enclosing seal would walk every prefix
+            // again. For wide overlap, one index replaces repeated searches;
+            // a remembered residual counts only the facts it still probes.
+            let probes = self.observations.len()
+                + merge_runs
+                    .iter()
+                    .zip(&residuals)
+                    .map(|(run, residual)| residual.as_ref().map_or(run.len(), |facts| facts.len()))
+                    .sum::<usize>();
+            // A cached index is free to reuse whatever the probe volume; a
+            // fresh one must still beat direct tree probes.
+            let base_facts = match base_index::cached_index_of(base) {
+                Some(cached) => Some(cached),
+                None if probes.saturating_mul(base.len().ilog2() as usize + 1) >= base.len() => {
+                    Some(base_index::index_of(base))
                 }
-                // The same retained runs reach scope after scope: a run a
-                // held seal already covers contributes nothing here, and
-                // re-merging its facts is exactly the repeated transitive
-                // expansion the growth contracts bound.
-                if crate::facts::fact_set::subset_memo::known_subset(run, base) {
-                    continue;
-                }
-                let mut held_all = true;
-                for fact in run.iter() {
-                    record_signature_work(1);
-                    if edit.contains(fact) {
-                        continue;
+                None => None,
+            };
+            let contains = |fact: &FactVersionRef| {
+                base_facts
+                    .as_ref()
+                    .map_or_else(|| base.contains(fact), |facts| facts.contains(fact))
+            };
+            let mut added = rustc_hash::FxHashSet::default();
+            // Preserve the canonical input runs' order for the final sort.
+            // Iterating the hash index would scramble those ordered runs.
+            let mut additions = Vec::new();
+            for (run, residual) in merge_runs.into_iter().zip(residuals) {
+                let held_all = match residual.as_deref() {
+                    Some(residual) => {
+                        probe_merge_facts(residual.iter(), &contains, &mut added, &mut additions)
                     }
-                    held_all = false;
-                    edit.insert_new(fact.clone());
-                    edit_still_base = false;
-                }
-                if held_all && edit_still_base {
+                    None => probe_merge_facts(run.iter(), &contains, &mut added, &mut additions),
+                };
+                if held_all {
                     crate::facts::fact_set::subset_memo::record_subset(run, base);
                 }
             }
-            for fact in std::mem::take(&mut self.observations) {
-                edit.insert(fact);
+            for fact in &self.observations {
+                record_signature_work(1);
+                if !contains(fact) && added.insert(fact.clone()) {
+                    additions.push(fact.clone());
+                }
             }
+            sort_fact_refs(&mut additions);
+            delta_base = Some(base);
+            sealed_delta = Some(additions.iter().cloned().collect());
+            let edit = if additions.len() > base.len() {
+                // A batch of mostly new facts is cheaper to build bottom-up
+                // than to insert through a growing tree once per fact.
+                let mut facts = Vec::with_capacity(base.len() + additions.len());
+                let mut existing = base.iter().peekable();
+                for fact in additions {
+                    while existing.peek().is_some_and(|held| **held < fact) {
+                        record_signature_work(1);
+                        facts.push(existing.next().unwrap().clone());
+                    }
+                    record_signature_work(1);
+                    facts.push(fact);
+                }
+                facts.extend(existing.cloned());
+                FactSet::from_canonical_vec(self.policy, facts).edit()
+            } else {
+                let mut edit = base.edit();
+                edit.insert_new_run(additions);
+                edit
+            };
+            self.observations.clear();
             edit
         };
         // Domain-wise lifting runs LAST, on the deduplicated set: the
@@ -838,9 +907,25 @@ impl FactReadSet {
         // finalised signature, from every entry point, compact
         // identically. A receipt a sibling receipt consumed is already
         // inside it.
-        drop_subsumed_receipts_in(&mut edit);
-        compact_domains_in(&mut edit, &self.aggregate_basis);
-        edit.finish()
+        let receipts_changed = drop_subsumed_receipts_in(&mut edit);
+        let domains_changed = compact_domains_in(&mut edit, &self.aggregate_basis);
+        let sealed = edit.finish();
+        if !receipts_changed && !domains_changed {
+            // The union construction itself proves every input a subset.
+            // Remember that provenance without scanning the union again.
+            for run in &runs {
+                if !run.ptr_eq(&sealed) {
+                    crate::facts::fact_set::subset_memo::record_subset(run, &sealed);
+                }
+            }
+            // The union construction is also a delta: exactly `sealed_delta`
+            // over `delta_base`. A later seal that provably holds the base
+            // scans only the delta instead of re-walking the whole run.
+            if let (Some(base), Some(delta)) = (delta_base, sealed_delta) {
+                seal_delta::record(&sealed, base, delta);
+            }
+        }
+        sealed
     }
 
     /// Seal the tracer into its immutable, complete signature.
@@ -1128,7 +1213,7 @@ fn terminal_tail<'f>(facts: impl DoubleEndedIterator<Item = &'f FactVersionRef>)
 
 /// [`crate::facts::fact_cache::drop_subsumed_receipts`] on a set under
 /// construction: only its receipts (its tail) are read.
-fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
+fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) -> bool {
     let receipts: smallvec::SmallVec<[crate::facts::receipt::ResultReceipt; 2]> = edit
         .iter()
         .rev()
@@ -1142,7 +1227,7 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
         .flatten()
         .collect();
     if receipts.len() < 2 {
-        return;
+        return false;
     }
     let mut kept: Vec<FactVersionRef> = receipts
         .iter()
@@ -1152,7 +1237,7 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
     let before = kept.len();
     crate::facts::fact_cache::drop_subsumed_receipts(&mut kept);
     if kept.len() == before {
-        return;
+        return false;
     }
     for receipt in receipts {
         let fact = FactVersionRef::Receipt(receipt);
@@ -1160,21 +1245,22 @@ fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
             edit.remove(&fact);
         }
     }
+    true
 }
 
 /// [`compact_domains`] on a set under construction: a set that cannot lift
 /// (no wider than one bucket's bound and holding no aggregate) is left as
 /// it is without being read; otherwise the lifted facts are removed and the
 /// aggregates inserted, every untouched node staying shared.
-fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) {
+fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) -> bool {
     let policy = edit.policy();
     if edit.len() <= policy.precise_domain_max() && !terminal_tail(edit.iter()).1 {
-        return;
+        return false;
     }
     let before: Vec<FactVersionRef> = edit.iter().cloned().collect();
     let mut after = before.clone();
     if !compact_domains(&mut after, basis, policy) {
-        return;
+        return false;
     }
     let (mut i, mut j) = (0, 0);
     let mut removed = Vec::new();
@@ -1212,6 +1298,7 @@ fn compact_domains_in(edit: &mut FactSetEdit, basis: &AggregateGenerations) {
     for fact in added {
         edit.insert(fact);
     }
+    true
 }
 
 /// Seal an arbitrary fact collection as a complete signature: sort,
@@ -1352,6 +1439,226 @@ fn sort_fact_refs(facts: &mut [FactVersionRef]) {
     record_signature_work(compared);
 }
 
+/// Probe each fact of one merged run against the seal's base, collecting
+/// the distinct additions; whether the probed facts were all held. Keys of
+/// the dedup set are owned fact handles — an `Arc` reference bump, never a
+/// fresh allocation — so a probe of remembered residual additions shares
+/// it with a probe of the run itself.
+fn probe_merge_facts<'i>(
+    facts: impl Iterator<Item = &'i FactVersionRef>,
+    contains: &impl Fn(&FactVersionRef) -> bool,
+    added: &mut rustc_hash::FxHashSet<FactVersionRef>,
+    additions: &mut Vec<FactVersionRef>,
+) -> bool {
+    let mut held_all = true;
+    for fact in facts {
+        record_signature_work(1);
+        if !contains(fact) {
+            held_all = false;
+            if added.insert(fact.clone()) {
+                additions.push(fact.clone());
+            }
+        }
+    }
+    held_all
+}
+
+/// Membership indexes of shared bases, remembered by storage address: the
+/// SAME retained run is the widest base of scope after sibling scope, and
+/// each of their seals would otherwise walk and re-index every one of its
+/// facts. A build walks the base once — the one charge it records — and
+/// sibling seals then reuse the index without a walk.
+///
+/// Entries are remembered with a weak handle validating liveness (a freed
+/// allocation's address is never mistaken for a reused one). The strongly
+/// held index sets are bounded by the caps below, mirroring
+/// [`crate::facts::fact_set::subset_memo`]'s discipline, and live for one
+/// demand: [`drain_demand_fact_memos`] drops them when this thread's last
+/// tracer pops, so a finished demand pins no fact storage.
+pub(crate) mod base_index {
+    use super::{record_signature_work, FactVersionRef};
+    use crate::facts::fact_set::{FactSet, StorageWeak};
+    use rustc_hash::{FxHashMap, FxHashSet};
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    /// Entries beyond this are pruned of dead bases; a memo still past
+    /// [`HARD_CAP`] after pruning starts again. Both are deterministic
+    /// functions of the merge sequence, so a demand's charge is stable.
+    const SOFT_CAP: usize = 4096;
+    const HARD_CAP: usize = 8192;
+
+    /// One remembered index: the weak handle of the base it indexes, and
+    /// the index itself.
+    type BaseIndexEntry = (StorageWeak, Arc<FxHashSet<FactVersionRef>>);
+
+    thread_local! {
+        static INDEXES: RefCell<FxHashMap<usize, BaseIndexEntry>> =
+            RefCell::new(FxHashMap::default());
+    }
+
+    /// Drop every remembered index: the demand that could consult them is
+    /// over, and their sets pin fact storage.
+    pub(crate) fn clear() {
+        INDEXES.with(|indexes| indexes.borrow_mut().clear());
+    }
+
+    /// An already-built membership index of this exact base storage, when
+    /// one is remembered and its base still lives.
+    pub(crate) fn cached_index_of(base: &FactSet) -> Option<Arc<FxHashSet<FactVersionRef>>> {
+        INDEXES.with(|indexes| {
+            let mut indexes = indexes.borrow_mut();
+            let entry = indexes.get_mut(&base.address())?;
+            if entry.0.address_while_alive()? != base.address() {
+                indexes.remove(&base.address());
+                return None;
+            }
+            Some(Arc::clone(&entry.1))
+        })
+    }
+
+    /// The base's membership index, reused from the memo or built and
+    /// remembered. The build walks every base fact once — the one charge
+    /// recorded — so sibling seals extending the same shared run never
+    /// walk it again.
+    pub(crate) fn index_of(base: &FactSet) -> Arc<FxHashSet<FactVersionRef>> {
+        if let Some(cached) = cached_index_of(base) {
+            return cached;
+        }
+        let built = Arc::new(base.iter().cloned().collect::<FxHashSet<_>>());
+        record_signature_work(base.len());
+        if !super::DEMAND_MEMOS_ACTIVE.with(std::cell::Cell::get) {
+            return built;
+        }
+        INDEXES.with(|indexes| {
+            let mut indexes = indexes.borrow_mut();
+            if indexes.len() >= SOFT_CAP {
+                indexes.retain(|_, (weak, _)| weak.address_while_alive().is_some());
+            }
+            if indexes.len() >= HARD_CAP {
+                indexes.clear();
+            }
+            indexes.insert(base.address(), (base.storage_weak(), Arc::clone(&built)));
+        });
+        built
+    }
+}
+
+// Whether a demand's tracers are installed on this thread, so the
+// per-demand proof memos accept entries: entries created outside a
+// demand (a finalisation that outlives its tracer) could never be
+// consulted before the next demand drains them, and would pin fact
+// storage for nothing.
+thread_local! {
+    static DEMAND_MEMOS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A demand's first tracer was installed: remember proofs from here on.
+pub fn begin_demand_fact_memos() {
+    DEMAND_MEMOS_ACTIVE.with(|active| active.set(true));
+}
+
+/// The demand's last tracer popped: drop the per-demand proof memos whose
+/// payloads pin fact storage, and remember nothing further — a finished
+/// demand retains nothing through them.
+pub fn end_demand_fact_memos() {
+    DEMAND_MEMOS_ACTIVE.with(|active| active.set(false));
+    seal_delta::clear();
+    base_index::clear();
+}
+
+/// How one sealed set was constructed: the widest base it extended, and
+/// the exact additions it introduced over that base. A later seal that
+/// provably holds the base scans only the additions instead of re-walking
+/// the whole run once per enclosing level.
+///
+/// Entries are remembered by storage address with weak handles validating
+/// liveness (a freed allocation's address is never mistaken for a reused
+/// one). The strongly-held additions slices are bounded by the caps below,
+/// mirroring [`crate::facts::fact_set::subset_memo`]'s discipline, and
+/// live for one demand: [`drain_demand_fact_memos`] drops them when this
+/// thread's last tracer pops, so a finished demand pins no fact storage.
+pub(crate) mod seal_delta {
+    use super::FactVersionRef;
+    use crate::facts::fact_set::{subset_memo, FactSet, StorageWeak};
+    use rustc_hash::FxHashMap;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    /// Entries beyond this are pruned of dead seals; a memo still past
+    /// [`HARD_CAP`] after pruning starts again. Both are deterministic
+    /// functions of the merge sequence, so a demand's charge is stable.
+    const SOFT_CAP: usize = 4096;
+    const HARD_CAP: usize = 8192;
+
+    struct Delta {
+        seal: StorageWeak,
+        base: StorageWeak,
+        additions: Arc<[FactVersionRef]>,
+    }
+
+    thread_local! {
+        static DELTAS: RefCell<FxHashMap<usize, Delta>> = RefCell::new(FxHashMap::default());
+    }
+
+    /// Drop every remembered construction: the demand that could consult
+    /// them is over, and their additions pin fact storage.
+    pub(crate) fn clear() {
+        DELTAS.with(|deltas| deltas.borrow_mut().clear());
+    }
+
+    /// Record that `sealed` is exactly `base` plus `additions`, a
+    /// construction remembered while both storages live.
+    pub(crate) fn record(sealed: &FactSet, base: &FactSet, additions: Arc<[FactVersionRef]>) {
+        if !super::DEMAND_MEMOS_ACTIVE.with(std::cell::Cell::get) {
+            return;
+        }
+        DELTAS.with(|deltas| {
+            let mut deltas = deltas.borrow_mut();
+            if deltas.len() >= SOFT_CAP {
+                deltas.retain(|_, delta| delta.seal.address_while_alive().is_some());
+            }
+            if deltas.len() >= HARD_CAP {
+                deltas.clear();
+            }
+            deltas.insert(
+                sealed.address(),
+                Delta {
+                    seal: sealed.storage_weak(),
+                    base: base.storage_weak(),
+                    additions,
+                },
+            );
+        });
+    }
+
+    /// The facts of `run` a merge into `base` must still probe: the
+    /// additions `run` sealed over its own construction base, when that
+    /// base is already PROVEN contained in `base` by an exact remembered
+    /// proof. Every other fact of the run is already inside `base`, so
+    /// walking it again would be the once-per-enclosing-level re-merge.
+    /// `None` when no such construction is remembered or proven.
+    pub(crate) fn unproven_facts(run: &FactSet, base: &FactSet) -> Option<Arc<[FactVersionRef]>> {
+        DELTAS.with(|deltas| {
+            let mut deltas = deltas.borrow_mut();
+            let delta = deltas.get(&run.address())?;
+            if delta.seal.address_while_alive()? != run.address() {
+                deltas.remove(&run.address());
+                return None;
+            }
+            let construction_base = delta.base.address_while_alive()?;
+            // The same storage IS its own containment; a different base
+            // needs an exact remembered proof.
+            if construction_base != base.address()
+                && !subset_memo::known_subset_address(construction_base, base)
+            {
+                return None;
+            }
+            Some(Arc::clone(&delta.additions))
+        })
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SIGNATURE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1412,6 +1719,32 @@ mod finalise_tests {
     }
 
     #[test]
+    fn narrow_deltas_do_not_walk_the_shared_base() {
+        let policy = FactPolicy::with_widths(crate::facts::policy::FactWidths {
+            fresh_slice_max: 32,
+            ..crate::facts::policy::FactWidths::PRODUCTION
+        })
+        .unwrap();
+        let work = [128, 2048].map(|count| {
+            let base = policy.set_of((0..count).map(fact).collect::<Vec<_>>());
+            let mut read = FactReadSet::new(policy);
+            read.absorb_canonical_signature(&base);
+            let added = fact(count);
+            read.observe(added.clone());
+            let before = signature_work_for_tests();
+            let FactReadSetFinalise::Ok(sealed) = read.finalise() else {
+                panic!("stable delta must seal");
+            };
+            let work = signature_work_for_tests() - before;
+            assert_eq!(sealed.len(), count + 1);
+            assert!(sealed.contains(&added));
+            assert!(base.iter().all(|held| sealed.contains(held)));
+            work
+        });
+        assert!(work[1] <= work[0] * 2, "narrow delta work: {work:?}");
+    }
+
+    #[test]
     fn canonical_run_batches_keep_proof_work_proportional() {
         let [small, large] = [128, 512].map(|count| {
             let before = signature_work_for_tests();
@@ -1437,6 +1770,65 @@ mod finalise_tests {
             large <= 6 * small,
             "canonical merge work grew from {small} to {large} over 4x input"
         );
+    }
+
+    #[test]
+    fn overlapping_batches_preserve_versions_and_shared_inputs() {
+        let policy = FactPolicy::production();
+        for count in [8, 64, 512, 2048] {
+            let base = policy.set_of((0..count).map(|index| fact(index * 2)).collect::<Vec<_>>());
+            let snapshot = base.to_vec();
+            let other = policy.set_of((0..count).map(fact).collect::<Vec<_>>());
+            let mut changed = fact(0);
+            if let FactVersionRef::FileWholeHash { hash, .. } = &mut changed {
+                *hash = [99; 16];
+            }
+            let mut read = FactReadSet::new(policy);
+            read.absorb_canonical_signature(&base);
+            read.absorb_canonical_signature(&other);
+            read.observe(changed.clone());
+            let FactReadSetFinalise::Ok(sealed) = read.finalise() else {
+                panic!("stable union must seal");
+            };
+            let expected = policy.set_of(
+                snapshot
+                    .iter()
+                    .cloned()
+                    .chain(other.iter().cloned())
+                    .chain([changed])
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(sealed, expected);
+            assert_eq!(base.to_vec(), snapshot, "shared input stays immutable");
+            assert!(crate::facts::fact_set::subset_memo::known_subset(
+                &base, &sealed
+            ));
+            assert!(crate::facts::fact_set::subset_memo::known_subset(
+                &other, &sealed
+            ));
+        }
+    }
+
+    #[test]
+    fn compacted_receipts_do_not_prove_input_membership() {
+        let policy = FactPolicy::production();
+        let child =
+            FactVersionRef::Receipt(crate::facts::receipt::ResultReceipt::new(vec![fact(0)]));
+        let parent = FactVersionRef::Receipt(crate::facts::receipt::ResultReceipt::new(vec![
+            child.clone(),
+        ]));
+        let input = policy.set_of([child.clone()]);
+        let mut read = FactReadSet::new(policy);
+        read.absorb_canonical_signature(&input);
+        read.observe(parent.clone());
+        let FactReadSetFinalise::Ok(sealed) = read.finalise() else {
+            panic!("stable receipts must seal");
+        };
+        assert!(sealed.contains(&parent));
+        assert!(!sealed.contains(&child));
+        assert!(!crate::facts::fact_set::subset_memo::known_subset(
+            &input, &sealed
+        ));
     }
 
     #[test]

@@ -55,6 +55,52 @@ oracle proof.
 Compile-fail fixtures run through `node scripts/compile-contracts.mjs`, outside
 Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
+`Compiler Contracts` uses the existing `compiler_contracts` change gate on PRs:
+the ten fixture-owner crates and the workspace runner crates are lane roots,
+so their transitive dependencies select the lane too. The excluded
+`verter_compile_contracts_session_observe` runner (including its separate
+`Cargo.lock`) is owned by the path filter, alongside the runner script,
+self-tests, generated-artifact inputs and nightly workflow. Workspace Cargo
+inputs, the toolchain, `.cargo/` and `ci.yml` select the lane through the shared
+fail-closed rules. Unrelated editor, package and prose changes skip it;
+`CI Required` accepts that skip and still rejects any failed or cancelled
+matrix leg.
+
+The full suite is partitioned into four independent runner jobs. Each job
+executes its configurations serially, keeping their original Cargo feature
+sets separate:
+
+| Group             | Configurations                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`            | audit, CSS syntax, identity, language, semantic, session-query, type-runtime, workspace; session test-support variants                   |
+| `compiler`        | compiler-default, compiler-bench, session soak-support; generated Svelte freshness and isolated default-feature compiler build/lib tests |
+| `session`         | session-default                                                                                                                          |
+| `session-observe` | excluded semantic-observe runner                                                                                                         |
+
+Run one group locally with `node scripts/compile-contracts.mjs --group core`;
+omitting `--group` runs all fourteen configurations. `--list-groups` prints the
+matrix inventory. The workflow self-test checks both PR and nightly matrices
+against it. Matrix failure cancellation is disabled so every group reports.
+
+Every group has its own target cache; within it, outer Cargo runners and all
+trybuild projects share `target/compiler-contracts`. Separate GitHub runners
+prevent concurrent writers to the generated fixture workspaces. Immutable cache
+keys include OS/architecture, group, toolchain/configuration, manifests, both
+workspace and excluded-runner lockfiles, and the checkout revision; restore
+prefixes reuse compatible earlier builds while source-only changes can refresh
+the saved cache. Both workflows save only on `main`, which nightly also warms.
+The sccache wrapper is explicitly enabled with incremental compilation off and
+a common namespace across groups and workflows. These jobs disable dev/test
+debug-symbol emission, including inside trybuild's generated workspaces, while
+retaining debug assertions and every original feature configuration. Only the
+compiler group needs the pnpm install and the isolated compiler build/tests.
+Both workflows disable `setup-node`'s automatic package-manager cache detection;
+only the compiler group explicitly enables pnpm caching. The plain production
+`cargo build` remains necessary: the compiler's test targets enable its
+`test-support` dev-dependency self-edge. Each invocation logs `COMPILE CONTRACT TIME`
+for its fetches and configurations plus a group total, and each matrix leg uploads
+its log even on failure.
+
 ### tsserver nightly (`tsserver-nightly.yml`)
 
 tsgo is the main platform and pull request CI tests it in full; tsserver is the
@@ -345,7 +391,14 @@ See [Publishing a Release](#publishing-a-release) for the full flow.
 
 ### Nightly (`nightly.yml`)
 
-Triggered daily at 06:00 UTC and manually through `workflow_dispatch`.
+Triggered daily at 06:00 UTC on `main` and manually through `workflow_dispatch`.
+
+The full four-group compile-contract suite runs every night without change
+filters, using the same runner, feature configurations and cache keys as PR CI.
+It also retains the compiler group's generated-artifact and default-feature lib
+checks. The existing nightly scale and coverage lanes run alongside it.
+
+The WASM/playground build:
 
 1. Builds WASM via `cargo build --target wasm32-unknown-unknown`, `wasm-bindgen`, and a `wasm-opt` size pass
 2. Smoke tests the WASM binary
