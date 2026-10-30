@@ -181,6 +181,10 @@ impl VerterHost {
     ) -> HostLoadHandoff {
         use std::sync::atomic::Ordering::Relaxed;
         self.provenance.ensure_loaded_calls.fetch_add(1, Relaxed);
+        #[cfg(test)]
+        self.test_force
+            .loads_begun
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let project_generation = self.project_type_store.project_generation();
         let canonical = self.normalized_analysis_canonical(canonical).into_owned();
         let (reload, pre_evict_hash, eviction_revision) = loop {
@@ -266,5 +270,115 @@ impl VerterHost {
                 },
             }),
         }
+    }
+}
+
+/// A file's load the semantic runtime waits on instead of driving it: the
+/// owned scheduler handoff, integrated on this host once Analysis is ready,
+/// exactly as [`VerterHost::ensure_loaded`] integrates it. Its terminal
+/// outcome is kept and answered again to a later poll.
+struct HostIndexedLoad<'h> {
+    host: &'h VerterHost,
+    load: Option<HostLoadHandoff>,
+    outcome: Option<verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome>,
+}
+
+impl verter_type_engine::resolver_core::request_ports::IndexedLoad for HostIndexedLoad<'_> {
+    fn poll(
+        &mut self,
+        waker: &Waker,
+    ) -> Poll<verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome> {
+        use verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome;
+        if let Some(outcome) = self.outcome {
+            return Poll::Ready(outcome);
+        }
+        let Some(load) = self.load.as_mut() else {
+            unreachable!("a load without its handoff has ended with an outcome")
+        };
+        let ended = match load.poll(waker) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(ended) => ended,
+        };
+        self.load = None;
+        // A failed, stopped or superseded load integrates nothing; its
+        // reader then answers as after a synchronous load that failed.
+        let outcome = match ended.and_then(|commit| commit.apply(self.host)) {
+            Ok(true) => IndexedLoadOutcome::Integrated,
+            Ok(false) => IndexedLoadOutcome::NotIntegrated(
+                verter_type_engine::resolver_core::request_ports::IndexedLoadEnd::Absent,
+            ),
+            Err(error) => IndexedLoadOutcome::NotIntegrated(error.load_end()),
+        };
+        self.outcome = Some(outcome);
+        Poll::Ready(outcome)
+    }
+}
+
+impl HostLoadError {
+    /// The typed end of an owned load this error stopped.
+    fn load_end(&self) -> verter_type_engine::resolver_core::request_ports::IndexedLoadEnd {
+        use verter_type_engine::resolver_core::request_ports::IndexedLoadEnd;
+        match self {
+            HostLoadError::Cancelled => IndexedLoadEnd::Cancelled,
+            HostLoadError::Cycle => IndexedLoadEnd::Cycle,
+            HostLoadError::Superseded => IndexedLoadEnd::Superseded,
+            HostLoadError::Shutdown => IndexedLoadEnd::Shutdown,
+            HostLoadError::Failed(_) | HostLoadError::WrongHost | HostLoadError::NoProgress => {
+                IndexedLoadEnd::Failed
+            }
+        }
+    }
+}
+
+impl VerterHost {
+    /// Whether `canonical_id`'s indexed input is servable without loading
+    /// it, or the owned load to wait on first
+    /// ([`verter_type_engine::resolver_core::request_ports::IndexedInputs::begin_indexed_load`]).
+    /// A load is begun exactly where the synchronous serve would load: a
+    /// loadable canonical the scheduler holds no source for and no retained
+    /// artifact serves. A scheduler without a driver thread (every wasm32
+    /// host) has no executor but the caller, so nothing would advance a load
+    /// begun here: the serve performs it in place, executing its stages on
+    /// this thread, as the synchronous load does.
+    pub(crate) fn begin_indexed_ready_load(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        use verter_type_engine::resolver_core::request_ports::IndexedReadiness;
+        if !self.scheduler.has_driver_thread() {
+            return IndexedReadiness::Settled;
+        }
+        let canonical = self
+            .normalized_analysis_canonical(canonical_id)
+            .into_owned();
+        if canonical.is_empty()
+            || crate::host_manage::is_raw_import_specifier_id(&canonical)
+            || self.scheduler.try_get_source(&canonical).is_some()
+        {
+            return IndexedReadiness::Settled;
+        }
+        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
+            verter_audit::observe::Uncaptured,
+        >();
+        if self
+            .artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+                &observation,
+                &canonical,
+            )
+            .is_some_and(|indexed| self.indexed_surface_is_current(&canonical, &indexed))
+        {
+            return IndexedReadiness::Settled;
+        }
+        let scope = self.scheduler.enter_execution_scope();
+        let load = self.begin_load(
+            &canonical,
+            scope.task().clone(),
+            self.cooperative_drive.cancellation().clone(),
+        );
+        IndexedReadiness::Loading(Box::new(HostIndexedLoad {
+            host: self,
+            load: Some(load),
+            outcome: None,
+        }))
     }
 }

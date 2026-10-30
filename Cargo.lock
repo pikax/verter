@@ -4498,6 +4498,7 @@ dependencies = [
  "verter_span",
  "verter_type_engine",
  "verter_type_expr",
+ "verter_workspace",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

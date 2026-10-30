@@ -18,6 +18,120 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::metadata::ValueDeclIdentity;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
+/// Whether a file's indexed input is servable without loading the file
+/// first ([`IndexedInputs::begin_indexed_load`]).
+pub enum IndexedReadiness<'p> {
+    /// No load is needed: the serve answers now.
+    Settled,
+    /// The file is being loaded: poll the load until it is ready, then serve
+    /// the file.
+    Loading(Box<dyn IndexedLoad + Send + 'p>),
+}
+
+/// A load of one file the semantic runtime waits on instead of blocking:
+/// owned, movable between threads, with one poller. Dropping it withdraws
+/// only its own wait; the load goes on for any other demand of it.
+pub trait IndexedLoad {
+    /// `Ready` with how the load ended — integrated, or ended without
+    /// integrating the file — or `Pending` with `waker` registered on the
+    /// load's completion. The outcome is terminal: a reader that waited on
+    /// the load consumes it instead of loading the file again.
+    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<IndexedLoadOutcome>;
+}
+
+/// How an owned load ended ([`IndexedLoad::poll`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedLoadOutcome {
+    /// The file is integrated: its serve answers without loading it.
+    Integrated,
+    /// The load ended without integrating the file: the reader answers as it
+    /// answers after a synchronous load that ended the same way, with no
+    /// indexed input for the file.
+    NotIntegrated(IndexedLoadEnd),
+}
+
+/// Why a load ended without integrating its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedLoadEnd {
+    /// The load completed and supplied no content for the file.
+    Absent,
+    /// The load failed.
+    Failed,
+    /// The load was cancelled.
+    Cancelled,
+    /// A newer version of the file superseded the load.
+    Superseded,
+    /// The load waited on itself.
+    Cycle,
+    /// The loader shut down.
+    Shutdown,
+}
+
+/// Owned loads that ended without integrating their file. Each outcome
+/// answers every load of that file by the waiting reader
+/// ([`consumed_load_end`]), including later scope or prepared-declaration
+/// reads. The reader owns these outcomes until it finishes; they are not
+/// a host-wide negative cache.
+pub type ConsumedLoadEnds = Vec<(Arc<str>, IndexedLoadEnd)>;
+
+std::thread_local! {
+    static CONSUMED_LOAD_ENDS: std::cell::RefCell<ConsumedLoadEnds> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `body` — a reader that waited on owned loads, reading the files they
+/// loaded — with the loads in `ends` that ended without integrating their
+/// file answering all its loads of those files. On return `ends` keeps the
+/// outcomes for the reader's next step. Any outcome
+/// installed by an enclosing reader is restored, unwinding included. An
+/// empty `ends` installs nothing.
+pub(crate) fn with_consumed_load_ends<R>(
+    ends: &mut ConsumedLoadEnds,
+    body: impl FnOnce() -> R,
+) -> R {
+    if ends.is_empty() {
+        return body();
+    }
+    struct Restore<'e> {
+        ends: &'e mut ConsumedLoadEnds,
+        outer: ConsumedLoadEnds,
+    }
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let outer = std::mem::take(&mut self.outer);
+            *self.ends = CONSUMED_LOAD_ENDS
+                .with(|installed| std::mem::replace(&mut *installed.borrow_mut(), outer));
+        }
+    }
+    let installed = std::mem::take(ends);
+    let outer =
+        CONSUMED_LOAD_ENDS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), installed));
+    let _restore = Restore { ends, outer };
+    body()
+}
+
+/// The terminal outcome a waiting reader's owned load of a file matching
+/// `is_file` ended with. It remains installed for repeated reads by this
+/// reader, so a later scope or prepared-declaration read cannot retry the
+/// failed load synchronously. `None` when no installed outcome names the
+/// file. Independent readers outside this scope may load the file again.
+pub fn consumed_load_end(is_file: impl Fn(&str) -> bool) -> Option<IndexedLoadEnd> {
+    CONSUMED_LOAD_ENDS.with(|slot| {
+        let ends = slot.borrow();
+        ends.iter()
+            .find(|(file, _)| is_file(file))
+            .map(|(_, end)| *end)
+    })
+}
+
+/// The load of a file another read would perform, begun instead
+/// ([`IndexedInputs::begin_prepared_bundle_load`]): the file, and its owned
+/// load to wait on.
+pub struct PendingLoad<'p> {
+    pub canonical: Arc<str>,
+    pub load: Box<dyn IndexedLoad + Send + 'p>,
+}
+
 /// The declaration namespace an ambient global read consumes.
 #[derive(Debug, Clone, Copy)]
 pub enum AmbientSymbolSpace {
@@ -191,6 +305,28 @@ pub trait IndexedInputs {
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
+
+    /// Begin making `canonical_id`'s indexed input servable without waiting
+    /// for it: [`IndexedReadiness::Settled`] when
+    /// [`Self::ensure_indexed_ready_serve`] answers it without loading the
+    /// file (it is loaded, or no load can supply it), else the owned load to
+    /// wait on before serving it. The load joins the task installed on this
+    /// thread and integrates the file when it completes, exactly as
+    /// [`Self::ensure_loaded`] would; it never drives the loading stages.
+    fn begin_indexed_load(&self, canonical_id: &str) -> IndexedReadiness<'_>;
+
+    /// Begin the loads [`Self::prepared_decl_bundle`] of `canonical_id`
+    /// would perform while materializing the bundle — the files it routes
+    /// an import to that have no current content — instead of performing
+    /// them: the first, past every file in `awaited`, that is still
+    /// loading, in the order the materialization loads them, or `None` once
+    /// none is. It materializes nothing and loads nothing itself; it reads
+    /// `canonical_id` only when that file is already current.
+    fn begin_prepared_bundle_load(
+        &self,
+        canonical_id: &str,
+        awaited: &[Arc<str>],
+    ) -> Option<PendingLoad<'_>>;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>>;
 

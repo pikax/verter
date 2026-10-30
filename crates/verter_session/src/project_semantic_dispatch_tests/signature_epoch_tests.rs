@@ -150,7 +150,7 @@ fn fresh_answers() -> Vec<Vec<String>> {
 
 /// Run `body` with `during` hooked at `point` of every `SignaturesOfType`
 /// build on this thread.
-fn with_build_hook<R>(
+pub(super) fn with_build_hook<R>(
     point: SignaturesOfTypeBuildPoint,
     during: impl Fn() + 'static,
     body: impl FnOnce() -> R,

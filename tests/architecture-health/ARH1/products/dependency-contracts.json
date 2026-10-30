@@ -606,6 +606,7 @@
           "begin_submit_request",
           "begin_owned_request",
           "enter_execution_scope",
+          "pump_owned_dependency",
           "submit_batch_atomic",
           "begin_submit_batch_atomic",
           "wait_batch",
@@ -1792,6 +1793,7 @@
           "crates/verter_type_engine/tests/allocator_canaries.rs",
           "crates/verter_wasm/src/feasibility_probe_tests.rs",
           "crates/verter_wasm/src/lib.rs",
+          "crates/verter_wasm/src/semantic_poll_wasm_tests.rs",
           "crates/verter_wasm/src/typeinfo.rs"
         ],
         "ownerCratePopulation": "semantic_query lives in verter_type_engine, so every file outside the engine's src tree that names it through verter_type_engine paths is a cross-crate importer; the importers array is the complete cross-crate population (the verter_session sources, benches, examples and integration tests, plus the bench/ffi/napi/wasm/source-policy-gate files) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
@@ -2024,6 +2026,7 @@
               "crates/verter_session/src/project_semantic_dispatch_tests/semantic_operand_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/semantic_source_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
+              "crates/verter_wasm/src/semantic_poll_wasm_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/signature_discovery_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/signature_epoch_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/signature_predicate_inference_tests.rs",

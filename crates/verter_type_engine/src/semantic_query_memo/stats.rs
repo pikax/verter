@@ -201,6 +201,10 @@ pub(crate) struct AtomicSemanticGraphStats {
     /// from `awaited_normalize_count`: the two relations are distinct
     /// families and must be countable apart.
     pub(super) async_return_payload_count: Tally,
+    /// First stages of family continuations, once per cold build.
+    pub(super) continuation_builds_begun: Tally,
+    /// Later stages of family continuations, once per read they named.
+    pub(super) continuation_stages_resumed: Tally,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) path_length_samples: Mutex<SampleCollector>,
     pub(super) decl_subexpression_lowering_count: Tally,
@@ -274,6 +278,8 @@ impl Default for AtomicSemanticGraphStats {
             branch_selections_false: Tally::default(),
             awaited_normalize_count: Tally::default(),
             async_return_payload_count: Tally::default(),
+            continuation_builds_begun: Tally::default(),
+            continuation_stages_resumed: Tally::default(),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             decl_subexpression_lowering_count: Tally::default(),
             relation_check_count: Tally::default(),
@@ -479,6 +485,8 @@ impl SemanticGraphStore {
             branch_selections_false: stats.branch_selections_false.load(Ordering::Relaxed),
             awaited_normalize_count: stats.awaited_normalize_count.load(Ordering::Relaxed),
             async_return_payload_count: stats.async_return_payload_count.load(Ordering::Relaxed),
+            continuation_builds_begun: stats.continuation_builds_begun.load(Ordering::Relaxed),
+            continuation_stages_resumed: stats.continuation_stages_resumed.load(Ordering::Relaxed),
             path_length_p50,
             path_length_p95,
             decl_subexpression_lowering_count: stats

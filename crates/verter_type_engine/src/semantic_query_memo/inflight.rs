@@ -109,12 +109,12 @@ pub(super) struct InflightState {
     /// register a temporary wait-for edge to this task before parking, so a
     /// cycle of waiting tasks escapes through ReturnOnly.
     pub(super) owner: Option<super::tasks::TaskId>,
-    /// `true` once some thread owns the build. Subsequent threads wait on
-    /// `ready` rather than trying to own it themselves.
+    /// `true` once some task owns the build. Subsequent tasks subscribe
+    /// rather than trying to own it themselves.
     pub(super) claimed: bool,
     /// Set by [`super::SemanticGraphStore::invalidate_canonical`] when this
     /// in-flight entry's `(family, slot)` matched the sweep. Joiners that
-    /// wake from the condvar observe this flag and re-enter dispatch from
+    /// wake from the flight observe this flag and re-enter dispatch from
     /// step 1 rather than returning the (now stale) winner result. The
     /// cold winner skips warm publish when the flag is set so the stale
     /// result never re-populates the cache.

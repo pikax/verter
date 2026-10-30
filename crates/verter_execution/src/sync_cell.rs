@@ -49,6 +49,11 @@ impl<T> SyncRefCell<T> {
         self.0.try_read().expect("already mutably borrowed")
     }
 
+    /// Borrow the value shared, or fail while it is mutably borrowed.
+    pub fn try_borrow(&self) -> Result<SyncRef<'_, T>, AlreadyBorrowed> {
+        self.0.try_read().ok_or(AlreadyBorrowed)
+    }
+
     /// Borrow the value exclusively.
     ///
     /// # Panics

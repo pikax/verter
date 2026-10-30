@@ -1,0 +1,11 @@
+error[E0616]: field `lender` of struct `SemanticQueryPoll` is private
+ --> tests/cases/compile-fail/semantic_query_poll_no_dispatcher.rs:7:19
+  |
+7 |     let _ = entry.lender;
+  |                   ^^^^^^ private field
+
+error[E0616]: field `program` of struct `SemanticTask` is private
+  --> tests/cases/compile-fail/semantic_query_poll_no_dispatcher.rs:11:19
+   |
+11 |     let _ = &task.program;
+   |                   ^^^^^^^ private field

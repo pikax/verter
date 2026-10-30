@@ -1,0 +1,5 @@
+error[E0599]: no method named `drive` found for mutable reference `&mut SemanticTask<'_, '_, C>` in the current scope
+ --> tests/cases/compile-fail/semantic_task_no_blocking_driver.rs:7:18
+  |
+7 |     let _ = task.drive();
+  |                  ^^^^^ method not found in `&mut SemanticTask<'_, '_, C>`
