@@ -574,6 +574,33 @@ mod propagation_tests {
 mod recorder_tests {
     use super::*;
 
+    #[test]
+    fn a_late_recorder_receives_a_fact_the_tracer_already_holds() {
+        let fact = FactVersionRef::FileWholeHash {
+            canonical_id: "/retained.ts".into(),
+            hash: [7; 16],
+        };
+        let recorder = FactReadRecorder::default();
+        crate::resolver_core::resolver_context::with_fact_tracer_cell(
+            Default::default(),
+            verter_session_query::facts::policy::FactPolicy::production(),
+            |_| {
+                observe_fan_out(fact.clone());
+                assert!(tracer_holds_fact(&fact));
+                {
+                    let _scope = install_recorder(&recorder);
+                    if !tracer_holds_fact(&fact) {
+                        observe_fan_out(fact.clone());
+                    }
+                }
+                assert!(tracer_holds_fact(&fact));
+            },
+        );
+        let (facts, non_cacheable) = recorder.into_parts();
+        assert_eq!(facts, vec![fact]);
+        assert!(!non_cacheable);
+    }
+
     /// A recorder sees what the tracers see, but is never one: the tracer
     /// stays the top scope and still owns a local-only mark.
     #[test]

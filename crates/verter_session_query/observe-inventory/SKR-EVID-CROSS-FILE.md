@@ -81,7 +81,7 @@ the base parser payload, even if its bytes match.
 | item | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `NodeStructureBits::versioned_ref`, `node_reaches_versioned_reference` | Bounds the retained-reference version observation at every cold-build close: a value whose retained closure reaches no versioned `DeclRef`/`InstantiationRef` costs one memo read, and the walk descends only ref-reaching structure | REQUIRED | Pure inductive per-node bit in the existing append-only arena sidecar; decided once per node id, dropped with the node | engine `semantic_query_memo/unresolved_reach.rs`, `project_semantic_dispatch/arena_ops.rs` | always |
-| `FactReadSet::holds`, `tracer_holds_fact` | Skips re-recording an embedded version fact the active tracer already holds through a delivered or absorbed witness; the sealed signature keeps the same union | REQUIRED | Read-only query over the live tracer's observations and absorbed runs; no stored state | query `facts/fact_read_set.rs`, engine `fact_tracing/tracing.rs`, `resolver_core/resolver_context.rs` | always |
+| `FactReadSet::holds`, `tracer_holds_fact` | Skips re-recording an embedded version fact the active tracer already holds through a delivered or absorbed witness only when no recorder is active; late recorders still receive the fact and the sealed signature keeps the same union | REQUIRED | Read-only query over the live tracer's observations and absorbed runs; no stored state | query `facts/fact_read_set.rs`, engine `fact_tracing/tracing.rs`, `resolver_core/resolver_context.rs` | always |
 | `FactReadSet::run_addresses` | Recognises a replayed canonical signature the scope already absorbed by storage address, so a warm read's repeated replays grow neither the run list nor comparison work | REQUIRED | Per-tracer index mirroring `canonical_runs`; inserted and removed with its runs and cleared at canonicalisation | query `facts/fact_read_set.rs` | always |
 | Nested ResolveCall root member version observation at queue time | The drain publishes the member under the enclosing root carrier's read set | REQUIRED | Same observation as the batch members in `relation.rs`, performed before the member leaves the frame | engine `project_semantic_dispatch/call_resolve.rs` | always |
 | `PreparedDeclBundle` resolution-segment retention charge | Shared-cache admission and bundle readers see the segments' vector, specifier and narrow fact-slice bytes | REQUIRED | Charged with the bundle's own retention via the existing heap meter; wide tree-sealed sets keep their own charge | session `resolver_core/prepared_decl.rs` | always |
@@ -121,9 +121,10 @@ probes only the remembered additions; the base-index memo remembers the
 membership index a seal built for its widest base, so sibling seals extending
 the same shared run never re-walk it. A prepared-declaration read that uses
 several authored imports replays the union of exactly those segments as ONE
-combined run, cached per used-import set on the bundle, bounded, and charged
-with the bundle's own retention, so an enclosing seal merges one run per used
-set instead of one run per import.
+combined run, cached per used-import set on the bundle and bounded. The lazy
+table and each combined witness are separately admitted `Held` cells on the
+bundle's `StoreAccount`; refused admission returns complete evidence uncached.
+Thus an enclosing seal merges one run per used set instead of one run per import.
 This prevents repeated tree-depth lookups for overlapping evidence, growing
 tree insertion for wide disjoint batches, and the once-per-enclosing-level
 re-merge of a nested scope's whole witness; existing growth checks detect
