@@ -1956,7 +1956,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // every open checker obligation, as a machinery root does; read
             // inside one, it is built in place through the same
             // continuation, its reads made where the obligation stands.
-            key @ (SemanticQueryKey::ResolveMacroPayload { .. }
+            key @ (SemanticQueryKey::TemplateLiteralReduce { .. }
+            | SemanticQueryKey::ResolveMacroPayload { .. }
             | SemanticQueryKey::ReduceIntersection { .. }
             | SemanticQueryKey::ResolveOverloadSet { .. }
             | SemanticQueryKey::ApparentType { .. }
@@ -2646,7 +2647,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return FramePoll::Done(Box::new(self.family_value_output(key, *output)))
                 }
                 FamilyStep::Value(output) => return FramePoll::Done(output),
-                FamilyStep::Need(need, family) if self.reads_as_frame_need(&need) => {
+                // The template stage already canonicalized its union operands.
+                FamilyStep::Need(need, family)
+                    if self.reads_as_frame_need(&need)
+                        || matches!(&*family, FamilyBuild::TemplateUnion(..)) =>
+                {
                     *build = Some(FrameBuild::Family(family));
                     return FramePoll::Need(need);
                 }

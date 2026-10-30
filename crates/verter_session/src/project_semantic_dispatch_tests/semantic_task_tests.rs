@@ -1164,10 +1164,11 @@ fn drive_x5_across_a_wait(
             let task = slot.as_mut().expect("the task is lent");
             assert!(task.poll_for_tests(&waker).is_pending());
             drop(lease.take());
-            let mut finish = || match task.poll_for_tests(&waker) {
-                Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
-                Poll::Ready(TaskOutcomeForTests::Stopped) => panic!("nothing stops the task"),
-                Poll::Pending => panic!("the woken task produces x2 itself"),
+            let mut finish = || match semantic_poll_contract::poll_until_ready(|waker| {
+                task.poll_for_tests(waker)
+            }) {
+                TaskOutcomeForTests::Answered(answer) => answer,
+                TaskOutcomeForTests::Stopped => panic!("nothing stops the task"),
             };
             if elsewhere {
                 std::thread::scope(|scope| {
@@ -4225,7 +4226,7 @@ mod semantic_poll_contract {
 
     /// Poll until ready, parking between polls until woken, failing past
     /// [`HELD_DEADLINE`] instead of hanging.
-    fn poll_until_ready<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
+    pub(super) fn poll_until_ready<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
         let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
         let deadline = std::time::Instant::now() + HELD_DEADLINE;
         loop {
@@ -5157,7 +5158,7 @@ mod semantic_poll_contract {
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 12] = [
+    const HELD_SEAMS: [HeldSeam; 13] = [
         HeldSeam {
             seam: "a routed declaration's defining declaration",
             host: routed_declaration_host,
@@ -5272,6 +5273,38 @@ mod semantic_poll_contract {
             // The declaring file is read before the wait.
             before_seam: (1, 1),
             in_all: (1, 2),
+        },
+        HeldSeam {
+            seam: "a template product's union reduction",
+            host: chain_host,
+            keys: |_, dispatch| {
+                use verter_type_engine::semantic_query::LiteralValue;
+                let graph = dispatch.graph_arc();
+                let literal = |text: &str| {
+                    graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text.into())))
+                };
+                let a = literal("a");
+                let b = literal("b");
+                let args = graph.intern_node(SemanticNodeData::Union(
+                    verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                        Arc::from([a, b]),
+                    ),
+                ));
+                (
+                    SemanticQueryKey::TemplateLiteralReduce {
+                        pattern: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("x"), verter_type_expr::OwnedStr::from("")]),
+                        args: Arc::from([args]),
+                        context: dispatch.template_literal_reduce_context(),
+                    },
+                    SemanticQueryKey::ReduceUnion {
+                        members: verter_type_engine::semantic_query::stable_key::canonicalize_union_members(graph, &[literal("xa"), literal("xb")]),
+                        nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                    },
+                )
+            },
+            expression_site: true,
+            before_seam: (1, 0),
+            in_all: (1, 1),
         },
     ];
 

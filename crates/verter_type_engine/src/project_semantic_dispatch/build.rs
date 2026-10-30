@@ -28,6 +28,15 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
+/// A completed template product, before its shared union reduction.
+enum TemplateReduction {
+    Node(SemanticNodeId),
+    Union {
+        members: Arc<[SemanticNodeId]>,
+        fallback: Box<SemanticNodeData>,
+    },
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static MAPPED_NAME_REMAP_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -18862,35 +18871,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &Arc<[SemanticNodeId]>,
         _context: crate::semantic_query::TemplateLiteralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let reduced = self.reduce_template_literal_nodes(
+        self.drive_family_in_place(self.begin_template_literal_reduce(pattern, args))
+    }
+
+    pub(super) fn begin_template_literal_reduce(
+        &self,
+        pattern: &verter_type_expr::OwnedSlice<OwnedStr>,
+        args: &Arc<[SemanticNodeId]>,
+    ) -> super::family_continuation::FamilyStep {
+        use super::family_continuation::{FamilyBuild, FamilyStep};
+        self.graph().record_continuation_begun();
+        let reduced = self.prepare_template_literal_nodes(
             pattern,
             args,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
         );
         let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-        let node = reduced.unwrap_or_else(|_| {
-            self.graph().intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: pattern.clone(),
-                expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
-            })
-        });
+        let (node, union, refused) = match reduced {
+            Ok(TemplateReduction::Node(node)) => (QueryResult::Value(node), None, false),
+            Ok(TemplateReduction::Union { members, fallback }) => (
+                QueryResult::Error(QueryError::Miss),
+                Some((members, fallback)),
+                false,
+            ),
+            Err(_) => (
+                QueryResult::Value(self.graph().intern_node(SemanticNodeData::TemplateLiteral {
+                    quasis: pattern.clone(),
+                    expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
+                })),
+                None,
+                true,
+            ),
+        };
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(node),
+            node,
             self.project_generation_signature(),
         ))
         .with_observed_self_roots(observed_self_roots);
-        if reduced.is_err() {
-            // The ledger refused the construction: the value is the deferred
-            // carrier-stop shell, not the enumerated surface. It is a
-            // non-cacheable budget-tainted partial, never warm-admitted, and
-            // the taint folds into the enclosing request.
+        if refused {
             output.cache_suppress = true;
             output.mark_partial();
-            // The refused Cartesian construction keeps every original quasi
-            // and interpolation operand at the addressed template position.
             output = output.with_positional_guarantee();
         }
-        output
+        match union {
+            Some((members, fallback)) => FamilyStep::Need(
+                SemanticQueryKey::ReduceUnion {
+                    members: super::canonicalize_node_list(self.graph().store(), &members),
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                },
+                Box::new(FamilyBuild::TemplateUnion(Box::new(output), fallback)),
+            ),
+            None => FamilyStep::Done(Box::new(output)),
+        }
     }
 
     /// Whether `node` is a SETTLED shape the awaited relations provably
@@ -20540,6 +20572,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
+        match self.prepare_template_literal_nodes(quasis, args, eval_context)? {
+            TemplateReduction::Node(node) => Ok(node),
+            TemplateReduction::Union { members, fallback } => {
+                let read = self.execute_read(SemanticQueryKey::ReduceUnion {
+                    members,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                });
+                Ok(match read.value {
+                    QueryResult::Value(id) => id,
+                    _ => self.graph().intern_node(*fallback),
+                })
+            }
+        }
+    }
+
+    fn prepare_template_literal_nodes(
+        &self,
+        quasis: &[OwnedStr],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Result<TemplateReduction, crate::semantic_query::PartialReasonSet> {
         let graph = self.graph();
         let spliced = self.spliced_template(quasis, args);
         let (quasis, args): (&[OwnedStr], &[SemanticNodeId]) = match &spliced {
@@ -20559,18 +20612,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // An open template keeps its open holes; its literal holes fold
             // into its text as the checker's construction folds them.
             TemplateSpans::Open => {
-                return Ok(match self.folded_literal_holes(quasis, args) {
-                    Some((quasis, args)) => graph.intern_node(SemanticNodeData::TemplateLiteral {
-                        quasis: verter_type_expr::OwnedSlice::from(quasis.as_slice()),
-                        expressions: crate::semantic_query::PayloadArray::from(
-                            args.into_boxed_slice(),
-                        ),
-                    }),
-                    None => authored(),
-                })
+                return Ok(TemplateReduction::Node(
+                    match self.folded_literal_holes(quasis, args) {
+                        Some((quasis, args)) => {
+                            graph.intern_node(SemanticNodeData::TemplateLiteral {
+                                quasis: verter_type_expr::OwnedSlice::from(quasis.as_slice()),
+                                expressions: crate::semantic_query::PayloadArray::from(
+                                    args.into_boxed_slice(),
+                                ),
+                            })
+                        }
+                        None => authored(),
+                    },
+                ))
             }
             TemplateSpans::TooComplex(refusal) => {
-                return Ok(self.recover_at_operation_budget(refusal, Some(authored())));
+                return Ok(TemplateReduction::Node(
+                    self.recover_at_operation_budget(refusal, Some(authored())),
+                ));
             }
             TemplateSpans::Exhausted(reasons) => {
                 self.fold_local_partial_completeness(reasons);
@@ -20581,7 +20640,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // whole template `string`, as the checker's template
             // construction does.
             TemplateSpans::AnyString => {
-                return Ok(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)))
+                return Ok(TemplateReduction::Node(
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                ))
             }
         };
         // Every concatenation interns one derived node: the work and the
@@ -20602,18 +20663,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         drop(plan);
         Ok(match members.as_slice() {
-            [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
-            [single] => *single,
-            _ => {
-                let read = self.execute_read(SemanticQueryKey::ReduceUnion {
-                    members: Arc::from(members.into_boxed_slice()),
-                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                });
-                match read.value {
-                    QueryResult::Value(id) => id,
-                    _ => authored(),
-                }
-            }
+            [] => TemplateReduction::Node(
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            ),
+            [single] => TemplateReduction::Node(*single),
+            _ => TemplateReduction::Union {
+                members: Arc::from(members.into_boxed_slice()),
+                fallback: Box::new(SemanticNodeData::TemplateLiteral {
+                    quasis: verter_type_expr::OwnedSlice::from(quasis),
+                    expressions: crate::semantic_query::PayloadArray::from(
+                        args.to_vec().into_boxed_slice(),
+                    ),
+                }),
+            },
         })
     }
 
