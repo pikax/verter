@@ -243,6 +243,8 @@ pub(super) struct FlightCore<K: Eq + Hash + Clone, V, E: Clone, F, R> {
     compute: Option<F>,
     retain: Option<R>,
     join: Option<FlightJoin<V, E>>,
+    #[cfg(test)]
+    joiner_park_sent: bool,
     answer: Option<Arc<Mutex<LeaderAnswer<V, E>>>>,
     registration: WakeRegistration,
     edge: Option<WaitEdge>,
@@ -271,6 +273,8 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
             compute: Some(compute),
             retain: Some(retain),
             join: None,
+            #[cfg(test)]
+            joiner_park_sent: false,
             answer: None,
             registration: WakeRegistration::default(),
             edge: None,
@@ -281,6 +285,10 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
         }
     }
     fn release_join(&mut self) {
+        #[cfg(test)]
+        {
+            self.joiner_park_sent = false;
+        }
         // A joined value's destructor may re-enter the task graph.
         self.edge = None;
         if let Some(join) = self.join.take() {
@@ -501,15 +509,19 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                 }
             }
             #[cfg(test)]
-            if let Some(tx) = self
-                .group
-                .as_ref()
-                .expect("live group")
-                .joiner_park_tx
-                .lock()
-                .clone()
-            {
-                let _ = tx.send(());
+            if !self.joiner_park_sent {
+                // Re-polling one suspended join is not another caller.
+                self.joiner_park_sent = true;
+                if let Some(tx) = self
+                    .group
+                    .as_ref()
+                    .expect("live group")
+                    .joiner_park_tx
+                    .lock()
+                    .clone()
+                {
+                    let _ = tx.send(());
+                }
             }
             return Poll::Pending;
         }

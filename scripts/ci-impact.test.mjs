@@ -739,6 +739,37 @@ test("the excluded session-observe runner still impacts the compile-contract lan
   );
 });
 
+test("compile contracts select their fixtures, runners, build inputs and workflows", () => {
+  for (const crate of LANE_ROOTS.compiler_contracts) {
+    for (const file of [`crates/${crate}/src/lib.rs`, `crates/${crate}/Cargo.toml`]) {
+      assert.equal(select([file]).gates.compiler_contracts, "true", file);
+    }
+  }
+  for (const file of [
+    "crates/verter_session/tests/cases/compile-fail/output_authority_not_forgeable.stderr",
+    "crates/verter_compile_contracts_session_observe/Cargo.toml",
+    "crates/verter_compile_contracts_session_observe/Cargo.lock",
+    "scripts/compile-contracts.mjs",
+    "scripts/compiler-ci-lane-selftest.mjs",
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    ".cargo/config.toml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/nightly.yml",
+  ]) {
+    assert.equal(select([file]).gates.compiler_contracts, "true", file);
+  }
+  for (const file of [
+    "docs/guide/introduction.md",
+    "packages/vue-vscode/src/extension.ts",
+    "crates/verter_lsp/src/main.rs",
+    "scripts/jetbrains-gate.mjs",
+  ]) {
+    assert.equal(select([file]).gates.compiler_contracts, "false", file);
+  }
+});
+
 test("every declared lane root is a crate in this workspace", () => {
   const names = new Set();
   const cratesDir = join(REPO_ROOT, "crates");

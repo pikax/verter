@@ -1872,10 +1872,10 @@ impl VerterHost {
             return Ok(None);
         };
         let result = bundle.prepared_value_decls.get_in(owner, symbol_name);
-        match &result {
-            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
-            _ => bundle.observe_read(),
-        }
+        // A value declaration's recorded dependencies name only the head of
+        // each annotation reference, not every import its surface reaches,
+        // so its read carries the owner's whole import witness.
+        bundle.observe_read();
         result
     }
 
@@ -1901,10 +1901,10 @@ impl VerterHost {
             return Ok(None);
         };
         let result = bundle.prepared_value_decls.get_in(owner, symbol_name);
-        match &result {
-            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
-            _ => bundle.observe_read(),
-        }
+        // A value declaration's recorded dependencies name only the head of
+        // each annotation reference, not every import its surface reaches,
+        // so its read carries the owner's whole import witness.
+        bundle.observe_read();
         result
     }
 

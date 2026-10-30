@@ -689,6 +689,30 @@ impl FactSetEdit {
         }
     }
 
+    /// Add the strictly increasing `facts`, all proven absent from this
+    /// unchanged edit: a tree takes them in one descent rather than one
+    /// search per fact.
+    pub(crate) fn insert_new_run(&mut self, facts: Vec<FactVersionRef>) {
+        if facts.len() > 1 {
+            if let Work::Tree {
+                root,
+                digest,
+                changed,
+            } = self.work_mut()
+            {
+                for fact in &facts {
+                    *digest = digest.wrapping_add(fact_digest(fact));
+                }
+                *changed = true;
+                fact_tree::insert_run(root, &facts);
+                return;
+            }
+        }
+        for fact in facts {
+            self.insert_new(fact);
+        }
+    }
+
     /// Remove `fact`; whether it was held.
     pub fn remove(&mut self, fact: &FactVersionRef) -> bool {
         if !self.contains(fact) {
@@ -1017,7 +1041,7 @@ pub(crate) enum StorageWeak {
 
 impl StorageWeak {
     /// The address of the still-live allocation, or `None` once freed.
-    fn address_while_alive(&self) -> Option<usize> {
+    pub(crate) fn address_while_alive(&self) -> Option<usize> {
         match self {
             Self::Flat(weak) => weak
                 .upgrade()
@@ -1052,17 +1076,26 @@ pub(crate) mod subset_memo {
 
     /// Whether `run ⊆ base` is already proven for these exact storages.
     pub(crate) fn known_subset(run: &FactSet, base: &FactSet) -> bool {
-        let key = (run.address(), base.address());
+        known_subset_address(run.address(), base)
+    }
+
+    /// [`known_subset`] where the contained set is named by the address its
+    /// own weak handle resolved to: the entry's weak handles still validate
+    /// that both allocations of the proof are the live ones at those
+    /// addresses.
+    pub(crate) fn known_subset_address(run_address: usize, base: &FactSet) -> bool {
+        let key = (run_address, base.address());
         PROOFS.with(|proofs| {
             let mut proofs = proofs.borrow_mut();
             let Some((run_weak, base_weak)) = proofs.get(&key) else {
                 return false;
             };
-            let alive = run_weak.address_while_alive().is_some_and(|run_address| {
-                base_weak
+            let alive = run_weak
+                .address_while_alive()
+                .is_some_and(|live| live == run_address)
+                && base_weak
                     .address_while_alive()
-                    .is_some_and(|base_address| (run_address, base_address) == key)
-            });
+                    .is_some_and(|live| live == key.1);
             if alive {
                 true
             } else {

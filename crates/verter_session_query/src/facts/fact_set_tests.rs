@@ -411,3 +411,53 @@ fn combining_sets_of_different_policies_is_refused_before_any_shortcut() {
         crate::facts::policy::FactPolicy::production().set_of((0..8).map(fact).collect::<Vec<_>>());
     let _ = production.is_superset(&narrow);
 }
+
+/// A sorted batch inserted into a tree in one descent is the set the same
+/// facts inserted one by one build, at every width the batch splits leaves
+/// and branches, with the digest of the content and the base left intact.
+#[test]
+fn a_batch_inserted_in_one_descent_equals_the_facts_inserted_singly() {
+    let policy = crate::facts::policy::FactPolicy::production();
+    let mut rng = Lcg(7);
+    for (base_len, batch_len) in [
+        (40, 2),
+        (40, 30),
+        (300, 5),
+        (300, 200),
+        (2_000, 700),
+        (50, 900),
+    ] {
+        let held: BTreeSet<usize> = (0..base_len).map(|index| index * 4).collect();
+        let base = policy.set_of(held.iter().copied().map(fact).collect::<Vec<_>>());
+        let mut batch = BTreeSet::new();
+        while batch.len() < batch_len {
+            let candidate = rng.next(base_len * 4 + batch_len * 8);
+            if !held.contains(&candidate) {
+                batch.insert(candidate);
+            }
+        }
+        let batch: Vec<_> = batch.into_iter().map(fact).collect();
+
+        let mut together = base.edit();
+        together.insert_new_run(batch.clone());
+        let together = together.finish();
+        let mut singly = base.edit();
+        for fact in batch.clone() {
+            singly.insert_new(fact);
+        }
+        let singly = singly.finish();
+
+        assert_eq!(together, singly, "{base_len}+{batch_len}");
+        assert_eq!(
+            hash_of(&together),
+            hash_of(&singly),
+            "{base_len}+{batch_len}"
+        );
+        assert_eq!(together.len(), base_len + batch_len);
+        assert!(together
+            .iter()
+            .zip(together.iter().skip(1))
+            .all(|(a, b)| a < b));
+        assert_eq!(base.len(), base_len, "the base is never edited");
+    }
+}

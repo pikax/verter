@@ -522,6 +522,7 @@ export const PATH_FILTERS = Object.freeze({
   compiler_contracts: [
     "scripts/compile-contracts.mjs",
     "scripts/compiler-ci-lane-selftest.mjs",
+    ".github/workflows/nightly.yml",
     "scripts/check-compiler-generated-artifacts.mjs",
     "scripts/generate-svelte-*.mjs",
     "crates/verter_compile_contracts_session_observe/**",
