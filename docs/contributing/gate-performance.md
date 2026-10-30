@@ -89,9 +89,27 @@ Two halves:
   Cargo is live, so the lane takes the whole build ceiling rather than a share of it, under the same
   supervisor, deadline, stall clock and process-forest RSS ceiling as every other phase, on its own
   `<runnerTarget>/l/wj` root. Each scoped package runs
-  `cargo test --target wasm32-unknown-unknown -p <pkg> --tests` with
+  `cargo test --target wasm32-unknown-unknown -p <pkg> --tests --profile wasm-test` with
   `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER` set to the resolved absolute runner (so `.cargo/config.toml`
   never acquires a repo-wide runner every unrelated wasm invocation would inherit).
+
+The `wasm-test` profile inherits dev codegen, debug assertions, overflow checks,
+and dependency optimization, but emits no DWARF. The runner parses and rewrites
+the whole module before Node compiles it; carrying native-style line tables
+through both steps needlessly increases their input and memory demand. Native
+tests retain their existing debug information. Both CI and the canonical gate
+select this profile through the shared argument builder, with identical source
+inventory and executed-case reconciliation.
+
+Resource qualification is configuration-specific. A 6 GiB process-forest RSS
+abort is incomplete coverage, never a failed semantic assertion or a passing
+gate. Build jobs bound compilation concurrency, but do not bound one bindgen
+transformation or one JavaScript engine compiling a module. Qualify a budget
+with complete WASM receipts and the full gate verdict under that same budget;
+a successful prerequisite probe or a native-only run is insufficient. RSS
+counts resident process pages, not virtual address reservations or the host's
+filesystem cache. Compare equivalent source/tool configurations on the same
+worker, and keep cache histories and compilation versus execution costs visible.
 
 The lane's receipt is required by the same fixed-order reducer that owns the rest of the verdict, and it
 carries two independent obligations. A **terminal result**: every announced `running N tests` must be
