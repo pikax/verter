@@ -548,6 +548,7 @@ impl<'s> Lowerer<'s> {
                             (!group.is_static)
                                 .then_some(verter_session_query::flow::slice::SliceThis::Receiver),
                         );
+                        self.member_this_explicit = true;
                         match self.lower_nested_function(&FunctionNode::Function(&getter.value)) {
                             SliceExpr::UnmodeledBinding => SliceClassMemberValue::Unmodeled,
                             function => SliceClassMemberValue::Getter(Box::new(function)),
@@ -596,6 +597,7 @@ impl<'s> Lowerer<'s> {
                             (!group.is_static)
                                 .then_some(verter_session_query::flow::slice::SliceThis::Receiver),
                         );
+                        self.member_this_explicit = true;
                         match self.lower_nested_function(&FunctionNode::Function(&method.value)) {
                             // A method no entry serves (a local class
                             // declaration's) is its authored signature only
@@ -704,6 +706,7 @@ impl<'s> Lowerer<'s> {
             &mut self.this,
             (!is_static).then_some(verter_session_query::flow::slice::SliceThis::Receiver),
         );
+        let enclosing_explicit_this = std::mem::replace(&mut self.explicit_this, true);
         self.class_property_initializers += 1;
         let value = self.lower_expr(
             initializer,
@@ -713,6 +716,7 @@ impl<'s> Lowerer<'s> {
         );
         self.class_property_initializers -= 1;
         self.this = enclosing_this;
+        self.explicit_this = enclosing_explicit_this;
         SliceClassMemberValue::Initializer {
             value: Box::new(value),
             widen: !readonly,

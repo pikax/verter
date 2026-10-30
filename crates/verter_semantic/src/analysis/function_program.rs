@@ -2644,6 +2644,7 @@ fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionPa
                 _ => None,
             },
             optional: param.optional,
+            has_initializer: param.initializer.is_some(),
             rest: false,
             has_ts_annotation: param.type_annotation.is_some(),
             annotation_reference: param.type_annotation.as_ref().and_then(|annotation| {
@@ -2670,6 +2671,7 @@ fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionPa
                 _ => None,
             },
             optional: false,
+            has_initializer: false,
             rest: true,
             has_ts_annotation: false,
             annotation_reference: None,

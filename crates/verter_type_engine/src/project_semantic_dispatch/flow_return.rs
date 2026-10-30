@@ -222,6 +222,8 @@ pub(crate) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialR
         FlowReturnDegradation::UnmodeledPosition
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
+        | FlowReturnDegradation::ContextSensitiveInference
+        | FlowReturnDegradation::AbsentReceiverMember
         | FlowReturnDegradation::FailedBindingInitializer => PartialReason::FlowReturnUninferred,
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
@@ -14455,10 +14457,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         } else {
             self.lower_body_type(declared.ty())
         };
-        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver::of_type(
-            binder,
-            Some(binder),
-        )));
+        self.receiver = Some(std::rc::Rc::new(
+            class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
+        ));
     }
 
     /// The canonical union of `members` under this frame's null algebra —
@@ -14822,7 +14823,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let receiver = inherited_receiver.or_else(|| {
             (!data_only || contextual.is_some() || contextual_this.is_some()).then(|| {
-                std::rc::Rc::new(class_expression::ClassReceiver::new(
+                let receiver = class_expression::ClassReceiver::new(
                     contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(
                             self.canonical,
@@ -14834,7 +14835,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     contextual_this,
                     rustc_hash::FxHashSet::default(),
                     infer_literal_members,
-                ))
+                );
+                std::rc::Rc::new(
+                    if contextual.is_some_and(|context| {
+                        self.contextual_methods_may_declare_this(context, entries)
+                    }) {
+                        receiver.explicit()
+                    } else {
+                        receiver
+                    },
+                )
             })
         });
         if let Some(receiver) = receiver.as_ref() {
@@ -28290,9 +28300,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// downstream gate: an overloaded callee published `flag: any` warm
     /// and clean where the checker says `boolean`.
     fn degraded_unrepresentable_callee(&mut self) -> Positional<CallValue> {
-        self.record_degradation(
-            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
-        );
+        self.degraded_call(crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee)
+    }
+
+    /// A refused call's DEGRADATION `degradation` with the typed unresolved
+    /// MARKER at its position, as [`Self::degraded_unrepresentable_callee`]
+    /// for a refusal whose own typed cause names it.
+    fn degraded_call(
+        &mut self,
+        degradation: crate::semantic_query::FlowReturnDegradation,
+    ) -> Positional<CallValue> {
+        self.record_degradation(degradation);
         Positional::Value(CallValue::unmodeled_position(self.dispatch))
     }
 
@@ -29466,6 +29484,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ));
             return OptionalLink::Unmodeled;
         };
+        // A member the receiver does not declare: the checker's TS2339,
+        // whose error type this rail does not model, named as its cause.
+        if this_source.is_some()
+            && matches!(
+                self.dispatch.arena().node_data(member).as_deref(),
+                Some(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss
+                ))
+            )
+            && self.receiver_lacks_member(current, name)
+        {
+            self.record_degradation(FlowReturnDegradation::AbsentReceiverMember);
+        }
         // An element read (`a[0]`) the walk misses is a position
         // this lane does not model, never a published miss.
         let element_read = name.parse::<u64>().is_ok();
@@ -30186,16 +30217,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already
             // defines; the executor never widens it to `any`, and
-            // neither does this rail. So is a call whose type parameter
-            // the checker infers from a context-sensitive argument's
-            // return: this rail's own read would answer that parameter's
-            // fallback.
+            // neither does this rail.
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
-                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
+                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
             ) => (!self.callee_is_lone_declared(callee))
                 .then(|| self.degraded_unrepresentable_callee()),
+            // So is a call whose type parameter the checker infers from a
+            // context-sensitive argument's return: this rail's own read
+            // would answer that parameter's fallback. The refusal keeps
+            // its own typed cause.
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
+            ) => (!self.callee_is_lone_declared(callee)).then(|| {
+                self.degraded_call(
+                    crate::semantic_query::FlowReturnDegradation::ContextSensitiveInference,
+                )
+            }),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
             // falls back to this rail's own read of the same call. That
