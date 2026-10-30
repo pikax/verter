@@ -757,8 +757,12 @@ test("every lane Cargo target links inside Windows MAX_PATH from a nested orches
   for (const [lane, profileDir] of [
     [layout.surface1, "debug"],
     [layout.shippedCfg, "no-debug-assertions"],
-    [layout.wasmJsBoundary, "debug"],
+    [layout.wasmJsBoundary, "wasm-test"],
   ]) {
+    if (lane === layout.wasmJsBoundary) {
+      const args = buildWasmLaneTestArgs({ packageName: "verter_wasm" });
+      assert.equal(profileDir, args[args.indexOf("--profile") + 1]);
+    }
     const laneChars = 1 + relative(runnerTarget, lane.targetDir).length;
     const projected = runnerRootChars + laneChars + deepestBuildScriptChars(profileDir);
     assert.ok(
@@ -768,9 +772,18 @@ test("every lane Cargo target links inside Windows MAX_PATH from a nested orches
   }
 });
 
-test("the lane argv selects cargo's own testable targets and honours execution policy only", () => {
+test("the lane argv selects every testable target under the WASM profile", () => {
   const bare = buildWasmLaneTestArgs({ packageName: "verter_wasm" });
-  assert.deepEqual(bare, ["test", "--target", WASM_LANE_TARGET, "-p", "verter_wasm", "--tests"]);
+  assert.deepEqual(bare, [
+    "test",
+    "--target",
+    WASM_LANE_TARGET,
+    "-p",
+    "verter_wasm",
+    "--tests",
+    "--profile",
+    "wasm-test",
+  ]);
   const exhaustive = buildWasmLaneTestArgs({ packageName: "verter_wasm", exhaustive: true });
   assert.deepEqual(exhaustive, [...bare, "--no-fail-fast"]);
   assert.throws(() => buildWasmLaneTestArgs({}), TypeError);
