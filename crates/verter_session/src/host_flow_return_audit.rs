@@ -456,6 +456,10 @@ fn degradation_tag(degradation: FlowReturnDegradation) -> FlowDegradationTag {
         },
         FlowReturnDegradation::NonCallableBinding => FlowDegradationTag::NonCallableBinding,
         FlowReturnDegradation::UnrepresentableCallee => FlowDegradationTag::UnrepresentableCallee,
+        FlowReturnDegradation::ContextSensitiveInference => {
+            FlowDegradationTag::ContextSensitiveInference
+        }
+        FlowReturnDegradation::AbsentReceiverMember => FlowDegradationTag::AbsentReceiverMember,
         FlowReturnDegradation::FailedBindingInitializer => {
             FlowDegradationTag::FailedBindingInitializer
         }

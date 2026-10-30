@@ -140,6 +140,7 @@ mod openness_depth_tests;
 // the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 mod overload_scale_tests;
+mod pinia_options_store_tests;
 mod projected_terminal_surface_tests;
 mod projection_stack_safety_tests;
 mod raise_tests;

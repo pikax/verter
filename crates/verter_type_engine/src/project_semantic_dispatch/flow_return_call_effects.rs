@@ -37,6 +37,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         site: SliceCallSite,
     ) -> bool {
         let node = match callee {
+            SliceEffectCallee::ContextualThis => return self.settle_this_call_effect(site),
             SliceEffectCallee::Declared(subject) => self.declared_callee_node(subject),
             SliceEffectCallee::Value(expr) => match self.eval_expr(expr) {
                 Positional::Value(node) => Some(node),
@@ -44,6 +45,27 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             },
         };
         self.settle_effects_signature(node, site)
+    }
+
+    /// A statement call through a `this` its function's text gives no
+    /// explicit type: inert, discharging the call, unless this frame's `this`
+    /// is explicitly typed after all — a contextual signature's `this`
+    /// parameter — whose effects signature this rail does not read, the
+    /// typed guard-narrowing gap.
+    fn settle_this_call_effect(&mut self, site: SliceCallSite) -> bool {
+        if self
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| receiver.explicit_this)
+        {
+            self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing));
+        } else {
+            self.call_evidence.push(FlowCallEvidence {
+                span: site.span(),
+                relations_decided: true,
+            });
+        }
+        true
     }
 
     /// [`Self::settle_call_effect`] over the callee's settled type: whether

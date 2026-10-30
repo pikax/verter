@@ -6167,11 +6167,31 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// applies the SAME resolution to the terminal under the caller's
     /// mode. Non-carrier terminals (Object, Union, Intersection, …) are
     /// returned unchanged and flow into `expand_empty_path_terminal`.
+    ///
+    /// An INTERFACE application is the exception: it stays its named
+    /// carrier. The checker prints a selected interface member by its
+    /// name, and a generic-interface application contributing to an
+    /// intersection keeps that name through publication (the shared
+    /// post-substitution projector's contributor rule) — resolving it
+    /// here loses the declaration and its arguments before that rule can
+    /// observe them. A bare interface reference resolves one level as
+    /// every carrier does: its surface is the answer a demand reads (a
+    /// `Parameters<F>[0]` terminal materialises the object), and member,
+    /// keyof and indexed-access demands still read an application's
+    /// instantiated structural surface through the ordinary `Instantiate`
+    /// owner.
     fn resolve_expanded_terminal_carrier(&mut self, node: SemanticNodeId) -> SemanticNodeId {
         let data = match self.graph().node_data(node) {
             Some(data) => data,
             None => return node,
         };
+        if let SemanticNodeData::InstantiationRef { base, .. } = &*data {
+            if self.dispatch.prepared_decl_kind(base)
+                == Some(verter_session_query::declarations::TypeDeclKind::Interface)
+            {
+                return node;
+            }
+        }
         match &*data {
             SemanticNodeData::TypeOf(_) => {
                 let (root, path) = data.typeof_head().expect("TypeOf carrier head");
