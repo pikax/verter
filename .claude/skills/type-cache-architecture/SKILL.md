@@ -1276,6 +1276,26 @@ not grow the outer tracer per read. The window bounds insertion work; it
 does not bound the answer or replace final canonicalization. Distinct versions
 of the same fact remain distinct observations.
 
+Canonical merging excludes runs covered by existing subset proofs before
+choosing its membership strategy. Narrow deltas probe the persistent base
+directly; wide overlap builds a temporary borrowed membership index. The
+choice compares remaining probe count times logarithmic search depth with
+base width. Both paths preserve the same exact union, conflicting versions,
+compaction, mutation instability and refusal propagation.
+
+Two per-demand proof memos remove the repeated cross-level cost: a seal
+remembers its construction (the widest base it extended plus its exact
+additions over it), so a later seal scanning that run against a base that
+provably holds its construction base probes only the remembered additions;
+and the membership index a seal built for its widest base is reused by every
+sibling seal extending the same shared run. Both are keyed by storage
+address with weak liveness validation, capped like the subset memo, and
+drained — and closed to new entries — when the thread's last tracer pops,
+so a finished demand pins no fact storage. A prepared-declaration read that
+uses several authored imports replays the union of exactly those segments
+as one combined run, cached per used-import set on the bundle and charged
+with its retention.
+
 Per-query frame cost: every cold query seals its tracer, builds its completed
 carrier and registers its memo candidate, so these steps copy nothing per fact
 beyond the output they own. `FactReadSet::finalise` merges absorbed canonical

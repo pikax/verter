@@ -13,6 +13,99 @@ permissions:
   contents: write
 
 jobs:
+  # Full compile contracts every night, independent of PR change detection.
+  compiler-contracts:
+    name: Compiler Contracts (${{ matrix.group }})
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, compiler, session, session-observe]
+    env:
+      # Every group has a separate runner/cache, with one shared target for
+      # its outer runners and nested trybuild builds. No concurrent writers.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/compiler-contracts
+      CARGO_INCREMENTAL: "0"
+      # Symbols are unnecessary for type/privacy contracts; retain debug assertions.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
+      # Shared across groups and nightly: identical compile units can hit.
+      SCCACHE_GHA_VERSION: "verter-compiler-contracts-v2"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # Exact trybuild stderr includes stdlib help snippets with rust-src.
+          components: rust-src
+      # Cache both outer runners and trybuild artifacts, without rust-cache's
+      # target pruning traversing generated fixture workspaces. The revision
+      # suffix lets main refresh artifacts after source-only changes.
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: compiler-contract-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            target/compiler-contracts
+          key: ${{ runner.os }}-${{ runner.arch }}-compiler-contracts-v2-${{ matrix.group }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/verter_compile_contracts_session_observe/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-compiler-contracts-v2-${{ matrix.group }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/verter_compile_contracts_session_observe/Cargo.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-compiler-contracts-v2-${{ matrix.group }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml') }}-
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+        if: matrix.group == 'compiler'
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: ${{ matrix.group == 'compiler' && 'pnpm' || '' }}
+          # Rust-only groups do not install pnpm; disable packageManager auto-detection.
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+        if: matrix.group == 'compiler'
+      - name: Verify compiler contracts lane and cache ownership
+        run: node --test scripts/compiler-ci-lane-selftest.mjs
+      - name: Run workspace compile contracts
+        shell: bash
+        run: node scripts/compile-contracts.mjs --group ${{ matrix.group }} 2>&1 | tee compile-contracts-${{ matrix.group }}.log
+      - name: Verify generated Svelte artifacts
+        if: matrix.group == 'compiler'
+        run: >-
+          cargo test --package verter_compiler --test main
+          cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs
+          -- --exact
+      # Tests activate the dev-dependency self-edge's test-support feature,
+      # so retain the separate production feature-off build as well.
+      - name: verter_compiler default feature-off build + lib tests (isolated)
+        if: matrix.group == 'compiler'
+        run: |
+          cargo build -p verter_compiler
+          cargo test -p verter_compiler --lib
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: github.ref == 'refs/heads/main' && steps.compiler-contract-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            target/compiler-contracts
+          key: ${{ steps.compiler-contract-cache.outputs.cache-primary-key }}
+      - name: Upload compile-contract logs and per-configuration timings
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: compile-contracts-${{ matrix.group }}
+          path: compile-contracts-${{ matrix.group }}.log
+          if-no-files-found: warn
+
   build-and-deploy:
     name: Build WASM & Deploy Playground
     runs-on: ubuntu-latest
