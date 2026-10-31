@@ -434,6 +434,51 @@ pub mod typeinfo;
 mod types;
 mod upsert;
 
+// Reserved homes for planned session product modules. Each module below is
+// declaration-only: its doc line names the node that fills it, and product
+// nodes write inside their own reserved module only.
+mod agent;
+mod app_perf;
+mod coexistence;
+mod compat;
+mod component_workbench;
+mod config_env;
+mod css_symbols;
+mod data;
+mod debug;
+mod diagnostic_authority;
+mod diagnostic_rules;
+mod diagnostic_service;
+mod embedded_documents;
+mod extensions;
+mod inspection;
+mod language_service;
+mod overlay;
+mod presentation;
+mod project_profile;
+mod realms;
+mod refactors;
+mod regex;
+mod runtime_inspector;
+mod security;
+mod semantic_diff;
+mod sfc_projection_cache;
+#[cfg(test)]
+mod sfc_projection_cache_tests;
+mod sfc_projection_consumers;
+#[cfg(test)]
+mod sfc_projection_consumers_tests;
+mod sfc_projection_diagnostics;
+#[cfg(test)]
+mod sfc_projection_diagnostics_tests;
+mod sfc_projection_observations;
+#[cfg(test)]
+mod sfc_projection_observations_tests;
+mod structural_search;
+mod testing;
+mod workspace_index;
+mod workspace_intel;
+
 // The TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
 // `oracle-gen` feature, so the `src/bin/oracle_gen` binary (a separate crate that
 // sees only non-test `pub` lib items) can invoke it. NEVER on the default build:
