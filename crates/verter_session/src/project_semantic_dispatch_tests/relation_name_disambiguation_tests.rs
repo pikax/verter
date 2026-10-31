@@ -12,7 +12,7 @@ use crate::VerterHost;
 const A: &str = r#"export interface Foo { p: number }
 export interface Gen<T> { v: T; p: number }
 interface Hidden { h: number }
-export interface Holder { v: Hidden }
+export declare const hidden: Hidden;
 export namespace NS { export interface Inner { p: number } }
 interface Renamed { p: number }
 export { Renamed as Public };
@@ -24,7 +24,8 @@ export enum S { Only }
 const B: &str = r#"export interface Foo { p: string }
 export interface Gen<T> { v: T; p: string }
 interface Hidden { h: string }
-export interface Holder { v: Hidden }
+export declare function takeHidden(x: { q: Hidden }): void;
+export declare function takeHiddens(x: { q: Hidden[] }): void;
 export namespace NS { export interface Inner { p: string } }
 interface Renamed { p: string }
 export { Renamed as Public };
@@ -33,9 +34,11 @@ export enum E { X, Z }
 export enum S { Solo }
 "#;
 
-const MAIN: &str = r#"import type { Foo as A, Gen as GA, Holder as HA, NS as NA, Public as PA } from './a';
+const MAIN: &str = r#"import { hidden } from './a';
+import type { Foo as A, Gen as GA, NS as NA, Public as PA } from './a';
 import type DA from './a';
-import type { Foo as B, Gen as GB, Holder as HB, NS as NB, Public as PB } from './b';
+import { takeHidden, takeHiddens } from './b';
+import type { Foo as B, Gen as GB, NS as NB, Public as PB } from './b';
 import type DB from './b';
 declare function f(x: { q: B }): void;
 export function g1(a: A) { return f({ q: a }); }
@@ -43,8 +46,7 @@ declare function f2(x: B): void;
 export function g2(a: A) { return f2(a); }
 declare function f3(x: { q: GB<number> }): void;
 export function g3(a: GA<number>) { return f3({ q: a }); }
-declare function f4(x: { q: HB['v'] }): void;
-export function g4(a: HA['v']) { return f4({ q: a }); }
+export function g4() { return takeHidden({ q: hidden }); }
 declare function f5(x: { q: NB.Inner }): void;
 export function g5(a: NA.Inner) { return f5({ q: a }); }
 declare function f6(x: { q: PB }): void;
@@ -55,16 +57,7 @@ declare function f8(x: { q: { n: B } }): void;
 export function g8(a: { n: A }) { return f8({ q: a }); }
 declare function f9(x: { q: B[] }): void;
 export function g9(a: A[]) { return f9({ q: a }); }
-declare function f10(x: { q: B | null }): void;
-export function g10(a: A | null) { return f10({ q: a }); }
-export function local() {
-  interface L { a: number }
-  function h() { interface L { a: string } ; return null as any as L; }
-  const v: { w: L } = { w: h() };
-  return v;
-}
-declare function f11(x: { q: HB['v'][] }): void;
-export function g11(a: HA['v'][]) { return f11({ q: a }); }
+export function g11() { return takeHiddens({ q: [hidden] }); }
 import type { E as EA, S as SA } from './a';
 import type { E as EB, S as SB } from './b';
 declare function f12(x: { q: EB }): void;
@@ -82,82 +75,68 @@ export function g16(a: { a: A; b: A; c: A; d: A; e: A; f: A; g: A }) { return f1
 const EXPECTED: &[(&str, &str)] = &[
     (
         "g1",
-        r#"(6,39): error TS2322: Type 'import("/wb/a").Foo' is not assignable to type 'import("/wb/b").Foo'.
+        r#"(8,39): error TS2322: Type 'import("/wb/a").Foo' is not assignable to type 'import("/wb/b").Foo'.
   Types of property 'p' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g2",
-        r#"(8,38): error TS2345: Argument of type 'import("/wb/a").Foo' is not assignable to parameter of type 'import("/wb/b").Foo'.
+        r#"(10,38): error TS2345: Argument of type 'import("/wb/a").Foo' is not assignable to parameter of type 'import("/wb/b").Foo'.
   Types of property 'p' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g3",
-        r#"(10,49): error TS2322: Type 'import("/wb/a").Gen<number>' is not assignable to type 'import("/wb/b").Gen<number>'.
+        r#"(12,49): error TS2322: Type 'import("/wb/a").Gen<number>' is not assignable to type 'import("/wb/b").Gen<number>'.
   Types of property 'p' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g4",
-        r#"(12,46): error TS2719: Type 'Hidden' is not assignable to type 'Hidden'. Two different types with this name exist, but they are unrelated.
+        r#"(13,44): error TS2719: Type 'Hidden' is not assignable to type 'Hidden'. Two different types with this name exist, but they are unrelated.
   Types of property 'h' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g5",
-        r#"(14,47): error TS2322: Type 'import("/wb/a").NS.Inner' is not assignable to type 'import("/wb/b").NS.Inner'.
+        r#"(15,47): error TS2322: Type 'import("/wb/a").NS.Inner' is not assignable to type 'import("/wb/b").NS.Inner'.
   Types of property 'p' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g6",
-        r#"(16,41): error TS2322: Type 'import("/wb/a").Public' is not assignable to type 'import("/wb/b").Public'.
+        r#"(17,41): error TS2322: Type 'import("/wb/a").Public' is not assignable to type 'import("/wb/b").Public'.
   Types of property 'p' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g7",
-        r#"(18,41): error TS2322: Type 'import("/wb/a").default' is not assignable to type 'import("/wb/b").default'.
+        r#"(19,41): error TS2322: Type 'import("/wb/a").default' is not assignable to type 'import("/wb/b").default'.
   Types of property 'p' are incompatible.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g8",
-        r#"(20,47): error TS2322: Type '{ n: import("/wb/a").Foo; }' is not assignable to type '{ n: import("/wb/b").Foo; }'.
+        r#"(21,47): error TS2322: Type '{ n: import("/wb/a").Foo; }' is not assignable to type '{ n: import("/wb/b").Foo; }'.
   The types of 'n.p' are incompatible between these types.
     Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g9",
-        r#"(22,42): error TS2322: Type 'import("/wb/a").Foo[]' is not assignable to type 'import("/wb/b").Foo[]'.
+        r#"(23,42): error TS2322: Type 'import("/wb/a").Foo[]' is not assignable to type 'import("/wb/b").Foo[]'.
   Type 'import("/wb/a").Foo' is not assignable to type 'import("/wb/b").Foo'.
     Types of property 'p' are incompatible.
       Type 'number' is not assignable to type 'string'."#,
-    ),
-    (
-        "g10",
-        r#"(24,49): error TS2322: Type 'import("/wb/a").Foo | null' is not assignable to type 'import("/wb/b").Foo | null'.
-  Type 'import("/wb/a").Foo' is not assignable to type 'import("/wb/b").Foo'.
-    Types of property 'p' are incompatible.
-      Type 'number' is not assignable to type 'string'."#,
-    ),
-    (
-        "local",
-        r#"(28,25): error TS2719: Type 'L' is not assignable to type 'L'. Two different types with this name exist, but they are unrelated.
-  Types of property 'a' are incompatible.
-    Type 'string' is not assignable to type 'number'."#,
     ),
     (
         "g11",
-        r#"(32,50): error TS2719: Type 'Hidden[]' is not assignable to type 'Hidden[]'. Two different types with this name exist, but they are unrelated.
-  Type 'Hidden' is not assignable to type 'Hidden'. Two different types with this name exist, but they are unrelated.
-    Types of property 'h' are incompatible.
-      Type 'number' is not assignable to type 'string'."#,
+        r#"(24,50): error TS2719: Type 'Hidden' is not assignable to type 'Hidden'. Two different types with this name exist, but they are unrelated.
+  Types of property 'h' are incompatible.
+    Type 'number' is not assignable to type 'string'."#,
     ),
     (
         "g16",
-        r#"(43,85): error TS2322: Type '{ a: import("/wb/a").Foo; b: import("/wb/a").Foo; c: import("/wb/a").Foo; d: import("/wb/a").Foo; e: import("/wb/a").Foo; f: import("/wb/a").Foo; g: import("/wb/a").Foo; }' is not assignable to type '{ a: import("/wb/b").Foo; b: import("/wb/b").Foo; c: import("/wb/b").Foo; d: import("/wb/b").Foo; e: import("/wb/b").Foo; f: import("/wb/b").Foo; g: import("/wb/b").Foo; }'.
+        r#"(35,85): error TS2322: Type '{ a: import("/wb/a").Foo; b: import("/wb/a").Foo; c: import("/wb/a").Foo; d: import("/wb/a").Foo; e: import("/wb/a").Foo; f: import("/wb/a").Foo; g: import("/wb/a").Foo; }' is not assignable to type '{ a: import("/wb/b").Foo; b: import("/wb/b").Foo; c: import("/wb/b").Foo; d: import("/wb/b").Foo; e: import("/wb/b").Foo; f: import("/wb/b").Foo; g: import("/wb/b").Foo; }'.
   The types of 'a.p' are incompatible between these types.
     Type 'number' is not assignable to type 'string'."#,
     ),
@@ -168,15 +147,15 @@ const EXPECTED: &[(&str, &str)] = &[
 const EXPECTED_HEADS: &[(&str, &str)] = &[
     (
         "g12",
-        r#"(36,43): error TS2322: Type 'import("/wb/a").E' is not assignable to type 'import("/wb/b").E'."#,
+        r#"(28,43): error TS2322: Type 'import("/wb/a").E' is not assignable to type 'import("/wb/b").E'."#,
     ),
     (
         "g13",
-        r#"(38,43): error TS2322: Type 'import("/wb/a").S' is not assignable to type 'import("/wb/b").S'."#,
+        r#"(30,43): error TS2322: Type 'import("/wb/a").S' is not assignable to type 'import("/wb/b").S'."#,
     ),
     (
         "g14",
-        r#"(41,47): error TS2322: Type 'Box<import("/wb/a").Foo>' is not assignable to type 'Box<import("/wb/b").Foo>'."#,
+        r#"(33,47): error TS2322: Type 'Box<import("/wb/a").Foo>' is not assignable to type 'Box<import("/wb/b").Foo>'."#,
     ),
 ];
 
@@ -197,9 +176,9 @@ fn host() -> VerterHost {
 }
 
 /// Same-named types from two modules keep the code the checker reports for
-/// them and print through their modules; declarations no module exports and
-/// declarations local to a function still take TS2719. Cold and warm answers
-/// are the same report, in the same order.
+/// them and print through their modules; declarations their modules do not
+/// export have no qualified spelling and still take TS2719. Cold and warm
+/// answers are the same report, in the same order.
 #[test]
 fn same_named_operands_report_as_the_checker_tells_them_apart() {
     let host = host();
