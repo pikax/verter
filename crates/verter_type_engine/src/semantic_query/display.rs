@@ -354,6 +354,32 @@ pub(crate) struct DisplayContext {
     inferred_constraints: rustc_hash::FxHashMap<super::InferBinderId, Vec<ImplicitInferConstraint>>,
     infer_constraint_decisions: InferConstraintDecisions,
     unsettled_infer_constraints: Vec<InferConstraintRequest>,
+    /// The symbol chains prepared by the consumer for a fully qualified
+    /// print ([`Self::with_declaration_chains`]).
+    declaration_chains: rustc_hash::FxHashMap<DeclarationName, DeclarationChain>,
+    /// The declarations a fully qualified print named with no prepared
+    /// chain, for the consumer to resolve ([`Self::unchained_declarations`]).
+    unchained_declarations: Vec<DeclarationName>,
+}
+
+/// A declaration a fully qualified message print names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DeclarationName {
+    pub(crate) canonical_id: verter_type_expr::OwnedStr,
+    pub(crate) decl_name: verter_type_expr::OwnedStr,
+}
+
+/// How `typeToString` spells a declaration under `UseFullyQualifiedType`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeclarationChain {
+    /// No module contains it: a global, or a declaration its module does
+    /// not export, prints its own name.
+    Unqualified,
+    /// `import("<specifier>").<name>`, `name` being the module export
+    /// (and any namespace path below it).
+    Module { specifier: String, name: String },
+    /// The chain is not known, so no print naming it is the checker's.
+    Unknown,
 }
 
 /// `typeToString`'s clip of a message's type text: a text of at least twice
@@ -454,6 +480,27 @@ impl DisplayContext {
 
     pub(crate) fn unsettled_infer_constraints(&self) -> &[InferConstraintRequest] {
         &self.unsettled_infer_constraints
+    }
+
+    /// The symbol chains this print spells qualified names with.
+    pub(crate) fn with_declaration_chains(
+        mut self,
+        chains: rustc_hash::FxHashMap<DeclarationName, DeclarationChain>,
+    ) -> Self {
+        self.declaration_chains = chains;
+        self
+    }
+
+    /// The declarations a fully qualified print named without a chain.
+    pub(crate) fn unchained_declarations(&self) -> &[DeclarationName] {
+        &self.unchained_declarations
+    }
+
+    /// The symbol chains this context prints by.
+    pub(crate) fn take_declaration_chains(
+        &mut self,
+    ) -> rustc_hash::FxHashMap<DeclarationName, DeclarationChain> {
+        std::mem::take(&mut self.declaration_chains)
     }
 
     /// The evaluated forms and identity decisions this context prints by.
@@ -817,7 +864,7 @@ fn display_resolved_type_node(
     // Cycle break: a node already on the ancestor stack renders as a
     // back-reference (its name when available, else `…`) instead of recursing.
     if visited.contains(&id) {
-        return DisplayString(back_ref_token(&data, visited));
+        return DisplayString(back_ref_token(&data, needs, visited));
     }
     visited.push(id);
     let child_depth = depth - 1;
@@ -974,8 +1021,17 @@ fn display_resolved_type_node(
         // A member prints as a reference through its enum (`E.A`), which the
         // node builder counts as the enum's.
         SemanticNodeData::EnumLiteral(literal) => {
-            visited.add_length(reference_length(&literal.enum_decl.decl_name));
-            literal.printed_name()
+            let name = reference_name(
+                needs,
+                &literal.enum_decl.canonical_id,
+                &literal.enum_decl.decl_name,
+                visited,
+            );
+            if literal.is_sole() {
+                name
+            } else {
+                format!("{name}.{}", literal.member)
+            }
         }
         // Error carrier riding through display — a concise token, NOT a panic.
         // A checker message has no type for it: the part is cut, so a message
@@ -1375,8 +1431,7 @@ fn display_resolved_type_node(
         // materialised body, and display must not re-resolve, so `ExpandAliases`
         // is a no-op here). `QualifyNames` qualifies with the declaration origin.
         SemanticNodeData::DeclRef { identity } => {
-            visited.add_length(reference_length(&identity.decl_name));
-            qualified_name(needs, &identity.canonical_id, &identity.decl_name)
+            reference_name(needs, &identity.canonical_id, &identity.decl_name, visited)
         }
         // A class expression renders by the name the checker prints for a
         // reference to it (`Mixin.(Anonymous class)`, `(Anonymous
@@ -1398,7 +1453,12 @@ fn display_resolved_type_node(
             let own = identity.own_type_arguments(type_arguments);
             let rendered = type_argument_list(store, own, needs, child_depth, visited);
             visited.add_length(entity_name_length(printed.split('.')));
-            let name = qualified_name(needs, &identity.canonical_id, &printed);
+            // The chain of a class expression's printed name is not modelled.
+            let name = if checker_qualified(needs) {
+                visited.cut()
+            } else {
+                qualified_name(needs, &identity.canonical_id, &printed)
+            };
             if own.is_empty() {
                 name
             } else {
@@ -1429,8 +1489,7 @@ fn display_resolved_type_node(
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             let rendered = type_argument_list(store, args, needs, child_depth, visited);
-            visited.add_length(reference_length(&base.decl_name));
-            let name = qualified_name(needs, &base.canonical_id, &base.decl_name);
+            let name = reference_name(needs, &base.canonical_id, &base.decl_name, visited);
             if args.is_empty() {
                 name
             } else {
@@ -1886,8 +1945,7 @@ fn render_union_entries(
                 render_operand(store, *arm, needs, depth, visited, Prec::Union)
             }
             Some(crate::semantic_query::PrintedUnionArm::Enum(decl)) => {
-                visited.add_length(reference_length(&decl.decl_name));
-                decl.decl_name.to_string()
+                reference_name(needs, &decl.canonical_id, &decl.decl_name, visited)
             }
             None => {
                 visited.add_length(9);
@@ -2146,7 +2204,22 @@ fn display_program_analysis(
 /// stack: its name when the node carries one, else the truncation token —
 /// in a checker message the `...` the node builder prints for a type it is
 /// already printing.
-fn back_ref_token(data: &SemanticNodeData, visited: &mut DisplayContext) -> String {
+fn back_ref_token(
+    data: &SemanticNodeData,
+    needs: DisplayNeeds,
+    visited: &mut DisplayContext,
+) -> String {
+    if checker_qualified(needs) {
+        match data {
+            SemanticNodeData::DeclRef { identity } => {
+                return reference_name(needs, &identity.canonical_id, &identity.decl_name, visited);
+            }
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                return reference_name(needs, &base.canonical_id, &base.decl_name, visited);
+            }
+            _ => {}
+        }
+    }
     let name = match data {
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
         SemanticNodeData::ClassExpressionInstance { identity, .. } => identity.name.to_string(),
@@ -2161,6 +2234,48 @@ fn back_ref_token(data: &SemanticNodeData, visited: &mut DisplayContext) -> Stri
     };
     visited.add_length(reference_length(&name));
     name
+}
+
+/// Whether names print as the checker's `UseFullyQualifiedType` does.
+fn checker_qualified(needs: DisplayNeeds) -> bool {
+    needs.contains(DisplayFacet::QualifyNames) && needs.contains(DisplayFacet::CheckerSpelling)
+}
+
+/// A reference to a declaration: counted as the node builder counts it, and
+/// spelled through its symbol chain in a fully qualified message print
+/// (`symbolToTypeNode`). A chain not prepared yet is requested, and the
+/// print repeated.
+fn reference_name(
+    needs: DisplayNeeds,
+    canonical_id: &verter_type_expr::OwnedStr,
+    decl_name: &verter_type_expr::OwnedStr,
+    visited: &mut DisplayContext,
+) -> String {
+    if !checker_qualified(needs) {
+        visited.add_length(reference_length(decl_name));
+        return qualified_name(needs, canonical_id, decl_name);
+    }
+    let declaration = DeclarationName {
+        canonical_id: canonical_id.clone(),
+        decl_name: decl_name.clone(),
+    };
+    match visited.declaration_chains.get(&declaration) {
+        Some(DeclarationChain::Unqualified) => {
+            visited.add_length(reference_length(decl_name));
+            decl_name.to_string()
+        }
+        Some(DeclarationChain::Module { specifier, name }) => {
+            let text = format!("import(\"{specifier}\").{name}");
+            let length = specifier.len() + 10 + entity_name_length(name.split('.'));
+            visited.add_length(length);
+            text
+        }
+        Some(DeclarationChain::Unknown) => visited.cut(),
+        None => {
+            visited.unchained_declarations.push(declaration);
+            decl_name.to_string()
+        }
+    }
 }
 
 /// A declaration name, optionally qualified with its canonical origin when
