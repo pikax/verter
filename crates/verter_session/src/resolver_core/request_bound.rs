@@ -1559,6 +1559,8 @@ impl<L> RequestBoundAdapter<L> {
         L: RequestBoundLifecycle,
         Self: verter_type_engine::resolver_core::request_ports::OwnedLowering,
     {
+        #[cfg(test)]
+        self.0.request_view().note_validation_preparation();
         // Completing parse facts serves the validation: what it reads is no
         // dependency of the computation that is validating a candidate.
         verter_type_engine::resolver_core::resolver_context::without_fact_observers(|| {
@@ -1862,12 +1864,13 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_retained_signature_with_self_roots"
         );
+        let view = self.0.request_view();
+        if let Some(settled) = view.settled_retained_signature(sig, self_root_canonicals) {
+            return settled;
+        }
         self.prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Set(sig))
             .is_ok()
-            && self
-                .0
-                .request_view()
-                .validates_retained_signature(sig, self_root_canonicals)
+            && view.validates_retained_signature(sig, self_root_canonicals)
     }
     fn promote_route_completion(
         &self,
@@ -1881,5 +1884,76 @@ where
         self.0
             .request_view()
             .promote_route_completion(canonical, whole_hash, route_hash)
+    }
+}
+
+#[cfg(test)]
+mod retained_validation_tests {
+    use std::sync::Arc;
+
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+    use verter_session_query::facts::fact_set::FactSet;
+    use verter_session_query::facts::policy::FactPolicy;
+    use verter_session_query::facts::{FactKey, FactLane};
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+
+    use super::RequestBoundLifecycle;
+    use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
+
+    const CANONICAL: &str = "/proj/button.ts";
+
+    fn route_interface(expected_hash: [u8; 16]) -> FactSet {
+        FactPolicy::production().set_of(vec![FactVersionRef::Parse(ParseFactRef {
+            canonical_id: CANONICAL.into(),
+            key: FactKey::SyntacticRouteInterface,
+            lane: FactLane::Semantic,
+            expected_hash,
+        })])
+    }
+
+    /// Preparing inputs walks every fact of a signature, so it belongs to the
+    /// read that settles the signature. A warm read meets the same signature
+    /// many times in a request; preparing it each time costs as much as
+    /// validating it would, and turned the settled verdict's one lookup into
+    /// the larger part of a whole-store inference. Stale verdicts count too:
+    /// a candidate that will not serve is met as often as one that will.
+    #[test]
+    fn a_settled_retained_signature_prepares_its_inputs_once() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: CANONICAL.to_string(),
+                source: Arc::from("export interface ButtonProps { label: string }\n"),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("the file is admitted");
+        let serve = host
+            .ensure_indexed_ready_serve(CANONICAL)
+            .expect("the file is served");
+        let current =
+            crate::resolver_store::syntactic_route_interface_hash(&serve.indexed.shallow_state);
+        let base = host.resolver_store_view_read().into_owned_view();
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+        let probe = |signature: &FactSet| {
+            let view = ctx.0.request_view();
+            let before = view.validation_preparations_for_tests();
+            let answer = ctx.validates_retained_signature_with_self_roots(signature, &[]);
+            (answer, view.validation_preparations_for_tests() - before)
+        };
+
+        for (signature, valid) in [
+            (route_interface(current), true),
+            (route_interface([0xEE; 16]), false),
+        ] {
+            assert_eq!(probe(&signature), (valid, 1), "the read that settles it");
+            assert_eq!(
+                probe(&signature),
+                (valid, 0),
+                "a read of the settled verdict"
+            );
+        }
     }
 }

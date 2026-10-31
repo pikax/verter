@@ -984,6 +984,8 @@ pub(crate) struct RequestStoreView<'a> {
     /// Test-only: how many facts that are not receipts this view validated.
     #[cfg(test)]
     leaf_validations: AtomicUsize,
+    #[cfg(test)]
+    validation_preparations: AtomicUsize,
 }
 
 /// The bytes a kept type body is charged per byte of its declarations'
@@ -1408,6 +1410,8 @@ impl<'a> RequestStoreView<'a> {
             validation_step: AtomicUsize::new(0),
             #[cfg(test)]
             leaf_validations: AtomicUsize::new(0),
+            #[cfg(test)]
+            validation_preparations: AtomicUsize::new(0),
         }
     }
 
@@ -1440,7 +1444,35 @@ impl<'a> RequestStoreView<'a> {
             validation_step: AtomicUsize::new(0),
             #[cfg(test)]
             leaf_validations: AtomicUsize::new(0),
+            #[cfg(test)]
+            validation_preparations: AtomicUsize::new(0),
         }
+    }
+
+    /// What this view can answer for a retained signature without reading
+    /// any of its facts: the trivial answers, and the verdict it settled
+    /// under the same strict roots and the current completion state (see
+    /// [`SignatureVerdicts`]). A caller that must prepare inputs before a
+    /// walk asks here first, or the preparation walks the signature the
+    /// settled verdict exists to spare.
+    pub(crate) fn settled_retained_signature(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        self_root_canonicals: &[&str],
+    ) -> Option<bool> {
+        if sig.is_empty() {
+            return Some(true);
+        }
+        if !self.base_is_current {
+            return Some(false);
+        }
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return None;
+        }
+        self.signature_verdicts
+            .get(sig, self_root_canonicals, state)
+            .map(|verdict| verdict == Verdict::Valid)
     }
 
     /// [`StoreView::validate_fact_signature`] for a signature a cache
@@ -1452,20 +1484,8 @@ impl<'a> RequestStoreView<'a> {
         sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
-        if sig.is_empty() {
-            return true;
-        }
-        if !self.base_is_current {
-            return false;
-        }
-        let state = self.overlay.completion_state();
-        if state != CompletionOverlayState::InFlight {
-            if let Some(verdict) = self
-                .signature_verdicts
-                .get(sig, self_root_canonicals, state)
-            {
-                return verdict == Verdict::Valid;
-            }
+        if let Some(settled) = self.settled_retained_signature(sig, self_root_canonicals) {
+            return settled;
         }
         let (verdict, state) = match self.signature_outcome(
             verter_session_query::facts::fact_set::FactsRef::Set(sig),
@@ -1764,6 +1784,18 @@ impl<'a> RequestStoreView<'a> {
     #[cfg(test)]
     pub(crate) fn leaf_validations_for_tests(&self) -> usize {
         self.leaf_validations.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: count one walk preparing a signature's inputs.
+    #[cfg(test)]
+    pub(crate) fn note_validation_preparation(&self) {
+        self.validation_preparations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Test-only: how many signatures this view's validations prepared.
+    #[cfg(test)]
+    pub(crate) fn validation_preparations_for_tests(&self) -> usize {
+        self.validation_preparations.load(Ordering::Relaxed)
     }
 
     /// One fact that is not a receipt, validated at `state`. A receipt
