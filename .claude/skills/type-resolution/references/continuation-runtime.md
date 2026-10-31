@@ -181,3 +181,99 @@ site (`QueryDemand`): a result completed at one site never answers a need at
 the other, and a need closes a cycle only through an open demand at its own
 site. A request-local completion is held open together with its site, so the
 same holds for it at both the frame and the synchronous entry.
+
+A root declaration lookup (`ResolveDecl`) uses the same owned indexed-load
+handoff as an instantiation before its builder starts. A local header lookup
+does not preflight preparation or import bundles: the shared local-header
+predicate includes framework and augmentation declarations. A nonlocal lookup
+waits on the prepared bundle's owned route-source handoff before its builder
+starts, so a direct imported declaration does not block the polling thread.
+This preflight does not convert the remaining route/preparation operations
+into owned continuations. After selecting a defining declaration, the family
+retains the barrel's observed content version and requests the target through
+an owned semantic need. Both drivers resume with that delivery rather than
+recursively building the target; a held target memo producer therefore yields
+at the production poll. The frame retains a terminal load failure so its
+builder cannot retry the missing source through the synchronous loader.
+
+## Dependency-reaching entry inventory
+
+The entry inventory starts at `build_cold_query_family` in
+`crates/verter_type_engine/src/project_semantic_dispatch/mod.rs`, including
+its early typed-value producers. Runtime admission is separately selected by
+`drives_on_the_runtime` in `query_frames.rs`; a live producer is not thereby
+a resumable producer. Likewise, a `FamilyStep::Need` suspends only when
+`reads_as_frame_need` accepts its key. Otherwise `advance_family_frame` reads
+it in place. A synchronous entry driving a nested query does not establish
+that a production poll can suspend at that nested read.
+
+Unqualified paths in the tables below are relative to
+`crates/verter_type_engine/src/project_semantic_dispatch/`; paths starting
+with `crates/` are relative to the repository root.
+
+| Entry | Current dependency boundary | State relevant to suspension |
+| --- | --- | --- |
+| `ResolveMacroPayload` | `family_continuation.rs`, `MacroPayloadBuild` | Owning file and payload operation are separate transitions. |
+| `ReduceIntersection` | `continuation_stages.rs`, `ReduceIntersectionBuild` | Ordered input cursor and completed members survive subgroup needs. |
+| `ResolveOverloadSet`, no explicit arguments | `continuation_stages.rs`, `OverloadSetBuild` | Signature list, kernel lease and completed composite candidates survive needs. |
+| `ApparentType` | `continuation_stages.rs`, `ApparentTypeBuild` | Signature reads are transitions; global declaration lookup still executes in place. |
+| `ResolveClassSurface(Instance)` | `continuation_stages.rs`, `ClassInstanceSurfaceBuild` | Declaring-file load and instance instantiation are transitions. |
+| `ResolveClassSurface(Static)` | `continuation_stages.rs`, `ClassStaticSurfaceBuild`; `build.rs`, `read_class_static_declarations` | File loads and base-surface needs retain state, but owner preparation, constructor lowering, heritage classification and final specialization execute in place. |
+| `Instantiate`, `TypeOf` | `query_frames.rs` | Frame and initializer transitions cover selected loads and nested evaluations; lowerers and resolver adapters reached inside a step can still read in place. |
+| `ResolveDecl` | `query_frames.rs`, `frame_source_load`; `build.rs`, `begin_resolve_decl`; `family_continuation.rs` | Source/direct-import preload and the selected target's semantic read can suspend. The selected target and barrel observation survive the wait; route/preparation still runs in place. |
+| `ProjectPath` (also canonicalized `ProjectMember` and `IndexedAccess`) | `build.rs`, `build_project_path`; `walk.rs`, `PathWalker` | Walker positions, resolved operands and completed projections are stack-local outside the existing projection seams. |
+| `MappedType`, `KeyOf` | `build.rs`, `build_mapped_type`, `build_key_of` | Source expansion, key enumeration and per-member reduction can reach nested queries in place. |
+| `TemplateLiteralReduce` | `build.rs`, `reduce_template_literal_nodes` | The completed product and fallback data survive the final canonical `ReduceUnion` need. Both entries drive that transition; interpolant planning still reads in place and is not fully resumable. |
+| `ResolveOverloadSet`, explicit arguments | `build.rs`, `build_resolve_overload_set` | Candidate instantiation uses the substitution engine in place; excluded by `builds_as_continuation`. |
+| `SignaturesOfType`, `ReadSignatureResult` | `signature_discovery.rs`, their `build_*` producers | Authored discovery, applied-result evaluation and kernel epoch handling run inside the producer. A consumer retaining a signature list does not convert these producers. |
+| `ProjectObjectSpread` | `object_spread_projection_eval.rs` | Ordered effect projection and carrier subject resolution execute in place. |
+| `LowerLocator` | `locator_shape_binder.rs`, `build_lower_locator` | Retained-parse dereference and graph lowering execute inside the producer; nested lowerer dependencies require their own handoffs. |
+| `Relate` | `mod.rs`, early typed producer; relation engine | Checker obligations, pair work and SCC state belong to the relation computation; the producer is not selected by `drives_on_the_runtime`. |
+| `AwaitedNormalize`, `AsyncReturnPayload` | `build.rs`, `awaited_relation_run` | Active operand path, union distribution, thenable checks and nested family reads run in place. |
+| `Conditional`, `ResolveCall` | `query_frames.rs`, decision/call frames | Existing seams cover selected dependencies. A call's retained argument collector does not convert all work beneath its suspension point. |
+| `FlowReturn` | `query_frames.rs`, flow frame | Selected callback-bearing roots use the flow seam; flow replay has its own driver and is not a general family continuation. |
+| `ClassifyBroadRuntime` | `broad_runtime.rs`, `build_classify_broad_runtime` | Locator rehydration loads indexed input and reads macro/path queries; its node walk also reads indexed access and evaluates carriers. This is an additional dependency-reaching family, despite its classifier result domain. |
+| `ClassifyMaterializationCycleGate` | `cycle_gate.rs`, `CycleGateBuild`; `family_continuation.rs` | The root indexed input and each FIFO skeleton-instantiation hop are separate transitions. The continuation retains the queue, first-visit identities, remaining hop count, path signals, fallback reasons, dependency facts and observed self-roots. Both drivers run these stages; the typed outcome reaches the frame without a node-domain conversion. |
+
+`ReduceUnion` normalizes graph operands through canonical algebra rather than
+loading declaration bodies. `ClassifyTruthinessDomain` delegates to
+`classify_truthiness_domain` over graph nodes in `canonical_algebra.rs`; it
+does not perform the locator rehydration used by `ClassifyBroadRuntime`.
+`ResolveAmbientNamespace` and `ResolveEnum` return `Miss` at this dispatcher.
+`FlowNarrowingAt` and `ContextualTypeAt` return typed partial gaps. These
+non-producing arms do not constitute evidence of a converted continuation.
+
+| Resolver boundary | Current owner and reachability |
+| --- | --- |
+| Indexed input | `FamilyStep::Load` uses `begin_indexed_load`; its scheduler-backed handoff retains both source loading and the existing pollable indexed materialization under the original execution task. A source-present cold index yields on its owner shard, and cancellation/drop releases its retained flight. The handoff transfers complete indexed deliveries, including valid unpublished artifacts, into the frame’s existing reader-scoped consumed-load storage. Reads replay whole-content/route observations and preserve ReturnOnly status through the request’s original input leases. Driverless hosts still drive the serve in place. Direct `ensure_indexed_ready_serve` calls inside builders and resolver adapters remain separate synchronous boundaries. |
+| Global lookup | `FamilyStep::Global` calls `resume_family_global`, then `first_global_declaration`, synchronously. Library and program contributors can introduce source dependencies. |
+| Prepared declarations | `FamilyStep::Declarations` calls `read_class_static_declarations` synchronously. Prepared values, export fallback and constructor/body lowering are not made pollable by the surrounding static-class state machine. |
+| Route/prepared bundle planning | `frame_source_load` calls `begin_prepared_bundle_load`; `crates/verter_session/src/host_manage/prepared_decl.rs` plans/resolves routes before returning an owned load. Direct targets use indexed readiness even for cached route identities or already-present source, so an unfinished target index can yield. The returned load covers only the boundary it names; deeper route traversal and route planning remain synchronous. |
+| Module/index/request adapters | `module_object.rs` and `crates/verter_session/src/resolver_core/request_bound.rs` can ensure indexed input, resolve module exports/routes and request prepared declarations inside a polled build. |
+| Body/artifact singleflight | Prepared-declaration and locator/body reads reach host-owned retained-parse and artifact producers. Their ownership remains on the host; an owned semantic frame alone does not supply an asynchronous host read. |
+| Carrier-subject and payload-projection normalization | `mod.rs`, `normalize_carrier_subject_key_with_fact`, `scope_apparent_wrapper_subject` and `scope_apparent_signature_subject` normalize subjects before dispatch. `query_frames.rs`, `reads_as_frame_need`, excludes reads that require this in-place prelude. Such reads bypass the frame-need transition even inside a converted family. |
+| Nested semantic memo claim | `join_seam_for` selects Decision/Flow seams. Outside them a nested cold query receives no polling waker and can select `AcquireWait::Block` in `mod.rs`, reaching `subscription.wait` in `semantic_query_memo/producer.rs`. |
+
+The held-seam matrix in
+`crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs`
+checks the converted query transitions, including exact stage counts,
+synchronous answer/diagnostic/receipt equivalence and drop cleanup. Its
+declaration-source fixtures cover source and direct-import loads. Neither
+set establishes suspension or progress preservation for the synchronous
+boundaries identified above. Inventory membership is a reachability
+observation, not acceptance evidence for a conversion.
+
+A consumed indexed-load failure is also authoritative for the direct-host and
+request-bound `IndexedInputs` adapters. They return no input before attempting
+materialization, even when source text is present. The cancelled-load control
+holds the owner shards while consuming that outcome, so a synchronous retry
+fails the forbidden-wait probe.
+
+The inventory above describes individual converted boundaries, not a guarantee
+that arbitrary semantic roots are nonblocking. A potentially suspending helper
+must retain its position and completed intermediate values at the actual read.
+Discarding an unfinished helper and restarting it with cached answers is replay,
+even if observations and charges are rolled back. The continuation driver has
+no generic stage-retry fallback. Complete family conversion must also retain
+work inside an iteration and preserve the full synchronous receipt, not merely
+its summed work count.

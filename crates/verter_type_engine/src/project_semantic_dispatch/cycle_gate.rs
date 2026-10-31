@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use super::family_continuation::{ContinuationStage, FamilyBuild, FamilyStep};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -189,237 +190,213 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         key: &MaterializationCycleGateKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
-        use crate::semantic_query::{
-            DeclIdentity, ProjectionMode, ProjectionReductionContext, SemanticNodeId,
-        };
-        use rustc_hash::FxHashSet;
-        use std::collections::VecDeque;
+        self.drive_family_value_in_place(self.continuation_stage().begin_cycle_gate(key))
+    }
+}
 
-        #[cfg(any(test, feature = "test-support"))]
-        CYCLE_GATE_COMPUTE_COUNTER.with(|c| c.set(c.get() + 1));
-        CYCLE_GATE_PRODUCER_RAN.with(|c| c.set(true));
+/// The root input or the exact declaration hop whose delivery resumes the walk.
+pub(super) enum CycleGateBuild {
+    Owner(MaterializationCycleGateKey),
+    Hop {
+        walk: CycleGateWalk,
+        current: crate::semantic_query::DeclIdentity,
+        path_has_complex_signal: bool,
+    },
+}
 
-        const MAX_HOPS: usize = 64;
+/// FIFO discovery and completed evidence owned by one classifier computation.
+pub(super) struct CycleGateWalk {
+    root: crate::semantic_query::DeclIdentity,
+    visited: rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    queue: std::collections::VecDeque<(crate::semantic_query::DeclIdentity, bool)>,
+    remaining_hops: usize,
+    reasons: Vec<MaterializationCycleGateFallbackReason>,
+    dep_facts: Vec<crate::semantic_query::DepEntry>,
+    observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
 
-        let mut reasons: Vec<MaterializationCycleGateFallbackReason> = Vec::new();
-        let record_reason =
-            |reasons: &mut Vec<MaterializationCycleGateFallbackReason>,
-             reason: MaterializationCycleGateFallbackReason| {
-                if !reasons.contains(&reason) {
-                    reasons.push(reason);
-                }
-            };
-
-        // Re-source the root's observed identity: the slot is
-        // content-free (R6), so the `whole_hash` comes from the live
-        // indexed view at compute time — the same snapshot the graph's
-        // interned `DeclRef` identities were lowered from. An
-        // unindexable root yields the default hash; its per-hop
-        // `Instantiate` read errors below and demotes the outcome.
-        let root = &key.root;
-        let root_whole_hash = self
-            .ctx
-            .ensure_indexed_ready_serve(root.defining_canonical.as_ref())
-            .map(|serve| serve.indexed.whole_hash)
-            .unwrap_or_default();
-        let root_identity = DeclIdentity {
-            canonical_id: root.defining_canonical.clone(),
-            owner: root.owner,
-            whole_hash: root_whole_hash,
-            decl_name: root.merged_symbol_name.clone(),
-        };
-
-        let mut dep_facts: Vec<crate::semantic_query::DepEntry> = self
-            .project_generation_signature()
-            .iter()
-            .cloned()
-            .collect();
-        let mut observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            Vec::new();
-        // Record one observed self-root per visited declaration identity
-        // (the observed `whole_hash` embedded in the identity, NOT a
-        // current-content re-read). The synthetic `__builtin__` carrier
-        // (and any other empty canonical) has no file to root against.
-        let record_self_root =
-            |identity: &DeclIdentity,
-             roots: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>| {
-                let canonical = identity.canonical_id.as_ref();
-                if canonical.is_empty() || canonical == "__builtin__" {
-                    return;
-                }
-                roots.push((identity.canonical_id.clone(), identity.whole_hash));
-            };
-
-        let graph = self.graph();
-        let mut visited: FxHashSet<DeclIdentity> = FxHashSet::default();
-        let mut queue: VecDeque<(DeclIdentity, bool)> = VecDeque::new();
-        visited.insert(root_identity.clone());
-        record_self_root(&root_identity, &mut observed_self_roots);
-        queue.push_back((root_identity.clone(), false));
-
-        let mut stop = false;
-        let mut remaining_hops: usize = MAX_HOPS;
-        while let Some((current, path_has_complex_signal)) = queue.pop_front() {
-            if remaining_hops == 0 {
-                // Hop-limit polarity: fall back to the carried flag
-                // rather than blanket-false. Conservative on bounded
-                // cyclic chains. NOT a partial result.
-                record_reason(
-                    &mut reasons,
-                    MaterializationCycleGateFallbackReason::HopLimit,
-                );
-                stop = path_has_complex_signal;
-                break;
-            }
-            remaining_hops -= 1;
-
-            let current_identity = current.clone();
-
-            let hop_key =
-                SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                    self.type_slot_for(
-                        current.canonical_id.clone(),
-                        current.owner,
-                        current.decl_name.clone(),
-                    ),
-                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    // Skeleton mode preserves open generics so body lowering
-                    // produces TypeParam graph nodes for T-refs (not
-                    // Opaque(Miss)). The walk is a structural guard, not a
-                    // publication boundary, so keep the Skeleton shape while
-                    // using StructuralTransit demand to prevent nested mapped
-                    // operators from emitting member publication edges.
-                    self.instantiate_context_for(
-                        &current.canonical_id,
-                        ProjectionReductionContext::structural_transit_with_mode(
-                            ProjectionMode::Skeleton,
-                        ),
-                    ),
-                ));
-            let read = self.execute_read(hop_key);
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
-                &mut dep_facts,
-                &read.dep_signature,
-            );
-            if read.result_is_partial() {
-                record_reason(
-                    &mut reasons,
-                    MaterializationCycleGateFallbackReason::NestedIncompleteObservation,
-                );
-            }
-            let body_id = match read.value {
-                QueryResult::Value(id) => id,
-                QueryResult::Recursive(_) => {
-                    record_reason(
-                        &mut reasons,
-                        MaterializationCycleGateFallbackReason::NestedIncompleteObservation,
-                    );
-                    continue;
-                }
-                QueryResult::Error(error) => {
-                    record_reason(
-                        &mut reasons,
-                        match &error {
-                            QueryError::Cancelled => {
-                                MaterializationCycleGateFallbackReason::Cancelled
-                            }
-                            QueryError::UnstableState { .. } => {
-                                MaterializationCycleGateFallbackReason::UnstableGeneration
-                            }
-                            _ => {
-                                MaterializationCycleGateFallbackReason::NestedIncompleteObservation
-                            }
-                        },
-                    );
-                    continue;
-                }
-            };
-
-            let body_has_complex_signal = path_has_complex_signal
-                || cycle_gate_has_complex_surface(graph.store(), body_id, 0, &mut reasons);
-
-            // Dispatch's recursive-ref back-edge is published as
-            // `Opaque(RecursiveRef { name })` — not a DeclRef — so a
-            // pure-graph walk would miss the self-cycle. Detect it
-            // explicitly: any `Opaque(RecursiveRef { name })` whose name
-            // matches the walk root's decl_name is a back-edge to root.
-            if cycle_gate_body_contains_recursive_ref(
-                graph.store(),
-                body_id,
-                &root_identity.decl_name,
-                0,
-                &mut reasons,
-            ) && body_has_complex_signal
-            {
-                stop = true;
-                break;
-            }
-
-            let mut child_refs: Vec<(DeclIdentity, bool)> = Vec::new();
-            cycle_gate_collect_ref_identities(
-                graph.store(),
-                body_id,
-                &mut child_refs,
-                &mut reasons,
-            );
-
-            for (child_identity, ref_has_type_args) in child_refs {
-                let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
-                // Cycle is reported when:
-                //  (a) child == root (transitive cycle back to the walk
-                //      root), OR
-                //  (b) child == current (intermediate self-reference at
-                //      this decl). NOT full SCC reachability.
-                if cycle_has_complex_signal
-                    && (child_identity == root_identity || child_identity == current_identity)
-                {
-                    stop = true;
-                    break;
-                }
-                if visited.insert(child_identity.clone()) {
-                    record_self_root(&child_identity, &mut observed_self_roots);
-                    queue.push_back((child_identity, cycle_has_complex_signal));
-                }
-            }
-            if stop {
-                break;
-            }
+impl CycleGateWalk {
+    fn record_reason(&mut self, reason: MaterializationCycleGateFallbackReason) {
+        if !self.reasons.contains(&reason) {
+            self.reasons.push(reason);
         }
+    }
 
+    fn enqueue(&mut self, identity: crate::semantic_query::DeclIdentity, complex: bool) {
+        if self.visited.insert(identity.clone()) {
+            let canonical = identity.canonical_id.as_ref();
+            if !canonical.is_empty() && canonical != "__builtin__" {
+                self.observed_self_roots
+                    .push((identity.canonical_id.clone(), identity.whole_hash));
+            }
+            self.queue.push_back((identity, complex));
+        }
+    }
+
+    fn finish(self, stop: bool) -> FamilyStep {
         let verdict = if stop {
             MaterializationCycleGateVerdict::Stop
         } else {
             MaterializationCycleGateVerdict::Continue
         };
-        let outcome = match MaterializationCycleGateFallbackReasons::new(reasons.iter().copied()) {
-            None => MaterializationCycleGateOutcome::Decided(verdict),
-            Some(fallback_reasons) => MaterializationCycleGateOutcome::LegacyFallback {
-                verdict,
-                reasons: fallback_reasons,
-            },
-        };
-
+        let outcome =
+            match MaterializationCycleGateFallbackReasons::new(self.reasons.iter().copied()) {
+                None => MaterializationCycleGateOutcome::Decided(verdict),
+                Some(reasons) => {
+                    MaterializationCycleGateOutcome::LegacyFallback { verdict, reasons }
+                }
+            };
         let mut output: QueryBuildOutput<SemanticQueryValue> = (
             QueryResult::Value(SemanticQueryValue::MaterializationCycleGate(
                 outcome.clone(),
             )),
-            crate::semantic_query::DepSignature::new(dep_facts),
+            crate::semantic_query::DepSignature::new(self.dep_facts),
         )
             .into();
-        output.observed_self_roots = observed_self_roots;
-        // Admission contract: a LegacyFallback never admits
-        // (`cache_suppress`); it is partial iff any reason is partial
-        // (every reason except HopLimit). The family memo refuses
-        // publish on `cache_suppress || result_is_partial`, so only
-        // `Decided` warm-serves.
+        output.observed_self_roots = self.observed_self_roots;
         if let Some(fallback) = outcome.fallback_reasons() {
             output.cache_suppress = true;
             if fallback.any_partial() {
                 output.mark_partial();
             }
         }
-        output
+        FamilyStep::Value(Box::new(output))
+    }
+}
+
+impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStage<'s, 'a, C> {
+    #[inline(never)]
+    pub(super) fn begin_cycle_gate(&self, key: &MaterializationCycleGateKey) -> FamilyStep {
+        #[cfg(any(test, feature = "test-support"))]
+        CYCLE_GATE_COMPUTE_COUNTER.with(|c| c.set(c.get() + 1));
+        CYCLE_GATE_PRODUCER_RAN.with(|c| c.set(true));
+        self.graph().record_continuation_begun();
+        FamilyStep::Load(
+            Arc::from(key.root.defining_canonical.as_ref()),
+            Box::new(FamilyBuild::CycleGate(Box::new(CycleGateBuild::Owner(
+                key.clone(),
+            )))),
+        )
+    }
+
+    #[inline(never)]
+    pub(super) fn resume_cycle_gate_owner(
+        &self,
+        build: CycleGateBuild,
+        serve: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+    ) -> FamilyStep {
+        let CycleGateBuild::Owner(key) = build else {
+            unreachable!("only the root stage reads indexed input")
+        };
+        let root = crate::semantic_query::DeclIdentity {
+            canonical_id: key.root.defining_canonical,
+            owner: key.root.owner,
+            whole_hash: serve
+                .map(|serve| serve.indexed.whole_hash)
+                .unwrap_or_default(),
+            decl_name: key.root.merged_symbol_name,
+        };
+        let mut walk = CycleGateWalk {
+            root: root.clone(),
+            visited: rustc_hash::FxHashSet::default(),
+            queue: std::collections::VecDeque::new(),
+            remaining_hops: 64,
+            reasons: Vec::new(),
+            dep_facts: self
+                .project_generation_signature()
+                .iter()
+                .cloned()
+                .collect(),
+            observed_self_roots: Vec::new(),
+        };
+        walk.enqueue(root, false);
+        self.advance_cycle_gate(walk)
+    }
+
+    fn advance_cycle_gate(&self, mut walk: CycleGateWalk) -> FamilyStep {
+        let Some((current, path_has_complex_signal)) = walk.queue.pop_front() else {
+            return walk.finish(false);
+        };
+        if walk.remaining_hops == 0 {
+            walk.record_reason(MaterializationCycleGateFallbackReason::HopLimit);
+            return walk.finish(path_has_complex_signal);
+        }
+        walk.remaining_hops -= 1;
+        let hop = self.cycle_gate_hop_key(&current);
+        FamilyStep::Need(
+            hop,
+            Box::new(FamilyBuild::CycleGate(Box::new(CycleGateBuild::Hop {
+                walk,
+                current,
+                path_has_complex_signal,
+            }))),
+        )
+    }
+
+    #[inline(never)]
+    pub(super) fn resume_cycle_gate_hop(
+        &self,
+        build: CycleGateBuild,
+        read: CacheRead<QueryResult<crate::semantic_query::SemanticNodeId>>,
+    ) -> FamilyStep {
+        let CycleGateBuild::Hop {
+            mut walk,
+            current,
+            path_has_complex_signal,
+        } = build
+        else {
+            unreachable!("only a hop stage reads a semantic query")
+        };
+        crate::request_context::observe_component_meta_read_suppress(&read);
+        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+            &mut walk.dep_facts,
+            &read.dep_signature,
+        );
+        if read.result_is_partial() {
+            walk.record_reason(MaterializationCycleGateFallbackReason::NestedIncompleteObservation);
+        }
+        let body_id = match read.value {
+            QueryResult::Value(id) => id,
+            QueryResult::Recursive(_) => {
+                walk.record_reason(
+                    MaterializationCycleGateFallbackReason::NestedIncompleteObservation,
+                );
+                return self.advance_cycle_gate(walk);
+            }
+            QueryResult::Error(error) => {
+                walk.record_reason(match error {
+                    QueryError::Cancelled => MaterializationCycleGateFallbackReason::Cancelled,
+                    QueryError::UnstableState { .. } => {
+                        MaterializationCycleGateFallbackReason::UnstableGeneration
+                    }
+                    _ => MaterializationCycleGateFallbackReason::NestedIncompleteObservation,
+                });
+                return self.advance_cycle_gate(walk);
+            }
+        };
+        let graph = self.graph_store();
+        let body_has_complex_signal = path_has_complex_signal
+            || cycle_gate_has_complex_surface(graph, body_id, 0, &mut walk.reasons);
+        if cycle_gate_body_contains_recursive_ref(
+            graph,
+            body_id,
+            &walk.root.decl_name,
+            0,
+            &mut walk.reasons,
+        ) && body_has_complex_signal
+        {
+            return walk.finish(true);
+        }
+        let mut child_refs = Vec::new();
+        cycle_gate_collect_ref_identities(graph, body_id, &mut child_refs, &mut walk.reasons);
+        for (child, ref_has_type_args) in child_refs {
+            let complex = body_has_complex_signal || ref_has_type_args;
+            if complex && (child == walk.root || child == current) {
+                return walk.finish(true);
+            }
+            walk.enqueue(child, complex);
+        }
+        self.advance_cycle_gate(walk)
     }
 }
 

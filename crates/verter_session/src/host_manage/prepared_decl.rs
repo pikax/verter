@@ -1173,11 +1173,11 @@ impl VerterHost {
         }
     }
 
-    /// Begin the loads materializing the prepared declaration bundle of
-    /// `canonical_id` would perform, instead of performing them: the import
-    /// targets [`Self::prepared_decl_bundle_route_dep_edges_with_context`]
-    /// would load, in the order it loads them, past every file in
-    /// `awaited`. The first one `begin` reports still loading is returned
+    /// Begin indexed loads for the direct import targets of `canonical_id`'s
+    /// prepared declaration bundle. Route consumers need their headers even
+    /// when their sources and route identities are already available. Walk
+    /// the bundle's import order, past every file in `awaited`.
+    /// The first one `begin` reports still loading is returned
     /// with its owned load; `None` once none is. The owner's own indexed
     /// input is read only when it is already current, so the probe loads
     /// nothing itself.
@@ -1201,20 +1201,20 @@ impl VerterHost {
             if !seen_sources.insert(specifier) {
                 continue;
             }
-            match self.route_dep_edge_plan::<M>(ctx, route_canonical, specifier) {
+            let resolved = match self.route_dep_edge_plan::<M>(ctx, route_canonical, specifier) {
                 RouteDepEdgePlan::Refused => return None,
-                RouteDepEdgePlan::Delivered(_) => continue,
-                RouteDepEdgePlan::RouteEdge => {}
-            }
-            let Some(resolved) = ctx.resolve_type_dependency_canonical(route_canonical, specifier)
-            else {
+                RouteDepEdgePlan::Delivered(resolved) => resolved,
+                RouteDepEdgePlan::RouteEdge => {
+                    ctx.resolve_type_dependency_canonical(route_canonical, specifier)
+                }
+            };
+            let Some(resolved) = resolved else {
                 continue;
             };
-            if ctx
-                .authoritative_current_content_hash(resolved.as_str())
-                .is_some()
-                || awaited.iter().any(|file| file.as_ref() == resolved)
-            {
+            // Source availability does not imply index availability. Route
+            // consumers need the target's headers even for a cached edge;
+            // the indexed-load handoff owns that unfinished work too.
+            if awaited.iter().any(|file| file.as_ref() == resolved) {
                 continue;
             }
             if let IndexedReadiness::Loading(load) = begin(resolved.as_str()) {

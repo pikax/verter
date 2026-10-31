@@ -38,6 +38,9 @@ fn chain_host() -> Arc<crate::VerterHost> {
         &crate::u6_flow_shape_corpus_tests::module_script(CHAIN),
         crate::FileLanguage::script_ts(),
     );
+    // These tests hold semantic producers, after the independent input handoff.
+    host.ensure_indexed_ready(TASK_FILE)
+        .expect("the chain has indexed input");
     host
 }
 
@@ -252,6 +255,8 @@ fn semantic_task_partiality_returns_to_its_lender_without_tainting_the_poller() 
                     &crate::u6_flow_shape_corpus_tests::module_script(source),
                     crate::FileLanguage::script_ts(),
                 );
+                host.ensure_indexed_ready(TASK_FILE)
+                    .expect("partiality is tested after the indexed-input handoff");
                 let dispatch = ProjectSemanticDispatch::new(&*host);
                 let lender = ColdComputeCompletenessScope::enter();
                 dispatch
@@ -1159,10 +1164,11 @@ fn drive_x5_across_a_wait(
             let task = slot.as_mut().expect("the task is lent");
             assert!(task.poll_for_tests(&waker).is_pending());
             drop(lease.take());
-            let mut finish = || match task.poll_for_tests(&waker) {
-                Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
-                Poll::Ready(TaskOutcomeForTests::Stopped) => panic!("nothing stops the task"),
-                Poll::Pending => panic!("the woken task produces x2 itself"),
+            let mut finish = || match semantic_poll_contract::poll_until_ready(|waker| {
+                task.poll_for_tests(waker)
+            }) {
+                TaskOutcomeForTests::Answered(answer) => answer,
+                TaskOutcomeForTests::Stopped => panic!("nothing stops the task"),
             };
             if elsewhere {
                 std::thread::scope(|scope| {
@@ -1533,6 +1539,8 @@ fn call_host() -> Arc<crate::VerterHost> {
         &crate::u6_flow_shape_corpus_tests::module_script(CALL),
         crate::FileLanguage::script_ts(),
     );
+    host.ensure_indexed_ready(CALL_FILE)
+        .expect("the call has indexed input before its inference is held");
     host
 }
 
@@ -3471,6 +3479,8 @@ mod semantic_poll_contract {
             &crate::u6_flow_shape_corpus_tests::module_script(INSTANCE_CLASS),
             crate::FileLanguage::script_ts(),
         );
+        host.ensure_indexed_ready(CONTEXTUAL_FILE)
+            .expect("the instance-surface fixture has indexed input");
         host
     }
 
@@ -3654,6 +3664,9 @@ mod semantic_poll_contract {
             &crate::u6_flow_shape_corpus_tests::module_script(STATIC_CLASSES),
             crate::FileLanguage::script_ts(),
         );
+        // These fixtures hold the base-surface read, after indexed input.
+        host.ensure_indexed_ready(CONTEXTUAL_FILE)
+            .expect("the static-surface fixture has indexed input");
         host
     }
 
@@ -4213,7 +4226,7 @@ mod semantic_poll_contract {
 
     /// Poll until ready, parking between polls until woken, failing past
     /// [`HELD_DEADLINE`] instead of hanging.
-    fn poll_until_ready<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
+    pub(super) fn poll_until_ready<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
         let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
         let deadline = std::time::Instant::now() + HELD_DEADLINE;
         loop {
@@ -4308,6 +4321,426 @@ mod semantic_poll_contract {
         assert!(graph.resident_flight_keys_for_tests().is_empty());
     }
 
+    fn cycle_gate_host() -> Arc<crate::VerterHost> {
+        unloaded_files_host(&[(
+            UNLOADED_OWNER,
+            "export interface Props { child: Child } export interface Child { value: string }",
+        )])
+    }
+
+    fn cycle_gate_keys(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let slot = |name: &str| {
+            dispatch.type_slot_for(
+                UNLOADED_OWNER,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name,
+            )
+        };
+        let root = dispatch.materialization_cycle_gate_key_for(
+            &verter_type_engine::semantic_query::DeclIdentity {
+                canonical_id: UNLOADED_OWNER.into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [0; 16],
+                decl_name: "Props".into(),
+            },
+        );
+        let child =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                slot("Child"),
+                Arc::from([]),
+                dispatch.instantiate_context_for(
+                    UNLOADED_OWNER,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Skeleton,
+                    ),
+                ),
+            ));
+        (root, child)
+    }
+
+    #[test]
+    fn a_cycle_gate_retains_completed_hops_while_a_nested_declaration_is_held() {
+        let synchronous = {
+            let host = cycle_gate_host();
+            host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (root, _) = cycle_gate_keys(&dispatch);
+            let read = dispatch.execute_via_cold_build_helper(root);
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = cycle_gate_host();
+            host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let (root, child) = cycle_gate_keys(&dispatch);
+            let (other, lease) = hold_producer(&host, graph, child);
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut entry = Some(dispatch.poll_query(root));
+            let (pending, progress, repeated) = while_held(lease, || {
+                let pending = entry.as_mut().unwrap().poll(&waker).is_pending();
+                let progress = continuation_stages(&host);
+                let repeated = entry.as_mut().unwrap().task().map(|task| {
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .unwrap()
+                    })
+                });
+                assert_eq!(
+                    continuation_stages(&host),
+                    progress,
+                    "completed hops stay retained"
+                );
+                if abandon {
+                    drop(entry.take());
+                }
+                (pending, progress, repeated)
+            });
+            assert!(pending, "a cold cycle gate yields at its nested Child hop");
+            assert_eq!(repeated, Some(true));
+            assert_eq!(
+                progress,
+                (1, 2),
+                "owner and Props completed before Child waits"
+            );
+            let read = entry.take().map(|mut entry| {
+                assert!(counter.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
+                poll_until_ready(|waker| entry.poll(waker))
+            });
+            drop(entry);
+            if let Some(read) = read {
+                assert_eq!(
+                    continuation_stages(&host),
+                    (1, 3),
+                    "no completed hop restarts"
+                );
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+            drop(other);
+        }
+    }
+
+    #[test]
+    fn a_cycle_gate_with_present_source_yields_for_indexing() {
+        let synchronous = {
+            let host = cycle_gate_host();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (root, _) = cycle_gate_keys(&dispatch);
+            let read = dispatch.execute_via_cold_build_helper(root);
+            read_summary(&dispatch, &read)
+        };
+        let host = cycle_gate_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let (root, _) = cycle_gate_keys(&dispatch);
+        let mut entry = dispatch.poll_query(root);
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(Waker::noop()).is_pending());
+            assert!(entry.poll(Waker::noop()).is_pending());
+        }
+        held.release();
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+    }
+
+    fn declaration_key(file: &str) -> SemanticQueryKey {
+        use verter_type_engine::semantic_query::{BinderScopeId, ResolveDeclKey, ScopeId};
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: file.into(),
+                owner,
+                local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(owner),
+            },
+            name: "Props".into(),
+        })
+    }
+
+    #[test]
+    fn a_declaration_with_present_source_yields_until_its_index_is_ready() {
+        let host = unloaded_owner_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
+        let counter = CountingThreadWaker::for_current_thread();
+        let waker = Waker::from(Arc::clone(&counter));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(&waker).is_pending());
+            assert!(entry.poll(&waker).is_pending());
+        }
+        held.release();
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        let synchronous = dispatch.execute_via_cold_build_helper(declaration_key(UNLOADED_OWNER));
+        assert_eq!(
+            read_summary(&dispatch, &read),
+            read_summary(&dispatch, &synchronous)
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn a_cancelled_index_load_is_not_retried_on_the_polling_thread() {
+        let host = unloaded_owner_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(Waker::noop()).is_pending());
+            host.cooperative_drive.cancellation().cancel();
+        }
+        // The owner shards stay held: answering from anywhere but the
+        // retained outcome would park this thread.
+        let read = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            poll_until_ready(|waker| entry.poll(waker))
+        };
+        drop(entry);
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
+            ),
+            "a failed load answers as a failed synchronous read"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+        held.release();
+    }
+
+    #[test]
+    fn a_declaration_preserves_a_fenced_index_delivery_without_rebuilding_it() {
+        let host = || {
+            let host = unloaded_owner_host();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            host.test_force
+                .force_indexed_ready_serve_fence_for_tests
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            host
+        };
+        let synchronous = {
+            let host = host();
+            let view = host.resolver_store_view_read().into_owned_view();
+            let ctx = crate::resolver_core::HostResolverContext::new(
+                &host,
+                &view,
+                Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+            );
+            let dispatch = ProjectSemanticDispatch::new(&ctx);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(UNLOADED_OWNER));
+            read_summary(&dispatch, &read)
+        };
+        let host = host();
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let view = host.resolver_store_view_read().into_owned_view();
+        let ctx = crate::resolver_core::HostResolverContext::new(
+            &host,
+            &view,
+            Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+        let mut dispatch = ProjectSemanticDispatch::new(&ctx);
+        let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(Waker::noop()).is_pending());
+        }
+        held.release();
+        let read = poll_until_ready(|waker| {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(waker)
+        });
+        drop(entry);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn a_declaration_whose_source_is_loading_yields_and_releases_its_retained_load() {
+        let synchronous = {
+            let host = unloaded_owner_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(UNLOADED_OWNER));
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = unloaded_owner_host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let gate = Arc::clone(&host.test_force.source_load_gate);
+            gate.hold(UNLOADED_OWNER);
+            let held = HeldSource(&gate);
+            let mut entry = Some(dispatch.poll_query(declaration_key(UNLOADED_OWNER)));
+            let counter = CountingThreadWaker::for_current_thread();
+            let waker = Waker::from(Arc::clone(&counter));
+            let first = while_held(held, || {
+                let first = entry.as_mut().unwrap().poll(&waker).is_pending();
+                if abandon {
+                    drop(entry.take());
+                }
+                first
+            });
+            assert!(
+                first,
+                "the declaration yields before its source is released"
+            );
+            let read = entry.take().map(|mut entry| {
+                counter.wait_for_wake("the source wakes the declaration reader");
+                poll_until_ready(|waker| entry.poll(waker))
+            });
+            drop(entry);
+            if let Some(read) = read {
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_imported_declaration_yields_while_its_defining_source_loads() {
+        const IMPORTER: &str = "/semantic-task/decl-importer.ts";
+        let host = || {
+            let host = unloaded_files_host(&[
+                (UNLOADED_OWNER, "export interface Props { a: string }\n"),
+                (
+                    IMPORTER,
+                    "import { Props } from './owner'; export { Props };",
+                ),
+            ]);
+            assert!(host.ensure_loaded(IMPORTER));
+            host
+        };
+        let synchronous = {
+            let host = host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(IMPORTER));
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let gate = Arc::clone(&host.test_force.source_load_gate);
+            gate.hold(UNLOADED_OWNER);
+            let mut entry = Some(dispatch.poll_query(declaration_key(IMPORTER)));
+            let pending = while_held(HeldSource(&gate), || {
+                let pending = entry.as_mut().unwrap().poll(Waker::noop()).is_pending();
+                if abandon {
+                    drop(entry.take());
+                }
+                pending
+            });
+            assert!(
+                pending,
+                "a routed declaration yields before its source is released"
+            );
+            let read = entry
+                .take()
+                .map(|mut entry| poll_until_ready(|waker| entry.poll(waker)));
+            drop(entry);
+            if let Some(read) = read {
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_imported_declaration_with_present_source_yields_for_indexing() {
+        const IMPORTER: &str = "/semantic-task/decl-importer.ts";
+        let make_host = || {
+            let host = unloaded_files_host(&[
+                (UNLOADED_OWNER, "export interface Props { a: string }"),
+                (
+                    IMPORTER,
+                    "import { Props } from './owner'; export { Props };",
+                ),
+            ]);
+            host.ensure_indexed_ready(IMPORTER).unwrap();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            host
+        };
+        let synchronous = {
+            let host = make_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(declaration_key(IMPORTER));
+            read_summary(&dispatch, &read)
+        };
+        for abandon in [false, true] {
+            let host = make_host();
+            let mut held = host.decl_lowering.hold_workers_for_tests();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let mut entry = dispatch.poll_query(declaration_key(IMPORTER));
+            {
+                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                assert!(entry.poll(Waker::noop()).is_pending());
+                assert!(entry.poll(Waker::noop()).is_pending());
+            }
+            if abandon {
+                drop(entry);
+                held.release();
+            } else {
+                held.release();
+                let read = poll_until_ready(|waker| {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(waker)
+                });
+                drop(entry);
+                assert_eq!(read_summary(&dispatch, &read), synchronous);
+            }
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+        }
+    }
+
+    #[test]
+    fn a_local_declaration_does_not_load_its_unrelated_imports() {
+        const LOCAL: &str = "/semantic-task/local-decl.ts";
+        let host = unloaded_files_host(&[
+            (UNLOADED_OWNER, "export interface Imported { a: string }"),
+            (
+                LOCAL,
+                "import { Imported } from './owner'; export interface Props { b: number }",
+            ),
+        ]);
+        assert!(host.ensure_loaded(LOCAL));
+        host.ensure_indexed_ready(LOCAL)
+            .expect("local headers are ready before the unrelated import is held");
+        let gate = Arc::clone(&host.test_force.source_load_gate);
+        gate.hold(UNLOADED_OWNER);
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(LOCAL));
+        let ready = while_held(HeldSource(&gate), || entry.poll(Waker::noop()).is_ready());
+        drop(entry);
+        assert!(ready, "local headers answer without preparing imports");
+        assert!(host.scheduler.try_get_source(UNLOADED_OWNER).is_none());
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    }
+
     /// A file the workspace does not hold: its load fails.
     const MISSING_OWNER: &str = "/semantic-task/missing.ts";
 
@@ -4366,7 +4799,10 @@ mod semantic_poll_contract {
                 .blocking_loads_begun
                 .load(std::sync::atomic::Ordering::SeqCst)
         };
-        let cases: [(&str, usize, Key); 4] = [
+        let cases: [(&str, usize, Key); 5] = [
+            ("a declaration's source", 1, |_, _| {
+                declaration_key(MISSING_OWNER)
+            }),
             ("an instantiation's declaring file", 1, |_, dispatch| {
                 missing_props_key(dispatch)
             }),
@@ -4681,6 +5117,62 @@ mod semantic_poll_contract {
         (apparent, interface)
     }
 
+    fn cycle_hop_host() -> Arc<crate::VerterHost> {
+        let host = chain_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            TASK_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(
+                "type Root = { child: Child }; type Child = { value: string };",
+            ),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(TASK_FILE)
+            .expect("indexed declarations");
+        host
+    }
+
+    fn cycle_hop_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        use verter_type_engine::semantic_query::{DeclIdentity, InstantiateKey};
+        let identity = |name: &str| DeclIdentity {
+            canonical_id: TASK_FILE.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host.ensure_indexed_ready(TASK_FILE).unwrap().whole_hash,
+            decl_name: name.into(),
+        };
+        let child = identity("Child");
+        (
+            dispatch.materialization_cycle_gate_key_for(&identity("Root")),
+            SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(child.canonical_id, child.owner, child.decl_name),
+                Arc::from([]),
+                dispatch.instantiate_context_for(
+                    TASK_FILE,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Skeleton,
+                    ),
+                ),
+            )),
+        )
+    }
+
+    fn routed_declaration_host() -> Arc<crate::VerterHost> {
+        let host = unloaded_files_host(&[
+            (UNLOADED_OWNER, "export interface Props { a: string }"),
+            (
+                "/semantic-task/decl-importer.ts",
+                "export * from './owner';",
+            ),
+        ]);
+        host.ensure_indexed_ready("/semantic-task/decl-importer.ts")
+            .unwrap();
+        host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+        host
+    }
+
     /// One suspension seam of a family built as a continuation: the root a
     /// consumer reads, the dependency another task holds at that seam, and
     /// the stages — builds begun, stages resumed with a read — the root runs
@@ -4697,7 +5189,20 @@ mod semantic_poll_contract {
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 10] = [
+    const HELD_SEAMS: [HeldSeam; 13] = [
+        HeldSeam {
+            seam: "a routed declaration's defining declaration",
+            host: routed_declaration_host,
+            keys: |_, _| {
+                (
+                    declaration_key("/semantic-task/decl-importer.ts"),
+                    declaration_key(UNLOADED_OWNER),
+                )
+            },
+            expression_site: false,
+            before_seam: (1, 0),
+            in_all: (2, 1),
+        },
         HeldSeam {
             seam: "a macro payload's props intersection",
             host: chain_host,
@@ -4756,6 +5261,14 @@ mod semantic_poll_contract {
             in_all: (1, 2),
         },
         HeldSeam {
+            seam: "a cycle classification's later declaration hop",
+            host: cycle_hop_host,
+            keys: cycle_hop_keys,
+            expression_site: true,
+            before_seam: (1, 2),
+            in_all: (1, 3),
+        },
+        HeldSeam {
             seam: "an apparent type's anchor list",
             host: apparent_callee_host,
             keys: |_, dispatch| apparent_type_keys(dispatch),
@@ -4791,6 +5304,38 @@ mod semantic_poll_contract {
             // The declaring file is read before the wait.
             before_seam: (1, 1),
             in_all: (1, 2),
+        },
+        HeldSeam {
+            seam: "a template product's union reduction",
+            host: chain_host,
+            keys: |_, dispatch| {
+                use verter_type_engine::semantic_query::LiteralValue;
+                let graph = dispatch.graph_arc();
+                let literal = |text: &str| {
+                    graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text.into())))
+                };
+                let a = literal("a");
+                let b = literal("b");
+                let args = graph.intern_node(SemanticNodeData::Union(
+                    verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                        Arc::from([a, b]),
+                    ),
+                ));
+                (
+                    SemanticQueryKey::TemplateLiteralReduce {
+                        pattern: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("x"), verter_type_expr::OwnedStr::from("")]),
+                        args: Arc::from([args]),
+                        context: dispatch.template_literal_reduce_context(),
+                    },
+                    SemanticQueryKey::ReduceUnion {
+                        members: verter_type_engine::semantic_query::stable_key::canonicalize_union_members(graph, &[literal("xa"), literal("xb")]),
+                        nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                    },
+                )
+            },
+            expression_site: true,
+            before_seam: (1, 0),
+            in_all: (1, 1),
         },
     ];
 
@@ -5083,7 +5628,7 @@ mod semantic_poll_contract {
     #[test]
     fn an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more(
     ) {
-        let seam = &HELD_SEAMS[5];
+        let seam = &HELD_SEAMS[6];
         let (synchronous, _) = synchronous_across(seam);
         let host = (seam.host)();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
