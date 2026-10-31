@@ -6,6 +6,7 @@ import {
   createTestComponentMetaPayload as factFixture,
   createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
   OriginGraphSchema,
+  SurfacePartialReason,
   SurfacePartialReasonSchema,
 } from "@verter/proto";
 import {
@@ -14,6 +15,7 @@ import {
   ModelMetaSchema,
   TypeRegistryEntrySchema,
 } from "../../proto/src/gen/verter/v1/component_meta_pb.js";
+import { GRAPH_FORMAT_VERSION } from "./type-graph-core.js";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
@@ -54,7 +56,7 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 13, found 7/);
+    ).toThrow(/expected 14, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -557,7 +559,7 @@ describe("typed property keys", () => {
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 13, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 14, found 4/);
   });
 });
 
@@ -644,6 +646,42 @@ describe("surface partial reason taxonomy parity", () => {
     const beyond = Math.max(...named.map((value) => value.number)) + 1;
     expect(() => decodeReasonsFor([beyond])).toThrow(/unknown surface partial reason/);
     expect(() => decodeReasonsFor([0])).toThrow(/unknown surface partial reason/);
+  });
+
+  describe("schema version gate", () => {
+    const fanout = SurfacePartialReason.FANOUT_LIMIT;
+
+    const payloadAt = (schemaVersion: number, cause: number): Uint8Array => {
+      const payload = create(FactPayloadSchema, { ...factFixture(), schemaVersion });
+      payload.body!.facts!.delivery = {
+        $typeName: "verter.v1.FactGuarantee",
+        kind: 3,
+        causes: [cause],
+      };
+      return toBinary(FactPayloadSchema, payload);
+    };
+
+    it("publishes the fan-out reason past the exact gate of schema 13 readers", () => {
+      // Those readers accept 12 and 13, then throw on a reason they do not
+      // know: the only clean failure for them is the version mismatch.
+      expect([12, 13]).not.toContain(GRAPH_FORMAT_VERSION);
+      expect(
+        decodeTypedComponentMetaPayload(payloadAt(GRAPH_FORMAT_VERSION, fanout)).resultCompleteness,
+      ).toEqual({ kind: "partial", reasons: ["fanoutLimit"] });
+    });
+
+    it("rejects a payload above its own version at the gate, before its vocabulary", () => {
+      expect(() =>
+        decodeTypedComponentMetaPayload(payloadAt(GRAPH_FORMAT_VERSION + 1, fanout)),
+      ).toThrow(/version mismatch/);
+    });
+
+    it("keeps decoding schema 13 payloads", () => {
+      expect(
+        decodeTypedComponentMetaPayload(payloadAt(13, SurfacePartialReason.BUDGET_EXCEEDED))
+          .resultCompleteness,
+      ).toEqual({ kind: "partial", reasons: ["budgetExceeded"] });
+    });
   });
 });
 

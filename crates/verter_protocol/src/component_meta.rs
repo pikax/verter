@@ -31,7 +31,7 @@ use crate::verter::v1::{
     UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 13;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 14;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -2750,8 +2750,8 @@ pub(crate) fn surface_partial_reason_to_proto(
         FfiSurfacePartialReason::ConnectedQueryDepthLimit => {
             proto::SurfacePartialReason::ConnectedQueryDepthLimit
         }
-        // Schema 12's vocabulary: a released reader knows only reasons 1-17,
-        // so each newer cause is published as the legacy reason it refines.
+        // Schema 12's vocabulary: each of these causes refines a legacy reason,
+        // so it is published as that reason.
         FfiSurfacePartialReason::ConnectedMemoryLimit => {
             proto::SurfacePartialReason::ProjectionWorkLimit
         }
@@ -2768,6 +2768,8 @@ pub(crate) fn surface_partial_reason_to_proto(
         FfiSurfacePartialReason::FlowReturnNoSurface => {
             proto::SurfacePartialReason::FlowReturnNoSurface
         }
+        // No legacy reason describes a fan-out stop. Schema 13 readers fail on
+        // this tag, so it exists only from schema 14, past their version gate.
         FfiSurfacePartialReason::FanoutLimit => proto::SurfacePartialReason::FanoutLimit,
         FfiSurfacePartialReason::UndecidedConditional => proto::SurfacePartialReason::Propagated,
     }
@@ -3359,6 +3361,32 @@ mod tests {
         );
     }
 
+    /// Readers of schema 13 gate on the exact version and then fail on any
+    /// reason they do not know, so a payload that may carry the fan-out tag
+    /// must not claim their version: it has to stop at their gate.
+    #[test]
+    fn the_fanout_tag_is_published_past_every_schema_13_reader_gate() {
+        use crate::types::{FfiResultCompleteness, FfiSurfacePartialReason as R};
+        const SCHEMAS_WITHOUT_FANOUT: [u32; 2] = [12, 13];
+        for reasons in [
+            vec![R::FanoutLimit],
+            vec![R::OperationBudget, R::FanoutLimit],
+        ] {
+            let mut meta = super::build_test_meta();
+            meta.result_completeness = FfiResultCompleteness::Partial { reasons };
+            let payload = super::component_meta_payload(&meta);
+            let completeness = payload
+                .body
+                .as_ref()
+                .and_then(|body| body.result_completeness.as_ref())
+                .expect("the payload states its completeness");
+            assert!(completeness
+                .partial_reasons
+                .contains(&(proto::SurfacePartialReason::FanoutLimit as i32)));
+            assert!(!SCHEMAS_WITHOUT_FANOUT.contains(&payload.schema_version));
+        }
+    }
+
     #[test]
     fn newer_causes_encode_in_the_schema_12_vocabulary() {
         use crate::types::{
@@ -3385,14 +3413,14 @@ mod tests {
                 property_name: None,
             }],
         }];
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 13);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 14);
         let decoded = ComponentMetaPayload::decode(
             super::component_meta_payload(&meta)
                 .encode_to_vec()
                 .as_slice(),
         )
         .expect("payload must round-trip");
-        assert_eq!(decoded.schema_version, 13);
+        assert_eq!(decoded.schema_version, 14);
         let body = decoded.body.as_ref().expect("component-meta body");
         let completeness = body
             .result_completeness
@@ -3726,17 +3754,17 @@ mod tests {
         // equality) demand in lockstep: a decoder that trusts the
         // completeness position must never accept a payload old enough to
         // omit it.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 13);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 14);
     }
 
     #[test]
     fn full_body_roundtrips_supported_contract_and_completeness_tags() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 13);
+        assert_eq!(payload.schema_version, 14);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 13);
+        assert_eq!(decoded.schema_version, 14);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(
