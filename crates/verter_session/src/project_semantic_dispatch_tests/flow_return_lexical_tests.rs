@@ -3238,42 +3238,6 @@ fn r5_node<R>(
     })
 }
 
-/// Evaluate one function under the CLEAN + UNADMITTED contract: the value
-/// is served (no degradation) but the slot is NEVER warm-admitted — the
-/// answer completes transaction-locally. That is the shape of a ROOTLESS
-/// winner (a callee with no authored occurrence, like a local arrow) and
-/// of a provisional SCC fixed-point join.
-#[track_caller]
-fn r5_node_unadmitted<R>(
-    host: &Arc<VerterHost>,
-    name: &str,
-    part: FunctionPartIdentity,
-    pick: impl FnOnce(
-        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        SemanticNodeId,
-    ) -> R,
-) -> R {
-    with_dispatch(host, |dispatch| {
-        let key = r5_key_part(dispatch, name, part);
-        let QueryResult::Value(SemanticQueryOutput {
-            value: SemanticQueryValue::FlowReturn(result),
-            ..
-        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
-        else {
-            panic!("{name} must produce a value");
-        };
-        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
-        assert_eq!(
-            dispatch
-                .graph()
-                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "{name}'s answer completes transaction-locally and is never warm-admitted"
-        );
-        pick(dispatch, result.return_type())
-    })
-}
-
 /// A NESTED function value's signature is composed under the ENCLOSING
 /// frames' binder environment, not the file's owner scope.
 ///
@@ -4064,44 +4028,6 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
          type-parameter node: an enclosing `GcHolder<number>` would then \
          substitute into it"
     );
-}
-
-/// Every `TypeParam` binder NAME reachable in one answer's node tree.
-///
-/// A leaked binder is rarely the whole answer: the SCC fixed point joins
-/// it into a union, so asserting only the ROOT node's shape would call
-/// `unknown | CT` clean. This walks the tree the way a substitution
-/// would.
-fn reachable_type_param_names(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    root: SemanticNodeId,
-) -> Vec<String> {
-    let mut visited: std::collections::BTreeSet<SemanticNodeId> = Default::default();
-    let mut stack = vec![root];
-    let mut names: Vec<String> = Vec::new();
-    while let Some(node) = stack.pop() {
-        if !visited.insert(node) {
-            continue;
-        }
-        let Some(data) = dispatch.graph().node_data(node) else {
-            continue;
-        };
-        match data.as_ref() {
-            SemanticNodeData::TypeParam { display_name, .. } => {
-                names.push(display_name.to_string());
-            }
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let members = composite.composite_members().expect("composite arm");
-                stack.extend(members.iter().copied());
-            }
-            SemanticNodeData::Array { element, .. } => stack.push(*element),
-            SemanticNodeData::Alias(target) => stack.push(*target),
-            _ => {}
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
 }
 
 /// EVERY route from a callee's return to its caller instantiates the

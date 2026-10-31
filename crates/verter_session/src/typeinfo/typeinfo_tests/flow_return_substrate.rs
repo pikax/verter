@@ -61,19 +61,6 @@ fn assert_flow_return_dispatched(record: &verter_audit::RequestAuditRecord, alia
     );
 }
 
-/// The FRAME-level degraded surface: an evaluation with NO VALUE AT ALL
-/// (an unmodelled control surface, an empty recursive cycle) projects the
-/// typed miss.
-fn assert_semantic_miss(expr: &TypeExpr) {
-    match expr {
-        TypeExpr::Unknown(unknown) => assert_eq!(
-            unknown.raw(),
-            verter_type_engine::semantic_query::compat_spelling::SEMANTIC_MISS
-        ),
-        other => panic!("expected the degraded semantic-miss surface, got {other:?}"),
-    }
-}
-
 fn expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown(unknown) => {
@@ -105,16 +92,6 @@ fn expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
             type_arguments.iter().any(expr_contains_semantic_miss)
         }
         TypeExpr::Parenthesized(inner) => expr_contains_semantic_miss(inner),
-        _ => false,
-    }
-}
-
-fn expr_contains_never(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Primitive(PrimitiveName::Never) => true,
-        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-            members.iter().any(expr_contains_never)
-        }
         _ => false,
     }
 }
