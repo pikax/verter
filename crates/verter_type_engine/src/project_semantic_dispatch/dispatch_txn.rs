@@ -798,17 +798,8 @@ pub enum FlowReturnPendingOutcome {
         /// The degradation the FAILED evaluation had already observed
         /// before it failed.
         ///
-        /// This field is not optional decoration: a hold-only
-        /// [`FlowReturnFailure::EmptyCycle`] member is RESURRECTED by the
-        /// component discharge (its value is the join of its hold
-        /// targets'), so a degradation observed on the way to the empty
-        /// cycle must ride the failure into the fixed point. Dropping it
-        /// launders a degraded evaluation into a clean, WARM-admissible
-        /// result — and, because only the non-root member takes the
-        /// resurrection path, it does so in exactly one of the two demand
-        /// orders. Naming the field at every construction site is what
-        /// makes "a Degraded outcome without its degradation"
-        /// unrepresentable.
+        /// Naming the field at every construction site is what makes "a
+        /// Degraded outcome without its degradation" unrepresentable.
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     },
 }
@@ -3286,8 +3277,7 @@ impl AugmentationPlanTable {
 
 /// One entry of a tagged flow component awaiting its equation fixed
 /// point: the member's current outcome (a Complete outcome IS its
-/// concrete seed join; a hold-only EmptyCycle has no seed) and the
-/// coinductive hold targets its evaluation met.
+/// concrete seed join) and the coinductive hold targets its evaluation met.
 #[derive(Debug, Clone)]
 pub(super) struct FlowDischargeEntry {
     /// The member's flow identity.

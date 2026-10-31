@@ -953,33 +953,6 @@ struct FlowEvaluationOutcome {
     provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
 }
 
-/// The §3.4 materialised point set a FAILED frame evaluation records.
-///
-/// A hold-only [`FlowReturnFailure::EmptyCycle`] is the one failure the
-/// component discharge RESURRECTS to `Complete`
-/// (`discharge_flow_component_to_fixed_point` admits exactly `Complete`
-/// and `EmptyCycle`): its value IS the join of its hold targets, and the
-/// point that join serves is the frame's own demand point. The
-/// resurrection copies only the outcome, so an empty set here would
-/// publish an entry `cached_satisfies` (an `.any(...)` over the recorded
-/// set) can never satisfy — a candidate holding a slot, a reverse-index
-/// registration and a FIFO budget admission while being permanently
-/// unreadable.
-///
-/// Every OTHER failure is a real no-value outcome that never publishes,
-/// so it records nothing.
-fn failure_materialized_set(
-    failure: FlowReturnFailure,
-    key: &FlowReturnKey,
-) -> crate::semantic_query::demand::MaterializedSet {
-    use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
-    if matches!(failure, FlowReturnFailure::EmptyCycle) {
-        MaterializedSet::single(MaterializedPoint::new(key.demand.point.clone()))
-    } else {
-        MaterializedSet::empty()
-    }
-}
-
 /// The frame-pop result.
 enum FlowFramePop {
     /// Caller-return for a non-root pop (the provisional member).
@@ -5800,14 +5773,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             || self_cycle;
         // The ONE discharge: every flow member and the root reach the
         // equation fixed point `result_i = seed_i ∪ (⋃ hold targets)`
-        // together — an EmptyCycle with no discharged target stays
-        // `ReturnOnly` and poisons the component.
+        // together.
         let mut outcome = outcome;
         // The mixed component (this root included, when it has holds or
         // drained members) discharges to ONE joint fixed point through
         // the shared close helper: a SELF-cycle converges to its seed,
-        // a hold-only empty cycle resurrects on its targets' admitted
-        // returns, and the call members' replay + return equation
+        // and the call members' replay + return equation
         // iterates against the flow side's current values.
         let replay_substitution: super::dispatch_txn::ProvisionalSubstitution = relation_members
             .iter()
@@ -6180,8 +6151,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the ONE discharge every close path (flow root, relation root) runs.
     /// Every entry's admitted result is the least fixed point of
     /// `result_i = seed_i ∪ (⋃ hold targets' results)`: a Complete
-    /// outcome IS the member's concrete seed join; a hold-only EmptyCycle
-    /// outcome has no seed. An entry whose hold targets cannot all
+    /// outcome IS the member's concrete seed join. An entry whose hold targets cannot all
     /// discharge (a target outside the component, or a component with no
     /// concrete seed) stays degraded — the whole tagged component then
     /// refuses admission.
@@ -6376,21 +6346,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let Some(result) = discharged else {
                 continue;
             };
-            // ONLY a hold-only empty cycle is resurrectable. Its "failure"
-            // is an artefact of evaluation order — it genuinely has no
-            // seed of its own and its value IS the join of its hold
-            // targets. Every OTHER failure kind is a real no-value
-            // outcome, and stamping it `Complete` from its targets'
-            // results would publish a value the member's own evaluation
-            // never produced.
-            if !matches!(
-                entry.outcome,
-                FlowReturnPendingOutcome::EvaluatedValue(_)
-                    | FlowReturnPendingOutcome::NoValue {
-                        failure: FlowReturnFailure::EmptyCycle,
-                        ..
-                    }
-            ) {
+            // A failure is a real no-value outcome: stamping it `Complete`
+            // from its targets' results would publish a value the member's
+            // own evaluation never produced.
+            if !matches!(entry.outcome, FlowReturnPendingOutcome::EvaluatedValue(_)) {
                 continue;
             }
             // The widened value is a NEW value, so its verdict is
@@ -7595,20 +7554,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     self_roots,
                     holds,
-                    materialized: failure_materialized_set(failure, key),
-                    fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
-                    // A hold-only empty cycle DID evaluate its whole slice
-                    // — the component discharge resurrects its value from
-                    // the join — so its discharge report is real evidence.
-                    // Every other failure truncated the evaluation: no
-                    // report.
-                    discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
-                        demand_carrier
-                            .as_ref()
-                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
-                    } else {
-                        None
-                    },
+                    materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                    fresh_seed: false,
+                    // A failure truncated the evaluation: no report.
+                    discharge: None,
                     provenance,
                 };
             }
@@ -7673,20 +7622,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     self_roots,
                     holds,
-                    materialized: failure_materialized_set(failure, key),
-                    fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
-                    // A hold-only empty cycle DID evaluate its whole slice
-                    // — the component discharge resurrects its value from
-                    // the join — so its discharge report is real evidence.
-                    // Every other failure truncated the evaluation: no
-                    // report.
-                    discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
-                        demand_carrier
-                            .as_ref()
-                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
-                    } else {
-                        None
-                    },
+                    materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                    fresh_seed: false,
+                    // A failure truncated the evaluation: no report.
+                    discharge: None,
                     provenance,
                 };
             }
@@ -31014,12 +30953,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             .dispatch
                             .observe_read(|| self.dispatch.execute_flow_return(key.clone()));
                         let provisional = self.dispatch.pending_obligation_count() > pending_before;
-                        let declined = provisional
-                            || matches!(
-                                read.value(),
-                                FlowReturnStep::Hold(_)
-                                    | FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle)
-                            );
+                        let declined =
+                            provisional || matches!(read.value(), FlowReturnStep::Hold(_));
                         let step = if declined {
                             read.discard()
                         } else {
@@ -31071,13 +31006,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 Positional::Value(value)
                             }
                             FlowReturnStep::Hold(key) => self.circular_call(&key),
-                            FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {
-                                // An empty-cycle callee IS a hold — the SCC
-                                // close discharges it (and its callers) on
-                                // the component's admitted returns.
-                                self.holds.push(HeldCallee::foreign(key, callee_clause));
-                                Positional::Hold
-                            }
                             // The CALLEE's frame failed. That is a fact
                             // about the callee's body, and it reaches this
                             // frame at exactly one place: the call.

@@ -361,8 +361,8 @@ fn mixed_empty_cycle_is_return_only_for_the_whole_component() {
     );
 }
 
-/// EmptyCycle poisons publication at the real mixed close, not merely in the
-/// algebra helper. Mutation recipe: admit either member after solver failure;
+/// A seedless component poisons publication at the real mixed close, not
+/// merely in the algebra helper. Mutation recipe: admit either member after solver failure;
 /// one completed queue becomes non-empty.
 #[test]
 fn mixed_empty_component_close_admits_nothing() {
@@ -396,12 +396,12 @@ fn mixed_empty_component_close_admits_nothing() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::NoValue {
-                failure: FlowReturnFailure::EmptyCycle,
+                failure: FlowReturnFailure::Unresolved,
                 degradation: None,
             },
             vec![ReturnObligationIdentity::ResolveCall(call_key)],
         ),
-        FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle)
+        FlowReturnStep::NoValue(FlowReturnFailure::Unresolved)
     ));
     let txn = dispatch.dispatch_txn.borrow();
     assert!(txn.flow.completed_members.is_empty());

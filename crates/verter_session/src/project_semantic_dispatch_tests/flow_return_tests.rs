@@ -2391,8 +2391,7 @@ fn flow_return_direct_call_reads_the_shadowing_nested_function_declaration() {
 /// inside `f` shadows the self-recursion hold, so the call is the nested
 /// declaration's declared return, never a self edge. TypeScript 7.0.2 (all
 /// four settings): `ReturnType<typeof f>` is `number`. Mutation recipe:
-/// treating the call as a DirectSelfCall degrades this with EmptyCycle
-/// instead.
+/// treating the call as a DirectSelfCall answers the self-recursion instead.
 #[test]
 fn flow_return_self_call_shadowed_by_nested_function_declaration_reads_it() {
     let host = make_host();
@@ -2614,11 +2613,11 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
 
 /// The same authority covers a nested value's OWN name: an inner hoisted
 /// declaration of the nested function's name shadows it — the call is
-/// NEVER a DirectSelfCall (no self edge, no EmptyCycle); it calls the inner
+/// NEVER a DirectSelfCall (no self edge); it calls the inner
 /// declaration. TypeScript 7.0.2 (all four `strictNullChecks` ×
 /// `noImplicitAny` settings): `ReturnType<typeof outer>` is `number`.
 /// Mutation recipe: an empty nested shadow set fires the DirectSelfCall arm
-/// and degrades with EmptyCycle instead.
+/// and answers the self-recursion instead.
 #[test]
 fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
     let host = make_host();
@@ -5280,14 +5279,10 @@ fn flow_return_drained_member_retires_from_the_table_it_claimed() {
 
 /// Every member of a resurrected flow SCC must publish a READABLE entry.
 ///
-/// A member whose own evaluation failed `EmptyCycle` has no seed of its
-/// own, so its evaluation records `MaterializedSet::empty()`. The
-/// component discharge then RESURRECTS it to `Complete` from its hold
-/// targets — but the resurrection copies only the outcome, so the
-/// published entry keeps the empty materialised set. `cached_satisfies`
-/// is an `.any(...)` over that set, so `∅` satisfies NOTHING: the
-/// candidate occupies a slot, a reverse-index registration and a FIFO
-/// budget admission while being permanently unreadable.
+/// `cached_satisfies` is an `.any(...)` over a candidate's recorded
+/// materialised set, so an entry published with `∅` satisfies NOTHING: it
+/// occupies a slot, a reverse-index registration and a FIFO budget admission
+/// while being permanently unreadable.
 ///
 /// Candidate count alone does NOT discriminate — a zombie satisfies it.
 /// The discriminating assertions are the recorded materialised set and
@@ -5295,7 +5290,7 @@ fn flow_return_drained_member_retires_from_the_table_it_claimed() {
 #[test]
 fn flow_return_resurrected_member_publishes_a_readable_entry() {
     // The two-cycle: whichever member is demanded first, the other one
-    // is the seedless `EmptyCycle` member the discharge resurrects.
+    // closes with it.
     for (first, rest) in [
         ("scResA", ["scResB"].as_slice()),
         ("scResB", ["scResA"].as_slice()),

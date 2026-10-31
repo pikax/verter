@@ -700,8 +700,8 @@ export type MsBFirst = ReturnType<typeof msb>;
 /// demand is served from the first order's state. A single-host pair
 /// asserts one order twice and cannot fail in the direction it names.
 ///
-/// Mutation recipe: revisiting only EmptyCycle members (never
-/// Complete-with-holds) publishes `number` for the non-root member.
+/// Mutation recipe: never revisiting Complete-with-holds members publishes
+/// `number` for the non-root member.
 #[test]
 fn flow_return_substrate_multi_seed_cycle_publishes_the_union_msa_first() {
     let host = make_host_with_footprint();

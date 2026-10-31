@@ -1018,7 +1018,7 @@ export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "G
  * that inner variant, so every distinct no-value reason keeps its own
  * wire spelling.
  */
-export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" | "UnsupportedInvokedClosureEffect" | "UnsupportedWith" | "UnsupportedModuleDeclaration" | "Unresolved" | "EmptyCycle" | "UnmodeledDemandPoint" | "CallNotCallable" | "CallNoApplicableOverload" | "CallUndecidable" | "CallBudget" | "BudgetDepthExceeded" | "BudgetWorkExceeded" | "UnstableState" | "Cancelled";
+export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" | "UnsupportedInvokedClosureEffect" | "UnsupportedWith" | "UnsupportedModuleDeclaration" | "Unresolved" | "UnmodeledDemandPoint" | "CallNotCallable" | "CallNoApplicableOverload" | "CallUndecidable" | "CallBudget" | "BudgetDepthExceeded" | "BudgetWorkExceeded" | "UnstableState" | "Cancelled";
 
 /**
  * Why a flow-return request was not a clean, complete value.

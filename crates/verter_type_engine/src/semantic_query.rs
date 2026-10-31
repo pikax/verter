@@ -2069,9 +2069,6 @@ pub enum FlowReturnFailure {
     /// An in-flight dependency could not be decided (a torn view, a
     /// missing non-cycle edge, or a nonconverging recursive component).
     Unresolved,
-    /// The recursive component has no concrete semantic seed (an empty
-    /// recursive cycle — holds only).
-    EmptyCycle,
     /// The demanded `(demand, input)` point is beyond the whole-return /
     /// empty-input point the evaluation models — fail closed, never a
     /// silently widened whole-return result and never a sibling
@@ -10004,7 +10001,7 @@ pub enum SemanticQueryKey {
     /// `ProgramAnalysisFactRef::FlowBody` fact rail. Value domain:
     /// [`SemanticQueryValueTag::FlowReturn`]; only a COMPLETE evaluation
     /// admits — every degraded shape (`Unsupported` / `Missing` /
-    /// `Budget` / `EmptyCycle` / `Unresolved`) is `ReturnOnly` and never
+    /// `Budget` / `Unresolved`) is `ReturnOnly` and never
     /// enters the family memo.
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight

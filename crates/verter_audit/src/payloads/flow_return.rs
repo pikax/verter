@@ -130,8 +130,6 @@ pub enum FlowFailureTag {
     /// An in-flight dependency could not be decided (a torn view, a
     /// missing non-cycle edge, or a nonconverging recursive component).
     Unresolved,
-    /// The recursive component has no concrete semantic seed.
-    EmptyCycle,
     /// The demanded `(demand, input)` point is beyond the whole-return /
     /// empty-input point the evaluation models.
     UnmodeledDemandPoint,

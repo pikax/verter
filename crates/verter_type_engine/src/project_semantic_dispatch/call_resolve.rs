@@ -3468,13 +3468,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             read.value(),
                             crate::semantic_query::FlowReturnStep::Complete(_)
                         ))
-                        || matches!(
-                            read.value(),
-                            crate::semantic_query::FlowReturnStep::Hold(_)
-                                | crate::semantic_query::FlowReturnStep::NoValue(
-                                    crate::semantic_query::FlowReturnFailure::EmptyCycle
-                                )
-                        );
+                        || matches!(read.value(), crate::semantic_query::FlowReturnStep::Hold(_));
                     let step = if declined {
                         read.discard()
                     } else {
@@ -3729,11 +3723,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             holds.push(ReturnObligationIdentity::FlowReturn(flow_key));
                         }
                         crate::semantic_query::FlowReturnStep::Complete(_) => {
-                            holds.push(ReturnObligationIdentity::FlowReturn(flow_key));
-                        }
-                        crate::semantic_query::FlowReturnStep::NoValue(
-                            crate::semantic_query::FlowReturnFailure::EmptyCycle,
-                        ) => {
                             holds.push(ReturnObligationIdentity::FlowReturn(flow_key));
                         }
                         // A tripped work envelope on the callee's return

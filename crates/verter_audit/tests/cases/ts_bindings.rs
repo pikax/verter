@@ -248,7 +248,6 @@ fn flow_partiality_tags_enumerate_every_closed_reason() {
         "UnsupportedWith",
         "UnsupportedModuleDeclaration",
         "Unresolved",
-        "EmptyCycle",
         "UnmodeledDemandPoint",
         "CallNotCallable",
         "CallNoApplicableOverload",

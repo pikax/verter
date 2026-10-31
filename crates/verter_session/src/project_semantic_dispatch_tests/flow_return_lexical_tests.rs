@@ -2553,13 +2553,11 @@ fn flow_return_captured_widening_literal_const_read_widens_like_a_direct_read() 
 ///
 /// `r5MutualB` observes an `UnappliedWriteEffect`; `r5MutualA` joins
 /// `r5MutualB`'s discharged return, so A's result is built from a
-/// degraded contributor and is itself degraded. Before the fix, A's
-/// evaluation reached the discharge as a hold-only `EmptyCycle`, whose
-/// construction DROPPED the observed degradation; the discharge then
-/// resurrected it from its hold targets and stamped it `Complete` with
-/// `degradation: None`, so the publish gate — which refuses only a
-/// degradation it can SEE — admitted it WARM. Demanding B first took the
-/// other path and reported the degradation honestly: the same key, two
+/// degraded contributor and is itself degraded. A dropped degradation
+/// would be stamped `Complete` with `degradation: None`, and the publish
+/// gate — which refuses only a degradation it can SEE — would admit it
+/// WARM. Demanding B first takes the
+/// other path and reports the degradation honestly: the same key, two
 /// values and two warmths, chosen by demand order.
 ///
 /// Each order needs its OWN host: `SemanticGraphStore` is host-owned and

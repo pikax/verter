@@ -499,7 +499,6 @@ fn failure_tag(failure: FlowReturnFailure) -> FlowFailureTag {
             }
         },
         FlowReturnFailure::Unresolved => FlowFailureTag::Unresolved,
-        FlowReturnFailure::EmptyCycle => FlowFailureTag::EmptyCycle,
         FlowReturnFailure::UnmodeledDemandPoint => FlowFailureTag::UnmodeledDemandPoint,
         FlowReturnFailure::CallResolution(call) => match call {
             ResolveCallFailure::NotCallable => FlowFailureTag::CallNotCallable,
