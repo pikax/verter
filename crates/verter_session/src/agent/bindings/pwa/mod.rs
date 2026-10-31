@@ -1,1 +1,1 @@
-//! Filled by AGM-PWA.
+//! Reserved module home.

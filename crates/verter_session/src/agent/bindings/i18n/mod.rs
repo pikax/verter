@@ -1,1 +1,1 @@
-//! Filled by AGM-I18N.
+//! Reserved module home.

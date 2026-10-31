@@ -1,1 +1,1 @@
-//! Filled by AGM-RSKT.
+//! Reserved module home.

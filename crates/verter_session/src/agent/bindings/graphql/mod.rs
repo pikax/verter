@@ -1,1 +1,1 @@
-//! Filled by AGM-GQL.
+//! Reserved module home.

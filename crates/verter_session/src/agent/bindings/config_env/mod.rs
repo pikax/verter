@@ -1,1 +1,1 @@
-//! Filled by AGM-CFG.
+//! Reserved module home.

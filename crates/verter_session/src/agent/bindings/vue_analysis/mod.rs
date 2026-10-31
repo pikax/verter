@@ -1,1 +1,1 @@
-//! Filled by AGM-VUE1.
+//! Reserved module home.

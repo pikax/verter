@@ -1,5 +1,3 @@
-//! Filled by AGT1/AGT6B.
-
 mod apply;
 mod basis;
 mod batch;

@@ -1,1 +1,1 @@
-//! Filled by AGM-DOCL.
+//! Reserved module home.
