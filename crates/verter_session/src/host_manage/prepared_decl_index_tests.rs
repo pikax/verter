@@ -196,11 +196,13 @@ fn a_cold_index_build_suspends_on_its_shard_and_a_second_task_follows_it() {
             &observation,
             PROPS,
             None,
+            None,
         ));
     let mut follower = pin!(host
         .ensure_indexed_ready_serve_located_pollable::<verter_audit::observe::Uncaptured>(
             &observation,
             PROPS,
+            None,
             None,
         ));
     assert!(poll_as(&host, &leading, leader.as_mut(), &leader_waker).is_pending());
@@ -254,6 +256,7 @@ fn dropping_a_suspended_index_build_lets_a_later_claim_build() {
             host.ensure_indexed_ready_serve_located_pollable::<verter_audit::observe::Uncaptured>(
                 &observation,
                 PROPS,
+                None,
                 None,
             ),
         );

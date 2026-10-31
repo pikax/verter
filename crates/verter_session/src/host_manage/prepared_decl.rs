@@ -142,6 +142,14 @@ struct HeldIndexedSource {
     expected_syntactic_route_interface_hash: Hash16,
 }
 
+/// The owner of a materialization's source load: the task that waits on it and
+/// what stops it. With one, a source missing at materialization is an owned
+/// load the computation suspends on; without one it is loaded in place.
+pub(crate) struct OwnedSourceLoad {
+    pub(crate) task: verter_execution::tasks::ExecutionTask,
+    pub(crate) stop: verter_execution::cancellation::CancellationToken,
+}
+
 /// Session-only input lifetimes captured before crossing the request ports.
 /// This carrier is never part of an engine input or port answer.
 #[derive(Clone, Copy, Default)]
@@ -2407,6 +2415,20 @@ impl VerterHost {
         })
     }
 
+    /// [`Self::ensure_indexed_ready_serve_pollable`], awaiting a missing
+    /// source as `owned_load` instead of loading it inside the poll.
+    pub(crate) async fn ensure_indexed_ready_serve_owning_loads(
+        &self,
+        canonical_id: &str,
+        owned_load: OwnedSourceLoad,
+    ) -> Option<IndexedReadyServe> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
+            self.ensure_indexed_ready_serve_in_pollable_with::<M>(&observation, canonical_id, Some(&owned_load))
+                .await
+        })
+    }
+
     /// Compiled for the calling execution unit's capture mode `M`; a
     /// unit outside one calls the plain form, which adopts the installed
     /// request's mode.
@@ -2434,11 +2456,26 @@ impl VerterHost {
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        self.ensure_indexed_ready_serve_in_pollable_with::<M>(observation, canonical_id, None)
+            .await
+    }
+
+    async fn ensure_indexed_ready_serve_in_pollable_with<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        owned_load: Option<&OwnedSourceLoad>,
+    ) -> Option<IndexedReadyServe> {
         let _ = observation;
         verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
         let located = verter_audit::attribution::attribute_polls(
             verter_audit::attribution::WorkSite::IndexedReadyBuild,
-            self.ensure_indexed_ready_serve_located_pollable::<M>(observation, canonical_id, None),
+            self.ensure_indexed_ready_serve_located_pollable::<M>(
+                observation,
+                canonical_id,
+                None,
+                owned_load,
+            ),
         )
         .await;
         verter_audit::attribute_scope!(IndexedReadyBuild);
@@ -2581,8 +2618,19 @@ impl VerterHost {
                 observation,
                 canonical_id,
                 held_source,
+                None,
             )),
         )
+    }
+
+    /// [`Self::ensure_loaded`] as a transition of a pollable computation:
+    /// the scheduler load suspends it, and integrates once Analysis is ready.
+    async fn await_source_load(&self, canonical_id: &str, owner: &OwnedSourceLoad) -> bool {
+        let mut load = self.begin_load(canonical_id, owner.task.clone(), owner.stop.clone());
+        std::future::poll_fn(|cx| load.poll(cx.waker()))
+            .await
+            .and_then(|commit| commit.apply(self))
+            .unwrap_or(false)
     }
 
     /// [`Self::ensure_indexed_ready_serve_located`] as a pollable
@@ -2594,13 +2642,14 @@ impl VerterHost {
     /// suspends on, so a pending poll returns `Pending` with the waker
     /// registered for the shard’s answer while the lane stays led by this
     /// task. Another task claiming the same file follows the lane and
-    /// suspends too. Loading a source the scheduler has not seen still
-    /// waits inside the poll.
+    /// suspends too. A source the scheduler does not hold suspends the same
+    /// way on `owned_load`; without an owner it is loaded inside the poll.
     async fn ensure_indexed_ready_serve_located_pollable<M: verter_audit::observe::ObserveExec>(
         &self,
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         held_source: Option<&HeldIndexedSource>,
+        owned_load: Option<&OwnedSourceLoad>,
     ) -> Option<LocatedIndexedServe> {
         let _ = observation;
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
@@ -2692,8 +2741,6 @@ impl VerterHost {
         }
 
         let materialize = || async {
-            #[cfg(test)]
-            let catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             verter_session_query::probe_scope!(ENSURE_INDEXED_COLD);
             if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
                 self.provenance
@@ -2729,16 +2776,22 @@ impl VerterHost {
                         // scheduler + current request view's extension store.
                         // Raw import specifiers and empty canonicals are
                         // never loadable.
-                        if canonical_id.is_empty()
-                            || is_raw_import_specifier_id(canonical_id)
-                            || !self.ensure_loaded(canonical_id)
-                        {
+                        if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
+                            return None;
+                        }
+                        let loaded = match owned_load {
+                            Some(load) => self.await_source_load(canonical_id, load).await,
+                            None => self.ensure_loaded(canonical_id),
+                        };
+                        if !loaded {
                             return None;
                         }
                         self.scheduler.try_get_source(canonical_id)?
                     }
                 },
             };
+            #[cfg(test)]
+            let catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             // Missing host data is refusal — never recatalog, never a
             // second scheduler read. Every content-addressed product
             // below is derived from this one object.

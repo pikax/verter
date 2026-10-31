@@ -115,6 +115,13 @@ pub(crate) fn with_consumed_loads<R>(ends: &mut ConsumedLoads, body: impl FnOnce
     body()
 }
 
+/// [`with_consumed_loads`] for a request adapter's test: the reader state a
+/// frame installs around its build, without a frame.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_consumed_loads_for_tests<R>(ends: &mut ConsumedLoads, body: impl FnOnce() -> R) -> R {
+    with_consumed_loads(ends, body)
+}
+
 /// The terminal outcome a waiting reader's owned load of a file matching
 /// `is_file` ended with. It remains installed for repeated reads by this
 /// reader, so a later scope or prepared-declaration read cannot retry the

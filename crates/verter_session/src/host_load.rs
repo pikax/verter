@@ -399,7 +399,9 @@ impl VerterHost {
     /// it, or the owned load to wait on first
     /// ([`verter_type_engine::resolver_core::request_ports::IndexedInputs::begin_indexed_load`]).
     /// A cold index retains its pollable materialization even when its source
-    /// is present. Missing source first joins the scheduler load. A scheduler
+    /// is present. Missing source first joins the scheduler load, and a source
+    /// that goes missing after this check is another owned load of the same
+    /// materialization, never a load driven inside its poll. A scheduler
     /// without a driver thread (every wasm32
     /// host) has no executor but the caller, so nothing would advance a load
     /// begun here: the serve performs it in place, executing its stages on
@@ -446,11 +448,15 @@ impl VerterHost {
             .try_get_source(&canonical)
             .is_none()
             .then(|| self.begin_load(&canonical, scope.task().clone(), stop.clone()));
+        let owned_load = crate::host_manage::prepared_decl::OwnedSourceLoad {
+            task: scope.task().clone(),
+            stop: stop.clone(),
+        };
         IndexedReadiness::Loading(Box::new(HostIndexedLoad {
             host: self,
             load,
             indexing: Some(Box::pin(async move {
-                self.ensure_indexed_ready_serve_pollable(&canonical)
+                self.ensure_indexed_ready_serve_owning_loads(&canonical, owned_load)
                     .await
                     .map(|serve| leases.retain(serve))
             })),

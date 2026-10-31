@@ -1628,6 +1628,8 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 nesting,
             })),
             Claim::Produce(lease) => {
+                #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+                lease.hold_for_flight_rendezvous(dispatch.snapshot.flags());
                 Start::Produce(self.producing_frame(key, FrameProducer::Lease(lease)))
             }
         }

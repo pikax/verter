@@ -4528,6 +4528,147 @@ mod semantic_poll_contract {
         held.release();
     }
 
+    /// A source the scheduler drops after an indexed load saw it is one more
+    /// owned load of that computation: polls stay `Pending` on the reload and
+    /// no reader drives it. Dropping or cancelling the load while it waits
+    /// leaves the file's flight claimable.
+    #[test]
+    fn an_indexed_load_awaits_a_source_lost_before_its_first_poll() {
+        use verter_type_engine::resolver_core::request_ports::{
+            IndexedLoadEnd, IndexedLoadOutcome, IndexedReadiness,
+        };
+
+        enum End {
+            Reload,
+            Drop,
+            Cancel,
+        }
+        for end in [End::Reload, End::Drop, End::Cancel] {
+            let host = unloaded_owner_host();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            let blocking_before = host
+                .test_force
+                .blocking_loads_begun
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let IndexedReadiness::Loading(mut load) = host.begin_indexed_ready_load(UNLOADED_OWNER)
+            else {
+                panic!("the index is cold");
+            };
+            host.scheduler.close_file(UNLOADED_OWNER);
+            let gate = Arc::clone(&host.test_force.source_load_gate);
+            gate.hold(UNLOADED_OWNER);
+            let held = HeldSource(&gate);
+            {
+                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                assert!(load.poll(Waker::noop()).is_pending());
+                assert!(load.poll(Waker::noop()).is_pending());
+            }
+            assert_eq!(
+                host.test_force
+                    .blocking_loads_begun
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                blocking_before,
+                "the reload is never driven inside the poll"
+            );
+            match end {
+                End::Reload => {
+                    drop(held);
+                    let outcome = poll_until_ready(|waker| {
+                        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                        load.poll(waker)
+                    });
+                    assert_eq!(outcome, IndexedLoadOutcome::Integrated);
+                    let delivered = load.take_indexed_input().expect("the reload indexes it");
+                    assert!(delivered.store_published);
+                }
+                End::Drop => {
+                    drop(load);
+                    assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+                    drop(held);
+                }
+                End::Cancel => {
+                    host.cooperative_drive.cancellation().cancel();
+                    let outcome = poll_until_ready(|waker| {
+                        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                        load.poll(waker)
+                    });
+                    assert_eq!(
+                        outcome,
+                        IndexedLoadOutcome::NotIntegrated(IndexedLoadEnd::Cancelled)
+                    );
+                    drop(load);
+                    assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+                    drop(held);
+                    continue;
+                }
+            }
+            assert!(
+                host.ensure_indexed_ready_serve(UNLOADED_OWNER).is_some(),
+                "the file stays claimable"
+            );
+            assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+        }
+    }
+
+    /// A reader's consumed load answers availability on both request adapters
+    /// exactly as it answers a read: an end is no input and a delivery is the
+    /// input, neither materialized again while the owner shards are held.
+    #[test]
+    fn availability_consumes_a_reader_s_load_without_materializing() {
+        use verter_type_engine::resolver_core::request_ports::{
+            with_consumed_loads_for_tests, ConsumedLoad, IndexedInputs, IndexedLoadEnd,
+            IndexedLoadOutcome, IndexedReadiness,
+        };
+
+        // The delivery comes from another host, so this one's index stays
+        // cold: an answer from anywhere but the delivery parks on the shards.
+        let delivered = {
+            let host = unloaded_owner_host();
+            assert!(host.ensure_loaded(UNLOADED_OWNER));
+            let IndexedReadiness::Loading(mut load) = host.begin_indexed_ready_load(UNLOADED_OWNER)
+            else {
+                panic!("the index is cold");
+            };
+            assert_eq!(
+                poll_until_ready(|waker| load.poll(waker)),
+                IndexedLoadOutcome::Integrated
+            );
+            load.take_indexed_input().expect("the load delivers")
+        };
+        let host = unloaded_owner_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let view = host.resolver_store_view_read().into_owned_view();
+        let ctx =
+            crate::resolver_core::HostResolverContext::<verter_audit::observe::Uncaptured>::new(
+                &host,
+                &view,
+                Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+            );
+        let file: Arc<str> = Arc::from(UNLOADED_OWNER);
+        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+        let mut ended = vec![(
+            Arc::clone(&file),
+            ConsumedLoad::End(IndexedLoadEnd::Cancelled),
+        )];
+        with_consumed_loads_for_tests(&mut ended, || {
+            assert!(!IndexedInputs::source_is_available(&*host, UNLOADED_OWNER));
+            assert!(!IndexedInputs::source_is_available(&ctx, UNLOADED_OWNER));
+        });
+        // The frame keeps the file as its key names it, normalized or not.
+        let alias = UNLOADED_OWNER.strip_suffix(".ts").expect("a script owner");
+        assert_eq!(host.normalized_analysis_canonical(alias), UNLOADED_OWNER);
+        for file in [file, Arc::from(alias)] {
+            let mut delivery = vec![(file, ConsumedLoad::Indexed(delivered.clone()))];
+            with_consumed_loads_for_tests(&mut delivery, || {
+                assert!(IndexedInputs::source_is_available(&*host, UNLOADED_OWNER));
+                assert!(IndexedInputs::source_is_available(&ctx, UNLOADED_OWNER));
+            });
+        }
+        drop(_forbid);
+        held.release();
+    }
+
     #[test]
     fn a_declaration_preserves_a_fenced_index_delivery_without_rebuilding_it() {
         let host = || {

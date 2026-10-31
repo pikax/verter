@@ -62,8 +62,9 @@ Architectural target for the project-global cache cutover:
   (compiled only under `test`, `test-support` or the default-off
   `soak-support`, which `verter_session/soak-support` forwards to the
   soak/tooling runner) parks the first joinable producer of `key` on that
-  store at the dispatcher's synchronous cold-build boundary — flight claimed,
-  raw build not begun, no memo or flight lock held — reports a subscriber
+  store at its cold-build boundary, the dispatcher's synchronous claim or the
+  claim of a runtime frame driving it — flight claimed, raw build not begun,
+  no memo or flight lock held — reports a subscriber
   only once its wait-for edge registered on that exact flight, and releases
   the producer on `release()`, when its own request is cancelled
   (`cancel_participants()` cancels the parked producer and the registered
@@ -72,7 +73,7 @@ Architectural target for the project-global cache cutover:
   overlapping scopes may end in any order. Other keys, stores and warm
   reads never satisfy it; an `Instantiate` key driven outside any drive
   runs on the continuation runtime and never reaches the synchronous
-  boundary, so arming one is refused. Inventory:
+  claim, so arming one stays refused. Inventory:
   `crates/verter_type_engine/observe-inventory/SKR-FLIGHT-RENDEZVOUS.md`.
 
 Concrete expectation:
@@ -245,7 +246,7 @@ non-producing arms do not constitute evidence of a converted continuation.
 
 | Resolver boundary | Current owner and reachability |
 | --- | --- |
-| Indexed input | `FamilyStep::Load` uses `begin_indexed_load`; its scheduler-backed handoff retains both source loading and the existing pollable indexed materialization under the original execution task. A source-present cold index yields on its owner shard, and cancellation/drop releases its retained flight. The handoff transfers complete indexed deliveries, including valid unpublished artifacts, into the frame’s existing reader-scoped consumed-load storage. Reads replay whole-content/route observations and preserve ReturnOnly status through the request’s original input leases. Driverless hosts still drive the serve in place. Direct `ensure_indexed_ready_serve` calls inside builders and resolver adapters remain separate synchronous boundaries. |
+| Indexed input | `FamilyStep::Load` uses `begin_indexed_load`; its scheduler-backed handoff retains both source loading and the existing pollable indexed materialization under the original execution task. A source-present cold index yields on its owner shard, and cancellation/drop releases its retained flight. A source the scheduler drops after the load saw it is one more owned load the same materialization suspends on, its file's flight still led by that task. The handoff transfers complete indexed deliveries, including valid unpublished artifacts, into the frame’s existing reader-scoped consumed-load storage. Reads replay whole-content/route observations and preserve ReturnOnly status through the request’s original input leases. Driverless hosts still drive the serve in place. Direct `ensure_indexed_ready_serve` calls inside builders and resolver adapters remain separate synchronous boundaries. |
 | Global lookup | `FamilyStep::Global` calls `resume_family_global`, then `first_global_declaration`, synchronously. Library and program contributors can introduce source dependencies. |
 | Prepared declarations | `FamilyStep::Declarations` calls `read_class_static_declarations` synchronously. Prepared values, export fallback and constructor/body lowering are not made pollable by the surrounding static-class state machine. |
 | Route/prepared bundle planning | `frame_source_load` calls `begin_prepared_bundle_load`; `crates/verter_session/src/host_manage/prepared_decl.rs` plans/resolves routes before returning an owned load. Direct targets use indexed readiness even for cached route identities or already-present source, so an unfinished target index can yield. The returned load covers only the boundary it names; deeper route traversal and route planning remain synchronous. |
@@ -264,10 +265,11 @@ boundaries identified above. Inventory membership is a reachability
 observation, not acceptance evidence for a conversion.
 
 A consumed indexed-load failure is also authoritative for the direct-host and
-request-bound `IndexedInputs` adapters. They return no input before attempting
-materialization, even when source text is present. The cancelled-load control
-holds the owner shards while consuming that outcome, so a synchronous retry
-fails the forbidden-wait probe.
+request-bound `IndexedInputs` adapters. Their serve and availability reads
+return no input before attempting materialization, even when source text is
+present, and answer from a consumed delivery without rebuilding it. The
+cancelled-load and availability controls hold the owner shards while consuming
+those outcomes, so a synchronous retry fails the forbidden-wait probe.
 
 The inventory above describes individual converted boundaries, not a guarantee
 that arbitrary semantic roots are nonblocking. A potentially suspending helper
