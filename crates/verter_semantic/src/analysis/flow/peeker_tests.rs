@@ -459,10 +459,11 @@ fn planner_expression_site_origin_plans_reachability() {
     assert!(!plan.is_selected(return_node));
 }
 
-/// A demanded key the body never mentions resolves to a Foreign segment:
-/// no static entry matches, so no entry value is selected.
+/// A demanded key the body never mentions resolves to a Foreign segment: no
+/// static entry matches it, so the read is an apparent member or an absent
+/// one, and either needs the literal's whole type.
 #[test]
-fn planner_foreign_demand_key_matches_no_static_entry() {
+fn planner_foreign_demand_key_reads_the_whole_literal() {
     let skeleton = skeleton_of("function f3() { const a = 1; return { a, b: 2 } }");
     let graph = build_function_flow_graph(&skeleton);
     let demand = SliceDemand::for_return_projection(&skeleton, &names(&["zzz"]));
@@ -470,8 +471,8 @@ fn planner_foreign_demand_key_matches_no_static_entry() {
     let plan = ReturnPathPeeker::new(&graph)
         .plan(&demand, &FlowSliceBudget::default())
         .expect("plan");
-    assert!(!plan.is_value(entry_value_node(&skeleton, &graph, "a", 0)));
-    assert!(!plan.is_value(entry_value_node(&skeleton, &graph, "b", 0)));
+    assert!(plan.is_value(entry_value_node(&skeleton, &graph, "a", 0)));
+    assert!(plan.is_value(entry_value_node(&skeleton, &graph, "b", 0)));
 }
 
 /// Budget refusal is TYPED and total: a tripped node cap returns

@@ -472,6 +472,13 @@ impl FlowReturnResult {
     /// at the one evaluation join per result; the wrap rides every
     /// rebuild untouched until the publication closure consumes it.
     #[must_use]
+    pub(crate) fn without_function_kind(mut self) -> Self {
+        self.facet = FunctionKindFacet::None;
+        self
+    }
+
+    /// Attach the function-kind wrap this body's join publishes under.
+    #[must_use]
     pub(crate) fn with_function_wrap(mut self, wrap: FlowReturnWrap) -> Self {
         self.facet = FunctionKindFacet::Wrap(wrap);
         self

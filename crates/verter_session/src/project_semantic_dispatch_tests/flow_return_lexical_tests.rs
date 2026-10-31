@@ -2581,7 +2581,11 @@ fn flow_return_degraded_component_member_is_order_independent_and_never_warms() 
             Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             "{first}: the component's observed degradation must survive the discharge"
         );
-        assert_eq!(outcome.ty, number(), "{first} return type");
+        assert_eq!(
+            outcome.ty,
+            TypeExpr::Primitive(PrimitiveName::Any),
+            "{first} is the checker's circular return"
+        );
         assert_eq!(
             outcome.candidates, 0,
             "{first}: a degraded component is ReturnOnly — it must never warm"
@@ -3229,42 +3233,6 @@ fn r5_node<R>(
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             1,
             "{name} must warm-admit exactly one candidate"
-        );
-        pick(dispatch, result.return_type())
-    })
-}
-
-/// Evaluate one function under the CLEAN + UNADMITTED contract: the value
-/// is served (no degradation) but the slot is NEVER warm-admitted — the
-/// answer completes transaction-locally. That is the shape of a ROOTLESS
-/// winner (a callee with no authored occurrence, like a local arrow) and
-/// of a provisional SCC fixed-point join.
-#[track_caller]
-fn r5_node_unadmitted<R>(
-    host: &Arc<VerterHost>,
-    name: &str,
-    part: FunctionPartIdentity,
-    pick: impl FnOnce(
-        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        SemanticNodeId,
-    ) -> R,
-) -> R {
-    with_dispatch(host, |dispatch| {
-        let key = r5_key_part(dispatch, name, part);
-        let QueryResult::Value(SemanticQueryOutput {
-            value: SemanticQueryValue::FlowReturn(result),
-            ..
-        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
-        else {
-            panic!("{name} must produce a value");
-        };
-        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
-        assert_eq!(
-            dispatch
-                .graph()
-                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "{name}'s answer completes transaction-locally and is never warm-admitted"
         );
         pick(dispatch, result.return_type())
     })
@@ -4062,44 +4030,6 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
     );
 }
 
-/// Every `TypeParam` binder NAME reachable in one answer's node tree.
-///
-/// A leaked binder is rarely the whole answer: the SCC fixed point joins
-/// it into a union, so asserting only the ROOT node's shape would call
-/// `unknown | CT` clean. This walks the tree the way a substitution
-/// would.
-fn reachable_type_param_names(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    root: SemanticNodeId,
-) -> Vec<String> {
-    let mut visited: std::collections::BTreeSet<SemanticNodeId> = Default::default();
-    let mut stack = vec![root];
-    let mut names: Vec<String> = Vec::new();
-    while let Some(node) = stack.pop() {
-        if !visited.insert(node) {
-            continue;
-        }
-        let Some(data) = dispatch.graph().node_data(node) else {
-            continue;
-        };
-        match data.as_ref() {
-            SemanticNodeData::TypeParam { display_name, .. } => {
-                names.push(display_name.to_string());
-            }
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let members = composite.composite_members().expect("composite arm");
-                stack.extend(members.iter().copied());
-            }
-            SemanticNodeData::Array { element, .. } => stack.push(*element),
-            SemanticNodeData::Alias(target) => stack.push(*target),
-            _ => {}
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
 /// EVERY route from a callee's return to its caller instantiates the
 /// callee's own clause — not just the direct-call rail.
 ///
@@ -4207,98 +4137,20 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
     );
 }
 
-/// The SCC fixed point performs the same callee-return transfer the call
-/// arm does, so it owes the same instantiation.
-///
-/// In a GENERIC mutual-recursion component both members are provisional
-/// when the component closes, so each one's contribution to the other
-/// arrives through the equation `result_i = seed_i ∪ (⋃ hold targets)`
-/// rather than through the call arm's own return value. Joining a hold
-/// target's `return_type` raw there re-published exactly the binder the
-/// call arm had already instantiated away: `cgOne` answered
-/// `unknown | CO | CT`, where the `unknown` arm is the call arm's
-/// instantiated contribution and `CT` is `cgTwo`'s clause — the SAME
-/// `SemanticNodeId` the unrelated `class CgHolder<CT>` interns.
-///
-/// Oracle (tsgo checker, `--strict`): `cgOne` and `cgTwo` are TS7023
-/// (`implicitly has return type 'any' because it ... is referenced
-/// directly or indirectly in one of its return expressions`), so
-/// TypeScript declines to type them at all. The substrate's coinductive
-/// answer is the component's own union — which must contain each
-/// member's OWN binder and no other member's. The provisional join
-/// completes transaction-locally and is never warm-admitted.
-///
-/// Mutation recipe: joining `result.return_type()` instead of
-/// `hold.discharged(...)` restores `CT` to `cgOne` (and `CO` to
-/// `cgTwo`), leaving both members' own-binder rows green.
+/// Generic functions whose returns require each other are the checker's
+/// circular return: each is `any`, holding no binder of its own or of the
+/// other's clause.
 #[test]
-fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
+fn generic_returns_requiring_each_other_hold_no_binder() {
     let host = make_r5_host();
-
-    // The bait: an unrelated class whose clause is spelled `CT`. Under
-    // the file-scoped name-keyed binder identity it interns the very node
-    // `cgTwo`'s clause does, so `cgOne` republishing `CT` hands
-    // `CgHolder<number>` a substitution site it does not own.
-    let own_ct = r5_node(
-        &host,
-        "CgHolder",
-        FunctionPartIdentity::Member {
-            member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
-        },
-        |dispatch, node| {
-            assert_eq!(node_shape(dispatch, node), type_param("CT"));
-            node
-        },
-    );
-
-    r5_node_unadmitted(
-        &host,
-        "cgOne",
-        FunctionPartIdentity::DeclarationBody,
-        |dispatch, node| {
-            let names = reachable_type_param_names(dispatch, node);
-            assert!(
-                !names.iter().any(|name| name == "CT"),
-                "cgOne must not republish cgTwo's clause through the fixed point; got {names:?}"
-            );
-            assert!(
-                names.iter().any(|name| name == "CO"),
-                "cgOne's OWN binder must survive the fixed point; got {names:?}"
-            );
-            let mut stack = vec![node];
-            let mut seen = false;
-            while let Some(current) = stack.pop() {
-                seen |= current == own_ct;
-                if let Some(SemanticNodeData::Union(members)) =
-                    dispatch.graph().node_data(current).as_deref()
-                {
-                    stack.extend(members.iter().copied());
-                }
-            }
-            assert!(
-                !seen,
-                "cgOne must not reach `CgHolder::ownCT`'s node — an unrelated \
-                 `CgHolder<number>` would substitute into cgOne's value"
-            );
-        },
-    );
-
-    r5_node_unadmitted(
-        &host,
-        "cgTwo",
-        FunctionPartIdentity::DeclarationBody,
-        |dispatch, node| {
-            let names = reachable_type_param_names(dispatch, node);
-            assert!(
-                !names.iter().any(|name| name == "CO"),
-                "cgTwo must not republish cgOne's clause through the fixed point; got {names:?}"
-            );
-            assert!(
-                names.iter().any(|name| name == "CT"),
-                "cgTwo's OWN binder must survive the fixed point; got {names:?}"
-            );
-        },
-    );
+    for name in ["cgOne", "cgTwo"] {
+        let outcome = r5_eval(&host, name).expect("the return has a value");
+        assert_eq!(
+            outcome.ty,
+            TypeExpr::Primitive(PrimitiveName::Any),
+            "{name}"
+        );
+    }
 }
 
 /// A callee clause parameter whose name ALSO names a file-scope
@@ -5794,32 +5646,24 @@ fn method_overload_group_carrier_hides_the_implementation_signature() {
 /// poisons that expression, and the whole inferred return becomes the
 /// circularity error — reported as TS7023 with `any` as the fallback.
 ///
-/// So a fail-closed `Error(Miss)` here is the honest answer, not a
-/// missing feature: it refuses exactly where the checker refuses. Making
-/// the union arm drop held arms and publish the concrete ones would
-/// publish `number` where the checker publishes an ERROR — a divergence,
-/// in the direction this substrate must never move.
-///
-/// This corrects the record: the round that gave the conditional its
-/// structural arm claimed the two spellings answer alike. They do not,
-/// and they should not.
-///
-/// Mutation recipe: making `SliceExpr::Union`'s arm skip a held arm
-/// (`Ok(None) => continue`) instead of failing closed flips `ctRec` to
-/// `Primitive(Number)` cands=1 — the divergence — while leaving
-/// `ctRecIf` green.
+/// The error type is the answer, kept like any other: publishing the
+/// conditional's concrete arm alone would be `number` where the checker
+/// answers `any`.
 #[test]
-fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
+fn a_composed_self_call_is_the_checkers_circular_return() {
     let host = make_r5_host();
 
     // The `if` spelling converges through the SCC fixed point.
     assert_clean_warm(&host, "ctRecIf", TypeExpr::Primitive(PrimitiveName::Number));
 
-    // The ternary spelling refuses — as tsgo does, with TS7023.
-    assert_fails_closed(&host, "ctRec");
-    // And so does a hold nested inside an object member, which is the
-    // same shape one level down.
-    assert_fails_closed(&host, "ctRecObjMember");
+    // The ternary spelling is the circular return, and so is a call nested
+    // inside an object member, the same shape one level down.
+    assert_clean_warm(&host, "ctRec", TypeExpr::Primitive(PrimitiveName::Any));
+    assert_clean_warm(
+        &host,
+        "ctRecObjMember",
+        TypeExpr::Primitive(PrimitiveName::Any),
+    );
 }
 
 /// Where the leaf `any` still stands, and where the CALL-POSITION

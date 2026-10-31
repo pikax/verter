@@ -4328,45 +4328,15 @@ fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate(
     );
 }
 
-/// A yield-position hold must never leak into the RETURN equation's own
-/// join. `sccGenYield` and `sccGenPartner` form one SCC component through
-/// the YIELD-position call (`yield sccGenPartner(c)`), not through a
-/// return-position one: `sccGenYield`'s own `return` is the unconditional
-/// literal `1`, and `sccGenPartner`'s hold-back to `sccGenYield` is a
-/// RETURN-position edge on `sccGenPartner`, not on `sccGenYield`.
-///
-/// Before the fix, the hold `sccGenPartner`'s call registered while
-/// evaluating the yield argument was never dropped from the frame's hold
-/// list, so the SCC fixed point folded `sccGenPartner`'s resolved return
-/// into `sccGenYield`'s own return-type join — publishing a return
-/// parameter of `"s" | 1` instead of the correct `number`. The yield
-/// parameter alone carries `sccGenPartner`'s contribution; the RETURN
-/// parameter — this row's subject — must stay exactly `sccGenYield`'s own
-/// widened return-position value.
-///
-/// No checker answer pins the YIELD parameter for this shape: tsgo declines
-/// the whole mutually-recursive pair with TS7023 (`implicitly has return
-/// type 'any' ... referenced directly or indirectly in one of its return
-/// expressions`), so this row is an internal contract about hold
-/// contamination rather than a checker comparison. The yield parameter
-/// follows the same rule a return position does — a yielded call's
-/// fresh-literal deposit widens as a lone arm — which the two shapes the
-/// checker CAN type do pin: an unrecursive twin publishes its callee's
-/// return verbatim (`ctlPartner(c): "s" | "t"`), and a single-literal
-/// callee widens inside its own return inference.
+/// A generator whose yield requires its partner's return, which requires
+/// the generator, is the checker's circular return: TS7023 on the pair, and
+/// the return is `any`, not a `Generator` of anything.
 #[test]
-fn yield_position_hold_does_not_contaminate_the_return_position_join() {
+fn a_yield_requiring_its_own_return_is_the_circular_return() {
     let host = ts_host();
     assert_eq!(
         value_of(&host, LEAF, "sccGenYield"),
-        TypeExpr::Ref {
-            name: Arc::from("Generator"),
-            type_arguments: Arc::from(
-                vec![string(), number(), TypeExpr::Primitive(PrimitiveName::Unknown)]
-                    .into_boxed_slice()
-            ),
-        },
-        "the return parameter must be sccGenYield's own return join, never sccGenPartner's yielded value",
+        TypeExpr::Primitive(PrimitiveName::Any)
     );
 }
 

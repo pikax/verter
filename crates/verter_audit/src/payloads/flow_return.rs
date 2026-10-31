@@ -79,9 +79,6 @@ pub enum FlowDegradationTag {
     /// context-sensitive argument's return the call resolver could not
     /// continue.
     ContextSensitiveInference,
-    /// A member read off a receiver that declares no such member evaluated
-    /// to the typed miss (the checker's TS2339 recovery).
-    AbsentReceiverMember,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,
@@ -161,6 +158,21 @@ pub enum FlowFailureTag {
     Cancelled,
 }
 
+/// One diagnostic the checker reports for the evaluated body: its code and
+/// where it starts and ends. A recovery the checker defines is a complete
+/// answer, so it is told apart from a partial by this list, never by
+/// [`FlowReturnInferencePayload::partiality`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub struct FlowCheckerDiagnostic {
+    /// The checker's numeric diagnostic code.
+    pub code: u32,
+    /// The byte offset into the function's file it starts at.
+    pub start: u32,
+    /// The byte offset it ends at.
+    pub end: u32,
+}
+
 /// Per-request counters and the typed partiality reason for one
 /// flow-return inference request.
 ///
@@ -201,4 +213,7 @@ pub struct FlowReturnInferencePayload {
     /// also the default-filled value on the filtered / audit-disabled
     /// record, where no payload was collected at all.
     pub partiality: Option<FlowPartialityTag>,
+    /// The checker's diagnostics for the evaluated body, in the checker's
+    /// order. Empty on a request with no value.
+    pub checker_diagnostics: Vec<FlowCheckerDiagnostic>,
 }
