@@ -3750,10 +3750,10 @@ mod tests {
         // SCHEMA bump landed (the payload carries the typed
         // `result_completeness` position, so a degraded surface can no longer
         // be read as an exact empty one). The wire schema version the encoder
-        // stamps and the TS decoder gate (`GRAPH_FORMAT_VERSION`, exact
-        // equality) demand in lockstep: a decoder that trusts the
-        // completeness position must never accept a payload old enough to
-        // omit it.
+        // stamps and the TS decoder gate (`GRAPH_FORMAT_VERSION`, beside the
+        // explicitly supported previous version) demand in lockstep: a
+        // decoder that trusts the completeness position must never accept a
+        // payload old enough to omit it.
         assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 14);
     }
 

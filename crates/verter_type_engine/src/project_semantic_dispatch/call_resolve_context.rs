@@ -1754,12 +1754,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some((operands.source, operands.target))
     }
 
-    /// The two types of a failed relation as the checker names them
-    /// (`reportRelationError`): two types that spell the same text are
-    /// printed fully qualified (`getTypeNamesForErrorDisplay`), and a literal
-    /// source is printed as its base primitive unless the target could
-    /// itself hold a literal at its top level, where the literal is what
-    /// tells the two apart.
+    /// The two types of a failed relation as every message about the pair
+    /// names them (`getTypeNamesForErrorDisplay`): two types that spell the
+    /// same text are printed fully qualified.
+    pub(in crate::project_semantic_dispatch) fn relation_type_names(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)> {
+        let printed_source = self.print_diagnostic_type(source)?;
+        let printed_target = self.print_diagnostic_type(target)?;
+        if printed_source != printed_target {
+            return Some((printed_source, printed_target));
+        }
+        Some((
+            self.print_qualified_diagnostic_type(source)?,
+            self.print_qualified_diagnostic_type(target)?,
+        ))
+    }
+
+    /// The two types of a failed relation as the checker names them in a
+    /// message relating the pair (`reportRelationError`): their
+    /// [`Self::relation_type_names`], and a literal source printed as its
+    /// base primitive unless the target could itself hold a literal at its
+    /// top level, where the literal is what tells the two apart.
     pub(in crate::project_semantic_dispatch) fn relation_operands(
         &self,
         source: SemanticNodeId,
@@ -1776,14 +1794,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         {
             None
         } else {
-            self.literal_base_spelling(source)
+            self.literal_base_spelling(source)?
         };
-        let mut printed_source = self.print_diagnostic_type(source)?;
-        let mut printed_target = self.print_diagnostic_type(target)?;
-        if printed_source == printed_target {
-            printed_source = self.print_qualified_diagnostic_type(source)?;
-            printed_target = self.print_qualified_diagnostic_type(target)?;
-        }
+        let (printed_source, printed_target) = self.relation_type_names(source, target)?;
         let same_name = printed_source == printed_target;
         Some(RelationOperands {
             source: generalized.unwrap_or(printed_source),
@@ -2016,6 +2029,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some((head, path)) => (head, Some(path)),
             None => (declaration.decl_name.as_ref(), None),
         };
+        // `export =` makes the declaration the module itself, leaving only
+        // the path below it to print.
+        if shallow.export_assignment_target() == Some(head) {
+            let specifier = module_specifier(&declaration.canonical_id).to_owned();
+            return match path {
+                Some(path) => DeclarationChain::Module {
+                    specifier,
+                    name: path.to_owned(),
+                },
+                None => DeclarationChain::AssignedModule { specifier },
+            };
+        }
         let exports_head = |target: &ExportTarget| matches!(target, ExportTarget::Local { symbol_name, .. } if symbol_name == head);
         let export = if shallow.exports.get(head).is_some_and(exports_head) {
             head
@@ -2256,13 +2281,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// The base type a literal source prints as
-    /// (`getBaseTypeOfLiteralType`): a literal's primitive, an enum member's
-    /// enum, and each member of a union of them mapped so, in order and
-    /// once. `None` for any type that is not a literal, an enum member or a
-    /// union of them.
-    fn literal_base_spelling(&self, source: SemanticNodeId) -> Option<String> {
-        let base = |node: SemanticNodeId| -> Option<String> {
-            match self.graph().node_data(node)?.as_ref() {
+    /// (`getBaseTypeOfLiteralType`), always fully qualified
+    /// (`getTypeNameForErrorDisplay`): a literal's primitive, an enum member's
+    /// enum through its symbol chain, and each member of a union of them
+    /// mapped so, in order and once. An alias or a reference to an enum is
+    /// what it settles to, as the checker reads the type a name declares.
+    /// `Some(None)` for any type that is not a literal, an enum member or a
+    /// union of them; `None` when the print cannot be the checker's, for an
+    /// enum whose symbol chain is not known or a union of bases long enough
+    /// for the node builder to abbreviate.
+    fn literal_base_spelling(&self, source: SemanticNodeId) -> Option<Option<String>> {
+        use crate::semantic_query::display::{clip_checker_text, DeclarationName};
+        let source = self.settle_through_carriers(source).unwrap_or(source);
+        let base = |node: SemanticNodeId| -> Option<Option<String>> {
+            let Some(data) = self.graph().node_data(node) else {
+                return Some(None);
+            };
+            Some(match data.as_ref() {
                 SemanticNodeData::Literal(value) => Some(
                     match LiteralKind::of(value) {
                         LiteralKind::String => "string",
@@ -2273,17 +2308,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .to_owned(),
                 ),
                 SemanticNodeData::EnumLiteral(literal) => {
-                    Some(literal.enum_decl.decl_name.to_string())
+                    let declaration = DeclarationName {
+                        canonical_id: literal.enum_decl.canonical_id.clone(),
+                        decl_name: literal.enum_decl.decl_name.clone(),
+                    };
+                    let chain = self.declaration_chain(&declaration);
+                    Some(chain.spelled(&literal.enum_decl.decl_name)?.0)
                 }
                 _ => None,
-            }
+            })
         };
-        if let Some(single) = base(source) {
-            return Some(single);
+        if let Some(single) = base(source)? {
+            return Some(Some(clip_checker_text(single)));
         }
-        let data = self.graph().node_data(source)?;
+        let Some(data) = self.graph().node_data(source) else {
+            return Some(None);
+        };
         let SemanticNodeData::Union(members) = data.as_ref() else {
-            return None;
+            return Some(None);
         };
         let strict = self.relation_strict_config().strict_null_checks;
         let (mut has_null, mut has_undefined) = (false, false);
@@ -2307,14 +2349,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // two unit types whose base is `boolean`.
             let spelled = match self.graph().node_data(member).as_deref() {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "boolean".to_owned(),
-                _ => base(member)?,
+                _ => match base(member)? {
+                    Some(spelled) => spelled,
+                    None => return Some(None),
+                },
             };
             if !bases.contains(&spelled) {
                 bases.push(spelled);
             }
         }
         if bases.is_empty() {
-            return None;
+            return Some(None);
         }
         // The checker prints the bases in its intrinsic type-id order, the
         // enums a program declares after them.
@@ -2332,7 +2377,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if has_undefined {
             bases.push("undefined".to_owned());
         }
-        Some(bases.join(" | "))
+        let printed = bases.join(" | ");
+        if bases.len() == 1 {
+            return Some(Some(clip_checker_text(printed)));
+        }
+        (printed.len() <= crate::semantic_query::checker_policy::MAXIMUM_TRUNCATION_LENGTH)
+            .then_some(Some(printed))
     }
 }
 

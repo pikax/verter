@@ -378,8 +378,30 @@ pub(crate) enum DeclarationChain {
     /// `import("<specifier>").<name>`, `name` being the module export
     /// (and any namespace path below it).
     Module { specifier: String, name: String },
+    /// `import("<specifier>")`: `export =` made the declaration the module
+    /// itself, which has no export name left to print.
+    AssignedModule { specifier: String },
     /// The chain is not known, so no print naming it is the checker's.
     Unknown,
+}
+
+impl DeclarationChain {
+    /// The text `typeToString` spells a declaration named `decl_name` by
+    /// through this chain, with the length the node builder counts for it.
+    /// `None` when the chain is not known.
+    pub(crate) fn spelled(&self, decl_name: &str) -> Option<(String, usize)> {
+        match self {
+            Self::Unqualified => Some((decl_name.to_owned(), reference_length(decl_name))),
+            Self::Module { specifier, name } => Some((
+                format!("import(\"{specifier}\").{name}"),
+                specifier.len() + 10 + entity_name_length(name.split('.')),
+            )),
+            Self::AssignedModule { specifier } => {
+                Some((format!("import(\"{specifier}\")"), specifier.len() + 10))
+            }
+            Self::Unknown => None,
+        }
+    }
 }
 
 /// `typeToString`'s clip of a message's type text: a text of at least twice
@@ -2259,22 +2281,16 @@ fn reference_name(
         canonical_id: canonical_id.clone(),
         decl_name: decl_name.clone(),
     };
-    match visited.declaration_chains.get(&declaration) {
-        Some(DeclarationChain::Unqualified) => {
-            visited.add_length(reference_length(decl_name));
-            decl_name.to_string()
-        }
-        Some(DeclarationChain::Module { specifier, name }) => {
-            let text = format!("import(\"{specifier}\").{name}");
-            let length = specifier.len() + 10 + entity_name_length(name.split('.'));
+    let Some(chain) = visited.declaration_chains.get(&declaration) else {
+        visited.unchained_declarations.push(declaration);
+        return decl_name.to_string();
+    };
+    match chain.spelled(decl_name) {
+        Some((text, length)) => {
             visited.add_length(length);
             text
         }
-        Some(DeclarationChain::Unknown) => visited.cut(),
-        None => {
-            visited.unchained_declarations.push(declaration);
-            decl_name.to_string()
-        }
+        None => visited.cut(),
     }
 }
 

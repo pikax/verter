@@ -651,15 +651,17 @@ describe("surface partial reason taxonomy parity", () => {
   describe("schema version gate", () => {
     const fanout = SurfacePartialReason.FANOUT_LIMIT;
 
-    const payloadAt = (schemaVersion: number, cause: number): Uint8Array => {
+    const messageAt = (schemaVersion: number, cause: number) => {
       const payload = create(FactPayloadSchema, { ...factFixture(), schemaVersion });
       payload.body!.facts!.delivery = {
         $typeName: "verter.v1.FactGuarantee",
         kind: 3,
         causes: [cause],
       };
-      return toBinary(FactPayloadSchema, payload);
+      return payload;
     };
+    const payloadAt = (schemaVersion: number, cause: number): Uint8Array =>
+      toBinary(FactPayloadSchema, messageAt(schemaVersion, cause));
 
     it("publishes the fan-out reason past the exact gate of schema 13 readers", () => {
       // Those readers accept 12 and 13, then throw on a reason they do not
@@ -671,9 +673,15 @@ describe("surface partial reason taxonomy parity", () => {
     });
 
     it("rejects a payload above its own version at the gate, before its vocabulary", () => {
-      expect(() =>
-        decodeTypedComponentMetaPayload(payloadAt(GRAPH_FORMAT_VERSION + 1, fanout)),
-      ).toThrow(/version mismatch/);
+      // Nothing past the gate is readable: a reason this decoder does not
+      // know, in a body it cannot decode. Only the gate running first answers
+      // with the version, so a newer payload never fails on what it added.
+      const unknown = Math.max(...named.map((value) => value.number)) + 1;
+      const newer = messageAt(GRAPH_FORMAT_VERSION + 1, unknown);
+      newer.typeGraph = undefined;
+      expect(() => decodeTypedComponentMetaPayload(toBinary(FactPayloadSchema, newer))).toThrow(
+        /version mismatch/,
+      );
     });
 
     it("keeps decoding schema 13 payloads", () => {

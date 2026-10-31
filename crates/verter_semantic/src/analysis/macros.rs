@@ -950,8 +950,10 @@ impl MacroFieldAddressTable {
     /// Replay the analyzer's macro assembly over `program` once and record
     /// every macro's and field's address. `work` receives one unit per
     /// statement, declarator, call, member list, member, runtime property
-    /// and field visited: linear in the program's macro surface, and
-    /// independent of declarations no macro field resolves into.
+    /// and field visited: linear in the program's macro surface. Fields held
+    /// in a macro's own arguments never touch unrelated declarations; the
+    /// first field resolved through a named declaration indexes every visible
+    /// declaration's members once, each charged here.
     #[must_use]
     pub fn build(
         program: &Program<'_>,
@@ -1351,22 +1353,32 @@ fn locate_macro_calls(
     work: &verter_audit::observe::ObservedU64,
 ) -> FxHashMap<verter_span::Span, MacroCallAddress> {
     fn visit(
-        call: &CallExpression<'_>,
+        root: &CallExpression<'_>,
         wanted: &FxHashSet<verter_span::Span>,
         address: &mut MacroCallAddress,
         found: &mut FxHashMap<verter_span::Span, MacroCallAddress>,
         work: &verter_audit::observe::ObservedU64,
     ) {
-        work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let span = verter_span::Span::new(call.span.start, call.span.end);
-        if wanted.contains(&span) {
-            found.entry(span).or_insert_with(|| address.clone());
-        }
-        for (ordinal, argument) in call.arguments.iter().enumerate() {
+        let mut enter = |call: &CallExpression<'_>, address: &MacroCallAddress| {
+            work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let span = verter_span::Span::new(call.span.start, call.span.end);
+            if wanted.contains(&span) {
+                found.entry(span).or_insert_with(|| address.clone());
+            }
+        };
+        enter(root, address);
+        // One frame per nesting level: the arguments of the call open there.
+        let mut open = vec![root.arguments.iter().enumerate()];
+        while let Some(arguments) = open.last_mut() {
+            let Some((ordinal, argument)) = arguments.next() else {
+                open.pop();
+                address.arguments.pop();
+                continue;
+            };
             if let Some(Expression::CallExpression(inner)) = argument.as_expression() {
                 address.arguments.push(ordinal as u32);
-                visit(inner, wanted, address, found, work);
-                address.arguments.pop();
+                enter(inner, address);
+                open.push(inner.arguments.iter().enumerate());
             }
         }
     }

@@ -1050,10 +1050,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 source_view.as_ref()?;
                 let missing = self.missing_required_properties(source, target)?;
                 if !missing.is_empty() {
-                    let (source_printed, target_printed) = (
-                        self.print_diagnostic_type(source)?,
-                        self.print_diagnostic_type(target)?,
-                    );
+                    let (source_printed, target_printed) =
+                        self.relation_type_names(source, target)?;
                     let (code, arguments) = match missing.as_slice() {
                         [name] => (
                             CheckerDiagnosticCode::PropertyMissing,
