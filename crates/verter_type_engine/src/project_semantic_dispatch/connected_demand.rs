@@ -480,6 +480,21 @@ pub struct ConnectedDemandLedger<'a> {
     schedule_cut: SyncBool,
 }
 
+/// A connected demand's charges at the start of a stage
+/// ([`ConnectedDemandLedger::stage_checkpoint`]).
+pub(crate) struct StageCharges {
+    work_used: usize,
+    bytes_used: u64,
+    advisory_bytes_used: u64,
+    tripped: PartialReasonSet,
+    schedule_cut: bool,
+    request_effects: RequestEffects,
+    paid: CostIdentitySet,
+    /// The open recording's exclusive cost, prerequisite count and tail
+    /// steps.
+    recording: Option<(LogicalUsage, usize, u32)>,
+}
+
 /// What one connected demand did to its request
 /// ([`ConnectedDemandLedger::request_effects`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1287,6 +1302,59 @@ impl ConnectedDemandLedger<'_> {
                 SCOPE_CHARGE_WRITES.with(|count| count.set(count.get() + 1));
                 scope.exclusive = scope.exclusive.saturating_add(usage);
             }
+        }
+    }
+
+    /// What the demand has charged so far, for a stage that may be dropped
+    /// unfinished ([`Self::roll_back_stage`]).
+    pub(crate) fn stage_checkpoint(&self) -> StageCharges {
+        let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
+        StageCharges {
+            work_used: self.work_used.get(),
+            bytes_used: self.bytes_used.get(),
+            advisory_bytes_used: self.advisory_bytes_used.get(),
+            tripped: self.tripped.get(),
+            schedule_cut: self.schedule_cut.get(),
+            request_effects: self.request_effects.get(),
+            paid: (*self.paid.borrow()).clone(),
+            recording: scopes
+                .last()
+                .map(|scope| (scope.exclusive, scope.prerequisites.len(), scope.tail_steps)),
+        }
+    }
+
+    /// Forget everything an unfinished stage charged: the stage runs again
+    /// once what it waits on is delivered, and its work is paid once.
+    pub(crate) fn roll_back_stage(&self, charges: StageCharges) {
+        let StageCharges {
+            work_used,
+            bytes_used,
+            advisory_bytes_used,
+            tripped,
+            schedule_cut,
+            request_effects,
+            paid,
+            recording,
+        } = charges;
+        let mut scopes = self.scopes.borrow_mut();
+        self.pending_usage.take();
+        self.work_used.set(work_used);
+        self.bytes_used.set(bytes_used);
+        self.advisory_bytes_used.set(advisory_bytes_used);
+        self.tripped.set(tripped);
+        self.schedule_cut.set(schedule_cut);
+        self.request_effects
+            .operations
+            .set(request_effects.operations);
+        self.request_effects.paid.set(request_effects.paid);
+        *self.paid.borrow_mut() = paid;
+        if let (Some(scope), Some((exclusive, prerequisites, tail_steps))) =
+            (scopes.last_mut(), recording)
+        {
+            scope.exclusive = exclusive;
+            scope.prerequisites.truncate(prerequisites);
+            scope.tail_steps = tail_steps;
         }
     }
 

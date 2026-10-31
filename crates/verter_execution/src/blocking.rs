@@ -33,6 +33,66 @@ use std::sync::Arc;
 use std::task::{Poll, Wake, Waker};
 use std::time::Duration;
 
+/// A dependency a stage of a polled computation handed off instead of waiting
+/// for it: owned, with one poller, finished once it answers `Ready`.
+pub trait OwnedWait: Send {
+    /// `Ready` once the dependency is available to the stage that runs next,
+    /// or `Pending` with `waker` registered on its completion.
+    fn poll_wait(&mut self, waker: &Waker) -> Poll<()>;
+}
+
+/// The stage gate on this thread: a stage running under one reads a
+/// dependency that would hold the thread by stopping there.
+enum StageGate {
+    Open,
+    Stopped(Box<dyn OwnedWait>),
+}
+
+std::thread_local! {
+    static STAGE_GATE: std::cell::RefCell<Option<StageGate>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run a stage under the stage gate, and hand back what stopped it, if
+/// anything did. A gate installed around it is restored, unwinding included.
+pub fn with_stage_gate<R>(stage: impl FnOnce() -> R) -> (R, Option<Box<dyn OwnedWait>>) {
+    struct Restore(Option<StageGate>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            STAGE_GATE.with(|gate| *gate.borrow_mut() = outer);
+        }
+    }
+    let outer = STAGE_GATE.with(|gate| gate.borrow_mut().replace(StageGate::Open));
+    let restore = Restore(outer);
+    let result = stage();
+    let stopped = STAGE_GATE.with(|gate| match gate.borrow_mut().replace(StageGate::Open) {
+        Some(StageGate::Stopped(wait)) => Some(wait),
+        _ => None,
+    });
+    drop(restore);
+    (result, stopped)
+}
+
+/// Whether a stage runs on this thread and has not stopped.
+pub fn stage_gate_open() -> bool {
+    STAGE_GATE.with(|gate| matches!(*gate.borrow(), Some(StageGate::Open)))
+}
+
+/// Whether the stage running on this thread stopped at its gate.
+pub fn stage_stopped() -> bool {
+    STAGE_GATE.with(|gate| matches!(*gate.borrow(), Some(StageGate::Stopped(_))))
+}
+
+/// Stop the stage running on this thread at `wait`.
+pub fn stop_stage(wait: Box<dyn OwnedWait>) {
+    STAGE_GATE.with(|gate| {
+        if let Some(gate) = gate.borrow_mut().as_mut() {
+            *gate = StageGate::Stopped(wait);
+        }
+    });
+}
+
 /// A dependency family whose synchronous wait can hold the calling thread.
 ///
 /// Each variant names one owner's wait, so a probe's report says which

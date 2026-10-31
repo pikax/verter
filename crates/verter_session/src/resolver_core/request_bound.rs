@@ -202,6 +202,9 @@ impl IndexedInputs for crate::VerterHost {
         if let Some(serve) = retained_indexed_input(self, canonical_id) {
             return Some(serve);
         }
+        if consumed_load_ended(self, canonical_id) {
+            return None;
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id).map(|serve| {
             super::owned_lowering_port::observe_whole_content(
                 canonical_id,
@@ -979,6 +982,9 @@ where
         if let Some(serve) = retained_indexed_input(self.0.host(), canonical_id) {
             self.0.complete_canonical(canonical_id);
             return Some(serve);
+        }
+        if consumed_load_ended(self.0.host(), canonical_id) {
+            return None;
         }
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::ensure_indexed_ready_serve"
@@ -1893,6 +1899,18 @@ where
             .request_view()
             .promote_route_completion(canonical, whole_hash, route_hash)
     }
+}
+
+/// Whether this reader already waited on a load of `canonical` that ended
+/// without a delivery. The reader answers with that outcome, as after a
+/// synchronous load that ended the same way, and never materializes the file
+/// again on the polling thread.
+fn consumed_load_ended(host: &crate::VerterHost, canonical: &str) -> bool {
+    let canonical = host.normalized_analysis_canonical(canonical);
+    verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
+        host.normalized_analysis_canonical(file) == canonical
+    })
+    .is_some()
 }
 
 /// Consume a load delivery through the same input observations as a live

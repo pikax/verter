@@ -140,7 +140,7 @@ pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>
 /// Variants describe non-fatal observations (cycle short-circuits, open
 /// conditionals, pathological-input cap) so consumers can render
 /// human-readable messages without re-walking the graph.
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
@@ -382,7 +382,7 @@ impl verter_session_query::retention::owned::Measured for ShallowDiagnostic {
 /// operands (a recursive back-edge's arguments) stay with the read that
 /// delivered the diagnostic, so the error has no public copy and no
 /// borrowed `QueryError` view to copy from.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DiagnosticError(pub(crate) QueryError);
 
 impl DiagnosticError {
@@ -1210,7 +1210,17 @@ struct ArmProbe {
     how: ArmHow,
 }
 
+impl Clone for ArmProbe {
+    fn clone(&self) -> Self {
+        Self {
+            view: self.view.clone(),
+            node: self.node,
+            how: self.how,
+        }
+    }
+}
 /// What one arm of a composite split reported.
+#[derive(Clone)]
 enum ArmReport {
     /// The surface it settled on and how it read the segment.
     Settled(ArmProbe),
@@ -1221,6 +1231,7 @@ enum ArmReport {
 
 /// The composite a join decides the segment for once its arms reported
 /// ([`PathWalker::composite_hop`]).
+#[derive(Clone)]
 struct CompositeJoin {
     slot: usize,
     node: SemanticNodeId,
@@ -1261,6 +1272,7 @@ enum CompositeHop {
 /// driver pushes a `Join*` frame **before** the per-arm `Step` frames
 /// so LIFO pop order makes the join execute after every arm result has
 /// been appended to the `results` stack.
+#[derive(Clone)]
 enum WalkFrame {
     Step {
         node: SemanticNodeId,
@@ -1477,9 +1489,105 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// The shallow-surface slots filled since the synthesiser last read
     /// them: each completes the visits that were to fill it.
     filled_shallow_slots: Vec<BufferTarget>,
+    /// The node the next stage continues the walk at, its hop reached by
+    /// the stage before it.
+    continued_hop: Option<SemanticNodeId>,
+}
+
+/// A walker's own state, which outlives the stage that advanced it.
+#[derive(Clone)]
+pub(super) struct WalkRetained {
+    visited_aliases: smallvec::SmallVec<[AliasCycleIdentity; 8]>,
+    visited_nodes: rustc_hash::FxHashSet<SemanticNodeId>,
+    arm_probes: Vec<Vec<Option<ArmReport>>>,
+    intermediate_nodes: Vec<Option<SemanticNodeId>>,
+    walker_diagnostics: Vec<ShallowDiagnostic>,
+    cache_suppress: bool,
+    completeness: crate::semantic_query::ResultCompleteness,
+    positional_child_terminal: Option<SemanticNodeId>,
+    positional_children_supported: bool,
+    open_spread_partial: bool,
+    surface_failure: Option<QueryError>,
+    original_path_non_empty: bool,
+    origin_file: Option<verter_type_expr::OwnedStr>,
+    filled_shallow_slots: Vec<BufferTarget>,
+    continued_hop: Option<SemanticNodeId>,
+}
+
+/// A path projection between its stages on a production poll.
+#[derive(Default)]
+pub(super) enum PathProgress {
+    /// Its operands are next.
+    #[default]
+    Begin,
+    /// Its walk, retained between hops.
+    Walk(Box<PathWalkProgress>),
+}
+
+/// A retained walk: the walker's state, its frames and the arms it finished.
+pub(super) struct PathWalkProgress {
+    start: super::build::PathWalkStart,
+    retained: WalkRetained,
+    frames: Vec<WalkFrame>,
+    results: Vec<SemanticNodeId>,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
+    /// One stage of a path projection on a production poll: its operands,
+    /// then one frame of its walk at a time, then its output. Both drivers
+    /// run the same walker, frame by frame.
+    pub(super) fn advance_project_path(
+        &self,
+        base: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        progress: &mut PathProgress,
+    ) -> super::query_frames::StageRun {
+        use super::query_frames::StageRun;
+        let PathProgress::Walk(walk) = progress else {
+            return match self.begin_project_path(base, path, context) {
+                Err(output) => StageRun::Done(Box::new((*output).into())),
+                Ok(start) => {
+                    if self.stage_waits() {
+                        return StageRun::Advanced;
+                    }
+                    let mut walker = PathWalker::new(self, context, &start.fence);
+                    let frames = walker.begin_walk(start.start_base, start.walker_path.as_ref());
+                    let retained = walker.retained();
+                    drop(walker);
+                    *progress = PathProgress::Walk(Box::new(PathWalkProgress {
+                        start,
+                        retained,
+                        frames,
+                        results: Vec::new(),
+                    }));
+                    StageRun::Advanced
+                }
+            };
+        };
+        let PathWalkProgress {
+            start,
+            retained,
+            frames,
+            results,
+        } = &mut **walk;
+        let mut walker = PathWalker::new(self, context, &start.fence);
+        walker.restore(retained.clone());
+        if !frames.is_empty() {
+            walker.walk_stage(frames, results);
+            *retained = walker.retained();
+            return StageRun::Advanced;
+        }
+        let result = results
+            .last()
+            .copied()
+            .unwrap_or_else(|| walker.opaque_miss());
+        StageRun::Done(Box::new(
+            self.finish_project_path(walker, result, base, path, context, start)
+                .into(),
+        ))
+    }
+
     construction_ordinal_seam! {
         /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
         /// `Object` node. Each contributor's surface is extracted (an interface
@@ -1914,7 +2022,65 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             original_path_non_empty: false,
             origin_file: None,
             filled_shallow_slots: Vec::new(),
+            continued_hop: None,
         }
+    }
+
+    /// The walker's own state, as it stands.
+    fn retained(&self) -> WalkRetained {
+        WalkRetained {
+            visited_aliases: self.visited_aliases.clone(),
+            visited_nodes: self.visited_nodes.clone(),
+            arm_probes: self.arm_probes.clone(),
+            intermediate_nodes: self.intermediate_nodes.clone(),
+            walker_diagnostics: self.walker_diagnostics.clone(),
+            cache_suppress: self.cache_suppress,
+            completeness: self.completeness.clone(),
+            positional_child_terminal: self.positional_child_terminal,
+            positional_children_supported: self.positional_children_supported,
+            open_spread_partial: self.open_spread_partial,
+            surface_failure: self.surface_failure.clone(),
+            original_path_non_empty: self.original_path_non_empty,
+            origin_file: self.origin_file.clone(),
+            filled_shallow_slots: self.filled_shallow_slots.clone(),
+            continued_hop: self.continued_hop,
+        }
+    }
+
+    /// Put the walker back as it stood at `retained`.
+    fn restore(&mut self, retained: WalkRetained) {
+        let WalkRetained {
+            visited_aliases,
+            visited_nodes,
+            arm_probes,
+            intermediate_nodes,
+            walker_diagnostics,
+            cache_suppress,
+            completeness,
+            positional_child_terminal,
+            positional_children_supported,
+            open_spread_partial,
+            surface_failure,
+            original_path_non_empty,
+            origin_file,
+            filled_shallow_slots,
+            continued_hop,
+        } = retained;
+        self.visited_aliases = visited_aliases;
+        self.visited_nodes = visited_nodes;
+        self.arm_probes = arm_probes;
+        self.intermediate_nodes = intermediate_nodes;
+        self.walker_diagnostics = walker_diagnostics;
+        self.cache_suppress = cache_suppress;
+        self.completeness = completeness;
+        self.positional_child_terminal = positional_child_terminal;
+        self.positional_children_supported = positional_children_supported;
+        self.open_spread_partial = open_spread_partial;
+        self.surface_failure = surface_failure;
+        self.original_path_non_empty = original_path_non_empty;
+        self.origin_file = origin_file;
+        self.filled_shallow_slots = filled_shallow_slots;
+        self.continued_hop = continued_hop;
     }
 
     /// Derived accessor for the projection mode. The full demand axis
@@ -3652,7 +3818,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// the produced arm results per the contributor rule. Bounded by
     /// graph size (finite, interned). No stack recursion on arm descent.
     /// No depth cap.
-    pub(super) fn walk(&mut self, base: SemanticNodeId, path: &[PathSegment]) -> SemanticNodeId {
+    fn begin_walk(&mut self, base: SemanticNodeId, path: &[PathSegment]) -> Vec<WalkFrame> {
         // Record whether this is a non-empty projected path vs an empty
         // whole-surface projection — the terminal expansion of a
         // non-empty path resolves a `DeclRef` / `InstantiationRef`
@@ -3665,62 +3831,86 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .and_then(|scope| scope.canonical_file());
         let initial_path: verter_type_expr::OwnedSlice<PathSegment> =
             verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice());
-        let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
+        let frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
             path: initial_path,
             index: 0,
             arm_read: None,
         }];
-        let mut results: Vec<SemanticNodeId> = Vec::new();
+        frames
+    }
 
+    /// Walk `path` from `base` to its terminal node.
+    pub(super) fn walk(&mut self, base: SemanticNodeId, path: &[PathSegment]) -> SemanticNodeId {
+        let mut frames = self.begin_walk(base, path);
+        let mut results: Vec<SemanticNodeId> = Vec::new();
         while let Some(frame) = frames.pop() {
-            match frame {
-                WalkFrame::Step {
-                    node,
-                    path,
-                    index,
-                    arm_read,
-                } => {
-                    self.advance_step(node, &path, index, arm_read, &mut frames, &mut results);
-                }
-                WalkFrame::JoinUnion {
-                    arm_count,
-                    composite,
-                } => {
-                    if let Some(join) = composite {
-                        if self.decide_composite_join(
-                            join,
-                            arm_count,
-                            true,
-                            &mut frames,
-                            &mut results,
-                        ) {
-                            continue;
-                        }
+            self.run_walk_frame(frame, &mut frames, &mut results);
+        }
+        results.pop().unwrap_or_else(|| self.opaque_miss())
+    }
+
+    /// Run the walk's next frame as one stage of a polled build: a hop, or a
+    /// join. A stage that reached something it waits on is undone, so the
+    /// walk resumes at that frame with every hop and arm before it finished.
+    fn walk_stage(&mut self, frames: &mut Vec<WalkFrame>, results: &mut Vec<SemanticNodeId>) {
+        let Some(frame) = frames.pop() else {
+            return;
+        };
+        let before = (
+            self.retained(),
+            results.clone(),
+            frames.len(),
+            frame.clone(),
+        );
+        self.run_walk_frame(frame, frames, results);
+        if self.dispatch.stage_waits() {
+            let (retained, kept, depth, frame) = before;
+            self.restore(retained);
+            frames.truncate(depth);
+            *results = kept;
+            frames.push(frame);
+        }
+    }
+
+    fn run_walk_frame(
+        &mut self,
+        frame: WalkFrame,
+        frames: &mut Vec<WalkFrame>,
+        results: &mut Vec<SemanticNodeId>,
+    ) {
+        match frame {
+            WalkFrame::Step {
+                node,
+                path,
+                index,
+                arm_read,
+            } => {
+                self.advance_step(node, &path, index, arm_read, frames, results);
+            }
+            WalkFrame::JoinUnion {
+                arm_count,
+                composite,
+            } => {
+                if let Some(join) = composite {
+                    if self.decide_composite_join(join, arm_count, true, frames, results) {
+                        return;
                     }
-                    self.join_union(arm_count, &mut results);
                 }
-                WalkFrame::JoinIntersection {
-                    arm_count,
-                    composite,
-                } => {
-                    if let Some(join) = composite {
-                        if self.decide_composite_join(
-                            join,
-                            arm_count,
-                            false,
-                            &mut frames,
-                            &mut results,
-                        ) {
-                            continue;
-                        }
+                self.join_union(arm_count, results);
+            }
+            WalkFrame::JoinIntersection {
+                arm_count,
+                composite,
+            } => {
+                if let Some(join) = composite {
+                    if self.decide_composite_join(join, arm_count, false, frames, results) {
+                        return;
                     }
-                    self.join_intersection(arm_count, &mut results);
                 }
+                self.join_intersection(arm_count, results);
             }
         }
-
-        results.pop().unwrap_or_else(|| self.opaque_miss())
     }
 
     /// Advance a single `Step` frame. Runs the linear per-segment loop
@@ -3743,7 +3933,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         frames: &mut Vec<WalkFrame>,
         results: &mut Vec<SemanticNodeId>,
     ) {
-        if !self.visited_nodes.insert(start_node) {
+        // A hop a stage continues at was reached, not re-entered.
+        let continued = self.continued_hop.take() == Some(start_node);
+        if !continued && !self.visited_nodes.insert(start_node) {
             results.push(self.dispatch.opaque(QueryError::AliasCycle {
                 chain: verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new()),
             }));
@@ -3775,6 +3967,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let cap_active = budget > 0 && budget < crate::project_semantic_dispatch::MAX_DEPTH;
 
         while index < path.len() {
+            // A polled build runs each hop as a stage of its own.
+            if (current != start_node || index != start_index) && self.dispatch.stage_runs_here() {
+                self.continued_hop = Some(current);
+                frames.push(WalkFrame::Step {
+                    node: current,
+                    path: path.clone(),
+                    index,
+                    arm_read,
+                });
+                return;
+            }
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
                     name: verter_type_expr::OwnedStr::from("depth-budget-exceeded"),

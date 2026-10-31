@@ -162,6 +162,8 @@ pub(super) enum FrameBuild {
     Call(Box<CallBuild>),
     Flow(Box<FlowBuild>),
     Family(Box<FamilyBuild>),
+    /// A family built in stages on a production poll's drive.
+    Stage(Box<StageBuild>),
     /// A family build waiting on its file's load, to read that file next
     /// from the load's terminal outcome.
     FamilySource(Box<FamilyBuild>, Arc<str>, LoadEnded),
@@ -266,6 +268,97 @@ pub(super) struct CallSeam {
     needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
+}
+
+/// A family a production poll's drive builds in stages: what its completed
+/// stages retain and the answers its frame received.
+///
+/// A family reads through the same helpers wherever its build runs. On a
+/// production poll each stage runs under a seam ([`StageSeam`]) where a read
+/// the frame holds no answer for, and that must be computed, becomes the
+/// frame's need instead of waiting on the polling thread or nesting another
+/// build natively, and a file that is not ready stops the stage at its load
+/// gate. Such a stage is unfinished: it charges nothing, nothing built in it
+/// is kept, and it runs once more with the answer. Every stage that finished
+/// stays finished, with what it observed and charged.
+#[derive(Default)]
+pub(super) struct StageBuild {
+    answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    awaiting: Option<SemanticQueryKey>,
+    /// The claim the awaited read entered with, until the runtime takes it.
+    claim: Option<ClaimAttempt>,
+    /// The key the family computes, its subject normalized once.
+    subject: Option<SemanticQueryKey>,
+    progress: StageProgress,
+}
+
+/// How far a family's stages have gone.
+#[derive(Default)]
+pub(super) enum StageProgress {
+    /// The family's build is its one stage.
+    #[default]
+    Build,
+    /// A path projection, retained between the hops of its walk.
+    Path(super::walk::PathProgress),
+}
+
+/// What one stage of a family did.
+pub(super) enum StageRun {
+    /// The next stage runs on.
+    Advanced,
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
+}
+
+/// What the stage a frame is running reads at its seam.
+pub(super) struct StageSeam {
+    answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    /// The one read the stage waits on, with the claim it entered with.
+    needs: SeamNeeds,
+    /// The frame depth a needed demand's own frame runs at.
+    depth: u32,
+    /// How many queries the stage is evaluating in place now.
+    nested: u32,
+}
+
+/// A dependency a stage handed off, waited on as a frame waits on a load.
+struct HandedOff(Box<dyn verter_execution::blocking::OwnedWait>);
+
+impl IndexedLoad for HandedOff {
+    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<IndexedLoadOutcome> {
+        self.0
+            .poll_wait(waker)
+            .map(|()| IndexedLoadOutcome::Integrated)
+    }
+}
+
+/// What a family stage reads from the frame it runs in.
+struct StageContext<'f> {
+    /// The frame depth a needed demand's own frame runs at.
+    depth: u32,
+    awaited: &'f mut Vec<(Arc<str>, Option<LoadEnded>)>,
+    prelude: &'f mut CarrierNormalizationPrelude,
+}
+
+/// Whether a production poll's drive builds `key`'s family in stages. A
+/// relation decides inside its own checker transaction, and a call, a flow
+/// return and the families with frames of their own build as those frames.
+pub(super) fn builds_in_stages(key: &SemanticQueryKey) -> bool {
+    match key {
+        SemanticQueryKey::ProjectPath { .. }
+        | SemanticQueryKey::ProjectMember { .. }
+        | SemanticQueryKey::IndexedAccess { .. }
+        | SemanticQueryKey::KeyOf { .. }
+        | SemanticQueryKey::MappedType { .. }
+        | SemanticQueryKey::SignaturesOfType { .. }
+        | SemanticQueryKey::ReadSignatureResult(_)
+        | SemanticQueryKey::ProjectObjectSpread { .. }
+        | SemanticQueryKey::LowerLocator { .. }
+        | SemanticQueryKey::AwaitedNormalize { .. }
+        | SemanticQueryKey::AsyncReturnPayload { .. }
+        | SemanticQueryKey::ClassifyBroadRuntime { .. } => true,
+        SemanticQueryKey::ResolveOverloadSet { type_args, .. } => !type_args.is_empty(),
+        _ => false,
+    }
 }
 
 /// What a frame's build did in one step.
@@ -421,6 +514,7 @@ pub(super) struct DecisionSeam {
 pub(super) enum JoinSeam {
     Decision,
     Flow,
+    Stage,
 }
 
 pub(super) struct ConditionalChildQueries<'d> {
@@ -445,6 +539,7 @@ impl Drop for ConditionalChildQueries<'_> {
 pub(super) struct NestedDecisionQuery<'d> {
     seam: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>>,
     flow: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<FlowSeam>>>,
+    stage: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<StageSeam>>>,
 }
 
 impl Drop for NestedDecisionQuery<'_> {
@@ -455,6 +550,11 @@ impl Drop for NestedDecisionQuery<'_> {
             }
         }
         if let Some(cell) = self.flow {
+            if let Some(seam) = cell.borrow_mut().as_mut() {
+                seam.nested -= 1;
+            }
+        }
+        if let Some(cell) = self.stage {
             if let Some(seam) = cell.borrow_mut().as_mut() {
                 seam.nested -= 1;
             }
@@ -495,6 +595,8 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     /// answers every read of its file by this frame's build, across steps,
     /// without letting later scope reads synchronously retry the load.
     consumed_loads: crate::resolver_core::request_ports::ConsumedLoads,
+    /// What normalizing a staged family's subject observed.
+    carrier_prelude: CarrierNormalizationPrelude,
 }
 
 /// What produces a frame's demand: the family memo's producer lease, or —
@@ -1243,7 +1345,14 @@ impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> SemanticQueryPol
     /// when the root is answered at its admission.
     fn start(&mut self, key: SemanticQueryKey) -> Option<ValueRead> {
         let lender = self.lender;
-        if lender.drives_on_the_runtime(&key) {
+        // A family built in stages is a frame from its root, its key
+        // canonical as its synchronous entry's is.
+        let key = if lender.stages_from_the_root(&key) {
+            lender.canonical_admission_key(key)
+        } else {
+            key
+        };
+        if lender.drives_on_the_runtime(&key) || lender.stages_from_the_root(&key) {
             let operation = (!matches!(key, SemanticQueryKey::FlowReturn(_)))
                 .then(|| lender.enter_operation(false));
             let start = match operation {
@@ -1516,6 +1625,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             computed_at: self.dispatch.workspace_edit(),
             awaited_loads: Vec::new(),
             consumed_loads: Vec::new(),
+            carrier_prelude: CarrierNormalizationPrelude::none(),
         }))
     }
 }
@@ -1658,6 +1768,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     // when the runtime starts it.
                     let claim = match frame.build.as_mut() {
                         Some(FrameBuild::Conditional(build)) => build.claim.take(),
+                        Some(FrameBuild::Stage(build)) => build.claim.take(),
                         Some(FrameBuild::Call(build)) => {
                             let claim = build.claim.take();
                             if let Some(claim) = &claim {
@@ -1986,6 +2097,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         family
             && !crate::semantic_execution::drive_running()
             && self.active_operand_evidence.borrow().is_empty()
+    }
+
+    /// Whether a production poll of `key` runs on the continuation runtime
+    /// as a family built in stages: outside any drive and every checker
+    /// obligation or forced operand.
+    fn stages_from_the_root(&self, key: &SemanticQueryKey) -> bool {
+        builds_in_stages(key)
+            && !crate::semantic_execution::drive_running()
+            && self.active_operand_evidence.borrow().is_empty()
+            && self
+                .dispatch_txn
+                .try_borrow()
+                .is_ok_and(|txn| txn.obligations.decides_root())
     }
 
     /// Evaluate `key` on the continuation runtime: the synchronous entry
@@ -2447,6 +2571,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn nested_decision_query(&self) -> NestedDecisionQuery<'_> {
         let mut seam = self.decision_seam.borrow_mut();
         let mut flow = self.flow_seam.borrow_mut();
+        let mut stage = self.stage_seam.borrow_mut();
         NestedDecisionQuery {
             seam: seam.as_mut().map(|seam| {
                 seam.nested += 1;
@@ -2455,6 +2580,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             flow: flow.as_mut().map(|seam| {
                 seam.nested += 1;
                 &self.flow_seam
+            }),
+            stage: stage.as_mut().map(|seam| {
+                seam.nested += 1;
+                &self.stage_seam
             }),
         }
     }
@@ -2492,6 +2621,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(JoinSeam::Decision)
         } else if self.flow_seam_reads_here() {
             Some(JoinSeam::Flow)
+        } else if self
+            .stage_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| seam.nested == 0)
+        {
+            Some(JoinSeam::Stage)
         } else {
             None
         }
@@ -2525,6 +2661,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let seam = installed.as_ref()?;
                 probe(&seam.answers, &seam.needs)
             }
+            JoinSeam::Stage => {
+                let installed = self.stage_seam.borrow();
+                let seam = installed.as_ref()?;
+                probe(&seam.answers, &seam.needs)
+            }
         };
         match answer {
             // The read is the one nested query level its synchronous entry
@@ -2547,6 +2688,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match seam {
             JoinSeam::Decision => self.with_decision_seam(|seam| seam.needs.push(key, claim)),
             JoinSeam::Flow => self.with_flow_seam(|seam| seam.needs.push(key, claim)),
+            JoinSeam::Stage => self.with_stage_seam(|seam| seam.needs.push(key, claim)),
         }
         self.suspended_decision_read()
     }
@@ -2560,10 +2702,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &SemanticQueryKey,
         build: &mut Option<FrameBuild>,
+        stage: StageContext<'_>,
         suspends_loads: bool,
     ) -> FramePoll<'a> {
         if !super::family_continuation::builds_as_continuation(key) {
-            return FramePoll::Done(Box::new(self.build_cold_query_family(key)));
+            if !(suspends_loads && builds_in_stages(key)) {
+                return FramePoll::Done(Box::new(self.build_cold_query_family(key)));
+            }
+            let FrameBuild::Stage(staged) = build.insert(FrameBuild::Stage(Box::default())) else {
+                unreachable!("the build was just inserted")
+            };
+            return self.drain_stage(key, staged, None, stage);
         }
         if let Some(refusal) = self.cold_build_budget_refusal(key) {
             return FramePoll::Done(Box::new(self.family_value_output(key, refusal)));
@@ -2655,12 +2804,236 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     *build = Some(FrameBuild::Family(family));
                     return FramePoll::Need(need);
                 }
+                // A read whose entry normalizes its subject is a need too on
+                // a production poll: its own frame normalizes it as a stage.
+                FamilyStep::Need(need, family)
+                    if suspends_loads
+                        && !matches!(need, SemanticQueryKey::Relate { .. })
+                        && !family.awaits_retired_read(&self.continuation_stage()) =>
+                {
+                    *build = Some(FrameBuild::Family(family));
+                    return FramePoll::Need(self.canonical_admission_key(need));
+                }
                 FamilyStep::Need(need, family) => {
                     let read = self.read_family_need_in_place(need, &family);
                     step = self.resume_family_build(*family, read);
                 }
             }
         }
+    }
+
+    /// Carry a family built in stages on: record a delivery as the answer to
+    /// the read its stage waited on, then run its stages with every answer
+    /// the frame holds until one waits or the family completes. A stage that
+    /// waits leaves nothing: its observations are dropped, its charges rolled
+    /// back, and it runs again; each finished stage keeps both.
+    fn drain_stage(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut StageBuild,
+        delivery: Option<QueryDelivery>,
+        stage: StageContext<'_>,
+    ) -> FramePoll<'a> {
+        let StageContext {
+            depth,
+            awaited,
+            prelude,
+        } = stage;
+        if let Some(delivery) = delivery {
+            let answered = build
+                .awaiting
+                .take()
+                .expect("a delivery answers the read its stage waited on");
+            build.answers.insert((answered, delivery.site), delivery);
+        }
+        loop {
+            let charges = self.connected_demand.stage_checkpoint();
+            let files: Vec<Arc<str>> = awaited.iter().map(|(file, _)| Arc::clone(file)).collect();
+            let installed = self.stage_seam.replace(Some(StageSeam {
+                answers: std::mem::take(&mut build.answers),
+                needs: SeamNeeds::default(),
+                depth,
+                nested: 0,
+            }));
+            verter_debug_assert!(installed.is_none(), "one stage runs per step");
+            let ((run, stopped), handed_off) = verter_execution::blocking::with_stage_gate(|| {
+                crate::resolver_core::request_ports::with_load_gate(&files, || {
+                    self.observe_read(|| self.run_stage(key, build, prelude))
+                })
+            });
+            let seam = self
+                .stage_seam
+                .take()
+                .expect("the stage's seam stays installed for its run");
+            build.answers = seam.answers;
+            if stopped.is_none() && handed_off.is_none() && seam.needs.is_empty() {
+                match run.adopt(self) {
+                    Ok(StageRun::Advanced) => continue,
+                    Ok(StageRun::Done(output)) => return FramePoll::Done(output),
+                    Err(abort) => {
+                        return FramePoll::Done(Box::new(self.aborted_build_output(abort).into()))
+                    }
+                }
+            }
+            if let Err(abort) = run.discard() {
+                return FramePoll::Done(Box::new(self.aborted_build_output(abort).into()));
+            }
+            self.connected_demand.roll_back_stage(charges);
+            if let Some(wait) = handed_off {
+                return FramePoll::Await(LoadWait {
+                    load: Box::new(HandedOff(wait)),
+                    ended: LoadEnded::default(),
+                });
+            }
+            if let Some(file) = stopped {
+                if let IndexedReadiness::Loading(load) = self.ctx.begin_indexed_load(&file) {
+                    let ended = LoadEnded::default();
+                    awaited.push((file, Some(Arc::clone(&ended))));
+                    return FramePoll::Await(LoadWait { load, ended });
+                }
+                awaited.push((file, None));
+                continue;
+            }
+            let (need, claim) = seam
+                .needs
+                .into_iter()
+                .next()
+                .expect("a stage that did not stop waits on a read");
+            build.awaiting = Some(need.clone());
+            build.claim = Some(claim);
+            return FramePoll::Need(need);
+        }
+    }
+
+    /// One stage of a family: normalizing its subject, once, then the next
+    /// stage of its build.
+    fn run_stage(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut StageBuild,
+        prelude: &mut CarrierNormalizationPrelude,
+    ) -> StageRun {
+        let Some(subject) = build.subject.as_ref() else {
+            let (subject, normalized) =
+                self.trace_carrier_subject_normalization_if_needed(key.clone());
+            if !self.stage_waits() {
+                *prelude = normalized;
+                if matches!(subject, SemanticQueryKey::ProjectPath { .. }) {
+                    build.progress = StageProgress::Path(super::walk::PathProgress::default());
+                }
+                build.subject = Some(subject);
+            }
+            return StageRun::Advanced;
+        };
+        match &mut build.progress {
+            StageProgress::Build => StageRun::Done(Box::new(self.build_cold_query_family(subject))),
+            StageProgress::Path(progress) => {
+                // The build the walk replaces is refused as the synchronous
+                // producer refuses it.
+                if matches!(progress, super::walk::PathProgress::Begin) {
+                    if let Some(refusal) = self.cold_build_budget_refusal(subject) {
+                        return StageRun::Done(Box::new(
+                            self.family_value_output(subject, refusal),
+                        ));
+                    }
+                }
+                let SemanticQueryKey::ProjectPath {
+                    base,
+                    path,
+                    context,
+                } = subject
+                else {
+                    unreachable!("a path walk's subject is its path projection")
+                };
+                self.advance_project_path(*base, path, *context, progress)
+            }
+        }
+    }
+
+    /// Whether the running stage has reached something it waits on: nothing
+    /// it builds from here is kept, so it stops where it can.
+    pub(super) fn stage_waits(&self) -> bool {
+        self.stage_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| !seam.needs.is_empty())
+            || crate::resolver_core::request_ports::load_gate_stopped()
+            || verter_execution::blocking::stage_stopped()
+    }
+
+    /// Whether a stage runs here, and not a query it evaluates in place.
+    pub(super) fn stage_runs_here(&self) -> bool {
+        self.stage_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| seam.nested == 0)
+    }
+
+    fn with_stage_seam(&self, update: impl FnOnce(&mut StageSeam)) {
+        update(
+            self.stage_seam
+                .borrow_mut()
+                .as_mut()
+                .expect("the stage's seam stays installed for its run"),
+        );
+    }
+
+    /// Answer a read at the seam of the stage whose frame is stepping. A read
+    /// the frame holds the answer to reads it. Any other enters as the
+    /// frame's need would: a result the memo serves warm answers it, and one
+    /// that must be computed is the need the stage waits on, reading as a
+    /// typed gap nothing built from it keeps, as does every read after it.
+    /// `None` outside any stage, inside a query the stage evaluates in place,
+    /// inside an open checker obligation, under a forced operand, and for a
+    /// relation or a call, whose checker state stays where the stage stands.
+    pub(super) fn read_at_stage_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
+        if matches!(
+            key,
+            SemanticQueryKey::Relate { .. } | SemanticQueryKey::ResolveCall(_)
+        ) || !self.stage_runs_here()
+            || !self.active_operand_evidence.borrow().is_empty()
+            || !self.dispatch_txn.borrow().obligations.decides_root()
+        {
+            return None;
+        }
+        let key = self.canonical_admission_key(key.clone());
+        let site = self.checking_site.get();
+        let (answered, depth, waits) = {
+            let installed = self.stage_seam.borrow();
+            let seam = installed.as_ref()?;
+            (
+                seam.answers.get(&(key.clone(), site)).cloned(),
+                seam.depth,
+                !seam.needs.is_empty(),
+            )
+        };
+        let nesting = Nesting::Frame { depth };
+        Some(match answered {
+            // A read that was the need of an earlier run enters here, charged
+            // as every entry of the read is. A recursion carrier is a same-path
+            // re-entry, which no entry charges.
+            Some(delivery) if matches!(delivery.read.value(), QueryResult::Recursive(_)) => {
+                self.read_delivery(delivery, nesting)
+            }
+            Some(delivery) => match self.charge_query_entry(&key, None, false) {
+                Ok(_) => self.read_delivery(delivery, nesting),
+                Err(read) => read,
+            },
+            None if waits => self.suspended_decision_read(),
+            None => match self.enter_query_frame(&key, depth) {
+                Err(delivery) => {
+                    self.with_stage_seam(|seam| {
+                        seam.answers
+                            .insert((key.clone(), delivery.site), (*delivery).clone());
+                    });
+                    self.read_delivery(*delivery, nesting)
+                }
+                Ok(claim) => {
+                    self.with_stage_seam(|seam| seam.needs.push(key, claim));
+                    self.suspended_decision_read()
+                }
+            },
+        })
     }
 
     /// The next load a frame's build would perform as it begins, when the
@@ -2736,6 +3109,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
+    /// The lowering of the declaration an instantiation's frame reads first,
+    /// handed to its worker on a production poll's drive. The read is
+    /// observed in a scope of its own and dropped: the build observes what it
+    /// reads itself, over the lowered declaration.
+    fn frame_declaration_wait(
+        &self,
+        key: &SemanticQueryKey,
+        suspends_loads: bool,
+    ) -> Option<LoadWait<'a>> {
+        let SemanticQueryKey::Instantiate(instantiate) = key else {
+            return None;
+        };
+        if !suspends_loads
+            || crate::semantic_query::is_non_file_base(&instantiate.base().defining_canonical)
+        {
+            return None;
+        }
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
+            source.live_basis(),
+            source.fact_policy(),
+        );
+        let _tracer = tracer.install();
+        let (_, wait) = verter_execution::blocking::with_stage_gate(|| {
+            self.observe_read(|| self.read_prepared_declaration(instantiate.base()))
+                .discard()
+        });
+        wait.map(|wait| LoadWait {
+            load: Box::new(HandedOff(wait)),
+            ended: LoadEnded::default(),
+        })
+    }
+
     /// Retain completed load deliveries and failures for the frame's later
     /// reads, without retrying either source loading or indexed materialization.
     fn take_awaited_loads(
@@ -2787,6 +3193,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let load =
                 crate::resolver_core::request_ports::with_consumed_loads(&mut consumed, || {
                     self.frame_source_load(&frame.key, &mut frame.awaited_loads, suspends_loads)
+                        .or_else(|| self.frame_declaration_wait(&frame.key, suspends_loads))
                 });
             frame.consumed_loads = consumed;
             if let Some(load) = load {
@@ -2904,11 +3311,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             suspends_loads,
                         )
                     }
+                    // A family built in stages keeps its deliveries as answers.
+                    Some(FrameBuild::Stage(build)) => self.drain_stage(
+                        &frame.key,
+                        build,
+                        delivery,
+                        StageContext {
+                            depth: frame.depth + 1,
+                            awaited: &mut frame.awaited_loads,
+                            prelude: &mut frame.carrier_prelude,
+                        },
+                    ),
                     None => self.begin_frame_build(
                         &frame.key,
                         frame.depth,
                         &mut frame.active,
                         &mut frame.build,
+                        StageContext {
+                            depth: frame.depth + 1,
+                            awaited: &mut frame.awaited_loads,
+                            prelude: &mut frame.carrier_prelude,
+                        },
                         suspends_loads,
                     ),
                 }
@@ -2948,6 +3371,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         depth: u32,
         active: &mut Option<(super::InstantiateIdentity, Arc<[SemanticNodeId]>)>,
         frame_build: &mut Option<FrameBuild>,
+        stage: StageContext<'_>,
         suspends_loads: bool,
     ) -> FramePoll<'a> {
         self.open_cold_build(None);
@@ -3045,7 +3469,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // evaluation joined at its seam whose producer went away
             // before the join answered — builds in one step, as its
             // synchronous producer builds it.
-            _ => self.start_family_frame(frame_key, frame_build, suspends_loads),
+            _ => self.start_family_frame(frame_key, frame_build, stage, suspends_loads),
         }
     }
 
@@ -3092,11 +3516,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.observe_retained_reference_versions(value);
         }
         let finalise = tracer.finish();
+        let carrier_prelude = std::mem::replace(
+            &mut frame.carrier_prelude,
+            CarrierNormalizationPrelude::none(),
+        );
         let (output, rooting) = self.close_cold_build(
             output,
             std::mem::take(&mut frame.taint),
             finalise,
-            &CarrierNormalizationPrelude::none(),
+            &carrier_prelude,
         );
         let producer = frame
             .producer
@@ -3136,12 +3564,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 let delivery = QueryDelivery {
                     site: self.checking_site.get(),
-                    read: self.attribute_query_read(
-                        &frame.key,
-                        true,
-                        read,
-                        &CarrierNormalizationPrelude::none(),
-                    ),
+                    read: self.attribute_query_read(&frame.key, true, read, &carrier_prelude),
                     carrier,
                 };
                 self.request_local_open
@@ -3190,12 +3613,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         QueryDelivery {
             site: self.checking_site.get(),
-            read: self.attribute_query_read(
-                &frame.key,
-                true,
-                read,
-                &CarrierNormalizationPrelude::none(),
-            ),
+            read: self.attribute_query_read(&frame.key, true, read, &carrier_prelude),
             carrier,
         }
     }

@@ -724,7 +724,7 @@ impl DemandCostReceipt {
 /// with a multiply and the identity's own equality. Equality is the
 /// identity's exact comparison, so two computations never share a member
 /// by hash collision.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct CostIdentitySet {
     members: Vec<CostIdentity>,
     /// Each slot holds the index of its member plus one; `0` marks an

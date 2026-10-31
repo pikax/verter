@@ -67,6 +67,10 @@ pub(crate) struct TestForceKnobs {
     /// by a semantic frame's retained terminal outcome.
     #[cfg(test)]
     pub(crate) blocking_loads_begun: std::sync::atomic::AtomicUsize,
+    /// Makes the pollable indexed materialization answer no serve, as a
+    /// stack refusal or an owner-index error does, for a present source.
+    #[cfg(test)]
+    pub(crate) refuse_pollable_indexing: std::sync::atomic::AtomicBool,
     /// The engine-owned forcing record, shared with every engine binding and
     /// macro-mirror selector this host attaches.
     pub(crate) engine: std::sync::Arc<verter_type_engine::engine_test_knobs::TestKnobs>,

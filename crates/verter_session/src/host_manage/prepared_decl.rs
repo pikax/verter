@@ -2415,6 +2415,9 @@ impl VerterHost {
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        if self.stops_at_load_gate(canonical_id) {
+            return None;
+        }
         let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
         verter_execution::blocking::drive_pending(
             verter_execution::blocking::WaitFamily::DeclLowering,
@@ -2435,6 +2438,14 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
         let _ = observation;
+        #[cfg(test)]
+        if self
+            .test_force
+            .refuse_pollable_indexing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
         verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
         let located = verter_audit::attribution::attribute_polls(
             verter_audit::attribution::WorkSite::IndexedReadyBuild,

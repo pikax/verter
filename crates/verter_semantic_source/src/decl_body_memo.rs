@@ -326,7 +326,70 @@ struct SnapshotDemandLease {
     lease: OnceLock<SnapshotLease>,
     counters: Arc<DeclLoweringCounters>,
 }
+/// The lease a stage of a polled computation waits on.
+#[cfg(not(target_arch = "wasm32"))]
+struct LeaseWait {
+    snapshot: Arc<SnapshotDemandLease>,
+    handoff: crate::decl_lowering::LeaseHandoff<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl verter_execution::blocking::OwnedWait for LeaseWait {
+    fn poll_wait(&mut self, waker: &std::task::Waker) -> std::task::Poll<()> {
+        self.handoff.poll(waker).map(|(outcome, _)| {
+            self.snapshot.adopt_lease(outcome);
+        })
+    }
+}
+
+/// A demanded lowering a stage of a polled computation waits on: its output
+/// stays with the memo for the demand that runs next.
+#[cfg(not(target_arch = "wasm32"))]
+struct LoweringWait {
+    key: DeclBindingKey,
+    handoff: crate::decl_lowering::LeasedRunHandoff<DemandJobOutput>,
+    lowered: LoweredAhead,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl verter_execution::blocking::OwnedWait for LoweringWait {
+    fn poll_wait(&mut self, waker: &std::task::Waker) -> std::task::Poll<()> {
+        self.handoff.poll(waker).map(|outcome| {
+            self.lowered.lock().push((self.key.clone(), outcome));
+        })
+    }
+}
+
+/// Lowerings handed off and finished, waiting for their demand.
+type LoweredAhead = Arc<parking_lot::Mutex<Vec<(DeclBindingKey, Option<DemandJobOutput>)>>>;
+
 impl SnapshotDemandLease {
+    fn adopt_lease(&self, outcome: crate::decl_lowering::LeaseOutcome) {
+        if outcome.parsed_now {
+            self.counters
+                .eval_program_parses
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.lease.get_or_init(|| outcome.lease);
+    }
+
+    /// Whether the lease is held, or a stage on this thread stopped to
+    /// acquire it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stops_for_lease(self: &Arc<Self>) -> bool {
+        let Some(service) = self.service.as_ref() else {
+            return false;
+        };
+        if self.lease.get().is_some() {
+            return false;
+        }
+        verter_execution::blocking::stop_stage(Box::new(LeaseWait {
+            snapshot: Arc::clone(self),
+            handoff: service.begin_acquire_lease(&self.key, &self.eval_source, self.source_type),
+        }));
+        true
+    }
+
     fn ensure_lease(&self) {
         let Some(service) = self.service.as_ref() else {
             return;
@@ -475,6 +538,9 @@ pub struct DeclBodyMemo {
     /// `None` on a seeded memo (every entry pre-filled; nothing to
     /// compute lazily).
     service: Option<Arc<DeclLoweringService>>,
+    /// Lowerings a polled stage handed off that finished before their demand
+    /// ran again.
+    lowered_ahead: LoweredAhead,
     /// LEASE pinning this memo's retained parse snapshot for the lifetime
     /// of the memo (hence the owning `IndexedReady` artifact). Acquired
     /// lazily on the first service-backed body demand; dropped with the
@@ -674,6 +740,7 @@ impl HeapSize for DeclBodyMemo {
             owner_table,
             svelte_component_runes_mode: _,
             service: _,
+            lowered_ahead: _,
             snapshot,
             header_index,
             counters: _,
@@ -769,6 +836,7 @@ impl DeclBodyMemo {
             owner_table,
             svelte_component_runes_mode,
             service: Some(service),
+            lowered_ahead: Default::default(),
             snapshot,
             header_index,
             counters,
@@ -836,6 +904,7 @@ impl DeclBodyMemo {
             ),
             svelte_component_runes_mode: false,
             service: None,
+            lowered_ahead: Default::default(),
             snapshot,
             header_index,
             counters,
@@ -2007,9 +2076,64 @@ impl DeclBodyMemo {
         let Some(service) = self.service.as_ref() else {
             return (DemandLower::Ready(None), None);
         };
-        let job = self.demanded_job(key, contributors, jsdoc_typedef, kept);
-        let outcome = service.run_leased(&job.key, job.run);
+        let lowered = {
+            let mut lowered = self.lowered_ahead.lock();
+            lowered
+                .iter()
+                .position(|(ahead, _)| ahead == key)
+                .map(|at| lowered.swap_remove(at).1)
+        };
+        let outcome = match lowered {
+            Some(outcome) => outcome,
+            None => {
+                let job = self.demanded_job(key, contributors, jsdoc_typedef, kept);
+                service.run_leased(&job.key, job.run)
+            }
+        };
         self.finish_demanded(outcome)
+    }
+
+    /// Whether a stage of a polled computation running on this thread stops
+    /// to hand this lowering to its shard's worker.
+    fn stops_for_lowering(
+        &self,
+        key: &DeclBindingKey,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<
+            &verter_session_query::declarations::header_index::JsdocTypedefHeader,
+        >,
+        kept: KeptParts,
+    ) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (key, contributors, jsdoc_typedef, kept);
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(service) = self.service.as_ref() else {
+                return false;
+            };
+            if !verter_execution::blocking::stage_gate_open()
+                || self
+                    .lowered_ahead
+                    .lock()
+                    .iter()
+                    .any(|(ahead, _)| ahead == key)
+            {
+                return false;
+            }
+            if self.snapshot.stops_for_lease() {
+                return true;
+            }
+            let job = self.demanded_job(key, contributors, jsdoc_typedef.cloned(), kept);
+            verter_execution::blocking::stop_stage(Box::new(LoweringWait {
+                key: key.clone(),
+                handoff: service.begin_run_leased(&job.key, job.run),
+                lowered: Arc::clone(&self.lowered_ahead),
+            }));
+            true
+        }
     }
 
     /// The pure statement-lowering job of one demanded declaration: it
@@ -2375,6 +2499,12 @@ impl DeclBodyMemo {
                     (DemandOutcome::LeaseMiss, None, None)
                 }
             };
+        }
+        // A stage of a polled computation hands the lowering off and stops;
+        // the cell stays vacant for the demand that runs next, a transient
+        // miss nothing keeps.
+        if self.stops_for_lowering(key, contributors, jsdoc_typedef.as_ref(), kept.clone()) {
+            return (DemandOutcome::LeaseMiss, None, None);
         }
         let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
         let kept_parts: std::cell::Cell<Option<TransientTypeParts>> = std::cell::Cell::new(None);

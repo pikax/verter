@@ -1389,6 +1389,9 @@ impl VerterHost {
         {
             return false;
         }
+        if self.stops_at_load_gate(canonical_id) {
+            return false;
+        }
         #[cfg(test)]
         self.test_force
             .blocking_loads_begun
