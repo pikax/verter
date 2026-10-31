@@ -1721,16 +1721,50 @@ pub(super) fn checker_property_name(key: &AuthoredPropertyKey) -> Option<String>
 /// target is read through to decide whether it could hold a literal.
 const SINGLETON_SCAN_DEPTH: u32 = 16;
 
+/// The two types of a failed relation as the checker's message names them.
+pub(in crate::project_semantic_dispatch) struct RelationOperands {
+    pub(in crate::project_semantic_dispatch) source: String,
+    pub(in crate::project_semantic_dispatch) target: String,
+    /// Both types spell the same name even fully qualified: the checker
+    /// tells them apart with TS2719's message.
+    pub(in crate::project_semantic_dispatch) same_name: bool,
+}
+
+/// The file name TypeScript names a source file's module symbol by
+/// (`removeFileExtension`).
+fn module_specifier(canonical: &str) -> &str {
+    [
+        ".d.ts", ".d.mts", ".d.cts", ".mjs", ".mts", ".cjs", ".cts", ".ts", ".js", ".tsx", ".jsx",
+        ".json",
+    ]
+    .iter()
+    .find_map(|extension| canonical.strip_suffix(extension))
+    .unwrap_or(canonical)
+}
+
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The two types of a failed relation as the checker prints them in its
-    /// message (`reportRelationError`): a literal source is printed as its
-    /// base primitive unless the target could itself hold a literal at its
-    /// top level, where the literal is what tells the two apart.
+    /// message.
     pub(in crate::project_semantic_dispatch) fn print_relation_operands(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<(String, String)> {
+        let operands = self.relation_operands(source, target)?;
+        Some((operands.source, operands.target))
+    }
+
+    /// The two types of a failed relation as the checker names them
+    /// (`reportRelationError`): two types that spell the same text are
+    /// printed fully qualified (`getTypeNamesForErrorDisplay`), and a literal
+    /// source is printed as its base primitive unless the target could
+    /// itself hold a literal at its top level, where the literal is what
+    /// tells the two apart.
+    pub(in crate::project_semantic_dispatch) fn relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<RelationOperands> {
         // The checker keeps the literal against `never` so an exhaustiveness
         // check (`assertNever(k)`) names the value that escaped.
         let target_is_never = matches!(
@@ -1744,13 +1778,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         } else {
             self.literal_base_spelling(source)
         };
-        Some((
-            match generalized {
-                Some(generalized) => generalized,
-                None => self.print_diagnostic_type(source)?,
-            },
-            self.print_diagnostic_type(target)?,
-        ))
+        let mut printed_source = self.print_diagnostic_type(source)?;
+        let mut printed_target = self.print_diagnostic_type(target)?;
+        if printed_source == printed_target {
+            printed_source = self.print_qualified_diagnostic_type(source)?;
+            printed_target = self.print_qualified_diagnostic_type(target)?;
+        }
+        let same_name = printed_source == printed_target;
+        Some(RelationOperands {
+            source: generalized.unwrap_or(printed_source),
+            target: printed_target,
+            same_name,
+        })
     }
 
     /// The checker's diagnostic for one walker diagnostic the checker
@@ -1908,7 +1947,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.print_diagnostic_type(node).unwrap_or_else(|| {
             let strict_null_checks = self.relation_strict_config().strict_null_checks;
             crate::semantic_query::display::clip_checker_text(
-                self.print_diagnostic_type_text(node, || {
+                self.print_diagnostic_type_text(node, false, || {
                     crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
                         .unabbreviated()
                 })
@@ -1932,10 +1971,74 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         node: SemanticNodeId,
     ) -> Option<String> {
         let strict_null_checks = self.relation_strict_config().strict_null_checks;
-        let (printed, context) = self.print_diagnostic_type_text(node, || {
+        let (printed, context) = self.print_diagnostic_type_text(node, false, || {
             crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
         });
         context.checker_text(printed)
+    }
+
+    /// One type as the checker prints it to tell apart two types that spell
+    /// the same text (`getTypeNameForErrorDisplay`, `UseFullyQualifiedType`).
+    /// `None` when the print cannot be the checker's, including a declaration
+    /// whose symbol chain is not known.
+    fn print_qualified_diagnostic_type(&self, node: SemanticNodeId) -> Option<String> {
+        let strict_null_checks = self.relation_strict_config().strict_null_checks;
+        let (printed, context) = self.print_diagnostic_type_text(node, true, || {
+            crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
+        });
+        context.checker_text(printed)
+    }
+
+    /// The symbol chain `typeToString` prints a declaration through under
+    /// `UseFullyQualifiedType`: a module export is named through its module
+    /// (`getAliasForSymbolInContainer` prefers the declaration's own name),
+    /// while a global and an unexported declaration have no container.
+    fn declaration_chain(
+        &self,
+        declaration: &crate::semantic_query::display::DeclarationName,
+    ) -> crate::semantic_query::display::DeclarationChain {
+        use crate::semantic_query::display::DeclarationChain;
+        use verter_session_query::inputs::contributors::{
+            classify_shallow_module_kind, FileModuleKind,
+        };
+        use verter_session_query::inputs::shallow::ExportTarget;
+        if declaration.canonical_id.is_empty() {
+            return DeclarationChain::Unqualified;
+        }
+        let Some(indexed) = self.transaction_indexed_record(&declaration.canonical_id) else {
+            return DeclarationChain::Unknown;
+        };
+        let shallow = &indexed.shallow_state;
+        if classify_shallow_module_kind(shallow) != FileModuleKind::Module {
+            return DeclarationChain::Unqualified;
+        }
+        let (head, path) = match declaration.decl_name.split_once('.') {
+            Some((head, path)) => (head, Some(path)),
+            None => (declaration.decl_name.as_ref(), None),
+        };
+        let exports_head = |target: &ExportTarget| matches!(target, ExportTarget::Local { symbol_name, .. } if symbol_name == head);
+        let export = if shallow.exports.get(head).is_some_and(exports_head) {
+            head
+        } else {
+            let mut aliases = shallow
+                .exports
+                .iter()
+                .filter(|(_, target)| exports_head(target));
+            match (aliases.next(), aliases.next()) {
+                (None, _) => return DeclarationChain::Unqualified,
+                (Some((alias, _)), None) => alias.as_str(),
+                // The checker takes the first in declaration order, which
+                // the export table does not record.
+                (Some(_), Some(_)) => return DeclarationChain::Unknown,
+            }
+        };
+        DeclarationChain::Module {
+            specifier: module_specifier(&declaration.canonical_id).to_owned(),
+            name: match path {
+                Some(path) => format!("{export}.{path}"),
+                None => export.to_owned(),
+            },
+        }
     }
 
     /// Prepare evaluated forms for a read-only print: closed mapped types,
@@ -1944,22 +2047,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     fn print_diagnostic_type_text(
         &self,
         node: SemanticNodeId,
+        qualified: bool,
         context: impl Fn() -> crate::semantic_query::display::DisplayContext,
     ) -> (String, crate::semantic_query::display::DisplayContext) {
+        use crate::semantic_query::{DisplayFacet, DisplayNeeds};
+        let mut needs = DisplayNeeds::single(DisplayFacet::CheckerSpelling)
+            .union(DisplayNeeds::single(DisplayFacet::IncludeReadonlyModifier));
+        if qualified {
+            needs = needs.union(DisplayNeeds::single(DisplayFacet::QualifyNames));
+        }
         let mut settled = FxHashMap::default();
         let mut decisions = FxHashMap::default();
+        let mut chains = FxHashMap::default();
         let mut tried = FxHashSet::default();
         loop {
-            let mut printing = context().with_settled_types(settled, decisions);
+            let mut printing = context()
+                .with_settled_types(settled, decisions)
+                .with_declaration_chains(chains);
             let printed = crate::semantic_query::display::display_type_node(
                 self.graph().store(),
                 node,
-                crate::semantic_query::DisplayNeeds::single(
-                    crate::semantic_query::DisplayFacet::CheckerSpelling,
-                )
-                .union(crate::semantic_query::DisplayNeeds::single(
-                    crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
-                )),
+                needs,
                 crate::semantic_query::display::MAX_DISPLAY_DEPTH,
                 &mut printing,
             )
@@ -1981,9 +2089,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     )
                 })
                 .collect();
-            if newly_settled.is_empty() && newly_decided.is_empty() {
+            let newly_chained: Vec<_> = printing
+                .unchained_declarations()
+                .iter()
+                .map(|declaration| (declaration.clone(), self.declaration_chain(declaration)))
+                .collect();
+            if newly_settled.is_empty() && newly_decided.is_empty() && newly_chained.is_empty() {
                 return (printed, printing);
             }
+            chains = printing.take_declaration_chains();
+            chains.extend(newly_chained);
             (settled, decisions) = printing.into_settled_types();
             settled.extend(newly_settled);
             decisions.extend(newly_decided);
