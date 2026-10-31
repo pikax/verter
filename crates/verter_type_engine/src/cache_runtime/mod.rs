@@ -26,6 +26,10 @@ pub mod flow_slice_node;
 pub(crate) mod lookup_publish;
 pub mod node;
 pub mod occupancy;
+mod owned_admission;
+pub use owned_admission::{
+    OwnedAdmission, OwnedAdmissionError, OwnedAdmissionProducer, OwnedAdmissionStep,
+};
 pub mod singleflight;
 pub(crate) mod singleflight_publish;
 pub mod world_snapshot;

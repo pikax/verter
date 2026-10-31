@@ -166,6 +166,30 @@ test("the guard flags TypeScript 7.0 references but not third-party 7.0.x versio
   assert.equal(guardCount("crates/verter_semantic/src/x.rs", '"7.0.3"'), 0);
 });
 
+test("explicit oracle comparison comments do not exempt neighboring pins", () => {
+  for (const prefix of ["//", "///", "//!"]) {
+    const provenance = `${prefix} Oracle comparison: TypeScript 7.0.2.`;
+    assert.equal(guardCount("crates/verter_tsgo_api/src/x.rs", provenance), 0);
+    for (const pin of [
+      'const version = "7.0.2";',
+      '"typescript": "7.0.2",',
+      "npm install -D typescript@7.0.2",
+    ]) {
+      assert.equal(guardCount("crates/verter_tsgo_api/src/x.rs", `${provenance}\n${pin}`), 1);
+      assert.equal(guardCount("crates/verter_tsgo_api/src/x.rs", `${pin}\n${provenance}`), 1);
+      assert.equal(guardCount("crates/verter_tsgo_api/src/x.rs", `${provenance} ${pin}`), 1);
+    }
+  }
+  for (const line of [
+    'const provenance = "// Oracle comparison: TypeScript 7.0.2.";',
+    "// Oracle comparison: TypeScript 7.0.2. npm install typescript@7.0.2",
+    "// Measured on TypeScript 7.0.2",
+    "Oracle comparison: TypeScript 7.0.2.",
+  ]) {
+    assert.equal(guardCount("docs/x.md", line), 1, line);
+  }
+});
+
 test("the guard baseline can only shrink and every entry names a known reason", () => {
   const allowed = { "a.md": { count: 2, reason: "evidence-record" } };
   assert.deepEqual(checkGuard({ "a.md": 2 }, allowed), []);

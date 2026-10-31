@@ -2,7 +2,7 @@
 //! back as a flow-return answer and, where the form is a returned test, as
 //! the type predicate the checker infers from it.
 //!
-//! Checker-parity answers are measured on the pinned TypeScript 7.0.2: the
+//! Checker-parity answers are measured on the pinned TypeScript 7.1.0-beta: the
 //! strict column is the function's `.d.ts` line (`tsc --declaration
 //! --emitDeclarationOnly --strict`), the loose column the same under
 //! `--strictNullChecks false`, read from a TS2322 message quoting the type
@@ -262,7 +262,7 @@ export function sig_tern() { return tern; }
 
 /// `true | false` IS `boolean`: a join or a ternary over both literals is
 /// `boolean` (beside a third arm too), one literal stays itself, and the
-/// ternary is no type predicate. Measured on 7.0.2: `boolean`, `boolean`,
+/// ternary is no type predicate. Measured on 7.1.0-beta: `boolean`, `boolean`,
 /// `"x" | true`, `"x" | boolean`, `boolean`, `(x: unknown) => boolean`.
 #[test]
 fn true_and_false_join_to_boolean() {
@@ -312,7 +312,7 @@ export function sig_n13() { return n13; }
 /// `true` when it can only be falsy, `boolean` otherwise — a fresh literal
 /// that a lone return, a `const` read back and an object member widen.
 /// Without `strictNullChecks` an operand that can be truthy can also be
-/// nullish. Measured on 7.0.2 (strict / loose): `!{ a: 1 }` is `false` /
+/// nullish. Measured on 7.1.0-beta (strict / loose): `!{ a: 1 }` is `false` /
 /// `boolean`, `!("" | 0)` is `true` / `true`, `!("a" | 1)` is `false` /
 /// `boolean` (read through annotated `const`s and a three-arm join that
 /// keeps the literals, and a `const` assertion over it),
@@ -595,7 +595,7 @@ const CALL_PREDICATE_ROWS: &[(&str, &str, &str)] = &[
 /// not a reference (`x as string`), narrow nothing. Returned, the call is
 /// the function's inferred predicate; a `this is` predicate narrows the
 /// receiver (`c11`: `b` is `Box & { v: Foo }`, whose `v` is `Foo`).
-/// Measured on 7.0.2, identically against the lib's own `Array.isArray`;
+/// Measured on 7.1.0-beta, identically against the lib's own `Array.isArray`;
 /// only `c10` differs without `strictNullChecks`, where `x === null`
 /// narrows nothing.
 ///
@@ -653,7 +653,7 @@ export function o4(x: Foo | null) { if (isC(x)) return x; throw 0; }
 /// to intersects the subject, printed as the checker prints it: the
 /// undistributed `(A | B) & C` when distributing would grow the union,
 /// else the distributed arms, a nullish arm dropping out beside the
-/// object target under `strictNullChecks`. Measured on 7.0.2; only `o2`
+/// object target under `strictNullChecks`. Measured on 7.1.0-beta; only `o2`
 /// and `o3` differ without `strictNullChecks`, where the nullish arms are
 /// gone before the test.
 #[test]
@@ -707,7 +707,7 @@ export function sig_p7() { return p7; }
 /// order wins over a named one (`p6`). A parameter narrowed short of
 /// `never` (`p2`, `p5`'s `x`) and one read where it is not narrowed
 /// (`p7`) establish nothing, and a reassigned parameter is never one
-/// (`p8` is `boolean`, complete). Measured on 7.0.2, identically without
+/// (`p8` is `boolean`, complete). Measured on 7.1.0-beta, identically without
 /// `strictNullChecks`.
 #[test]
 fn a_parameter_never_at_the_return_is_the_inferred_predicate() {
@@ -754,7 +754,7 @@ export function m2(b: Box & VF) { return b.v; }
 /// object type, a base primitive beside its literal adds nothing
 /// (`"a" & string` is `"a"`), and the undistributed intersection stays
 /// the print when distributing would grow it (`(A | B) & C`). Measured on
-/// 7.0.2, identically without `strictNullChecks`.
+/// 7.1.0-beta, identically without `strictNullChecks`.
 #[test]
 fn a_member_read_through_an_intersection_distributes_like_the_checker() {
     let rows = [
@@ -815,7 +815,7 @@ export function pib() { const v: typeof ib extends (x: any) => x is infer U ? U 
 /// `takes(us)` over `Sub` and `Base` is `Base` in either order, literals
 /// of one base union, and a nullable candidate keeps its `undefined`. A
 /// conditional whose extends type is an intersection decides each member
-/// (`A extends A & B` is `0`). Measured on 7.0.2, identically without
+/// (`A extends A & B` is `0`). Measured on 7.1.0-beta, identically without
 /// `strictNullChecks` except `tnull` (`string`).
 #[test]
 fn call_argument_inference_reads_the_last_overload_and_the_common_supertype() {
@@ -861,7 +861,7 @@ export function aba() { const v: A & B extends A ? 1 : 0 = null!; return v; }
 /// through the relation authority like any other arm, so a conditional
 /// over such a composite decides: `A extends A & B` and `Foo | Bar extends
 /// Foo` are `0`, the same spellings over type literals too. Measured on
-/// 7.0.2, identically without `strictNullChecks`.
+/// 7.1.0-beta, identically without `strictNullChecks`.
 #[test]
 fn a_conditional_over_named_composites_decides_like_the_checker() {
     let rows = [
@@ -955,7 +955,7 @@ export function sig_p4() { return p4; }
 /// true edge establishes when the false edge empties it (`p1`, `p4`). A
 /// value this substrate cannot resolve (`Missing`) is no fact about either
 /// edge: the narrow degrades.
-/// Measured on 7.0.2 with `--strict` and with `--strictNullChecks false`
+/// Measured on 7.1.0-beta with `--strict` and with `--strictNullChecks false`
 /// (`e9` reads `string`, `e11` `string` and `e26` `"a" | "b"` there).
 #[test]
 fn an_equality_between_two_values_narrows_both_references() {
@@ -1129,7 +1129,7 @@ export function lp1() { let x: string | number = 1; for (let i = 0; i < 3; i++) 
 /// A call its only candidate does not accept continues with that
 /// candidate as the checker's error-recovery candidate
 /// (`getCandidateForOverloadFailure`), re-inferred from the arguments.
-/// Measured on 7.0.2, identically without `strictNullChecks`: `takes(u)`
+/// Measured on 7.1.0-beta, identically without `strictNullChecks`: `takes(u)`
 /// is `A`; `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
 /// candidates' common supertype, which `y` then fails; `con(1)` is
 /// `string` — the inference violating `T extends string` takes the
@@ -2183,7 +2183,7 @@ export function predicate(x: number | string) { if (guards.isStr(x)) return x; t
 /// A lazy declared return that is the checker's parameterized recovery
 /// (TS2456, naming its alias) is reported with its bound argument at the
 /// alias's authored name, and a lone predicate signature is checked for
-/// applicability before it narrows. Measured on TypeScript 7.0.2.
+/// applicability before it narrows. Measured on TypeScript 7.1.0-beta.
 #[test]
 fn parameterized_recoveries_and_lone_predicates_report_like_the_checker() {
     const TS2456: &str = "(1,6): error TS2456: Type alias 'G' circularly references itself.";
@@ -2242,7 +2242,7 @@ export function sig_l5() { return l5; }
 /// signatures answer calls, and `Array.isArray`'s `arg is any[]` narrows
 /// both edges and is the predicate a returned call infers, over `any`
 /// (`x is any[]`) and a type parameter (`x is T[]`) too. Measured on
-/// 7.0.2 against the full lib, identically without `strictNullChecks`;
+/// 7.1.0-beta against the full lib, identically without `strictNullChecks`;
 /// the host registers the lib's own declarations of these values.
 #[test]
 fn a_lib_global_value_reads_its_lib_declaration() {
@@ -2322,7 +2322,7 @@ export function s6(x: string | number) { if (typeof x === "string") { class C { 
 /// assertion or parentheses around the target still assign (`x! = 1` and
 /// `(x) = 1` read `number`). A class's property initializer is its own
 /// control-flow container, so its write does not retype the enclosing
-/// read. Measured on 7.0.2, identically without `strictNullChecks` except
+/// read. Measured on 7.1.0-beta, identically without `strictNullChecks` except
 /// `w10`, whose `undefined` the loose parameter type never had.
 #[test]
 fn a_write_through_a_type_assertion_neither_assigns_nor_narrows() {
@@ -2395,7 +2395,7 @@ export function y21(x: unknown) { return x instanceof Cls; }
 /// one (`getNarrowedType` answers the candidate for a top type), except
 /// that the checker never narrows it to the global `Function`
 /// (`narrowTypeByTypePredicate`); `unknown` narrows the same way under
-/// `instanceof`; an `in` test leaves `any` as it is. Measured on 7.0.2,
+/// `instanceof`; an `in` test leaves `any` as it is. Measured on 7.1.0-beta,
 /// identically without `strictNullChecks`, each function's `.d.ts` line
 /// the row's answer.
 #[test]
@@ -2469,7 +2469,7 @@ export function c15<T>(x: T, g: (v: unknown) => v is T[]) { if (g(x)) return x; 
 /// string`); failing that each type-parameter arm whose constraint admits
 /// the target becomes their intersection (`T & any[]`, `T & Foo` beside a
 /// dropped `undefined`); and the false edge keeps what is not assignable
-/// to the target. Measured on 7.0.2, identically without
+/// to the target. Measured on 7.1.0-beta, identically without
 /// `strictNullChecks` (each function's `.d.ts` line): `g01v` `Foo`, `g01e`
 /// `T`, `g02` `T[]`, `g03` `T`, `g05` and `g07` `T & any[]`, `g05e` and
 /// `g07e` `T`, `g08` `T & Foo`, `g09v` `T`, `g11` `T & string`, `g12`
@@ -2566,7 +2566,7 @@ export function l18(x: string | number) { return typeof x === "string" || x > 0;
 /// (`boolean` as `true`, `unknown` as `{}`, no `undefined`) with the
 /// right under subtype reduction, or is the left alone when it cannot be
 /// falsy. A mutable slot widens the operands' fresh literals, never the
-/// falsy part. Measured on 7.0.2 (the `.d.ts` line, strict and without
+/// falsy part. Measured on 7.1.0-beta (the `.d.ts` line, strict and without
 /// `strictNullChecks`).
 #[test]
 fn a_logical_expression_value_is_typed_like_the_checker() {
@@ -2622,7 +2622,7 @@ export function a15(x: string | number) { return typeof x === "number" && Math.a
 /// establishes, or none: only `Array.isArray`'s `arg is any[]` narrows,
 /// and a call inside a comparison is off the narrowing spine. The lib's
 /// own declaration is a global's only one when no program file declares
-/// it. Measured on 7.0.2, identically without `strictNullChecks`: `a07`
+/// it. Measured on 7.1.0-beta, identically without `strictNullChecks`: `a07`
 /// is `(x: string | number | boolean[]) => x is string | boolean[]`, the
 /// rest return `boolean` with no predicate.
 #[test]
@@ -2695,7 +2695,7 @@ export function f8(x: string | number) { if (typeof x === "number") { (0, fail()
 /// expression statement's own call or comma operand
 /// (`maybeBindExpressionFlowIfCall`), and the narrowing persists past the
 /// position unless a conditional's other path joins it unnarrowed.
-/// Measured on 7.0.2, identically without `strictNullChecks`: an argument
+/// Measured on 7.1.0-beta, identically without `strictNullChecks`: an argument
 /// (`n1`), an initializer (`n2`), an array element (`n3`), a `void`
 /// operand (`n4`), a template interpolation (`n5`) and a parenthesized
 /// call (`p2`, `p3`, `p4`) leave `x` as `string | number`; a comma
@@ -2750,7 +2750,7 @@ fn only_an_entered_call_can_assert() {
 }
 
 /// A comma operand in the argument of a statement call whose callee is an
-/// unresolved import narrows like any other: measured on 7.0.2, with and
+/// unresolved import narrows like any other: measured on 7.1.0-beta, with and
 /// without `strictNullChecks` (and with the import resolved to
 /// `declare function touch(v: unknown): void`), `n8` is `string`. The
 /// lane reads `string` behind the typed guard gap, because the callee's
@@ -2786,7 +2786,7 @@ export function sig_z5() { return z5; }
 /// apparent surface, an array, a tuple or a function because it is an
 /// object — so `unknown` narrowed past `null` (`{} | undefined`) narrows
 /// to `any[]` under `Array.isArray`, the `{}` arm taking the narrower
-/// target (`getNarrowedType`). Measured on 7.0.2: `e1`–`e3` and `e5`–`e7`
+/// target (`getNarrowedType`). Measured on 7.1.0-beta: `e1`–`e3` and `e5`–`e7`
 /// are `1`; `e4` and `e8` are `0` (`1` without `strictNullChecks`); `z5`
 /// is `(x: unknown) => x is any[] | null` and `z6` `any[] | null`
 /// (`boolean` and `unknown` without `strictNullChecks`, where `x === null`
@@ -2830,7 +2830,7 @@ export function s3(x: "a" | "b") { if ((touch(), x) === "a") { return x; } throw
 /// A call inside a comparison operand of an `if` test is off the narrowing
 /// spine: its predicate narrows nothing, and it is never entered into
 /// control flow, so the test narrows exactly as its spine does. Measured
-/// on 7.0.2, identically without `strictNullChecks`: `s1` is `number`,
+/// on 7.1.0-beta, identically without `strictNullChecks`: `s1` is `number`,
 /// `s2` `string`. A comparison whose reference sits behind a comma
 /// sequence narrows that reference (`s3` is `"a"`).
 #[test]
@@ -2872,7 +2872,7 @@ export function sig_c8() { return c8; }
 /// equality, a `typeof`, a truthiness test, a predicate argument, an
 /// `instanceof` or `in` operand and a discriminant read behind `(touch(),
 /// x)` all narrow `x`, the earlier operands only running first. Measured
-/// on 7.0.2, identically without `strictNullChecks`.
+/// on 7.1.0-beta, identically without `strictNullChecks`.
 #[test]
 fn a_reference_behind_a_comma_sequence_narrows() {
     let rows = [
@@ -2936,7 +2936,7 @@ export function sig_t10() { return t10; }
 /// `strictNullChecks` (`undefined` without it); the negated edge keeps
 /// `{}`. With `unknown` split into `{} | null | undefined` past a nullish
 /// test, a returned `x === null || typeof x === "object"` infers `x is
-/// object | null`. Measured on 7.0.2 (the `.d.ts` line, strict and without
+/// object | null`. Measured on 7.1.0-beta (the `.d.ts` line, strict and without
 /// `strictNullChecks`).
 #[test]
 fn a_typeof_test_narrows_the_empty_object_type() {
@@ -3003,7 +3003,7 @@ export function sig_d4() { return d4; }
 /// A property equality narrows the property's parent only through a
 /// DISCRIMINANT property of a union (`isMatchingReferenceDiscriminant`):
 /// a parameter that is a union neither as declared nor as narrowed is
-/// never narrowed, and its member is not read for it. Measured on 7.0.2,
+/// never narrowed, and its member is not read for it. Measured on 7.1.0-beta,
 /// identically without `strictNullChecks`: `d3` / `d4` return `boolean`
 /// with no predicate, `d6` is `number[]`, `d7` `{ a: string; }`.
 #[test]
@@ -3047,7 +3047,7 @@ export function retLenOnly(x: string | number[]) { if (x.length === 0) return x;
 /// `x.length` over `string | number[]` reads each arm's `length` — the
 /// string arm through its wrapper — and every arm projects `number`, so
 /// `x.length === 0` discriminates no arm: the parent keeps both. Measured
-/// on 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting:
+/// on 7.1.0-beta under every `strictNullChecks` × `noImplicitAny` setting:
 /// `orLen` and `eqLen` return `boolean` with no predicate, `retLen` and
 /// `retLenOnly` return `string | number[]`.
 #[test]
@@ -3098,7 +3098,7 @@ export function g1(x: string | number | boolean, c: boolean) { c ? (0, a(x)) : (
 /// The flow after a conditional joins its arms' ends, so an entered
 /// `asserts` call every arm applies narrows past it — nested conditionals
 /// included, the other operands of an arm aside. Measured on
-/// 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting: `c1` to
+/// 7.1.0-beta under every `strictNullChecks` × `noImplicitAny` setting: `c1` to
 /// `c7` return `string`; a call that is an arm itself is not entered
 /// (`o1`), and an arm that asserts nothing joins the unnarrowed path
 /// (`o2`, `o3`, `o4`), each `string | number`. Arms that assert different

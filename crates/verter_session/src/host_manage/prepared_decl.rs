@@ -13,6 +13,7 @@ use verter_session_query::analysis::types::Hash16;
 use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
+use verter_semantic_source::decl_lowering::LoweringStep;
 
 use crate::types::*;
 use crate::VerterHost;
@@ -1786,10 +1787,10 @@ impl VerterHost {
             return Ok(None);
         };
         let result = bundle.prepared_value_decls.get_in(owner, symbol_name);
-        match &result {
-            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
-            _ => bundle.observe_read(),
-        }
+        // A value declaration's recorded dependencies name only the head of
+        // each annotation reference, not every import its surface reaches,
+        // so its read carries the owner's whole import witness.
+        bundle.observe_read();
         result
     }
 
@@ -1815,10 +1816,10 @@ impl VerterHost {
             return Ok(None);
         };
         let result = bundle.prepared_value_decls.get_in(owner, symbol_name);
-        match &result {
-            Ok(Some(decl)) => bundle.observe_read_for(&decl.external_deps),
-            _ => bundle.observe_read(),
-        }
+        // A value declaration's recorded dependencies name only the head of
+        // each annotation reference, not every import its surface reaches,
+        // so its read carries the owner's whole import witness.
+        bundle.observe_read();
         result
     }
 
@@ -2789,8 +2790,12 @@ impl VerterHost {
             // again for the work after it, wherever that resumes.
             #[cfg(test)]
             drop(catalog_host);
-            let (cold_lease, outcome) =
-                std::future::poll_fn(|cx| cold_index.poll(cx.waker())).await;
+            let (cold_lease, outcome) = loop {
+                match std::future::poll_fn(|cx| cold_index.poll_step(cx.waker())).await {
+                    LoweringStep::Work(work) => work.run(),
+                    LoweringStep::Value(value) => break value,
+                }
+            };
             #[cfg(test)]
             let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             if cold_lease.refused.is_some() {

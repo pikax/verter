@@ -227,6 +227,8 @@ fn flow_partiality_tags_enumerate_every_closed_reason() {
         "GapUnmodeledExpression",
         "NonCallableBinding",
         "UnrepresentableCallee",
+        "ContextSensitiveInference",
+        "AbsentReceiverMember",
         "FailedBindingInitializer",
         "UnappliedWriteEffect",
         "ConditionalVarDefinition",

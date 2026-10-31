@@ -193,6 +193,19 @@ impl DepEdges {
             .flat_map(|waiters| waiters.values().copied())
     }
 
+    /// Dependencies at one file generation, including stages not yet admitted.
+    pub(in crate::dag) fn file_dependencies(
+        &self,
+        canonical: &str,
+        generation: u64,
+    ) -> impl Iterator<Item = &DepKey> {
+        self.by_file
+            .get(canonical)
+            .and_then(|generations| generations.get(&generation))
+            .into_iter()
+            .flatten()
+    }
+
     /// Gated dependencies on `canonical` whose generation is strictly below
     /// `floor`, across every incarnation. Visits only those dependencies.
     pub(in crate::dag) fn gated_below(&mut self, canonical: &str, floor: u64) -> Vec<DepKey> {

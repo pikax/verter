@@ -327,6 +327,82 @@ pub(crate) fn insert(root: &mut Option<Arc<Node>>, fact: FactVersionRef) {
     }
 }
 
+/// Insert the strictly increasing `facts`, all absent from the tree under
+/// `slot`, in one descent: consecutive facts that belong under the same
+/// child share the search that found it. Answers the right siblings the
+/// node split into, in order.
+fn insert_run_into(slot: &mut Arc<Node>, facts: &[FactVersionRef]) -> Vec<Arc<Node>> {
+    let node = make_mut(slot, facts.len());
+    node.len += facts.len();
+    match &mut node.body {
+        Body::Leaf(held) => {
+            for fact in facts {
+                let at = held.partition_point(|existing| existing < fact);
+                held.insert(at, fact.clone());
+            }
+            if held.len() <= LEAF_CAP {
+                return Vec::new();
+            }
+            let mut runs = even_runs(held, LEAF_CAP);
+            let first = runs.next().expect("a split leaf has a first run");
+            let rest: Vec<Arc<Node>> = runs.map(Node::leaf).collect();
+            node.len = first.len();
+            node.body = Body::Leaf(first);
+            rest
+        }
+        Body::Branch(children) => {
+            let mut start = 0;
+            while start < facts.len() {
+                let at = child_index(children, &facts[start]);
+                let mut end = start + 1;
+                if let Some(next) = children.get(at + 1) {
+                    while end < facts.len() {
+                        super::fact_read_set::record_signature_work(1);
+                        if &facts[end] >= next.first() {
+                            break;
+                        }
+                        end += 1;
+                    }
+                } else {
+                    end = facts.len();
+                }
+                let splits = insert_run_into(&mut children[at], &facts[start..end]);
+                children.splice(at + 1..at + 1, splits);
+                start = end;
+            }
+            if children.len() <= BRANCH_CAP {
+                return Vec::new();
+            }
+            let mut runs = even_runs(children, BRANCH_CAP);
+            let first = runs.next().expect("a split branch has a first run");
+            let rest: Vec<Arc<Node>> = runs.map(Node::branch).collect();
+            node.len = first.iter().map(|child| child.len).sum();
+            *children = first;
+            rest
+        }
+    }
+}
+
+/// Insert the strictly increasing `facts`, all absent from the tree.
+pub(crate) fn insert_run(root: &mut Option<Arc<Node>>, facts: &[FactVersionRef]) {
+    let Some(slot) = root else {
+        *root = build(facts);
+        return;
+    };
+    if facts.is_empty() {
+        return;
+    }
+    let rest = insert_run_into(slot, facts);
+    if !rest.is_empty() {
+        let mut level = vec![slot.clone()];
+        level.extend(rest);
+        while level.len() > 1 {
+            level = even_runs(&level, BRANCH_CAP).map(Node::branch).collect();
+        }
+        *slot = level.pop().expect("one root remains");
+    }
+}
+
 /// Remove `fact`, present in the tree under `slot`.
 fn remove_from(slot: &mut Arc<Node>, fact: &FactVersionRef) {
     let node = make_mut(slot, 0);

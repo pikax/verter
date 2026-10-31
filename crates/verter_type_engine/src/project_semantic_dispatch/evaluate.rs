@@ -1287,14 +1287,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether `node` is a type the checker prints by name: a declaration
-    /// or class reference, or a union or intersection of them.
+    /// or class reference, or a union or intersection of them. An
+    /// application of an alias the checker prints as what it resolves to —
+    /// a conditional alias (`UnwrapRef<S>`), a bare parameter or a primitive
+    /// ([`Self::printed_declaration`]) — is no name: the access reads what
+    /// it resolves to, as `St['$state']` over `$state: UnwrapRef<S> & C<S>`
+    /// reads the unwrapped state beside the interface `C<S>`.
     fn is_named_reference(&self, node: SemanticNodeId) -> bool {
         match self.graph().node_data(node).as_deref() {
             Some(
-                SemanticNodeData::DeclRef { .. }
-                | SemanticNodeData::InstantiationRef { .. }
-                | SemanticNodeData::ClassExpressionInstance { .. },
-            ) => true,
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. },
+            ) => {
+                is_builtin(identity)
+                    || !matches!(
+                        self.printed_declaration(identity),
+                        Some(PrintedDeclaration::AliasTransparent)
+                    )
+            }
+            Some(SemanticNodeData::ClassExpressionInstance { .. }) => true,
             Some(SemanticNodeData::Union(arms)) => {
                 arms.iter().any(|arm| self.is_named_reference(*arm))
                     && arms.iter().all(|arm| {

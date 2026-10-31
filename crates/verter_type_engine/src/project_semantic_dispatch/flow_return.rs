@@ -222,6 +222,8 @@ pub(crate) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialR
         FlowReturnDegradation::UnmodeledPosition
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
+        | FlowReturnDegradation::ContextSensitiveInference
+        | FlowReturnDegradation::AbsentReceiverMember
         | FlowReturnDegradation::FailedBindingInitializer => PartialReason::FlowReturnUninferred,
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
@@ -3961,13 +3963,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// whose only contact with a dependency is such a reference therefore
     /// misses on that dependency's next edit and re-interns the live
     /// version, instead of serving a superseded one.
+    ///
+    /// Two bounds keep this proportional at every enclosing close: the
+    /// memoized `node_reaches_versioned_reference` bit cuts the walk at
+    /// every subtree that retains no versioned reference at all, and a
+    /// version whose fact the active tracer already holds — a nested
+    /// build's delivered signature or a warm read's absorbed witness
+    /// carried it into this scope — is not re-recorded. The first
+    /// observation of each embedded version still happens here, whatever
+    /// close retains it.
     pub(super) fn observe_retained_reference_versions(&self, value: &SemanticQueryValue) {
         let mut pending: Vec<SemanticNodeId> = Vec::new();
         value.for_each_retained_node(|node| pending.push(node));
+        if !pending
+            .iter()
+            .any(|&node| self.arena().node_reaches_versioned_reference(node))
+        {
+            return;
+        }
         let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = Default::default();
         let mut observed: Vec<(Arc<str>, _)> = Vec::new();
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
+                continue;
+            }
+            // A node whose retained closure reaches no versioned reference
+            // has nothing to observe at or below it.
+            if !self.arena().node_reaches_versioned_reference(node) {
                 continue;
             }
             let Some(data) = self.arena().node_data(node) else {
@@ -3981,21 +4003,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(identity) = identity {
                 let canonical: &str = identity.canonical_id.as_ref();
                 let embedded = identity.whole_hash;
-                if !observed
-                    .iter()
-                    .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
+                // A reference minted before its file's content was
+                // authoritative embeds the zero version: no version was
+                // interned, so there is none to certify (a zero fact could
+                // never validate against any content).
+                if embedded != [0u8; 16]
+                    && !observed
+                        .iter()
+                        .any(|(seen, hash)| seen.as_ref() == canonical && *hash == embedded)
                 {
+                    // The version the retained payload actually embeds, not
+                    // the live one: a stale embedded version must make this
+                    // entry miss on the next validation, never certify the
+                    // live hash next to an old payload.
+                    let fact = FactVersionRef::FileWholeHash {
+                        canonical_id: Arc::from(canonical),
+                        hash: embedded,
+                    };
                     observed.push((Arc::from(canonical), embedded));
-                    // The version the retained payload actually embeds, not the
-                    // live one: a stale embedded version must make this entry
-                    // miss on the next validation, never certify the live hash
-                    // next to an old payload.
-                    crate::resolver_core::resolver_context::observe_fan_out(
-                        FactVersionRef::FileWholeHash {
-                            canonical_id: Arc::from(canonical),
-                            hash: embedded,
-                        },
-                    );
+                    // Already held through a delivered or absorbed witness:
+                    // the sealed signature is the same union without it, so
+                    // recording it again only widens the work of every
+                    // enclosing seal.
+                    if !crate::resolver_core::resolver_context::tracer_holds_fact(&fact) {
+                        crate::resolver_core::resolver_context::observe_fan_out(fact);
+                    }
                 }
             }
             data.for_each_retained_child(|child| pending.push(child));
@@ -6048,6 +6080,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // (the usable value still flows to the caller).
                     match &verdict {
                         Some(FlowSolveOutcome::Complete(proof)) => {
+                            // The batched publish copies the root carrier's
+                            // read-set signature, so every version each
+                            // embedded reference interns must be observed
+                            // into that carrier HERE, before the member
+                            // leaves this frame — the shared cold-build
+                            // close only observes the enclosing build's own
+                            // value, not a queued member's.
+                            let value = crate::semantic_query::SemanticQueryValue::FlowReturn(
+                                verter_session_query::retention::owned::Owned::new(
+                                    proof.value().clone(),
+                                ),
+                            );
+                            self.observe_retained_reference_versions(&value);
                             let member = CompletedFlowReturnMember {
                                 key: root_key,
                                 result: proof.clone(),
@@ -14504,10 +14549,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         } else {
             self.lower_body_type(declared.ty())
         };
-        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver::of_type(
-            binder,
-            Some(binder),
-        )));
+        self.receiver = Some(std::rc::Rc::new(
+            class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
+        ));
     }
 
     /// The canonical union of `members` under this frame's null algebra —
@@ -14871,7 +14915,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let receiver = inherited_receiver.or_else(|| {
             (!data_only || contextual.is_some() || contextual_this.is_some()).then(|| {
-                std::rc::Rc::new(class_expression::ClassReceiver::new(
+                let receiver = class_expression::ClassReceiver::new(
                     contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(
                             self.canonical,
@@ -14883,7 +14927,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     contextual_this,
                     rustc_hash::FxHashSet::default(),
                     infer_literal_members,
-                ))
+                );
+                std::rc::Rc::new(
+                    if contextual.is_some_and(|context| {
+                        self.contextual_methods_may_declare_this(context, entries)
+                    }) {
+                        receiver.explicit()
+                    } else {
+                        receiver
+                    },
+                )
             })
         });
         if let Some(receiver) = receiver.as_ref() {
@@ -28339,9 +28392,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// downstream gate: an overloaded callee published `flag: any` warm
     /// and clean where the checker says `boolean`.
     fn degraded_unrepresentable_callee(&mut self) -> Positional<CallValue> {
-        self.record_degradation(
-            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
-        );
+        self.degraded_call(crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee)
+    }
+
+    /// A refused call's DEGRADATION `degradation` with the typed unresolved
+    /// MARKER at its position, as [`Self::degraded_unrepresentable_callee`]
+    /// for a refusal whose own typed cause names it.
+    fn degraded_call(
+        &mut self,
+        degradation: crate::semantic_query::FlowReturnDegradation,
+    ) -> Positional<CallValue> {
+        self.record_degradation(degradation);
         Positional::Value(CallValue::unmodeled_position(self.dispatch))
     }
 
@@ -29515,6 +29576,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ));
             return OptionalLink::Unmodeled;
         };
+        // A member the receiver does not declare: the checker's TS2339,
+        // whose error type this rail does not model, named as its cause.
+        if this_source.is_some()
+            && matches!(
+                self.dispatch.arena().node_data(member).as_deref(),
+                Some(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss
+                ))
+            )
+            && self.receiver_lacks_member(current, name)
+        {
+            self.record_degradation(FlowReturnDegradation::AbsentReceiverMember);
+        }
         // An element read (`a[0]`) the walk misses is a position
         // this lane does not model, never a published miss.
         let element_read = name.parse::<u64>().is_ok();
@@ -30235,16 +30309,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already
             // defines; the executor never widens it to `any`, and
-            // neither does this rail. So is a call whose type parameter
-            // the checker infers from a context-sensitive argument's
-            // return: this rail's own read would answer that parameter's
-            // fallback.
+            // neither does this rail.
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
-                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
+                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
             ) => (!self.callee_is_lone_declared(callee))
                 .then(|| self.degraded_unrepresentable_callee()),
+            // So is a call whose type parameter the checker infers from a
+            // context-sensitive argument's return: this rail's own read
+            // would answer that parameter's fallback. The refusal keeps
+            // its own typed cause.
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
+            ) => (!self.callee_is_lone_declared(callee)).then(|| {
+                self.degraded_call(
+                    crate::semantic_query::FlowReturnDegradation::ContextSensitiveInference,
+                )
+            }),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
             // falls back to this rail's own read of the same call. That

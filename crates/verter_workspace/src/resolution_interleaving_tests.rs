@@ -105,7 +105,8 @@ fn resolve_cancellable(
             MAIN,
             "./dep",
             CONTEXT,
-            ResolutionOperation::unpinned(&mut ledger, &|| true).cancelled_by(cancelled),
+            ResolutionOperation::unpinned(&mut ledger, &|| true)
+                .cancelled_by(&|| cancelled.is_cancelled()),
         )
 }
 

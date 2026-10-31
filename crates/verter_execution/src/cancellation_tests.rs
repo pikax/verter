@@ -568,3 +568,148 @@ fn detached_final_owner_cancels_before_a_late_registration() {
     assert!(aggregate.register_owner(None).is_none());
     assert!(aggregate.is_cancelled());
 }
+
+#[test]
+fn cancellation_wakes_one_subscription_and_withdraws_its_sibling() {
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Poll, Wake, Waker};
+
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let count = Arc::new(Count(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&count));
+    let token = CancellationToken::new();
+    let mut kept = token.subscribe();
+    let mut dropped = token.subscribe();
+    assert_eq!(kept.poll(&waker), Poll::Pending);
+    assert_eq!(kept.poll(&waker), Poll::Pending);
+    assert_eq!(dropped.poll(&waker), Poll::Pending);
+    drop(dropped);
+    token.cancel();
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    assert_eq!(kept.poll(&waker), Poll::Ready(()));
+    assert_eq!(token.subscribe().poll(&waker), Poll::Ready(()));
+    token.cancel();
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn aggregate_stop_wakes_on_final_request_cancel_and_final_owner_drop() {
+    use std::sync::atomic::AtomicUsize;
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for drop_owner in [false, true] {
+        let aggregate = CancellationToken::aggregate();
+        let first_request = CancellationToken::new();
+        let second_request = CancellationToken::new();
+        let first = aggregate
+            .register_owner(Some(first_request.clone()))
+            .unwrap();
+        let second = aggregate
+            .register_owner(Some(second_request.clone()))
+            .unwrap();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut subscription = aggregate.subscribe();
+        assert!(subscription.poll(&waker).is_pending());
+        first_request.cancel();
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        if drop_owner {
+            drop(second);
+        } else {
+            second_request.cancel();
+        }
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(subscription.poll(&waker).is_ready());
+        drop(first);
+    }
+}
+
+#[test]
+fn owner_registration_preserves_deferred_stop_delivery() {
+    use std::sync::atomic::AtomicUsize;
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for batch in [false, true] {
+        let aggregate = CancellationToken::aggregate();
+        let request = CancellationToken::new();
+        let _owner = aggregate.register_owner(Some(request.clone())).unwrap();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut stopped = aggregate.subscribe();
+        assert!(stopped.poll(&waker).is_pending());
+        // An enclosing owner has published stop but still holds its lock.
+        let request_wakes = request.cancel_deferred();
+        let (refused, wakes) = if batch {
+            let (owners, wakes) = aggregate.register_owners_deferred([None, None]);
+            (owners.is_none(), wakes)
+        } else {
+            let (owner, wakes) = aggregate.register_owner_deferred(None);
+            (owner.is_none(), wakes)
+        };
+        assert!(refused);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        wakes.wake();
+        request_wakes.wake();
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(stopped.poll(&waker).is_ready());
+    }
+}
+
+#[test]
+fn repeated_owner_withdrawal_cannot_deliver_a_siblings_stop() {
+    let aggregate = CancellationToken::aggregate();
+    let first = aggregate.register_owner(None).unwrap();
+    let request = CancellationToken::new();
+    let _second = aggregate.register_owner(Some(request.clone())).unwrap();
+    let mut stop = aggregate.subscribe();
+    assert!(stop.poll(Waker::noop()).is_pending());
+    assert!(first.detach_deferred().is_empty());
+    let notification = request.cancel_deferred();
+    // A later Drop of the already detached owner must not take the
+    // sibling's notification from its enclosing delivery hold.
+    assert!(first.detach_deferred().is_empty());
+    notification.wake();
+    assert!(stop.poll(Waker::noop()).is_ready());
+}
+
+#[test]
+fn cancellation_registration_races_never_miss_the_stop() {
+    use std::sync::atomic::AtomicUsize;
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for _ in 0..64 {
+        let token = CancellationToken::new();
+        let cancelled = token.clone();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut subscription = token.subscribe();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let ready = Arc::clone(&barrier);
+        let producer = std::thread::spawn(move || {
+            ready.wait();
+            cancelled.cancel();
+        });
+        barrier.wait();
+        let pending = subscription.poll(&waker).is_pending();
+        producer.join().unwrap();
+        assert!(!pending || count.0.load(Ordering::SeqCst) == 1);
+        assert!(subscription.poll(&waker).is_ready());
+    }
+}

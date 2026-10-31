@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "reruns": 3,
+  "timeZones": ["Pacific/Kiritimati", "America/St_Johns", "Etc/GMT+12"],
+  "clockOffsetDays": [397, -211, 1463],
+  "runnerSuppliedVariables": ["CI", "ImageOS", "ImageVersion"]
+}

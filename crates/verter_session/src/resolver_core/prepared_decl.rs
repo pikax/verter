@@ -1443,6 +1443,55 @@ struct ResolutionWitnessSegment {
     facts: verter_session_query::facts::fact_set::FactSet,
 }
 
+/// How many distinct used-import sets a bundle keeps a combined witness
+/// for. A file whose declarations draw more distinct import subsets than
+/// this keeps per-segment replay for the excess: the cache bounds the
+/// bundle's own retention, never the witness a read carries.
+const COMBINED_WITNESS_CAP: usize = 32;
+
+/// The one run a used-import set replays as: its own self-charged cell, so
+/// a combined witness is retained only while the account has room for it.
+struct CombinedWitness(verter_session_query::facts::fact_set::FactSet);
+
+impl verter_retention::heap_size::HeapSize for CombinedWitness {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        verter_session_query::retention::allocation::fact_slice_bytes(&self.0, meter.handles())
+    }
+}
+
+/// The bundle's combined witnesses by used-import set. Its table is
+/// allocated once, at the cap, and charged by its own cell on first use;
+/// each entry is its own held cell, so no growth goes unaccounted.
+struct CombinedWitnessTable {
+    entries: parking_lot::Mutex<FxHashMap<u128, Held<CombinedWitness>>>,
+}
+
+impl CombinedWitnessTable {
+    fn new() -> Self {
+        Self {
+            entries: parking_lot::Mutex::new(FxHashMap::with_capacity_and_hasher(
+                COMBINED_WITNESS_CAP,
+                Default::default(),
+            )),
+        }
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for CombinedWitnessTable {
+    fn heap_size<'t>(
+        &'t self,
+        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        verter_retention::heap_size::hash_table_bytes(
+            self.entries.lock().capacity(),
+            std::mem::size_of::<(u128, Held<CombinedWitness>)>(),
+        )
+    }
+}
+
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -1455,6 +1504,16 @@ pub struct PreparedDeclBundle {
     /// Immutable producing route witnesses, replayed even on committed
     /// declaration slots and request-memo/shared/follower bundle hits.
     resolution_facts: OnceLock<Vec<ResolutionWitnessSegment>>,
+    /// The union of each distinct used-import subset this bundle has
+    /// served, keyed by the bitmask of the segments a read used. A read
+    /// that uses several authored imports replays their union as ONE
+    /// shared run — recognized by storage on every later read of the same
+    /// import set — instead of one run per specifier, so an enclosing
+    /// scope's seal merges one run per used set rather than one per
+    /// import. Lazily filled and bounded by [`COMBINED_WITNESS_CAP`]; the
+    /// table and every witness it commits are cells of their own, held
+    /// refusably on the bundle's account.
+    combined_witnesses: OnceLock<Held<CombinedWitnessTable>>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1488,13 +1547,21 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
     /// it fills ([`Held`]). The shared shallow state carries its own pin until its last artifact or
     /// bundle holder drops; the identity pool likewise charges its own cells.
     /// The bundle pays only for its handles to those shared owners.
+    ///
+    /// The sealed resolution-witness segments are the bundle's own
+    /// retention: their vector and specifier blocks are plain owned
+    /// allocations, and a narrow fact set's shared slice is charged by its
+    /// holder (only a wide tree-sealed set carries its own charge), so the
+    /// bundle charges the segment storage and every narrow set's slice and
+    /// fact heap here.
     fn heap_size<'t>(
         &'t self,
         meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
     ) -> usize {
         let Self {
             input_projection: _,
-            resolution_facts: _, // the witness rail owns its charge
+            resolution_facts,
+            combined_witnesses: _,
             account: _,
             owner_whole_hash: _,
             prepared_type_decls,
@@ -1502,10 +1569,30 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
             dep_edges,
             owner_scopes,
         } = self;
+        let segments = resolution_facts
+            .get()
+            .map(|segments| {
+                verter_retention::allocation::vec_bytes(segments)
+                    + segments
+                        .iter()
+                        .map(|segment| {
+                            segment
+                                .specifier
+                                .as_ref()
+                                .map_or(0, verter_retention::allocation::string_bytes)
+                                + verter_session_query::retention::allocation::fact_slice_bytes(
+                                    &segment.facts,
+                                    meter.handles(),
+                                )
+                        })
+                        .sum::<usize>()
+            })
+            .unwrap_or(0);
         prepared_type_decls.heap_size(meter)
             + prepared_value_decls.heap_size(meter)
             + dep_edges.heap_size(meter)
             + owner_scopes.heap_size(meter)
+            + segments
     }
 }
 
@@ -1660,6 +1747,13 @@ impl PreparedDeclBundle {
         }
     }
 
+    /// This bundle, retaining what it commits after admission on `account`.
+    #[cfg(test)]
+    pub(crate) fn charged_to_for_tests(mut self, account: StoreAccount) -> Self {
+        self.account = account;
+        self
+    }
+
     /// Observe the owner's whole import-route witness, for a read whose
     /// import use is not known.
     pub(crate) fn observe_read(&self) {
@@ -1679,11 +1773,39 @@ impl PreparedDeclBundle {
             self.owner_whole_hash,
         );
         if let Some(segments) = self.resolution_facts.get() {
-            for segment in segments {
-                if segment.specifier.as_deref().is_none_or(&uses_specifier) {
+            // The union of exactly the used segments is the witness this
+            // read must carry; delivering it as one run preserves the
+            // per-specifier precision of the seal while an enclosing
+            // scope's seal scans the used imports once per used set.
+            if segments.len() > u128::BITS as usize {
+                // Beyond the mask width a read replays its segments one by one.
+                for segment in segments {
+                    if segment.specifier.as_deref().is_none_or(&uses_specifier) {
+                        verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                            &segment.facts,
+                        );
+                    }
+                }
+            } else {
+                let mut used = 0u128;
+                for (index, segment) in segments.iter().enumerate() {
+                    if segment.specifier.as_deref().is_none_or(&uses_specifier) {
+                        used |= 1 << index;
+                    }
+                }
+                if used.count_ones() > 1 {
+                    let combined = self.combined_witness(segments, used);
                     verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
-                        &segment.facts,
+                        &combined,
                     );
+                } else {
+                    for (index, segment) in segments.iter().enumerate() {
+                        if used >> index & 1 == 1 {
+                            verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                                &segment.facts,
+                            );
+                        }
+                    }
                 }
             }
         } else if !self
@@ -1696,6 +1818,49 @@ impl PreparedDeclBundle {
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
         }
+    }
+
+    /// The one shared run for the used-import set `mask` of the sealed
+    /// `segments`: built once under the segments' own policy and replayed
+    /// by storage address by every later read of the same import set.
+    fn combined_witness(
+        &self,
+        segments: &[ResolutionWitnessSegment],
+        mask: u128,
+    ) -> verter_session_query::facts::fact_set::FactSet {
+        let table = match self.combined_witnesses.get() {
+            Some(table) => Some(table),
+            None => Held::retain(CachedValue::new(CombinedWitnessTable::new()), &self.account)
+                .ok()
+                .map(|held| self.combined_witnesses.get_or_init(|| held)),
+        };
+        if let Some(table) = table {
+            if let Some(held) = table.value.entries.lock().get(&mask) {
+                return held.value.0.clone();
+            }
+        }
+        let policy = segments[0].facts.policy();
+        let mut facts = Vec::new();
+        for (index, segment) in segments.iter().enumerate() {
+            if mask >> index & 1 == 1 {
+                facts.extend(segment.facts.iter().cloned());
+            }
+        }
+        let combined = policy.set_of(facts);
+        // Retained only while the account admits it; a refused witness is
+        // this read's alone and a later read builds it again.
+        if let Some(table) = table {
+            let mut entries = table.value.entries.lock();
+            if entries.len() < COMBINED_WITNESS_CAP && !entries.contains_key(&mask) {
+                if let Ok(held) = Held::retain(
+                    CachedValue::new(CombinedWitness(combined.clone())),
+                    &self.account,
+                ) {
+                    entries.insert(mask, held);
+                }
+            }
+        }
+        combined
     }
 
     pub(crate) fn input_record(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
@@ -1855,6 +2020,7 @@ pub fn build_prepared_decl_bundle(
     PreparedDeclBundle {
         input_projection: OnceLock::new(),
         resolution_facts: OnceLock::new(),
+        combined_witnesses: OnceLock::new(),
         account: StoreAccount::default(),
         owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(

@@ -325,7 +325,9 @@ const STAGED_TSDK_STEM = "native-preview";
  *
  * Native Preview does NOT spawn `<tsdk>/tsgo`. Its tsdk validator reads
  * `<tsdk>/package.json` (or its parent's), requires a `name` plus a matching
- * `bin` entry, and then stats the platform package beside it:
+ * `bin` entry, then resolves the platform package from that manifest with
+ * Node's module resolution (`@typescript/<name>-<platform>-<arch>/package.json`)
+ * and stats the engine beside the manifest it finds:
  *
  * ```text
  * <node_modules>/@typescript/<name>-<platform>-<arch>/lib/<tsgo|tsc>[.exe]
@@ -337,6 +339,7 @@ const STAGED_TSDK_STEM = "native-preview";
  *
  * ```text
  * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview/package.json
+ * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview-<os>-<arch>/package.json
  * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview-<os>-<arch>/lib/tsgo[.exe]
  * ```
  *
@@ -365,16 +368,27 @@ export function prepareEditorTsdk(opts: {
   const engineDir = join(modules, "@typescript", `${STAGED_TSDK_STEM}-${platform}-${arch}`, "lib");
   const executable = join(engineDir, engineName);
 
+  const writeFile =
+    opts.writeFile ?? ((path: string, content: string) => writeFileSync(path, content));
+  const platformPackage = `${STAGED_TSDK_STEM}-${platform}-${arch}`;
   mkdir(dir);
   mkdir(engineDir);
-  (opts.writeFile ?? ((path: string, content: string) => writeFileSync(path, content)))(
+  writeFile(
     join(dir, "package.json"),
     `${JSON.stringify(
       {
         name: STAGED_TSDK_PACKAGE,
         version: STAGED_TSDK_VERSION,
-        bin: { tsgo: join("..", `${STAGED_TSDK_STEM}-${platform}-${arch}`, "lib", engineName) },
+        bin: { tsgo: join("..", platformPackage, "lib", engineName) },
       },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFile(
+    join(modules, "@typescript", platformPackage, "package.json"),
+    `${JSON.stringify(
+      { name: `@typescript/${platformPackage}`, version: STAGED_TSDK_VERSION },
       null,
       2,
     )}\n`,

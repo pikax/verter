@@ -1554,6 +1554,12 @@ impl FileArtifactStore {
         reclaimed
     }
 
+    /// Callback-free readiness hint for transferring reclamation outside a poll.
+    pub(crate) fn root_release_reclamation_pending(&self) -> bool {
+        self.unreclaimed_retirements.load(Ordering::Relaxed) != 0
+            && self.live_roots.released.load(Ordering::Acquire)
+    }
+
     /// Give back the table capacity removals and reclaimed versions left
     /// behind, lowering each table's backing charge to what it still holds.
     /// For release boundaries (host close, a release-completion boundary):

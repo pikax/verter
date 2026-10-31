@@ -3971,6 +3971,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // consumes the computed step.
                         self_step = Some(relation_step_from_payload(&payload));
                         settles.push(!recursion_uses[position].context_dependent);
+                        self.observe_retained_reference_versions(
+                            &crate::semantic_query::SemanticQueryValue::Relation(payload.clone()),
+                        );
                         completed.push(CompletedSccMember {
                             key,
                             payload,
@@ -3979,6 +3982,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 } else if !session_delta {
                     settles.push(!recursion_uses[position].context_dependent);
+                    self.observe_retained_reference_versions(
+                        &crate::semantic_query::SemanticQueryValue::Relation(payload.clone()),
+                    );
                     completed.push(CompletedSccMember {
                         key,
                         payload,
@@ -4087,6 +4093,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 match verdict {
                     Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
+                        // The batch publishes under the root carrier's read
+                        // set: every version this member's value embeds is
+                        // observed into it before the member leaves.
+                        self.observe_retained_reference_versions(
+                            &crate::semantic_query::SemanticQueryValue::FlowReturn(
+                                verter_session_query::retention::owned::Owned::new(
+                                    proof.value().clone(),
+                                ),
+                            ),
+                        );
                         proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
                             key: member.key,
                             result: proof,
@@ -4186,12 +4202,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // provenance and is not the admission oracle.
                     match crate::semantic_query::AdmissibleCallResult::new(result, state.proof_complete)
                     {
-                        Some(result) => txn.call.completed_members.push(CompletedResolveCallMember {
-                            key,
-                            result,
-                            inline_flight: state.inline_flight,
-                            self_roots: state.self_roots,
-                        }.held(self.graph().store())),
+                        Some(result) => {
+                            self.observe_retained_reference_versions(
+                                &crate::semantic_query::SemanticQueryValue::ResolveCall(
+                                    verter_session_query::retention::owned::Owned::new(
+                                        result.get().clone(),
+                                    ),
+                                ),
+                            );
+                            txn.call.completed_members.push(CompletedResolveCallMember {
+                                key,
+                                result,
+                                inline_flight: state.inline_flight,
+                                self_roots: state.self_roots,
+                            }.held(self.graph().store()));
+                        }
                         _ => rootless_flights.push(state.inline_flight),
                     }
                 }
@@ -8493,6 +8518,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         current
     }
 
+    /// The leaves of a relation's key domain, resolving aliases at every
+    /// union level. Shared subdomains are visited once; an unresolved or
+    /// cyclic domain leaves the relation undecided.
+    fn relation_key_constituents(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.graph();
+        let mut pending = vec![(node, false)];
+        let mut active = FxHashSet::default();
+        let mut complete = FxHashSet::default();
+        let mut keys = Vec::new();
+        while let Some((node, finish)) = pending.pop() {
+            if finish {
+                active.remove(&node);
+                complete.insert(node);
+                continue;
+            }
+            let node = match self.unwrap_identity_carrier_for_relation(node) {
+                IdentityCarrierUnwrap::Concrete(node) => self.follow_relation_aliases(node),
+                IdentityCarrierUnwrap::Unresolvable => return None,
+            };
+            if complete.contains(&node) {
+                continue;
+            }
+            if !active.insert(node) {
+                return None;
+            }
+            match graph.node_data(node).as_deref()? {
+                SemanticNodeData::Union(members) => {
+                    pending.push((node, true));
+                    pending.extend(members.iter().rev().map(|member| (*member, false)));
+                }
+                _ => {
+                    keys.push(node);
+                    active.remove(&node);
+                    complete.insert(node);
+                }
+            }
+        }
+        Some(keys)
+    }
+
     /// When `node == node` unwraps (alias follow + identity-carrier unwrap) to
     /// an object-spread program, the identical pair answers through the
     /// program protocol: node identity is not a completeness proof, so an
@@ -12439,8 +12504,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `{ [K in 1 | "1"]: K }` IS `{ 1: 1 | "1" }`, and `-?` drops the
     /// `undefined` an optional source member adds.
     ///
+    /// The checker resolves those members whenever the key domain is not
+    /// generic, whatever the template holds: a value still naming an open
+    /// type variable (`Pick<{ s: () => S }, "s">` while a call infers `S`)
+    /// stays that carrier, which the relation then infers into.
+    ///
     /// `None` (the operand stays the carrier it is, undecided) for a key
-    /// remap, a source, key domain or template that is still open, a
+    /// remap, a source or key domain that is still open, a
     /// homomorphic source that is no plain object surface (a union
     /// distributes, an array or tuple maps elementwise), a key domain with an
     /// index key (see [`Self::index_key_mapped_object_for_relation`]) or a
@@ -12454,7 +12524,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         transit: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
         if mapper.name_remap.is_some()
-            || super::raise::mapped_type_is_open_or_unknown(self, source, mapper)
+            || super::raise::mapped_type_key_domain_is_open_or_unknown(self, source, mapper)
         {
             return None;
         }
@@ -12631,7 +12701,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The members of a plain object surface `node` names for a relation:
     /// `None` for an open carrier, a non-object, and an object with call,
-    /// construct or index signatures.
+    /// construct or index signatures. A composed surface — an interface
+    /// whose body extends a base, an intersection — reads through the one
+    /// shared surface reader ([`Self::comparable_surface`]), so `Pick<I,
+    /// "s">` over `interface I extends B { s?: … }` reads `s` as `I`
+    /// declares it, inherited members included.
     fn plain_object_members_for_relation(
         &self,
         node: SemanticNodeId,
@@ -12641,8 +12715,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             return None;
         };
-        let data = self.graph().node_data(object)?;
-        let SemanticNodeData::Object(view) = &*data else {
+        let ComparableSurface::Object(view) = self.comparable_surface(object) else {
             return None;
         };
         if !view.call_signatures.is_empty()
@@ -12693,11 +12766,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let key_domain = self
             .evaluate_deferred_semantic_node_with_context(mapper.key_space, transit)
             .into_active_query_build_node(self);
-        let constituents: Vec<SemanticNodeId> = match graph.node_data(key_domain).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-            Some(_) => vec![key_domain],
-            None => return None,
-        };
+        let constituents = self.relation_key_constituents(key_domain)?;
         let optional = matches!(
             mapper.optionality,
             crate::semantic_query::OptionalityMod::Add
@@ -12963,7 +13032,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Relate an Object surface against a Record<K, V> target.
+    /// Relate an Object surface against a `Record<K, V>` target, as the
+    /// checker relates it to the object it resolves to: each literal key of
+    /// `K` is a required property the source must carry with a value
+    /// related to `V`, and each index key — `string`, `number`, `symbol` or
+    /// a template literal pattern — is an index signature valued `V`,
+    /// related through the one index-signature rule
+    /// ([`Self::relate_target_index_signature`]): only the source members
+    /// that key applies to relate to `V`, so `{ count: number }` takes
+    /// `Record<symbol, any>` and `{ [k: number]: string }` alike. A key that
+    /// is neither leaves the relation unknown.
     fn relate_object_as_record(
         &self,
         source_view: &SurfaceView,
@@ -12972,94 +13050,69 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         let graph = self.graph();
-        let key_data = match graph.node_data(key_type) {
-            Some(d) => d,
-            None => return RelationResult::Unknown,
+        let Some(keys) = self.relation_key_constituents(key_type) else {
+            return RelationResult::Unknown;
         };
-        let required_keys: Vec<Arc<str>> = match &*key_data {
-            SemanticNodeData::Literal(LiteralValue::String(s)) => vec![Arc::from(s.as_str())],
-            SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-                vec![Arc::from(super::build::js_number_to_string(*n).as_str())]
+        let mut required_keys: Vec<crate::semantic_query::PropertyKey> = Vec::new();
+        let mut index_keys: Vec<SemanticNodeId> = Vec::new();
+        for key in keys {
+            match graph.node_data(key).as_deref() {
+                Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
+                    required_keys.push(crate::semantic_query::PropertyKey::string_literal(
+                        s.as_str(),
+                    ));
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::Number(n))) => {
+                    required_keys.push(crate::semantic_query::PropertyKey::from_js_number(*n));
+                }
+                Some(
+                    SemanticNodeData::Primitive(
+                        PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::Symbol,
+                    )
+                    | SemanticNodeData::TemplateLiteral { .. },
+                ) => index_keys.push(key),
+                _ => return RelationResult::Unknown,
             }
-            SemanticNodeData::Union(members) => {
-                let members = members.members_arc();
-                drop(key_data);
-                let mut keys: Vec<Arc<str>> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    match graph.node_data(*member).as_deref() {
-                        Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
-                            keys.push(Arc::from(s.as_str()));
-                        }
-                        Some(SemanticNodeData::Literal(LiteralValue::Number(n))) => {
-                            keys.push(Arc::from(super::build::js_number_to_string(*n).as_str()));
-                        }
-                        _ => return RelationResult::Unknown,
-                    }
-                }
-                keys
-            }
-            SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Number) => {
-                drop(key_data);
-                // The strict subtype relation infers no index signature for
-                // a source that declares none, an object literal's own type
-                // aside (the checker's `typeRelatedToIndexInfo`).
-                let applicable_source_index = source_view.index_signatures.iter().any(|s_index| {
-                    index_domains_overlap(graph.store(), s_index.key_type, key_type)
-                });
-                if self.strict_subtype_mode()
-                    && !applicable_source_index
-                    && !surface_is_object_literal(source_view)
-                {
-                    return RelationResult::NotAssignable;
-                }
-                let mut acc = RelationResult::Assignable {
-                    bindings: Arc::from(Vec::new().into_boxed_slice()),
-                };
-                for s_index in source_view.index_signatures.iter() {
-                    if !index_domains_overlap(graph.store(), s_index.key_type, key_type) {
-                        continue;
-                    }
-                    let r = self.relate_member(
-                        s_index.value_type,
-                        value_type,
-                        bindings,
-                        InferPosition::Covariant,
-                    );
-                    acc = result_and(acc, r);
-                    if matches!(acc, RelationResult::NotAssignable) {
-                        return RelationResult::NotAssignable;
-                    }
-                }
-                for member in source_view.positive_members().iter() {
-                    let r = self.relate_member(
-                        member.value,
-                        value_type,
-                        bindings,
-                        InferPosition::Covariant,
-                    );
-                    acc = result_and(acc, r);
-                    if matches!(acc, RelationResult::NotAssignable) {
-                        return RelationResult::NotAssignable;
-                    }
-                }
-                return acc;
-            }
-            _ => return RelationResult::Unknown,
-        };
+        }
 
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
         for key in required_keys {
-            let member = match source_view.project_string_key(key.as_ref()) {
+            // `{ 1: V }` and `{ "1": V }` are one property: the key matches
+            // whichever spelling the source authored.
+            let member = match source_view.project_known_key(&key) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => member,
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
                     return RelationResult::NotAssignable;
                 }
             };
+            // The key is a required property, so a source member that may
+            // be absent never satisfies it — the optional-to-required rule
+            // of [`Self::relate_property_pair`].
+            if member.optional && self.current_relation_kind() != RelationKind::Comparable {
+                return RelationResult::NotAssignable;
+            }
             let r =
                 self.relate_member(member.value, value_type, bindings, InferPosition::Covariant);
             acc = result_and(acc, r);
+            if matches!(acc, RelationResult::NotAssignable) {
+                return RelationResult::NotAssignable;
+            }
+        }
+        for key_type in index_keys {
+            let index = crate::semantic_query::IndexSignature {
+                key_type,
+                value_type,
+                readonly: false,
+                key_name: None,
+                spans: verter_type_expr::IndexSignatureSpans::default(),
+                declaration_origin: None,
+            };
+            acc = result_and(
+                acc,
+                self.relate_target_index_signature(source_view, &index, bindings),
+            );
             if matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }

@@ -199,109 +199,68 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     );
 }
 
-/// Discriminator — `cooperative_return_only_not_shared_to_joiners`.
-///
-/// The materialiser's stack-local `non_cacheable_outcome:
-/// RefCell<...>` side channel held the valid-but-non-cacheable
-/// outcome from the winner thread only — cooperative joiners on the
-/// same key observed an empty stash and returned `Tainted`.
-///
-/// The `ComputeAdmission::{Cacheable, ReturnOnly, Failed}` admission
-/// outcome lifts the non-cacheable case into the cooperative API.
-/// A `ReturnOnly { value, reason }` value carries NO `Entry` and NO dep-signature
-/// carrier, so it cannot be view-validated against a cooperative
-/// joiner's own view: two requests carrying the same cache key can
-/// run under different overlays, and a carrier-less value is not
-/// interchangeable across views. `ReturnOnly` is therefore
-/// non-shareable — the winner alone receives the `V`, and every
-/// joiner observes the slot's `non_cacheable_winner` flag, forks,
-/// and cold-recomputes for its own view. The cache stays empty.
-///
-/// Discriminating assertions: the enum exists with all three
-/// variants; the admission function exists; the `ReturnOnly` arm
-/// sets `non_cacheable_winner` (NOT a broadcast channel); the
-/// joiner branch forks on `non_cacheable_winner`; the `Cacheable`
-/// arm does not broadcast a value; the materialiser uses the API
-/// (the legacy side channel is retired).
+/// A carrier-less winner belongs only to its own view. A waiting caller
+/// must receive its own producer and answer, and neither answer becomes warm.
 #[test]
 #[serial(fact_counter_provenance)]
 fn cooperative_return_only_not_shared_to_joiners() {
-    let ca_src = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../verter_type_engine/src/cache_runtime/singleflight.rs"),
-    )
-    .expect("read cache_runtime/singleflight.rs");
-    assert!(
-        ca_src.contains("pub enum ComputeAdmission<V, Entry> {"),
-        "ComputeAdmission<V, Entry> must exist with the three-variant shape"
-    );
-    for variant in &["Cacheable(Entry)", "ReturnOnly {", "Failed"] {
-        assert!(
-            ca_src.contains(variant),
-            "ComputeAdmission must declare variant `{variant}`"
-        );
-    }
-    assert!(
-        ca_src.contains("pub fn cooperative_admit_with_post_publish<"),
-        "cooperative_admission must expose `cooperative_admit_with_post_publish` — \
-         the ComputeAdmission-aware admission entry point"
-    );
-    // A `ReturnOnly` winner must NOT broadcast `V` to joiners. A
-    // carrier-less value cannot be view-validated against a joiner's
-    // own view, so `ReturnOnly` is non-shareable across joiners. The
-    // `ReturnOnly` arm marks the slot `non_cacheable_winner` so every
-    // joiner forks and cold-recomputes for its own view; the winner
-    // alone receives the value. Scope the check to the `ReturnOnly`
-    // match arm.
-    let return_only_arm_idx = ca_src
-        .find("ComputeAdmission::ReturnOnly { value, reason } => {")
-        .expect("ReturnOnly admission arm must exist");
-    let cacheable_arm_idx = ca_src
-        .find("ComputeAdmission::Cacheable(entry) => {")
-        .expect("Cacheable admission arm must exist");
-    let return_only_arm_window = &ca_src[return_only_arm_idx..];
-    assert!(
-        return_only_arm_window.contains("state.non_cacheable_winner = true"),
-        "the ReturnOnly admission arm must mark the slot \
-         `non_cacheable_winner` so cooperative joiners fork and \
-         cold-recompute for their own view — a carrier-less ReturnOnly \
-         value cannot be view-validated and must not be shared to joiners"
-    );
-    assert!(
-        !return_only_arm_window.contains("return_only ="),
-        "the ReturnOnly admission arm must NOT broadcast `V` through a \
-         slot channel — `ReturnOnly` is non-shareable across joiners; \
-         each joiner forks and cold-recomputes for its own view"
-    );
-    // The joiner branch must fork when it observes a
-    // `non_cacheable_winner` winner rather than reading a broadcast
-    // value.
-    assert!(
-        ca_src.contains("if non_cacheable_winner {"),
-        "the cooperative joiner branch must fork (re-enter admission) \
-         when the winner emitted a non-cacheable `ReturnOnly` outcome"
-    );
-    // Critical: the Cacheable arm must NOT broadcast `V` through a
-    // slot channel. Joiners fall through to `map.get(&key) +
-    // validate(&entry_arc)` so each joiner thread runs `validate` on
-    // its own thread — view-checking the entry against its own view
-    // and running the caller's fact-bubble side effect. See
-    // `cacheable_joiner_runs_validate_on_its_own_thread` in
-    // `cache_runtime/singleflight.rs` for the behavioural discriminator.
-    let cacheable_arm_end = cacheable_arm_idx
-        + ca_src[cacheable_arm_idx..]
-            .find("ComputeAdmission::ReturnOnly { value, reason } => {")
-            .expect("ReturnOnly arm follows Cacheable arm");
-    let cacheable_arm_window = &ca_src[cacheable_arm_idx..cacheable_arm_end];
-    assert!(
-        !cacheable_arm_window.contains("return_only ="),
-        "the Cacheable admission arm must NOT broadcast `V` through a \
-         slot channel. Joiners must fall through to \
-         `map.get(&key) + validate(&entry_arc)` so each joiner thread \
-         runs `validate` on its own thread — view-checking the entry \
-         and bubbling the cached entry's facts into the joiner's outer \
-         fact tracer."
-    );
+    use dashmap::DashMap;
+    use std::sync::Arc;
+    use std::task::{Poll, Waker};
+    use verter_audit::NonAdmissionReason;
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::tasks::TaskRegistry;
+    use verter_type_engine::cache_runtime::singleflight::{
+        owned_admit_with_post_publish, ComputeAdmission, InflightTable,
+    };
+    use verter_type_engine::cache_runtime::OwnedAdmissionStep;
+
+    let registry = TaskRegistry::default();
+    let flights = InflightTable::new();
+    let map = Arc::new(DashMap::new());
+    let begin = |value| {
+        owned_admit_with_post_publish(
+            map.clone(),
+            &flights,
+            1u32,
+            |entry: &u32| Some(*entry),
+            move || ComputeAdmission::ReturnOnly {
+                value,
+                reason: NonAdmissionReason::ForcedTestRefusal,
+            },
+            |entry| *entry,
+            |_| true,
+            |_, _| {},
+            |_, _| {},
+            None,
+            registry.register_task(),
+            CancellationToken::new(),
+        )
+    };
+    let mut winner = begin(7);
+    let Poll::Ready(Ok(OwnedAdmissionStep::Produce(producer))) = winner.poll(Waker::noop()) else {
+        panic!("the cold winner owns its producer");
+    };
+    let mut follower = begin(9);
+    assert!(follower.poll(Waker::noop()).is_pending());
+    producer.run();
+    assert!(matches!(
+        winner.poll(Waker::noop()),
+        Poll::Ready(Ok(OwnedAdmissionStep::Value(Some(7))))
+    ));
+    assert!(map.is_empty(), "ReturnOnly publishes no reusable entry");
+    let Poll::Ready(Ok(OwnedAdmissionStep::Produce(producer))) = follower.poll(Waker::noop())
+    else {
+        panic!("the cross-view follower must recompute through admission");
+    };
+    producer.run();
+    assert!(matches!(
+        follower.poll(Waker::noop()),
+        Poll::Ready(Ok(OwnedAdmissionStep::Value(Some(9))))
+    ));
+    assert!(map.is_empty());
+    assert_eq!(registry.active_task_count_for_tests(), 0);
+    assert_eq!(registry.wait_count_for_tests(), 0);
 }
 
 /// Bonus discriminator — the ReadSetSignature carrier's `canonical_ids()`

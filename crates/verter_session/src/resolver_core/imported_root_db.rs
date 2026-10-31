@@ -180,26 +180,32 @@ impl ImportedRootDb {
             )
     }
 
-    /// **Test-only.** Strong-reference count of the in-flight singleflight state
-    /// for `(provider, imported_name)` under `view`'s compat token, or `0` if no
-    /// flight is registered.
+    /// **Test-only.** Wait until the strong-reference count of the in-flight
+    /// singleflight state for `(provider, imported_name)` under `view`'s compat
+    /// token exceeds `more_than`.
     ///
     /// A leader parked inside its resolve closure holds the leader-only baseline
     /// of 2 (its local `state` + the `flights` map entry); a follower that has
     /// joined and is committed to the condvar wait raises the count to 3. Tests
-    /// poll this to deterministically observe follower admission onto the flight
-    /// before releasing the leader — no wall-clock sleep racing the follower's
-    /// registration.
+    /// wait on this to observe follower admission onto the flight before
+    /// releasing the leader — no wall-clock sleep racing the follower's
+    /// registration. The budget is a hang guard only.
     #[cfg(test)]
-    pub(crate) fn test_root_inflight_strong_count<V: StoreView + ?Sized>(
+    pub(crate) fn test_wait_for_root_inflight_strong_count<V: StoreView + ?Sized>(
         &self,
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-    ) -> usize {
+        more_than: usize,
+        budget: std::time::Duration,
+    ) -> bool {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
-        self.singleflight
-            .test_flight_strong_count(&key, view.compat_token())
+        self.singleflight.test_wait_for_flight_strong_count(
+            &key,
+            view.compat_token(),
+            more_than,
+            budget,
+        )
     }
 
     /// Test-only: drive [`Self::get_or_resolve_with_facts`] the way a production
@@ -778,7 +784,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         use std::sync::{mpsc, Arc as StdArc};
         use std::thread;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         // With a burst sibling's participation pin held, the parked leader's
         // lane carries 3 refs (the `flights` map entry + the sibling's pin
@@ -865,18 +871,18 @@ mod tests {
         // leader retired the slot and would be a fresh cold winner, not a burst
         // member, and the test would prove nothing.
         let probe_view = TestView::new(1);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while db.test_root_inflight_strong_count("burst_provider.ts", "Burst", &probe_view)
-            <= LEADER_AND_SIBLING_PIN_INFLIGHT_REFS
-        {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for the follower to be admitted onto the imported-root \
-                 singleflight in-flight entry (strong count never exceeded \
-                 {LEADER_AND_SIBLING_PIN_INFLIGHT_REFS})",
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        assert!(
+            db.test_wait_for_root_inflight_strong_count(
+                "burst_provider.ts",
+                "Burst",
+                &probe_view,
+                LEADER_AND_SIBLING_PIN_INFLIGHT_REFS,
+                Duration::from_secs(10),
+            ),
+            "timed out waiting for the follower to be admitted onto the imported-root \
+             singleflight in-flight entry (strong count never exceeded \
+             {LEADER_AND_SIBLING_PIN_INFLIGHT_REFS})",
+        );
         tx_release_leader.send(()).expect("release the leader");
 
         let leader_root = leader.join().expect("leader thread");

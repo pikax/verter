@@ -5,7 +5,7 @@
 //! Primary columns:
 //!
 //! * `script` — authored program, spliced verbatim into every lane.
-//! * `checker` — recorded TypeScript 7.0.2 `tsc` (`--noEmit
+//! * `checker` — recorded TypeScript 7.1.0-beta `tsc` (`--noEmit
 //!   --strict --ignoreConfig`, checker only, never `.d.ts`) print for
 //!   `probe`. The suite never invokes tsgo. The column must be
 //!   non-empty, the probe derivable
@@ -170,6 +170,8 @@ pub(crate) enum Degr {
     ConditionalVarDefinition,
     NonCallableBinding,
     UnrepresentableCallee,
+    ContextSensitiveInference,
+    AbsentReceiverMember,
     FailedBindingInitializer,
     UnreducedDeclaredUnion,
     UnresolvedValue,
@@ -770,6 +772,8 @@ pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
         Some(FlowReturnDegradation::ConditionalVarDefinition) => Degr::ConditionalVarDefinition,
         Some(FlowReturnDegradation::NonCallableBinding) => Degr::NonCallableBinding,
         Some(FlowReturnDegradation::UnrepresentableCallee) => Degr::UnrepresentableCallee,
+        Some(FlowReturnDegradation::ContextSensitiveInference) => Degr::ContextSensitiveInference,
+        Some(FlowReturnDegradation::AbsentReceiverMember) => Degr::AbsentReceiverMember,
         Some(FlowReturnDegradation::FailedBindingInitializer) => Degr::FailedBindingInitializer,
         Some(FlowReturnDegradation::UnreducedDeclaredUnion) => Degr::UnreducedDeclaredUnion,
         Some(FlowReturnDegradation::UnresolvedValue) => Degr::UnresolvedValue,
@@ -4530,12 +4534,12 @@ mod corpus_suite {
 // Oracle — how the `checker` column is obtained
 
 /// The pinned checker: the TypeScript 7 native compiler (`tsc[.exe]
-/// --version` → `Version 7.0.2`, the workspace `typescript` devDependency's
+/// --version` → `Version 7.1.0-beta`, the workspace `typescript` devDependency's
 /// platform package). CHECKER only, never `.d.ts`. Every `checker` column
 /// in the corpus was measured against exactly this version; the oracle
 /// harness pins the same engine for its snapshots.
 #[cfg(test)]
-pub(crate) const TSGO_VERSION: &str = "7.0.2";
+pub(crate) const TSGO_VERSION: &str = "7.1.0-beta";
 
 /// One generated probe program for a row.
 ///

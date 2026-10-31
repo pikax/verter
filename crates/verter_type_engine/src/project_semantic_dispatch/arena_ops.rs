@@ -28,6 +28,10 @@ impl<'a, M: verter_audit::observe::ObserveExec> ArenaOps<'a, M> {
         self.graph.node_reaches_unresolved(node)
     }
 
+    pub(super) fn node_reaches_versioned_reference(&self, node: SemanticNodeId) -> bool {
+        self.graph.node_reaches_versioned_reference(node)
+    }
+
     pub(super) fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
         self.graph.intern_node(data)
     }

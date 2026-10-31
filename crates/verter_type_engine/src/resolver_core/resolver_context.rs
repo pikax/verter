@@ -430,6 +430,15 @@ pub fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersio
     tracer_stack::observe_fan_out(fact);
 }
 
+/// Whether the innermost active tracer already holds `fact` (its own
+/// observation or an absorbed canonical run), so a producer re-deriving it
+/// can skip fanning it out again: it reached every active cell when it was
+/// first recorded. `false` when no tracer is installed.
+#[inline]
+pub fn tracer_holds_fact(fact: &verter_session_query::facts::fact_cache::FactVersionRef) -> bool {
+    tracer_stack::tracer_holds_fact(fact)
+}
+
 /// Run `f` with every installed fact tracer and recorder suspended: what it
 /// reads serves cache validation and is no dependency of the enclosing
 /// computation.
