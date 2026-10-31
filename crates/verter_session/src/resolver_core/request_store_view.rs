@@ -965,6 +965,9 @@ pub(crate) struct RequestStoreView<'a> {
     /// The settled verdicts of the retained signatures this view validated
     /// (see [`SignatureVerdicts`]).
     signature_verdicts: SignatureVerdicts,
+    /// The host state each retained signature's inputs were last proved
+    /// ready under (see [`PreparedSignatures`]).
+    prepared_signatures: PreparedSignatures,
     /// The project environment this request read per canonical (see
     /// [`RequestProjectEnv`]).
     project_env: RequestProjectEnv,
@@ -1239,6 +1242,52 @@ impl SignatureVerdicts {
     }
 }
 
+/// The host state under which this view last proved each retained
+/// signature's inputs ready, so a warm read that meets a signature again
+/// walks it only after the host moved.
+///
+/// [`SignatureVerdicts`] holds what the base and overlay answer; whether the
+/// files behind that answer are still published is a fact of the live host,
+/// which fences, replaces and retires serves while the request runs. Every
+/// generation a fence compares is a dimension of the validation token, so a
+/// proof taken under a token holds for as long as that token is current.
+/// Request-scoped, dropped with the view.
+#[derive(Default)]
+struct PreparedSignatures(
+    parking_lot::Mutex<
+        rustc_hash::FxHashMap<
+            usize,
+            (
+                verter_session_query::facts::fact_set::FactSet,
+                crate::resolver_store::StoreViewValidationToken,
+            ),
+        >,
+    >,
+);
+
+impl PreparedSignatures {
+    fn is_current(
+        &self,
+        signature: &verter_session_query::facts::fact_set::FactSet,
+        inputs: &crate::resolver_store::StoreViewValidationToken,
+    ) -> bool {
+        self.0
+            .lock()
+            .get(&signature.address())
+            .is_some_and(|(held, proven_under)| held.ptr_eq(signature) && proven_under == inputs)
+    }
+
+    fn record(
+        &self,
+        signature: &verter_session_query::facts::fact_set::FactSet,
+        inputs: crate::resolver_store::StoreViewValidationToken,
+    ) {
+        self.0
+            .lock()
+            .insert(signature.address(), (signature.clone(), inputs));
+    }
+}
+
 /// The owning project's environment for each canonical a request keyed a
 /// query by: its env hashes, project identity and effective compiler
 /// options. They are read live from the workspace's published root the
@@ -1401,6 +1450,7 @@ impl<'a> RequestStoreView<'a> {
             base_is_current: true,
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
+            prepared_signatures: PreparedSignatures::default(),
             project_env: RequestProjectEnv::default(),
             kept_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
@@ -1435,6 +1485,7 @@ impl<'a> RequestStoreView<'a> {
             base_is_current,
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
+            prepared_signatures: PreparedSignatures::default(),
             project_env: RequestProjectEnv::default(),
             kept_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
@@ -1454,7 +1505,9 @@ impl<'a> RequestStoreView<'a> {
     /// under the same strict roots and the current completion state (see
     /// [`SignatureVerdicts`]). A caller that must prepare inputs before a
     /// walk asks here first, or the preparation walks the signature the
-    /// settled verdict exists to spare.
+    /// settled verdict exists to spare; a valid answer also needs
+    /// [`Self::signature_prepared_under`] to hold, because the verdict says
+    /// nothing about whether its inputs are still published.
     pub(crate) fn settled_retained_signature(
         &self,
         sig: &verter_session_query::facts::fact_set::FactSet,
@@ -1473,6 +1526,26 @@ impl<'a> RequestStoreView<'a> {
         self.signature_verdicts
             .get(sig, self_root_canonicals, state)
             .map(|verdict| verdict == Verdict::Valid)
+    }
+
+    /// Whether `sig`'s inputs were proved ready under exactly `inputs`
+    /// ([`PreparedSignatures`]). A signature of no facts has no inputs.
+    pub(crate) fn signature_prepared_under(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        inputs: &crate::resolver_store::StoreViewValidationToken,
+    ) -> bool {
+        sig.is_empty() || self.prepared_signatures.is_current(sig, inputs)
+    }
+
+    /// Record that `sig`'s inputs proved ready on a walk that began under
+    /// `inputs`.
+    pub(crate) fn note_signature_prepared(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        inputs: crate::resolver_store::StoreViewValidationToken,
+    ) {
+        self.prepared_signatures.record(sig, inputs);
     }
 
     /// [`StoreView::validate_fact_signature`] for a signature a cache
