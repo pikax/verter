@@ -242,8 +242,9 @@ pub enum Claim<'s> {
     Produce(ProducerLease<'s>),
 }
 
-/// The outcome of a synchronous acquisition: a claim whose subscriptions
-/// were all waited out.
+/// The outcome of an acquisition: a claim whose subscriptions were waited
+/// out, or — when the acquisition yields ([`AcquireWait::Yield`]) — one
+/// left waiting on another task's producer.
 pub enum Acquired<'s> {
     Read(ValueRead),
     /// The caller's own source answered the warm miss before any claim,
@@ -251,6 +252,39 @@ pub enum Acquired<'s> {
     Served(ValueRead),
     Recursive(Recursion),
     Produce(ProducerLease<'s>),
+    /// Another task produces the key: the claim waits in the caller's slot,
+    /// its waker registered on the producer's flight, and the next
+    /// acquisition through that slot continues it.
+    Pending,
+}
+
+/// A claim an acquisition left waiting on another task's producer: its
+/// attempt and its subscription, owned by the caller between its polls.
+pub struct PendingAcquire<'s> {
+    attempt: ClaimAttempt,
+    subscription: Subscription<'s>,
+}
+
+impl PendingAcquire<'_> {
+    /// The claim this acquisition continues, for another owner to make
+    /// again. Dropping the subscription withdraws only its own readiness
+    /// registration and wait edge; the producer it joined is left alone.
+    pub(crate) fn into_claim(self) -> ClaimAttempt {
+        self.attempt
+    }
+}
+
+/// How an acquisition that meets another task's producer waits for it.
+pub enum AcquireWait<'w, 's> {
+    /// Wait it out on this thread: the synchronous entry.
+    Block,
+    /// Leave the claim in `slot` with `waker` registered and answer
+    /// [`Acquired::Pending`]; an acquisition whose `slot` holds a claim
+    /// continues that claim instead of beginning another.
+    Yield {
+        slot: &'w mut Option<PendingAcquire<'s>>,
+        waker: &'w std::task::Waker,
+    },
 }
 
 /// A subscription to the producer another task owns for a key.
@@ -263,6 +297,11 @@ pub struct Subscription<'s> {
     /// observing build, when it began waiting). Dropping the subscription
     /// releases them.
     parked: Option<Parked>,
+    /// The cancellation that stops the subscriber's request, registered with
+    /// the waker of each poll that leaves it pending — before that poll
+    /// checks the flight — so the request's cancellation wakes the waiting
+    /// subscriber with the producer still held, on whatever thread polls it.
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
 }
 
 /// A parked subscriber's registrations.
@@ -270,7 +309,7 @@ struct Parked {
     _edge: verter_execution::tasks::WaitEdge,
     /// When a polled subscriber began waiting, for the `waits_ms` stat.
     /// Observation only: a default build keeps no timer across `Pending`.
-    #[cfg(feature = "semantic-observe")]
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     since: Option<Instant>,
     /// The subscription's own waker registration on the flight.
     waker: verter_execution::wake::WakeRegistration,
@@ -446,19 +485,24 @@ impl SemanticGraphStore {
     }
 
     construction_ordinal_seam! {
-        /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
-        /// returns a subscription — it waits each one out. With `recompute` the
-        /// claim computes the key rather than reads it warm: the claimant was
-        /// refused the stored result's receipt.
+        /// Lookup, claim and wait: the acquisition of `key`. With `recompute`
+        /// the claim computes the key rather than reads it warm: the claimant
+        /// was refused the stored result's receipt.
         ///
-        /// A claim needs the synchronous entry's task: `execution` is entered
-        /// only once the warm lookup misses, so a warm read takes no task, and
-        /// the caller keeps the scope for as long as the producer it may be
+        /// A claim needs the entry's task: `execution` is entered only once
+        /// the warm lookup misses, so a warm read takes no task, and the
+        /// caller keeps the scope for as long as the producer it may be
         /// handed runs, so every query nested in that build joins the task.
         ///
         /// unclaimed is consulted once the warm lookup misses and before the
         /// first claim: a read it answers with ([Acquired::Served]) installs
         /// no flight, so no other task can join one that is never produced.
+        ///
+        /// `wait` decides what meeting another task's producer does: the
+        /// synchronous entry waits it out, a polled entry yields with the
+        /// claim in its slot and continues that claim on its next poll — the
+        /// same claim, so its lookup and the caller's own source are not
+        /// consulted again.
         fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
             &'s self,
             ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -468,20 +512,40 @@ impl SemanticGraphStore {
             capture: &mut ReadCapture<'_>,
             recompute: bool,
             unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
+            mut wait: AcquireWait<'_, 's>,
         ) -> Acquired<'s> {
-            let begun = if recompute {
-                self.begin_query_recompute(flags, key)
-            } else {
-                self.begin_query_claim(ctx, flags, key, capture)
+            let resumed = match &mut wait {
+                AcquireWait::Yield { slot, .. } => slot.take(),
+                AcquireWait::Block => None,
             };
-            let mut attempt = match begun {
-                Ok(attempt) => attempt,
-                Err(read) => return Acquired::Read(read),
+            let mut attempt = match resumed {
+                // The claim a yielded acquisition left continues where it
+                // waited: its producer answers it, or it claims again.
+                Some(PendingAcquire {
+                    attempt,
+                    subscription,
+                }) => match self.join_acquired(ctx, flags, attempt, subscription, capture, &mut wait)
+                {
+                    Ok(acquired) => return acquired,
+                    Err(attempt) => attempt,
+                },
+                None => {
+                    let begun = if recompute {
+                        self.begin_query_recompute(flags, key)
+                    } else {
+                        self.begin_query_claim(ctx, flags, key, capture)
+                    };
+                    let mut attempt = match begun {
+                        Ok(attempt) => attempt,
+                        Err(read) => return Acquired::Read(read),
+                    };
+                    attempt.site = capture.site;
+                    if let Some(read) = unclaimed() {
+                        return Acquired::Served(read);
+                    }
+                    attempt
+                }
             };
-            attempt.site = capture.site;
-            if let Some(read) = unclaimed() {
-                return Acquired::Served(read);
-            }
             let task = execution
                 .get_or_insert_with(|| self.enter_execution())
                 .task();
@@ -491,14 +555,50 @@ impl SemanticGraphStore {
                     Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
                     Claim::Produce(lease) => return Acquired::Produce(lease),
                     Claim::Subscribed(subscription) => {
-                        match subscription.wait(ctx, flags, &mut attempt, capture) {
-                            Joined::Read(read) => return Acquired::Read(read),
-                            Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
-                            Joined::Retry => {}
+                        match self.join_acquired(ctx, flags, attempt, subscription, capture, &mut wait)
+                        {
+                            Ok(acquired) => return acquired,
+                            Err(again) => attempt = again,
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Wait out, or poll, `subscription` for the claim `attempt` continues:
+    /// `Ok` with the acquisition's outcome once the producer answered, or
+    /// with [`Acquired::Pending`] and the claim left in a yielding
+    /// acquisition's slot; `Err` with the claim to make again when the
+    /// producer went away.
+    fn join_acquired<'s, C: crate::resolver_core::ResolverCapabilities>(
+        &'s self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        mut attempt: ClaimAttempt,
+        mut subscription: Subscription<'s>,
+        capture: &mut ReadCapture<'_>,
+        wait: &mut AcquireWait<'_, 's>,
+    ) -> Result<Acquired<'s>, ClaimAttempt> {
+        let joined = match wait {
+            AcquireWait::Block => subscription.wait(ctx, flags, &mut attempt, capture),
+            AcquireWait::Yield { slot, waker } => {
+                match subscription.poll(ctx, flags, &mut attempt, capture, waker) {
+                    std::task::Poll::Ready(joined) => joined,
+                    std::task::Poll::Pending => {
+                        **slot = Some(PendingAcquire {
+                            attempt,
+                            subscription,
+                        });
+                        return Ok(Acquired::Pending);
+                    }
+                }
+            }
+        };
+        match joined {
+            Joined::Read(read) => Ok(Acquired::Read(read)),
+            Joined::Recursive(recursion) => Ok(Acquired::Recursive(recursion)),
+            Joined::Retry => Err(attempt),
         }
     }
 
@@ -692,6 +792,7 @@ impl SemanticGraphStore {
                         inflight,
                         waiter: task.id(),
                         parked: None,
+                        stop: None,
                     });
                 }
                 state.claimed = true;
@@ -771,71 +872,28 @@ impl Subscription<'_> {
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
-        verter_execution::blocking::enter_wait(
+        // Park until the flight completes, is aborted by a
+        // canonical-invalidation sweep, or this request is cancelled: each
+        // poll registers the thread's waker on both. A cancelled subscriber
+        // detaches by returning; it never marks the shared flight aborted,
+        // so it cannot disturb an uncancelled producer or sibling.
+        verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::SemanticFlight,
-        );
-        let inflight = Arc::clone(&self.inflight);
-        let mut state = inflight.state.lock();
-        // The wait time is a measurement-only counter; without the
-        // observation gate the clock is never read.
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let wait_start = super::records_telemetry::<C::Observe>().then(Instant::now);
-        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
-        let wait_start = None;
-        if !flight_resolved(&state, flags) {
-            if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
-                return Joined::Recursive(Recursion::WaitCycle);
-            }
-            drop(state);
-            // Park until the flight completes, is aborted by a
-            // canonical-invalidation sweep, or this request is cancelled.
-            // The cancellation registers before the flight is checked, so a
-            // cancellation landing between the two still wakes the thread. A
-            // cancelled subscriber detaches by returning; it never marks the
-            // shared flight aborted, so it cannot disturb an uncancelled
-            // producer or sibling.
-            let mut stop =
-                crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
-                    .map(|token| token.subscribe());
-            let parked = self
-                .parked
-                .as_mut()
-                .expect("a waiting subscriber is parked");
-            #[cfg(any(test, feature = "test-support"))]
-            let mut announced = false;
-            #[cfg(any(test, feature = "test-support"))]
-            let store = self.store;
-            verter_execution::blocking::block_on(
-                verter_execution::blocking::WaitFamily::SemanticFlight,
-                None,
-                |waker| {
-                    if let Some(stop) = stop.as_mut() {
-                        let _ = stop.poll(waker);
-                    }
-                    let mut state = inflight.state.lock();
-                    if flight_resolved(&state, flags) {
-                        return std::task::Poll::Ready(());
-                    }
-                    state.wakers.register(&mut parked.waker, waker);
-                    #[cfg(any(test, feature = "test-support"))]
-                    if !std::mem::replace(&mut announced, true) {
-                        store.announce_joiner_suspended();
-                    }
-                    std::task::Poll::Pending
-                },
-            );
-            state = inflight.state.lock();
-        }
-        self.resolve(state, ctx, flags, attempt, capture, wait_start)
+            None,
+            |waker| self.poll(ctx, flags, attempt, capture, waker),
+        )
     }
 
     /// Poll the producer's completion without blocking: `Ready` once the
-    /// flight resolved, else `Pending` with `waker` registered on the flight.
-    /// The readiness check and the registration happen under the flight's
-    /// lock, and the producer wakes every registered waker after it
+    /// flight resolved, else `Pending` with `waker` registered on the flight
+    /// and on the cancellation that stops the subscriber's request.
+    /// The readiness check and the flight registration happen under the
+    /// flight's lock, and the producer wakes every registered waker after it
     /// resolves the flight under the same lock, so a completion between a
-    /// poll's check and its registration is never lost. A wait that would
-    /// close a cycle of waiting tasks answers at once.
+    /// poll's check and its registration is never lost. The cancellation
+    /// registers before that check, so a cancellation landing after it
+    /// still wakes the subscriber. A wait that would close a cycle of
+    /// waiting tasks answers at once.
     pub fn poll<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -846,10 +904,17 @@ impl Subscription<'_> {
     ) -> std::task::Poll<Joined> {
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
+        if !flight_resolved(&state, flags) {
+            // Still waiting: register the request's cancellation, then check
+            // the flight again under its lock.
+            drop(state);
+            self.register_stop(waker);
+            state = inflight.state.lock();
+        }
         if flight_resolved(&state, flags) {
             // A polled wait is timed only in an observing build, from when
             // its subscriber parked.
-            #[cfg(feature = "semantic-observe")]
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             let wait_start = if super::records_telemetry::<C::Observe>() {
                 self.parked
                     .as_ref()
@@ -858,7 +923,7 @@ impl Subscription<'_> {
             } else {
                 None
             };
-            #[cfg(not(feature = "semantic-observe"))]
+            #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
             let wait_start = None;
             return std::task::Poll::Ready(
                 self.resolve(state, ctx, flags, attempt, capture, wait_start),
@@ -881,6 +946,23 @@ impl Subscription<'_> {
             self.store.announce_joiner_suspended();
         }
         std::task::Poll::Pending
+    }
+
+    /// Register `waker` on the cancellation the request checkpoint selects
+    /// on this thread now, subscribing again when that selection moved to
+    /// another token since the last poll (a job that accepted owners).
+    fn register_stop(&mut self, waker: &std::task::Waker) {
+        let Some(token) =
+            crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+        else {
+            self.stop = None;
+            return;
+        };
+        let stop = match &mut self.stop {
+            Some(stop) if stop.token().same_source(&token) => stop,
+            slot => slot.insert(token.subscribe()),
+        };
+        let _ = stop.poll(waker);
     }
 
     /// Register this subscriber's wait-for edge to the flight's producer.
@@ -913,7 +995,7 @@ impl Subscription<'_> {
         };
         self.parked = Some(Parked {
             _edge: edge,
-            #[cfg(feature = "semantic-observe")]
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             since: super::records_telemetry::<M>().then(Instant::now),
             waker: verter_execution::wake::WakeRegistration::default(),
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
@@ -1914,9 +1996,17 @@ impl SemanticGraphStore {
         // fields exactly as the production dispatch path does.
         let flags = crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx);
         let mut execution = None;
-        match self.acquire_query(ctx, flags, key, &mut execution, capture, false, &mut || {
-            None
-        }) {
+        match self.acquire_query(
+            ctx,
+            flags,
+            key,
+            &mut execution,
+            capture,
+            false,
+            &mut || None,
+            AcquireWait::Block,
+        ) {
+            Acquired::Pending => unreachable!("a blocking acquisition waits its subscriptions out"),
             Acquired::Read(read) | Acquired::Served(read) => read,
             Acquired::Recursive(recursion) => self.recursion_read(recursion, recursion_sentinel()),
             Acquired::Produce(lease) => {

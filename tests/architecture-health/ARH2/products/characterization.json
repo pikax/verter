@@ -643,6 +643,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_operand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_source_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
+          "crates/verter_wasm/src/semantic_poll_wasm_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/signature_discovery_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/signature_epoch_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/signature_predicate_inference_tests.rs",

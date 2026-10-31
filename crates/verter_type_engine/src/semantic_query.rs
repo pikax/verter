@@ -6583,6 +6583,14 @@ pub struct SemanticGraphStats {
     /// builds, and collapsing the counters would hide exactly the
     /// cross-family aliasing the separation exists to prevent.
     pub async_return_payload_count: u64,
+    /// Family builds begun as owned continuations: one first stage per cold
+    /// build, whichever driver steps it. A continuation resumed after a
+    /// read finishes from what its stages retained, so a count above the
+    /// cold builds means a first stage ran again.
+    pub continuation_builds_begun: u64,
+    /// Later stages of those continuations: one per query read a build
+    /// named. A count above the reads means a stage ran again.
+    pub continuation_stages_resumed: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,
@@ -12937,7 +12945,8 @@ mod tests {
     ///   decl_subexpression_lowering_count, relation_check_count,
     ///   mapped_per_k_materializations, substitute_memo_hits,
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
-    ///   evaluate_deferred_memo_misses.
+    ///   evaluate_deferred_memo_misses, continuation_builds_begun,
+    ///   continuation_stages_resumed.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -12972,6 +12981,8 @@ mod tests {
             "evaluate_deferred_memo_misses",
             "awaited_normalize_count",
             "async_return_payload_count",
+            "continuation_builds_begun",
+            "continuation_stages_resumed",
         ];
         for field in expected_to_fire {
             assert!(

@@ -37,6 +37,9 @@ struct ChainProgram<E: Fn(u64) -> Vec<u64>> {
     outside: Option<u64>,
     outside_restarts: u32,
     answered: Option<u64>,
+    /// A demand whose kept value stops serving the first time a need would
+    /// take it, as a value whose handles were retired after it completed.
+    retired_once: Option<(u64, std::cell::Cell<u32>)>,
 }
 
 const CYCLE: u64 = 1_000_000_000;
@@ -56,6 +59,7 @@ impl<E: Fn(u64) -> Vec<u64>> ChainProgram<E> {
             outside: None,
             outside_restarts: 0,
             answered: None,
+            retired_once: None,
         }
     }
 }
@@ -114,7 +118,16 @@ impl<E: Fn(u64) -> Vec<u64>> Program for ChainProgram<E> {
         Ok(CYCLE)
     }
 
-    fn reusable(&self, _demand: &u64, _value: &u64) -> bool {
+    fn reusable(&self, demand: &u64, _value: &u64) -> bool {
+        if let Some((retired, asked)) = &self.retired_once {
+            if retired == demand {
+                // Asked when it completes, then when a need would take it.
+                asked.set(asked.get() + 1);
+                if asked.get() == 2 {
+                    return false;
+                }
+            }
+        }
         self.reusable
     }
 
@@ -194,6 +207,42 @@ fn a_completion_that_is_not_reusable_is_started_again() {
     assert_eq!(execution.counters().starts, 15);
     assert_eq!(execution.counters().reuses, 0);
     assert_eq!(execution.demand_state(&0), None);
+}
+
+/// A kept value that stops serving after it completed is not delivered: the
+/// need that finds it starts that demand alone again, its waiter keeping its
+/// place, and the recomputed value serves the needs after it.
+#[test]
+fn a_kept_value_that_stopped_serving_starts_its_demand_again() {
+    let mut program = ChainProgram::new(|n| if n == 0 { vec![1, 1, 1] } else { vec![] });
+    program.retired_once = Some((1, std::cell::Cell::new(0)));
+    let mut execution = SemanticExecution::new();
+    assert_eq!(execution.drive(&mut program, 0), Ok(3));
+    assert_eq!(
+        program.starts,
+        vec![0, 1, 1],
+        "only the retired demand starts again"
+    );
+    assert_eq!(execution.counters().invalidated, 1);
+    assert_eq!(
+        execution.counters().reuses,
+        1,
+        "the recomputed value serves"
+    );
+    assert_eq!(execution.demand_state(&1), Some(DemandState::Complete));
+    // The root's own kept value is checked as a later drive opens it.
+    let mut program = ChainProgram::new(|_| vec![]);
+    program.retired_once = Some((0, std::cell::Cell::new(0)));
+    let mut execution = SemanticExecution::new();
+    assert_eq!(execution.drive(&mut program, 0), Ok(0));
+    assert_eq!(execution.drive(&mut program, 0), Ok(0));
+    assert_eq!(
+        program.starts,
+        vec![0, 0],
+        "the retired root is started again"
+    );
+    assert_eq!(execution.drive(&mut program, 0), Ok(0));
+    assert_eq!(program.starts, vec![0, 0], "the recomputed root serves");
 }
 
 /// A demand the program answers when it starts completes without a frame,
@@ -290,6 +339,93 @@ fn an_outside_producer_is_awaited_and_a_vanished_one_restarts_the_demand() {
     let mut execution = SemanticExecution::new();
     assert_eq!(execution.drive(&mut program, 0), Ok(1 + 2 + 3 + 4));
     assert_eq!(program.starts, vec![0, 1, 2, 3, 3, 4]);
+}
+
+/// A frame parked on an outside input that is not one of the program's
+/// demands keeps everything it computed: the drive is pending while the
+/// input is unavailable, an input resolved without an outcome steps the same
+/// frame again with no delivery, one resolved with an outcome delivers it,
+/// and neither starts the frame's demand again nor repeats its earlier step.
+#[test]
+fn an_awaited_input_resumes_the_same_frame_without_restarting_its_demand() {
+    struct Awaiting {
+        pending_polls: u32,
+        outcome: bool,
+        starts: u32,
+        steps: u32,
+    }
+    impl Program for Awaiting {
+        type Demand = ();
+        type Frame = u32;
+        type Value = u32;
+        type Failure = ();
+        type Role = ();
+        type Subscription = u32;
+        fn start(&mut self, _: &()) -> Start<Self> {
+            self.starts += 1;
+            Start::Produce(0)
+        }
+        fn step(&mut self, frame: &mut u32, delivery: Option<Outcome<Self>>) -> EvalStep<Self> {
+            self.steps += 1;
+            match (*frame, delivery) {
+                (0, None) => {
+                    *frame = 5;
+                    EvalStep::Await(7)
+                }
+                (5, None) => EvalStep::Complete(*frame + 1),
+                (5, Some(Ok(value))) => EvalStep::Complete(*frame + value),
+                (state, delivery) => panic!("unexpected step at {state}: {delivery:?}"),
+            }
+        }
+        fn close_cycle(&mut self, _: &(), _: ()) -> Outcome<Self> {
+            unreachable!("an awaited input is on no cycle")
+        }
+        fn reusable(&self, _: &(), _: &u32) -> bool {
+            true
+        }
+        fn poll_subscription(&mut self, input: &mut u32, _: &Waker) -> Poll<External<Self>> {
+            if self.pending_polls > 0 {
+                self.pending_polls -= 1;
+                return Poll::Pending;
+            }
+            Poll::Ready(if self.outcome {
+                External::Complete(Ok(*input))
+            } else {
+                External::Restart
+            })
+        }
+        fn stop(&self) -> Option<()> {
+            None
+        }
+        fn wake_on_stop(&mut self, _: &Waker) {}
+    }
+    for (outcome, answer) in [(false, 6), (true, 12)] {
+        let mut program = Awaiting {
+            pending_polls: 2,
+            outcome,
+            starts: 0,
+            steps: 0,
+        };
+        let mut execution = SemanticExecution::new();
+        assert!(execution
+            .poll(&mut program, Some(()), Waker::noop())
+            .is_pending());
+        assert_eq!(execution.live_frames(), 1, "the parked frame is kept");
+        assert!(execution
+            .poll(&mut program, None, Waker::noop())
+            .is_pending());
+        assert_eq!(
+            execution.poll(&mut program, None, Waker::noop()),
+            Poll::Ready(Ok(answer))
+        );
+        assert_eq!(
+            (program.starts, program.steps),
+            (1, 2),
+            "the demand starts once and its first step never runs again"
+        );
+        assert_eq!(execution.live_frames(), 0);
+        assert_eq!(execution.counters().external_waits, 1);
+    }
 }
 
 /// Tail transitions replace the running frame: a million replacements keep

@@ -16,9 +16,57 @@
 #[cfg(test)]
 use verter_type_engine::engine_test_knobs::SeamHook;
 
+/// Holds the scheduler's source read of one file until released, so a
+/// test observes a load that is in flight. A held read waits at most
+/// [`SourceLoadGate::HOLD_LIMIT`], so a test that never releases cannot hang a
+/// scheduler worker.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct SourceLoadGate {
+    held: parking_lot::Mutex<Option<String>>,
+    released: parking_lot::Condvar,
+}
+
+#[cfg(test)]
+impl SourceLoadGate {
+    const HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Hold every later source read of `canonical` until [`Self::release`].
+    pub(crate) fn hold(&self, canonical: &str) {
+        *self.held.lock() = Some(canonical.to_owned());
+    }
+
+    /// Let held reads go on.
+    pub(crate) fn release(&self) {
+        *self.held.lock() = None;
+        self.released.notify_all();
+    }
+
+    /// Wait while `canonical`'s reads are held.
+    pub(crate) fn pass(&self, canonical: &str) {
+        let deadline = std::time::Instant::now() + Self::HOLD_LIMIT;
+        let mut held = self.held.lock();
+        while held.as_deref() == Some(canonical) {
+            if self.released.wait_until(&mut held, deadline).timed_out() {
+                break;
+            }
+        }
+    }
+}
+
 /// Per-host test force-injection knobs. See the module docs.
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
+    /// The scheduler source-read hold this host's loader passes through.
+    #[cfg(test)]
+    pub(crate) source_load_gate: std::sync::Arc<SourceLoadGate>,
+    /// Number of file loads this host began, owned or in place.
+    #[cfg(test)]
+    pub(crate) loads_begun: std::sync::atomic::AtomicUsize,
+    /// File loads begun by the synchronous driver, excluding reads answered
+    /// by a semantic frame's retained terminal outcome.
+    #[cfg(test)]
+    pub(crate) blocking_loads_begun: std::sync::atomic::AtomicUsize,
     /// The engine-owned forcing record, shared with every engine binding and
     /// macro-mirror selector this host attaches.
     pub(crate) engine: std::sync::Arc<verter_type_engine::engine_test_knobs::TestKnobs>,

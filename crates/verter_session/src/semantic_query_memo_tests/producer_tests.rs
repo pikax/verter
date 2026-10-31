@@ -795,10 +795,14 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
                 &mut capture,
                 false,
                 &mut || None,
+                super::producer::AcquireWait::Block,
             ) {
                 super::producer::Acquired::Produce(_) => "produce",
                 super::producer::Acquired::Read(_) | super::producer::Acquired::Served(_) => "read",
                 super::producer::Acquired::Recursive(_) => "recursive",
+                super::producer::Acquired::Pending => {
+                    unreachable!("a blocking acquisition waits its subscriptions out")
+                }
             }
         });
         // The claimant parks on the open member flight ...

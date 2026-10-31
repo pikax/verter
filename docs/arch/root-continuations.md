@@ -332,13 +332,18 @@ caller that must bound its park for another reason.
 that usually answers at once and waits only behind another caller's work
 (the store-view read): it enters the `family` wait only when its first poll
 is pending.
+Semantic tasks register their cancellation wakes directly and do not require
+timed re-polling.
 
 Each synchronous entry listed below is the driver applied to the pollable
 boundary beside it, so there is one implementation of each handoff, not a
 blocking copy next to a polling one. The synchronous host entries drive
 their roots ([Host roots](#host-roots)) as `WaitFamily::Root`. The semantic
-runtime's blocking drive (`SemanticExecution::drive`, `SemanticTask::drive`)
-uses the same driver, untimed, and is woken by its stop's cancellation.
+runtime's synchronous root entry (`ProjectSemanticDispatch::drive_query`)
+applies the same driver, untimed, to the root the production poll advances
+([Polled root queries](#polled-root-queries)), and is woken by its stop's
+cancellation. A semantic task itself has no blocking driver:
+`SemanticTask::poll` is its only way forward.
 
 The target is that only a synchronous public entry outside the computation
 reaches the driver. The current tree does not meet it: the component-
@@ -444,6 +449,33 @@ cross-family cycles.
 
 Terminal scoped handoffs also release their scheduler, identity and request
 context; keeping a completed handoff alive does not retain its scheduler tree.
+
+The semantic task retains cancellation subscriptions beside its suspended
+execution. A request stop or the final shared-job owner's cancellation or
+withdrawal wakes its latest poller, including after a move to another thread.
+A job that has accepted request owners decides cancellation for shared work;
+otherwise the bound request decides, with an ownerless job as fallback. The
+job subscription remains armed while it is ownerless, so accepting owners
+during a suspension cannot lose a later stop. An unselected ownerless job
+may cause a harmless extra wake. Every terminal poll or task drop withdraws
+the task's stop registrations. This does not make the nested synchronous
+semantic callers in the inventory below pollable.
+
+Semantic memo subscriptions use one polling implementation for both task
+polls and synchronous joins. `Subscription::wait` applies the external
+driver to `Subscription::poll`; flight cells hold only readiness wakers,
+with no separate condition-variable wait implementation. The synchronous
+join registers on its selected cancellation before each poll and parks
+untimed.
+
+Conditional frames retain completed operand preparation in
+`ConditionalDecisionState`. The synchronous and frame entries use the same
+preparation and selection stages. Each stage owns its speculative observation
+scope: an unanswered read discards only that unfinished stage, while completed
+preparation has already joined the frame's retained facts and taint. A later
+relation dependency therefore resumes selection without preparing the operands
+again. Incomplete preparation and selection still retry their own stage; this
+does not make the remaining nested synchronous calls pollable.
 
 ### Scheduler completions
 
@@ -963,6 +995,283 @@ the service or host.
   the subscriber. Panic containment requires an unwinding target; the default
   wasm panic-abort target is checked for compilation rather than recovery.
 
+### Polled root queries
+
+`ThreadDispatch::poll_query(key)` begins a root query as a
+`SemanticQueryPoll`, the production entry a consumer that must not block
+drives a query through. It borrows its dispatcher exclusively and stays on
+the dispatcher's thread. `SemanticQueryPoll::poll` returns `Ready` with the
+full-value read the synchronous `execute_via_cold_build_helper` returns for
+the same key, in the query's own value domain (a flow return, a call
+resolution, a relation or a classification is delivered as itself, never
+narrowed to a type node), or `Pending` once the query waits on another
+task's producer that will wake the poller. `SemanticQueryPoll::poll_node`
+is the explicit type-node adapter; it narrows exactly as `execute_read`
+does. The entry also implements `Future`, with the full-value read as its
+output.
+
+The entry and the synchronous entry run one implementation. An
+instantiation, a `typeof`, a machinery-root conditional or call, or a
+callback-typing machinery-root flow return enters as a driven root: the root's connected demand, its query level and the
+dispatcher operation it runs as are opened once and held across polls,
+because the request state they live on moves into the lent task until the
+task gives it back. The thread's execution scopes (audit attribution,
+construction scope, validity) are entered for each poll. `drive_query`
+blocks on the same root with the external-boundary driver.
+The root claims its family memo and publishes the same canonical candidate as
+the synchronous entry. Only dependency frames may complete a cheap intermediate
+for the request alone, outside that memo.
+
+Every other query enters as a cold root through the synchronous entry's own
+cold-query admission (`begin_cold_query`: canonical key, sealed isolated-root
+refusal, carrier-subject normalization, entry charge) and family-memo claim
+(`claim_cold_query`), under the same dispatcher operation, entered once and
+held across polls. The claim's acquisition (`SemanticGraphStore::acquire_query`)
+takes an `AcquireWait`: the synchronous entry passes `Block` and waits another
+task's producer out, the polled entry passes `Yield`, which leaves the claim
+and its subscription in a `PendingAcquire` slot with the poll's waker
+registered on the producer's flight and returns `Pending`. The claim keeps the
+execution task it waits as across polls and installs it for each; the next poll
+continues the same claim — its lookup is not repeated — and either reads the
+producer's result or claims again and produces. A produced read is finished by
+the same `finish_cold_query` tail, then re-rooted where it is delivered; a
+flow return off the runtime drains or aborts its completed members as its
+synchronous executor does. Dropping a waiting cold root withdraws its wait and
+closes its entry, then its operation.
+
+While the entry is pending, `SemanticQueryPoll::task` lends its
+`SemanticTask`. The task is `Send` and has one exclusive poller, so it may
+be advanced to readiness on another thread with `SemanticTask::poll`. It
+keeps its root's delivery, and the entry delivers the delivery on its own
+thread at its next poll. Neither value exposes the dispatcher, the resolver
+capabilities or a blocking driver. Dropping a pending entry releases the
+task's frames, flights and waits, gives the request state back within the
+execution's scopes and then closes the root's operation.
+
+Contracts: `semantic_query_poll_consumer` (positive: poll the entry, advance
+its task on another thread), `semantic_task_no_blocking_driver` and
+`semantic_query_poll_no_dispatcher` (negative). Behaviour:
+`a_polled_root_query_suspends_resumes_elsewhere_and_reads_what_the_synchronous_entry_reads`
+and `a_polled_root_query_released_while_pending_leaves_nothing_open` in the
+session's semantic-task tests, and its `semantic_poll_contract` group: a
+cold root whose key another task produces yields while held and then reads
+what the synchronous full-value entry reads, receipt included; a released
+waiting cold root leaves nothing open; roots answering outside the type-node
+domain poll their own value; and a single-threaded control polls a chain to
+the synchronous read with no other thread advancing it. A distributed
+conditional holds a selected branch's dependency after a sibling completes,
+resumes its task on a different thread, and compares exact evidence and logical
+work with the synchronous boundary. Its production counters also require each
+member fold to execute once. A direct call root holds an argument alias during
+inference and delivers the full call result after resuming. The same group runs
+with optional capture compiled in (`semantic-observe`). The WASM controls
+`semantic_poll_contract_*` in `verter_wasm` drive the production entry on the
+single-threaded `wasm32-unknown-unknown` host: a chain, a conditional dependency
+and a cold root each yield instead of parking the only thread and deliver what
+the synchronous entry serves.
+
+The entry is only as non-blocking as the frames below it. A root's own claim
+yields, but a query a frame step or a cold build evaluates in place still
+reaches the waits under
+[Boundaries that still block](#boundaries-that-still-block).
+
+### Family continuations
+
+A family whose build reads other queries or files can be written as an owned
+sequential continuation (`project_semantic_dispatch/family_continuation.rs`).
+Its first stage either answers or names the one dependency it reads next —
+a query (`FamilyStep::Need`) or a file's indexed input (`FamilyStep::Load`)
+— and retains everything it computed in a `FamilyBuild`; each later stage
+resumes from that state with the dependency's answer. Macro payloads
+(`ResolveMacroPayload`: owner file, then the props intersection or the
+emits/slots/model projection), ordered intersection reductions
+(`ReduceIntersection`: each nested subgroup) and overload sets without
+explicit type arguments (`ResolveOverloadSet`: the callee's
+`SignaturesOfType` list, then the `ReadSignatureResult` each composite
+candidate's node form applies, one at a time; a list a kernel-epoch
+replacement retired is read once more) and apparent types (`ApparentType`:
+the anchor walk's signature lists of an object surface, the base's call and
+construct lists choosing a `strictBindCallApply` interface, the global
+interface lookup with its `Function` fallback, then the interface's
+`Instantiate`) and class instance surfaces (`ResolveClassSurface` on its
+`Instance` side: the declaring file's indexed input, which the surface roots
+on, then the type-space half's `Shallow` `Instantiate`) and class static
+surfaces (`ResolveClassSurface` on its `Static` side: the declaring file's
+indexed input, the effective prepared value declaration, the effective
+declaring file when the slot rebases onto a re-exported declaration, the
+constructor shape and heritage list, then each heritage base in clause
+order — a declared base's own `Static` surface read as a query, a value
+base's constructor surface composed in place — and the composed surface
+with its `prototype` property and type-argument specialization) are written
+this way.
+The shared signature-list read
+(`SignatureListRead`) is one sub-continuation both overload sets and
+apparent types step, in resolution or declaration order.
+
+Five of these are certified suspendable at every dependency they name, with
+each seam held under test: macro payloads (owner load; props intersection or
+emits/slots/model projection), intersection reductions (each nested
+subgroup, first or later), overload sets without explicit type arguments
+(the list; each composite's result, including a retirement while it is
+held), apparent types (anchor, call and construct lists; the interface's
+instantiation) and class instance surfaces (the declaring file's load; the
+instantiation). A class's static surface is written the same way but is not
+certified: its declaration reads and a value base's constructor surface are
+still made in place (below). Neither is an apparent type's global lookup,
+nor a need whose entry normalizes its subject first; the children a family
+needs are suspendable only as far as their own families are.
+- **Global lookups.** A stage names a global declaration lookup as
+  `FamilyStep::Global`; both drivers make it in place
+  (`first_global_declaration`), so the library and program-contributor
+  files it reads still load synchronously on the polling thread.
+- **Declaration reads.** A stage names a read of prepared declarations and
+  declaration positions as `FamilyStep::Declarations`; both drivers make it
+  in place (`read_class_static_declarations`). The files those reads lower
+  from were loaded by the build's earlier `Load` stages, but a prepared
+  declaration's own import routing, a heritage argument's lowering and a
+  value base's constructor type still read synchronously inside the step.
+
+- **One implementation, two drivers.** The synchronous producer (the cold
+  build every synchronous entry runs) drives the continuation in place,
+  reading each named dependency where the build stands. A query frame drives
+  the same stages by needing each named query, so another task's producer of
+  it suspends the frame with the build owned by the frame
+  (`FrameBuild::Family`), and the delivery resumes it. A family read from an
+  entry outside every open checker obligation drives on the runtime from its
+  synchronous entry as well, so both entries price their reads alike. A
+  query whose entry first normalizes its subject (a carrier, an apparent
+  wrapper or apparent signatures) keeps the prelude that entry records and is
+  read in place by the frame.
+- **File loads.** `IndexedInputs::begin_indexed_load` answers whether a file
+  is servable without loading it, or returns an owned `IndexedLoad` over the
+  host's `begin_load` handoff, which integrates the file when Analysis is
+  ready exactly as `ensure_loaded` does. On a production poll's drive a frame
+  waits on that load as an outside input (`EvalStep::Await`, which steps the
+  same frame again once the load resolves) with its build retained
+  (`FrameBuild::FamilySource`); the synchronous entry's drive loads the file
+  in place as its external driver. The load's end is a typed terminal
+  `IndexedLoadOutcome` the frame consumes once: an integrated file is
+  served as loaded, and a load that ended without integrating it (absent,
+  failed, cancelled, superseded, a cycle, shutdown) resumes the build with no
+  input for the file — what the synchronous serve answers after the same
+  failed load. The frame never begins that load again and never serves the
+  file in place to rediscover the failure. An explicit session overlay or a
+  tombstoned file needs no load. A scheduler without a driver thread
+  (every wasm32 host) has no executor but the caller, so nothing would
+  advance a load begun for a frame to wait on: there the serve loads the
+  file in place, executing its stages on the polling thread, exactly as
+  the synchronous load does.
+- **Stage capability.** Every stage is a method of `ContinuationStage`, which
+  holds the dispatcher in a field private to `family_continuation` and
+  exposes only graph construction, the construction meter, canonical
+  composite normalization, the project generation a fence pins and the
+  self-roots its nodes observed. A stage therefore cannot read another
+  query, read or load a file, join a producer or drive an execution; only
+  the two drivers hold the dispatcher. Contracts:
+  `continuation_stage_constructs_through_its_capability` (positive) and
+  `continuation_stage_reaches_no_synchronous_adapter` (negative), in the
+  session compile contracts.
+- **No replay.** The per-graph counters `continuation_builds_begun` and
+  `continuation_stages_resumed` count stages wherever they run, so a stage
+  run again under either driver changes them.
+- **Kept results stay valid where they are consumed.** The execution keeps
+  a completed demand's value for later needs only while
+  `Program::reusable` holds, and asks it again each time a need would take
+  the kept value. The query program answers it with the memo's own warm
+  gates: complete, cacheable, and naming no retired signature-kernel epoch
+  (`SemanticGraphStore::serves_stored_value`). A list retired after it
+  completed is therefore forgotten and that one demand started again; the
+  family that needed it keeps its stage, and a list retired before it
+  completed is never kept.
+- **Reads named from retired handles are never consumed.** A composite
+  candidate's `ReadSignatureResult` is named from the descriptors of the
+  list it was pinned from. When a replacement retires that list while the
+  read waits, no answer to the read is an answer to the list: the build
+  reports it (`FamilyBuild::awaits_retired_read`), and either driver resumes
+  it with a rail-free retired answer instead of the read — the frame drops
+  the delivery unread, the in-place driver does not make the read — so the
+  stale read's incompleteness never taints the family. The list is then read
+  once more in the current epoch, as a retirement found at pinning is; a
+  second retirement leaves it unsettled.
+- **Owned, exclusively advanced state.** `FamilyBuild` and `FamilyStep` are
+  asserted `Send` and neither `Clone` nor `Copy`: a build is moved into each
+  stage and out again, never shared between drivers. A polled root lends its
+  task only through an exclusive borrow of its entry
+  (`semantic_query_poll_consumer`, positive;
+  `semantic_task_exclusive_poll`, negative: the entry cannot be polled while
+  its task is out, and a shared task cannot be polled).
+
+Behaviour, in the session's `semantic_poll_contract` group:
+`every_converted_seam_suspends_and_resumes_elsewhere_to_the_synchronous_read`
+holds each certified seam above with another task's producer and requires
+`Pending` after exactly the stages before the seam, a task that stays
+pending on another thread, and — released — a resume on another thread that
+delivers the synchronous entry's answer, fact status, rails, diagnostics,
+whole receipt tree and dependency signature, with absolute stage counts so
+a stage both entries run again still fails; warm, both entries answer alike
+running no stage. `a_root_released_or_cancelled_at_any_converted_seam_leaves_nothing_open`
+drops the waiting root, or cancels its request, at every seam.
+`a_macro_payload_whose_owner_is_loading_yields_and_reads_it_once_loaded`
+and `a_class_instance_surface_whose_declaring_file_is_loading_resumes_elsewhere_once_loaded`
+hold the scheduler source read of the file the family loads, and
+`a_family_released_or_cancelled_while_its_file_loads_leaves_nothing_open`
+drops or cancels each while it waits there.
+`completed_signature_list_is_revalidated_after_retirement` retires the
+kernel epoch once, as a list's build settles it and, separately, as a
+consumer holds the completed list to pin it, and requires an overload set
+over authored leaves, one over a composite and an apparent type to read
+what the synchronous entry reads with no replacement, each reading the
+retired list exactly once more;
+`an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more`
+retires it while the composite's result is held.
+`family_load_failure_is_terminal` polls a macro payload and a class instance
+surface whose file the workspace does not hold and requires a bounded
+answer equal to the synchronous entry's, with the owner's failed load
+submitted once by either entry.
+
+### Frame entry loads
+
+An instantiation's or a `typeof`'s frame on a production poll's drive
+performs no load before its build begins. Its first step asks for the
+loads that build would perform first and waits on each as an outside input
+(`EvalStep::Await`) instead:
+
+- its own file — the instantiation's declaring file, the `typeof`'s value
+  file — while it is still loading (`IndexedInputs::begin_indexed_load`);
+- then each file that file's prepared declaration bundle routes an import to
+  and would load while materializing (`IndexedInputs::begin_prepared_bundle_load`),
+  in the order the materialization loads them. The host answers it from the
+  bundle's own route-edge plan (`VerterHost::route_dep_edge_plan`, shared
+  with `prepared_decl_bundle_route_dep_edges_with_context`), so it begins
+  exactly the loads the materialization would perform and never one it
+  would not. It materializes nothing and reads the owner only when that
+  file is already current.
+
+Nothing of the build has run while the frame waits, so the step the last
+load restarts begins the build once, over loaded files. Every file waited on
+joins the frame's `awaited_loads` and is never waited on again: a load that
+failed supplies its terminal outcome to every read of that file by the
+frame. The frame owns that outcome across steps and installs it only while
+its build runs; repeated indexed or scope reads cannot submit a synchronous
+retry. An independent reader can load the file again after the frame ends.
+What the check itself reads is observed in a fact
+tracer and observation scope of its own and dropped; the build observes
+what it reads. On the synchronous entry's drive the frame waits on nothing,
+and its build performs the same loads in place as their external driver.
+
+Behaviour, in the session's `semantic_poll_contract` group: an
+instantiation whose declaring file's scheduler source read is held, a
+`typeof` whose value file is held, and a `typeof` in a loaded file whose
+initializer reads a value imported from a held file each return `Pending`,
+stay pending when their `Send` task is polled on another thread, leave the
+held file unloaded, and once the read goes on deliver exactly the
+synchronous entry's answer, fact status, diagnostics and receipt with as
+many instantiations built; an instantiation released while its file loads
+leaves no wait, flight or request state open. The WASM control
+`semantic_poll_contract_an_instantiation_of_an_unloaded_file_loads_on_the_only_thread`
+polls the same instantiation on the driverless single thread and reads what
+the synchronous entry serves.
+
 ### Cache admission and publication
 
 Both artifact and query-candidate admission use one owned protocol. Artifact
@@ -1102,6 +1411,66 @@ conversions consume these APIs separately from the dependency owner.
 
 ## Boundaries that still block
 
+Conditional frames retain operand preparation, absorption/distribution
+classification and the completed prefix of a distributed check. An explicit
+distributed member or inferred winner transfers its nested conditional to another frame;
+it no longer evaluates that member synchronously inside the parent. Each
+completed member's observations join the parent before its result is
+retained. An unanswered member neither advances the cursor nor contributes
+a partial value to the accumulated union. Resumption continues at that
+member, and the final union uses the same reduction as an uninterrupted
+decision. A completed relation/inference selection also joins the owning
+frame before its winner is evaluated: its verdict, inferred bindings and
+false-recovery classification survive a winner's dependency wait. The
+unfinished winner retains its own speculative observation scope, so a gap
+does not discard the completed relation's evidence. Selection counters
+assert the authored decisions execute once as well as comparing synchronous
+and polled work; equality alone would hide replay shared by both drivers.
+The final union reduction of distributed members is an owned child demand,
+including when another task already produces that union. Its admission and
+claim are retained by the child, so consuming the delivered result does not
+enter cold-query admission again. The distribution keeps its completed
+members, their evidence and the final query's canonical member order while
+that child waits. A held-reduction control
+compares the exact cold synchronous receipt and checks completed-member work.
+Internal relation/inference stages, winner processing and nested queries
+evaluated inside other synchronous adapters still require continuation conversion.
+
+Family continuations (above) cover macro payloads, intersection
+reductions, overload sets without explicit type arguments, apparent
+types (whose global interface lookup is still made in place) and class
+instance and static surfaces (the static side's declaration reads are still
+made in place). Every other
+family a frame or cold build reaches still builds in one synchronous step:
+path projection, mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
+through the substitution engine, whose template-literal fold reads in
+place), signature discovery,
+object-spread projection, locator lowering, relations, flow returns and the
+call walk below a suspension point. Their nested query reads and resolver
+port calls (`ensure_indexed_ready_serve`, prepared declarations, module
+export tables, route resolution, declaration lowering) remain synchronous
+inside the step. Frame entry loads (above) cover only the loads an
+instantiation or `typeof` build performs before anything else: a file a
+build reaches later — a re-export chain's hop resolved at demand time, a
+heritage or member declaration of another file, a declaration body lowered
+on its owner shard — still loads or is lowered in place. Failed frame entry
+loads supply their terminal outcome to the frame's repeated reads without
+synchronous retries. A flow frame still drops and re-runs
+its evaluation when its body meets an unanswered read.
+
+An ignored acceptance test in the session's `semantic_poll_contract` group
+states the polled entry's contract for the flow gap and fails today:
+`a_flow_suspended_at_a_held_read_evaluates_its_body_once` (after the held
+read is delivered the flow evaluates its body again: one evaluation and its
+logical work more than the synchronous entry). Retaining that evaluation is blocked on the
+flow product execution authority, which is asserted `!Send`
+(`FlowProductStore`, `FlowProductExecution`, `FlowProductKey`,
+`SelectedFlowSite` in `flow_products.rs`), on the evaluator's borrowed
+explicit stacks (`ExprRun`, `RegionEvalFrame`, call frames, `NestedStore`),
+and on the dispatch read helpers the body calls (signature discovery, the
+contextual call executor, type-leaf lowering, the relation entry) being
+continuations themselves.
+
 These are the production waits a component-meta or compile root can reach
 in the current tree, with the `WaitFamily` each announces. A synchronous
 caller still parks when it drives an incomplete dependency. Each dependency
@@ -1110,14 +1479,14 @@ traversals consume those interfaces as they become suspendable.
 
 | Wait | Family | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- | --- |
-| Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | SemanticFlight | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
-| Semantic task drive (`SemanticTask::drive`) | SemanticDrive | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
+| Semantic memo flight join (`SemanticGraphStore::acquire_query` with `AcquireWait::Block` → `Subscription::wait`) | SemanticFlight | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a frame step or a cold build evaluates in place | `Subscription::poll` in `SemanticTask` frames; `AcquireWait::Yield` for the polled entry's own root claim |
+| Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | SemanticDrive | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof`, machinery-root conditionals/calls and callback-typing flow returns — including those a cold build evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | CacheFlight | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | CacheFlight | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | ResolverFlight | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
 | Store-view capture (`StoreViewManager::base_view`) | StoreViewBuild | `verter_session/src/store_view_handoff.rs` | `capture_batch_fixed_view` at every component-meta entry | `VerterHost::begin_store_view` with owned build/maintenance producer; callers still synchronous |
 | Carrier publication and stable parse | CarrierPublication | `verter_session/src/carrier_publication_store/owned.rs` | scheduler Source stage; base/overlay structure | `OwnedPublication` → external Work and owned S subscription; `OwnedStableParse` → external stable producer; callers still synchronous |
-| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | SchedulerCompletion | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; synchronous callers externally drive and integrate |
+| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | SchedulerCompletion | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; a macro payload's owner and a frame's entry loads (its file, its bundle's import targets) wait on it; other synchronous callers externally drive and integrate |
 | Batch upsert completion (`Scheduler::wait_batch`) | SchedulerCompletion | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | ScopedCacheNode / CpuPool | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | SchedulerAdmission | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |

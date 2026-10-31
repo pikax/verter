@@ -17,6 +17,8 @@ const PASS_FIXTURES: &[&str] = &[
     "public_owned_carriers_borrow_and_own.rs",
     "host_release_completion_in_production_build.rs",
     "work_observation_behavior.rs",
+    "semantic_query_poll_consumer.rs",
+    "continuation_stage_constructs_through_its_capability.rs",
     "root_external_consumer_positive.rs",
     "in_flight_charge_available_without_support.rs",
 ];
