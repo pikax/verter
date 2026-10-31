@@ -6656,6 +6656,8 @@ export function buildWasmLaneTestArgs({
     "-p",
     packageName,
     "--tests",
+    "--profile",
+    "wasm-test",
     ...(exhaustive ? ["--no-fail-fast"] : []),
   ];
 }

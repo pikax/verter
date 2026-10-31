@@ -15139,6 +15139,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             Some(
                 SemanticNodeData::TypeParam { .. }
+                // An `infer` type variable is a type variable as a type
+                // parameter is: its keys are the deferred `keyof V` until
+                // the conditional binds it.
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::TypeOf(_)
                 | SemanticNodeData::TypeOfNominal(_)
@@ -15203,6 +15208,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use verter_session_query::flow::policy::NullabilityPolicy;
         let context =
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+        // Reading a retained interface's surface is connected work: joined
+        // with the caller's demand where one is open, and run under its own
+        // root demand where publication rebuilds an answer outside one (the
+        // named-demand bridge). A root entry pays the standard work rail; a
+        // trip keeps the arm's named contributor — the carrier resolve folds
+        // the partiality and returns the carrier it was reading.
+        let (_connected_demand, _) = self.enter_connected_demand(false);
         let surfaces: Vec<SemanticNodeId> = arms
             .iter()
             .map(|arm| {

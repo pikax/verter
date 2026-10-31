@@ -89,16 +89,53 @@ Two halves:
   Cargo is live, so the lane takes the whole build ceiling rather than a share of it, under the same
   supervisor, deadline, stall clock and process-forest RSS ceiling as every other phase, on its own
   `<runnerTarget>/l/wj` root. Each scoped package runs
-  `cargo test --target wasm32-unknown-unknown -p <pkg> --tests` with
+  `cargo test --target wasm32-unknown-unknown -p <pkg> --tests --profile wasm-test` with
   `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER` set to the resolved absolute runner (so `.cargo/config.toml`
   never acquires a repo-wide runner every unrelated wasm invocation would inherit).
+
+The `wasm-test` profile inherits dev codegen, debug assertions, overflow checks,
+and dependency optimization, but emits no DWARF. The runner parses and rewrites
+the whole module before Node compiles it; carrying native-style line tables
+through both steps needlessly increases their input and memory demand. Native
+tests retain their existing debug information. Both CI and the canonical gate
+select this profile through the shared argument builder, with identical source
+inventory and executed-case reconciliation.
+
+Resource qualification is configuration-specific. A 6 GiB process-forest RSS
+abort is incomplete coverage, never a failed semantic assertion or a passing
+gate. Build jobs bound compilation concurrency, but do not bound one bindgen
+transformation or one JavaScript engine compiling a module. Qualify a budget
+with complete WASM receipts and the full gate verdict under that same budget;
+a successful prerequisite probe or a native-only run is insufficient. RSS
+counts resident process pages, not virtual address reservations or the host's
+filesystem cache. Compare equivalent source/tool configurations on the same
+worker, and keep cache histories and compilation versus execution costs visible.
+
+The observed supported WASM execution configuration is macOS arm64 on a
+24 GiB host, Rust 1.97.1, Node 26.6.0, the dependency-matched
+`wasm-bindgen-test-runner` 0.2.129, and the `wasm-test` profile under a
+6 GiB process-forest ceiling. Complete baseline and candidate lane receipts
+support that configuration; they do not establish a portable minimum or a
+full-gate resource prerequisite. The dominant observed RSS owner was the
+runner's bindgen transformation, sometimes overlapping Node, rather than
+concurrent Rust compilation. Reducing `--build-jobs` cannot bound that peak.
+
+For the retained Linux comparison, 6 GiB remains marginal and unqualified:
+the recorded ceiling abort produced incomplete coverage. A supported full-gate
+configuration requires the matching complete canonical verdict, produced by
+the workflow on its host-derived budget (50% of physical RAM by default).
+That budget must be recorded with the verdict; a default-budget pass does not
+qualify an explicit 6 GiB run. Linux requalification and a portable minimum
+remain unavailable evidence, not a semantic failure or a landing condition.
+Keep the retained Gin result independent; these observations establish no
+Gin-versus-Git speed or memory ratio.
 
 The lane's receipt is required by the same fixed-order reducer that owns the rest of the verdict, and it
 carries two independent obligations. A **terminal result**: every announced `running N tests` must be
 closed by a `test result:` line — a transcript that announced work and never closed it is a run that did
-not finish. And **executed-vs-declared parity**: both the announced count and the *executed* count
+not finish. And **executed-vs-declared parity**: both the announced count and the _executed_ count
 (`passed + failed`) must equal an independent source scan of the scope's `#[wasm_bindgen_test]` attributes.
-Those two counts are not interchangeable — the harness prints `running N tests` *before* it applies the
+Those two counts are not interchangeable — the harness prints `running N tests` _before_ it applies the
 ignore filter, and the scan counts the attribute either way because `#[ignore]` is a separate line, so a
 comparison against the announced count alone would report full coverage for a lane that executed nothing.
 An unexecuted boundary case has no tolerated disposition here: it is fixed or deleted, never ignored. Zero
@@ -107,7 +144,7 @@ lane compiled). Both comparisons are applied per package as well as on the total
 reconciles under compensating drift between two scoped packages. There is no enable flag and no skip
 disposition: a run with no wasm receipt reduces to the same FAIL as any other incomplete coverage.
 
-One shape the scan cannot see: a `#[wasm_bindgen_test]` written in a lib *outside* `#[cfg(test)]` compiles
+One shape the scan cannot see: a `#[wasm_bindgen_test]` written in a lib _outside_ `#[cfg(test)]` compiles
 into both the lib test binary and any integration test binary that links it, so it executes twice against a
 single scanned attribute and fails parity as a superset. Keep boundary cases inside `#[cfg(test)]`.
 
@@ -137,22 +174,22 @@ The Windows reference host had 32 available logical CPUs and 127.17 GiB RAM.
 All cold archive runs began with an absent, distinct target and produced the
 same 804 MiB archive / 86 listed binaries:
 
-| build jobs | dev archive | peak RSS |
-|---:|---:|---:|
-| 4 | 422.775s | 7.72 GiB |
-| 8 | 283.920s | 9.90 GiB |
-| 12 | **234.792s** | 11.60 GiB |
+| build jobs |  dev archive |  peak RSS |
+| ---------: | -----------: | --------: |
+|          4 |     422.775s |  7.72 GiB |
+|          8 |     283.920s |  9.90 GiB |
+|         12 | **234.792s** | 11.60 GiB |
 
 The Surface-1 comparison held revision, selection, nextest groups, inventory
 (24,843 run / 597 configured skips / none unrun), and terminal outcome constant
 (24,837 passed / the same 6 Windows-only failures outside this slice and outside
 the canonical verdict / no timeout or exec failure):
 
-| test threads | Surface 1 | nextest wall | peak RSS |
-|---:|---:|---:|---:|
-| 4 | 695.769s | 683.990s | 1.85 GiB |
-| 8 | 426.028s | 416.015s | 3.08 GiB |
-| 12 | **357.825s** | **347.571s** | 3.84 GiB |
+| test threads |    Surface 1 | nextest wall | peak RSS |
+| -----------: | -----------: | -----------: | -------: |
+|            4 |     695.769s |     683.990s | 1.85 GiB |
+|            8 |     426.028s |     416.015s | 3.08 GiB |
+|           12 | **357.825s** | **347.571s** | 3.84 GiB |
 
 These Windows measurement runs were red and are scheduling evidence, not gate-pass receipts. The original
 baseline was red, while the later macOS canonical run is proven green. The six Windows product/test
@@ -341,13 +378,13 @@ A dedicated `node scripts/gate.mjs --memory-limit 18GiB` run on a 24 GiB host
 (default ceiling `max(512MiB, 50% RAM)` = 12 GiB) measured peak RSS per phase
 with the corrected sampler:
 
-| phase                        | peak RSS  | processes\* |
-|-------------------------------|-----------|-------------|
-| archive build (dev profile)   | 4.87 GiB  | —           |
-| SURFACE 1 (nextest run)       | 1.88 GiB  | —           |
-| SURFACE 2 (in-process)        | 1.54 GiB  | —           |
-| archive build (shipped-cfg)   | 5.50 GiB  | —           |
-| SURFACE 3 (nextest run)       | 1.02 GiB  | —           |
+| phase                       | peak RSS | processes\* |
+| --------------------------- | -------- | ----------- |
+| archive build (dev profile) | 4.87 GiB | —           |
+| SURFACE 1 (nextest run)     | 1.88 GiB | —           |
+| SURFACE 2 (in-process)      | 1.54 GiB | —           |
+| archive build (shipped-cfg) | 5.50 GiB | —           |
+| SURFACE 3 (nextest run)     | 1.02 GiB | —           |
 
 \* The per-sample process count reported alongside peak RSS was, at
 measurement time, a second bug in the same telemetry: `runContainedStep`
@@ -383,19 +420,19 @@ source scan has no shared-process failure mode and no `debug_assertions`
 sensitivity). The real surface, measured on the tree, was twelve files.
 Verified per file (not by filename) rather than assumed:
 
-| file | verdict | why |
-|---|---|---|
-| `architecture_guards.rs` | **kept in `verter_session`** | one `#[test]` (`foundations_guards::external_corpus_paths_not_present_outside_gated_tests`) is bound by name into `typeinfo_ignored_test_manifest.rs`'s `live_guard!` registry, which requires the bound test to run in the SAME binary the canonical gates execute; the file's `foundations_guards` submodule also shares internal helper functions across that boundary. Relocating it needs a scoped design decision (repoint the one binding, or prove the "same binary" invariant can relax), not a same-session mechanical move. |
-| `output_projector_residual_guards.rs` | moved, later retired | residual HOT_*/taint analyzer and closed OutputProjector inventories — capability fence now lives in compile-time witnesses + trybuild fixtures |
-| `whole_env_consumer_graph_native_inventory.rs` | moved, later retired | closed whole-env consumer inventory |
-| `residual_type_expr_body_reader_inventory.rs` | moved, later retired | closed TypeExpr body-reader inventory |
-| `handle_capable_consumer_guards.rs` | moved, later retired | closed handle-capable consumer inventory |
-| `tracked_paths_are_portable.rs` | moved | scan plus a check against `verter_session`'s public API (`framework::descriptor` registry) — never runs it |
-| `scanners_replacement.rs` | moved | pure JSON/schema scan |
-| `framework_known_bug_manifest.rs` | moved | known-bug ledger bijection |
-| `svelte_typecheck_gate.rs` | kept | drives a real `tsc.js` subprocess — not a scan |
-| `vue_macro_tsc_typecheck_gate.rs` | kept | drives a real `tsc.js` subprocess — not a scan |
-| `defect_b_corpus_prevention_gate.rs` | kept, N/A | `#![cfg(feature = "external-corpus")]` — already excluded from the default gate entirely; not compiled into any of the three surfaces to begin with |
+| file                                           | verdict                      | why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `architecture_guards.rs`                       | **kept in `verter_session`** | one `#[test]` (`foundations_guards::external_corpus_paths_not_present_outside_gated_tests`) is bound by name into `typeinfo_ignored_test_manifest.rs`'s `live_guard!` registry, which requires the bound test to run in the SAME binary the canonical gates execute; the file's `foundations_guards` submodule also shares internal helper functions across that boundary. Relocating it needs a scoped design decision (repoint the one binding, or prove the "same binary" invariant can relax), not a same-session mechanical move. |
+| `output_projector_residual_guards.rs`          | moved, later retired         | residual HOT\_\*/taint analyzer and closed OutputProjector inventories — capability fence now lives in compile-time witnesses + trybuild fixtures                                                                                                                                                                                                                                                                                                                                                                                      |
+| `whole_env_consumer_graph_native_inventory.rs` | moved, later retired         | closed whole-env consumer inventory                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `residual_type_expr_body_reader_inventory.rs`  | moved, later retired         | closed TypeExpr body-reader inventory                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `handle_capable_consumer_guards.rs`            | moved, later retired         | closed handle-capable consumer inventory                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `tracked_paths_are_portable.rs`                | moved                        | scan plus a check against `verter_session`'s public API (`framework::descriptor` registry) — never runs it                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `scanners_replacement.rs`                      | moved                        | pure JSON/schema scan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `framework_known_bug_manifest.rs`              | moved                        | known-bug ledger bijection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `svelte_typecheck_gate.rs`                     | kept                         | drives a real `tsc.js` subprocess — not a scan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `vue_macro_tsc_typecheck_gate.rs`              | kept                         | drives a real `tsc.js` subprocess — not a scan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `defect_b_corpus_prevention_gate.rs`           | kept, N/A                    | `#![cfg(feature = "external-corpus")]` — already excluded from the default gate entirely; not compiled into any of the three surfaces to begin with                                                                                                                                                                                                                                                                                                                                                                                    |
 
 The movable files relocated to a new crate, `verter_source_policy_gate`
 (`crates/verter_source_policy_gate/tests/cases/`), with its own single
@@ -484,12 +521,12 @@ so the seed's effect is unambiguous:
   `#[cfg(debug_assertions)]` arm is what compiles in, so the correct value is
   still returned — proving Surface 1 alone cannot see this class).
 - `cargo test -p verter_shipped_cfg_contract --profile no-debug-assertions
-  shipped_cfg_behaviour::` (bare `cargo test`'s custom-profile flag is
+shipped_cfg_behaviour::` (bare `cargo test`'s custom-profile flag is
   `--profile`, not nextest's `--cargo-profile`): went to 6 FAILED / 0 passed
   (the `#[cfg(not(debug_assertions))]` arm compiles in instead and drops the
   prop).
 - Unfiltered `cargo nextest run -p verter_shipped_cfg_contract
-  --cargo-profile no-debug-assertions` (all 8 tests, matching what the live
+--cargo-profile no-debug-assertions` (all 8 tests, matching what the live
   guard actually runs): 2 passed (the two canaries, which pass under this
   profile by construction) / 6 failed (the seeded behavioral tests).
 
@@ -516,13 +553,13 @@ concurrent `cargo`/`rust-lock.sh` jobs from other agents were running
 throughout both measurements — Surface 1's absolute wall-clock is noisy
 against the pre-step-3 497s baseline for that reason):
 
-| phase | before (this branch) | after |
-|---|---|---|
-| dev archive build | ~443s cold / 65s warm | 10s (warm, unchanged mechanism) |
-| SURFACE 1 | 497s, 24777 tests | 712-925s, 24785-24793 tests (contended host; test count differs only by the 8 new `shared_process_contract` tests) |
-| SURFACE 2 | 3 suites in-process (sequential, on top of the above) | **removed** |
-| SURFACE 3 | 221s test run + a second whole-workspace archive build | **removed** |
-| shipped-cfg guard | n/a | 100s check + 68s run = 168s (cold, first commit) → 6s + 5s = 11s (warm, second run) |
+| phase             | before (this branch)                                   | after                                                                                                              |
+| ----------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| dev archive build | ~443s cold / 65s warm                                  | 10s (warm, unchanged mechanism)                                                                                    |
+| SURFACE 1         | 497s, 24777 tests                                      | 712-925s, 24785-24793 tests (contended host; test count differs only by the 8 new `shared_process_contract` tests) |
+| SURFACE 2         | 3 suites in-process (sequential, on top of the above)  | **removed**                                                                                                        |
+| SURFACE 3         | 221s test run + a second whole-workspace archive build | **removed**                                                                                                        |
+| shipped-cfg guard | n/a                                                    | 100s check + 68s run = 168s (cold, first commit) → 6s + 5s = 11s (warm, second run)                                |
 
 The unambiguous, contention-independent win is the shipped-cfg guard number:
 what used to require a full second `cargo nextest archive --workspace`

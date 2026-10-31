@@ -59,6 +59,7 @@ impl NestedDemand {
             function,
             context,
             has_declared_return,
+            required_parameters: _,
             gap,
             declared_evolving_captures,
             extended_captures,
@@ -932,7 +933,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             if let Some(binder) = contextual.as_ref().and_then(|signature| signature.receiver) {
                 evaluator.receiver = Some(std::rc::Rc::new(
-                    class_expression::ClassReceiver::of_type(binder, Some(binder)),
+                    class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
                 ));
             }
         }

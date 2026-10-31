@@ -1893,6 +1893,10 @@ pub enum SliceExpr {
         function: crate::function_program::FunctionProgramKey,
         context: Arc<NestedFlowContext>,
         has_declared_return: bool,
+        /// The parameters a call must supply before the first optional,
+        /// defaulted or rest one: a contextual signature taking fewer types
+        /// none of them (the checker's `isAritySmaller`).
+        required_parameters: u32,
         gap: Option<crate::flow::policy::FlowGap>,
         /// The captured bindings of THIS frame whose narrowing at the
         /// function's creation reaches its body: a `const`, or a parameter
@@ -2194,6 +2198,11 @@ pub enum SliceEffectCallee {
     /// Any other dotted name (a module or global binding, a nested
     /// function declaration): its value.
     Value(Box<SliceExpr>),
+    /// A dotted name rooted at a `this` the function's text gives no
+    /// explicit type (an object literal's method, a function with no `this`
+    /// parameter): inert unless the evaluator's receiver is explicitly typed
+    /// after all, by a contextual signature's `this` parameter.
+    ContextualThis,
 }
 
 /// One class expression's body, lowered for the evaluator's class
@@ -3467,6 +3476,7 @@ pub struct NestedFlowContext {
     captures: CaptureScope,
     this: Option<SliceThis>,
     lexical_this: bool,
+    explicit_this: bool,
 }
 
 impl NestedFlowContext {
@@ -3478,6 +3488,21 @@ impl NestedFlowContext {
 
     pub fn this_is_lexical(&self) -> bool {
         self.lexical_this
+    }
+
+    /// Whether `this` inside the nested function has an explicit type (the
+    /// checker's `getExplicitThisType`): an authored `this` parameter of the
+    /// function its `this` belongs to, or a class's member. An object
+    /// literal's method reads only a contextual `this`.
+    #[must_use]
+    pub fn with_explicit_this(mut self, explicit: bool) -> Self {
+        self.explicit_this = explicit;
+        self
+    }
+
+    /// See [`Self::with_explicit_this`].
+    pub fn this_is_explicit(&self) -> bool {
+        self.explicit_this
     }
 
     /// The lexical chain at the nested function's position.
@@ -4082,6 +4107,7 @@ impl DefiningFrameGate {
             },
             this,
             lexical_this: false,
+            explicit_this: false,
         })
     }
 

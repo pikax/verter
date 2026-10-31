@@ -1953,6 +1953,24 @@ pub enum FlowReturnDegradation {
     /// A symbolic call carrier whose callee could not be represented or
     /// resolved to a signature evaluated to `any`.
     UnrepresentableCallee,
+    /// A generic call whose type argument is inferred from the return of
+    /// a context-sensitive argument the call resolver could not continue
+    /// ([`ResolveCallFailure::ContextSensitiveInference`]): a method whose
+    /// return reads a `this` no marker types — the object literal being
+    /// inferred, whose own member read the checker recovers as TS2339 and
+    /// whose circular return as TS7023. The call position carries the
+    /// typed unresolved marker. Distinct from
+    /// [`Self::UnrepresentableCallee`], so a consumer tells this inference
+    /// refusal from a callee that is not callable, accepts no overload, or
+    /// whose applicability went undecided.
+    ContextSensitiveInference,
+    /// A member read off a receiver that declares no such member — an object
+    /// literal's own `this` when no marker types it — evaluated to the typed
+    /// miss: the checker reports TS2339 there and continues with its error
+    /// type, a recovery this rail does not model. The first observed cause
+    /// wins, so a call refused because a context-sensitive argument's return
+    /// holds that miss reports this read, never only the refusal.
+    AbsentReceiverMember,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,
@@ -6984,6 +7002,9 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
+            // One wildcard: every permissive instantiation reads the same
+            // type, as the checker's single `wildcardType`.
+            (Self::PermissiveWildcard, Self::PermissiveWildcard) => true,
             (
                 Self::CheckerRecovery {
                     diagnostic: a_d,

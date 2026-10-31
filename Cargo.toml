@@ -145,6 +145,14 @@ debug = "line-tables-only"
 debug = false
 opt-level = 2
 
+# The JS-boundary runner parses and rewrites the complete Wasm module before
+# Node compiles it. DWARF is unnecessary for these behavioral tests and adds
+# substantial input to both stages. Keep dev assertions and codegen semantics;
+# scope the metadata reduction to this lane rather than native test artifacts.
+[profile.wasm-test]
+inherits = "dev"
+debug = false
+
 # Test profile that reproduces the CONDITIONAL-COMPILATION and runtime-check
 # state of a shipped build — `debug_assertions` off, `overflow-checks` off —
 # while keeping dev codegen (workspace crates at opt-level 0, dependencies at
