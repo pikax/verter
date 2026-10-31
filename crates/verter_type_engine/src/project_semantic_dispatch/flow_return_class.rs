@@ -42,6 +42,14 @@ pub(super) struct ClassReceiver {
     /// literal whose contextual methods may declare one. An object literal's
     /// contextual receiver alone does not.
     pub(super) explicit_this: bool,
+    /// The reads of a member this receiver proves absent, each with its
+    /// name's position: the checker reports them with the receiver's final
+    /// type, which its literal has once its members are evaluated.
+    pub(super) absent_reads: std::cell::RefCell<Vec<(Arc<str>, verter_span::Span)>>,
+    /// The members whose returns are the checker's circular return. A body
+    /// reading one requires its return through the message that made it
+    /// circular, which prints every member of this receiver.
+    pub(super) circular_members: std::cell::RefCell<rustc_hash::FxHashSet<Arc<str>>>,
 }
 
 /// What a read of member `name` off a receiver's evaluated members found
@@ -138,6 +146,8 @@ impl ClassReceiver {
             base,
             infer_literal_members,
             forward_read: std::cell::Cell::new(false),
+            absent_reads: std::cell::RefCell::default(),
+            circular_members: std::cell::RefCell::default(),
             reads: ReceiverReadLog::default(),
             explicit_this: false,
         }
@@ -1106,6 +1116,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             let read = self.receiver_member_read(bound, name);
             bound.reads.log(name, read);
+            if matches!(read, ReceiverMemberRead::Own(_))
+                && bound.circular_members.borrow().contains(name)
+            {
+                self.circular_return.set(!self.frame_declares_return);
+            }
             return match read {
                 ReceiverMemberRead::Own(node) => Some(node),
                 ReceiverMemberRead::Forward => {

@@ -91,6 +91,8 @@ impl FlowSliceSelection {
 /// reachability result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceContent {
+    /// The member reads off this function's `this`, selected or not.
+    pub receiver_reads: Option<SliceReceiverReads>,
     pub bindings: crate::flow::bundle::BindingsRef,
     pub declared_return: Option<GatedType>,
     /// The receiver annotation belongs to this demanded body, not its lexical context.
@@ -244,6 +246,17 @@ pub struct SliceRegion {
     pub statements: Arc<[SliceStatement]>,
     /// Whether execution can reach past this region without a `return`.
     pub can_fall_through: NormalCompletion,
+}
+
+/// Every `this.name` a function body reads, whether or not the demanded
+/// return selected it: the checker checks the whole body, so a read the
+/// return does not depend on still reports an absent member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceReceiverReads {
+    /// The receiver they read.
+    pub this: SliceThis,
+    /// Each read's member name and position, in source order.
+    pub reads: Arc<[(Arc<str>, FrameSpan)]>,
 }
 
 /// One statement of the slice content.
@@ -1408,6 +1421,10 @@ pub enum ReturnPredicateTest {
 pub struct GatedLeaf {
     ty: TypeExpr,
     frame_root: Option<FlowBindingRef>,
+    /// Each member name's position of a `typeof` path leaf, in path order
+    /// after the root: where the checker reports a read of an absent one.
+    /// Empty for every other leaf.
+    member_spans: Arc<[FrameSpan]>,
 }
 
 impl GatedLeaf {
@@ -1423,6 +1440,12 @@ impl GatedLeaf {
         &self.ty
     }
 
+    /// See the field of this name.
+    #[must_use]
+    pub fn member_spans(&self) -> &[FrameSpan] {
+        &self.member_spans
+    }
+
     /// A leaf whose answer is built only from primitives and literals
     /// (unions of them included): it names nothing, so no frame can bind
     /// any part of it and it has no frame root. `None` for any other type.
@@ -1431,6 +1454,7 @@ impl GatedLeaf {
         names_nothing(&ty).then_some(Self {
             ty,
             frame_root: None,
+            member_spans: Arc::from([]),
         })
     }
 
@@ -1440,6 +1464,7 @@ impl GatedLeaf {
         Self {
             ty: TypeExpr::Primitive(name),
             frame_root: None,
+            member_spans: Arc::from([]),
         }
     }
 
@@ -1468,6 +1493,7 @@ impl GatedLeaf {
         Self {
             ty,
             frame_root: self.frame_root,
+            member_spans: self.member_spans,
         }
     }
 }
@@ -1522,9 +1548,18 @@ fn shadow_wrapped(carrier: SliceExpr, shadowed: Arc<[FrameShadowedName]>) -> Sli
 pub struct SymbolicCallee {
     ty: TypeExpr,
     frame_root: Option<FlowBindingRef>,
+    /// Each member name's position of a member callee, as on a
+    /// [`GatedLeaf`].
+    member_spans: Arc<[FrameSpan]>,
 }
 
 impl SymbolicCallee {
+    /// See the field of this name.
+    #[must_use]
+    pub fn member_spans(&self) -> &[FrameSpan] {
+        &self.member_spans
+    }
+
     /// The callee's answer type.
     #[must_use]
     pub fn ty(&self) -> &TypeExpr {
@@ -1821,6 +1856,15 @@ pub enum SliceExpr {
         /// The member links in evaluation order, each with its own
         /// `?.`-authored optionality.
         links: Arc<[(Arc<str>, bool)]>,
+        /// Each link's member-name position, where the checker reports a
+        /// read of an absent member. Empty for links with no authored name
+        /// (an element read).
+        name_spans: Arc<[FrameSpan]>,
+        /// Whether the root is `this` of a declared object literal whose
+        /// every member is known and none has the first link's name, which
+        /// reading the literal's own value could not prove from inside one
+        /// of its methods.
+        first_link_undeclared: bool,
     },
     /// A local binding reference; its reaching definition is resolved by
     /// the evaluator. Covers BOTH a same-frame local and a binding an
@@ -4187,11 +4231,17 @@ impl DefiningFrameGate {
     /// [`SliceExpr::FrameShadowed`] exactly when the answer's verdict names
     /// frame-owned bindings.
     #[must_use]
-    pub fn leaf(&self, answer: FrameAnswer, root: Option<LeafRootOccurrence<'_>>) -> SliceExpr {
+    pub fn leaf(
+        &self,
+        answer: FrameAnswer,
+        root: Option<LeafRootOccurrence<'_>>,
+        member_spans: Arc<[FrameSpan]>,
+    ) -> SliceExpr {
         let frame_root = self.value_root(&answer.ty, root);
         let leaf = SliceExpr::Type(GatedLeaf {
             ty: answer.ty,
             frame_root,
+            member_spans,
         });
         shadow_wrapped(leaf, answer.shadowed)
     }
@@ -4205,6 +4255,7 @@ impl DefiningFrameGate {
         &self,
         answer: FrameAnswer,
         root: Option<LeafRootOccurrence<'_>>,
+        member_spans: Arc<[FrameSpan]>,
         site: SliceCallSite,
         arguments: SliceCallArguments,
     ) -> SliceExpr {
@@ -4213,6 +4264,7 @@ impl DefiningFrameGate {
             SliceCall::Symbolic(SymbolicCallee {
                 ty: answer.ty,
                 frame_root,
+                member_spans,
             }),
             site,
             arguments,

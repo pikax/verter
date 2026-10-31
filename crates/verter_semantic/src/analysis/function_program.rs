@@ -92,9 +92,16 @@ struct DiscoveryCtx<'source, 'ast> {
     served: rustc_hash::FxHashSet<(u32, u32)>,
     /// The classes the discovery walks meet.
     classes: crate::analysis::class_index::ClassCollector,
+    /// The authored name the next function built is reported by.
+    report_name: Option<verter_span::Span>,
 }
 
 impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
+    /// The next function built is reported by the name at `span`.
+    fn reported_by(&mut self, span: oxc_span::Span) {
+        self.report_name = Some(verter_span::Span::new(span.start, span.end));
+    }
+
     fn anchor(&self, contributor_index: usize) -> Option<DeclContributorAnchor> {
         let owner = self.owners.statements().get(contributor_index)?;
         Some(DeclContributorAnchor {
@@ -211,6 +218,7 @@ fn build_function_program_index_impl<'ast>(
         hashed_nodes: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
+        report_name: None,
         served: rustc_hash::FxHashSet::default(),
         classes: crate::analysis::class_index::ClassCollector::default(),
     };
@@ -1736,6 +1744,12 @@ fn discover_variable_declaration<'ast>(
             ctx,
         );
         let descent = |extra: FunctionDescentStep| base_descent.then(extra);
+        if matches!(
+            init,
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+        ) {
+            ctx.reported_by(declarator.id.span());
+        }
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(
@@ -1774,6 +1788,7 @@ fn discover_variable_declaration<'ast>(
                     );
                     match &p.value {
                         Expression::FunctionExpression(func) => {
+                            ctx.reported_by(p.key.span());
                             let previous_this =
                                 ctx.enclosing_this.replace(EnclosingThis::ObjectLiteral);
                             discover_function_inner(
@@ -2046,6 +2061,12 @@ fn discover_variable_declaration_ns<'ast>(
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
         let base = descent.then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
         discover_variable_initializer(init, &name, var_decl.kind, contributor_index, &base, ctx);
+        if matches!(
+            init,
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+        ) {
+            ctx.reported_by(declarator.id.span());
+        }
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(
@@ -2187,6 +2208,7 @@ fn discover_class_members<'ast>(
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
                 let descent =
                     base_descent.then(FunctionDescentStep::ClassMember { member_ordinal });
+                ctx.reported_by(method.key.span());
                 discover_function_inner(
                     &method.value,
                     name,
@@ -2338,6 +2360,9 @@ fn discover_function_inner<'ast>(
     let Some(body) = func.body.as_ref() else {
         return;
     };
+    if let (None, Some(id)) = (ctx.report_name, func.id.as_ref()) {
+        ctx.reported_by(id.span);
+    }
     let params = formal_params(&func.params);
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
@@ -2847,6 +2872,13 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
     ) -> FunctionProgramDiscovery {
         let function_end = node.span().end;
         let frame_span = verter_span::Span::new(function_start, function_end);
+        let report_name = self.report_name.take().map(|span| {
+            let text = self
+                .source
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_default();
+            (span, Arc::from(text))
+        });
         let mut inventory = InventoryVisitor {
             call_addresses: self.nodes.as_mut().map(|nodes| &mut nodes.call_sites),
             frame_span,
@@ -2960,6 +2992,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                 let span = node.body().expect("indexed functions have a body").span();
                 verter_span::Span::new(span.start, span.end)
             },
+            report_name,
             locator,
             params,
             bindings: Arc::from(bindings.into_boxed_slice()),

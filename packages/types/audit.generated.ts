@@ -1007,7 +1007,7 @@ export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep"
  * so each detected flow-model gap keeps a distinct wire spelling
  * instead of collapsing into one "gap" bucket.
  */
-export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "GapClosureCapture" | "GapAbruptCompletion" | "GapUnmodeledExpression" | "NonCallableBinding" | "UnrepresentableCallee" | "ContextSensitiveInference" | "AbsentReceiverMember" | "FailedBindingInitializer" | "UnappliedWriteEffect" | "ConditionalVarDefinition" | "UnreducedDeclaredUnion" | "UnresolvedValue" | "UnmodeledPosition" | "PartialInterior";
+export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "GapClosureCapture" | "GapAbruptCompletion" | "GapUnmodeledExpression" | "NonCallableBinding" | "UnrepresentableCallee" | "ContextSensitiveInference" | "FailedBindingInitializer" | "UnappliedWriteEffect" | "ConditionalVarDefinition" | "UnreducedDeclaredUnion" | "UnresolvedValue" | "UnmodeledPosition" | "PartialInterior";
 
 /**
  * Closed mirror of the session's no-value flow-return reasons — the
@@ -1037,6 +1037,26 @@ export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" |
  * was partial", never as "the complete inventory of what is missing".
  */
 export type FlowPartialityTag = { "Degraded": FlowDegradationTag } | { "NoValue": FlowFailureTag };
+
+/**
+ * One diagnostic the checker reports for the evaluated body: its code and
+ * where it starts and ends. A recovery the checker defines is a complete
+ * answer, so it is told apart from a partial by this list, never by
+ * [`FlowReturnInferencePayload::partiality`].
+ */
+export type FlowCheckerDiagnostic = {
+/**
+ * The checker's numeric diagnostic code.
+ */
+code: number,
+/**
+ * The byte offset into the function's file it starts at.
+ */
+start: number,
+/**
+ * The byte offset it ends at.
+ */
+end: number, };
 
 /**
  * Per-request counters and the typed partiality reason for one
@@ -1087,7 +1107,12 @@ cycle_reentry_holds: number,
  * also the default-filled value on the filtered / audit-disabled
  * record, where no payload was collected at all.
  */
-partiality: FlowPartialityTag | null, };
+partiality: FlowPartialityTag | null,
+/**
+ * The checker's diagnostics for the evaluated body, in the checker's
+ * order. Empty on a request with no value.
+ */
+checker_diagnostics: Array<FlowCheckerDiagnostic>, };
 
 /**
  * Which flow-slice budget axis tripped — the substrate mirror of the

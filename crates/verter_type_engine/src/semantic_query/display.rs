@@ -977,6 +977,14 @@ fn display_resolved_type_node(
             visited.add_length(reference_length(&literal.enum_decl.decl_name));
             literal.printed_name()
         }
+        // The checker's error type prints as what it reads as.
+        SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            diagnostic,
+            ..
+        }) if diagnostic.recovery().is_some() => {
+            visited.add_length("any".len());
+            "any".to_string()
+        }
         // Error carrier riding through display — a concise token, NOT a panic.
         // A checker message has no type for it: the part is cut, so a message
         // that would show it is not reported.

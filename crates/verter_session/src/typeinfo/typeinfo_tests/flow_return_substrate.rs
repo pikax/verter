@@ -199,17 +199,13 @@ fn flow_surface_try_return_resolves_widened() {
 }
 
 #[test]
-fn empty_recursive_cycle_degrades_without_collapsing_to_never() {
-    // Approved behavior pin (both halves): the cycle is degraded (no
-    // admission) and it must NEVER collapse to `never`.
+fn a_function_returning_only_itself_returns_never() {
+    // tsgo: `never`, no diagnostic: a `return` of the bare self-call is
+    // skipped and no other return remains.
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubEmptyRecursion");
-    assert!(
-        !expr_contains_never(&expr),
-        "an empty recursive cycle must never produce `never`, got {expr:?}"
-    );
-    assert_semantic_miss(&expr);
+    assert_primitive(&expr, PrimitiveName::Never);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -324,15 +320,11 @@ fn flow_return_substrate_serves_try_return_widened() {
 }
 
 #[test]
-fn flow_return_substrate_empty_cycle_admits_nothing_and_never_produces_never() {
+fn flow_return_substrate_serves_a_function_returning_only_itself() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubEmptyRecursion");
-    assert!(
-        !expr_contains_never(&expr),
-        "an empty recursive cycle must never produce `never`, got {expr:?}"
-    );
-    assert_semantic_miss(&expr);
+    assert_primitive(&expr, PrimitiveName::Never);
     assert_flow_return_dispatched(&record, "SubEmptyRecursion");
 }
 
@@ -430,17 +422,17 @@ export type MutBFirst = ReturnType<typeof mutB>;
     // a-first: the inline member (mutB) is empty-cycle at pop and upgrades
     // at the close.
     let (expr_a, _) = resolve_expr(&host, SUBSTRATE, "MutAFirst", &[], ProjectionMode::Expanded);
-    assert_primitive(&expr_a, PrimitiveName::Number);
+    assert_circular_return(&expr_a);
     // b-first (warm a): the root discharges on the inline member's seed.
     let (expr_b, _) = resolve_expr(&host, SUBSTRATE, "MutBFirst", &[], ProjectionMode::Expanded);
-    assert_primitive(&expr_b, PrimitiveName::Number);
+    assert_circular_return(&expr_b);
 }
 
 /// An empty MUTUAL cycle (holds only, no concrete seed anywhere) is
 /// `ReturnOnly` for the whole component — nothing admits, and nothing
 /// collapses to `never`.
 #[test]
-fn flow_return_substrate_empty_mutual_cycle_admits_nothing() {
+fn flow_return_substrate_seedless_mutual_cycle_is_the_circular_return() {
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -456,11 +448,7 @@ export type Cyc = ReturnType<typeof cycA>;
 "#,
     );
     let (expr, _) = resolve_expr(&host, SUBSTRATE, "Cyc", &[], ProjectionMode::Expanded);
-    assert!(
-        !expr_contains_never(&expr),
-        "an empty mutual cycle must never produce `never`, got {expr:?}"
-    );
-    assert_semantic_miss(&expr);
+    assert_circular_return(&expr);
 }
 
 /// A method inside a RETURNED object literal evaluates its body-derived
@@ -648,7 +636,7 @@ export type CycChain = ReturnType<typeof cycA>;
 "#,
     );
     let (expr, _) = resolve_substrate_alias(&host, "CycChain");
-    assert_primitive(&expr, PrimitiveName::Number);
+    assert_circular_return(&expr);
 }
 
 /// A forward-dependency cycle upgrades even when the drain reaches the
@@ -677,7 +665,7 @@ export type FwdChain = ReturnType<typeof fwdA>;
 "#,
     );
     let (expr, _) = resolve_substrate_alias(&host, "FwdChain");
-    assert_primitive(&expr, PrimitiveName::Number);
+    assert_circular_return(&expr);
 }
 
 /// A class-field function initializer (`f = () => { … }`) is a served
@@ -704,25 +692,10 @@ export type FieldFnReturn = ReturnType<FieldHost["f"]>;
     assert_primitive(&expr, PrimitiveName::Number);
 }
 
-/// The multi-seed component's fixed point: the two members' literal
-/// seeds, unwidened. Literal widening at a return join is tsc's
-/// SINGLE-contributor rule, and each member here joins its own seed with
-/// the other member's discharged return — two contributors, so both
-/// literals stay pinned (`"a" | 1`).
-fn assert_union_is_the_two_literal_seeds(expr: &TypeExpr) {
-    let TypeExpr::Union(members) = expr else {
-        panic!("expected the `\"a\" | 1` union, got {expr:?}");
-    };
-    let mut has_string = false;
-    let mut has_number = false;
-    for member in members.iter() {
-        match member {
-            TypeExpr::Literal(LiteralValue::String(value)) if value == "a" => has_string = true,
-            TypeExpr::Literal(LiteralValue::Number(value)) if *value == 1.0 => has_number = true,
-            other => panic!("unexpected union arm: {other:?}"),
-        }
-    }
-    assert!(has_string && has_number, "expected `\"a\" | 1`: {expr:?}");
+/// tsgo: a return that requires another function's return that requires it
+/// is TS7023 on both, and both are `any`, whatever their other returns.
+fn assert_circular_return(expr: &TypeExpr) {
+    assert_primitive(expr, PrimitiveName::Any);
 }
 
 const MULTI_SEED_CYCLE: &str = r#"
@@ -757,9 +730,9 @@ fn flow_return_substrate_multi_seed_cycle_publishes_the_union_msa_first() {
     let host = make_host_with_footprint();
     upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE);
     let (expr_a, _) = resolve_substrate_alias(&host, "MsAFirst");
-    assert_union_is_the_two_literal_seeds(&expr_a);
+    assert_circular_return(&expr_a);
     let (expr_b, _) = resolve_substrate_alias(&host, "MsBFirst");
-    assert_union_is_the_two_literal_seeds(&expr_b);
+    assert_circular_return(&expr_b);
 }
 
 /// The B-FIRST drain of [`MULTI_SEED_CYCLE`] on a FRESH host — the order
@@ -770,9 +743,9 @@ fn flow_return_substrate_multi_seed_cycle_publishes_the_union_msb_first() {
     let host = make_host_with_footprint();
     upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE);
     let (expr_b, _) = resolve_substrate_alias(&host, "MsBFirst");
-    assert_union_is_the_two_literal_seeds(&expr_b);
+    assert_circular_return(&expr_b);
     let (expr_a, _) = resolve_substrate_alias(&host, "MsAFirst");
-    assert_union_is_the_two_literal_seeds(&expr_a);
+    assert_circular_return(&expr_a);
 }
 
 const MULTI_SEED_CYCLE_UNDER_RELATION: &str = r#"
@@ -807,7 +780,7 @@ fn flow_return_substrate_multi_seed_cycle_under_a_relation_root() {
     let host = make_host_with_footprint();
     upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE_UNDER_RELATION);
     let (expr, _) = resolve_substrate_alias(&host, "PairAssign");
-    assert_string_literal(&expr, "no");
+    assert_string_literal(&expr, "yes");
 }
 
 /// The relation root's answer is the same when the flow component was
@@ -820,7 +793,7 @@ fn flow_return_substrate_multi_seed_cycle_under_a_relation_root_after_a_flow_dra
     let host = make_host_with_footprint();
     upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE_UNDER_RELATION);
     let (pre, _) = resolve_substrate_alias(&host, "MsAFirst");
-    assert_union_is_the_two_literal_seeds(&pre);
+    assert_circular_return(&pre);
     let (expr, _) = resolve_substrate_alias(&host, "PairAssign");
-    assert_string_literal(&expr, "no");
+    assert_string_literal(&expr, "yes");
 }

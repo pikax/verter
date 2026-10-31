@@ -595,6 +595,13 @@ impl ObligationReentryStack {
         self.frames.is_empty()
     }
 
+    /// The flow returns in flight from stack index `from` inward.
+    pub(crate) fn flow_returns_from(&self, from: usize) -> impl Iterator<Item = &FlowReturnKey> {
+        self.frames[from..]
+            .iter()
+            .filter_map(|frame| frame.identity.as_flow_return())
+    }
+
     pub(crate) fn depth(&self) -> usize {
         self.frames.len()
     }
@@ -3049,6 +3056,10 @@ impl ResolveCallDomainRuntime {
 /// the per-domain runtimes. Transient; NEVER a cache key.
 #[derive(Debug, Default)]
 pub struct CheckerDispatchTransaction {
+    /// The inferred returns found to require themselves while still in
+    /// flight, the checker's `pushTypeResolution` marks: each closes as its
+    /// error type.
+    pub(crate) circular_returns: rustc_hash::FxHashSet<FlowReturnKey>,
     /// The generic obligation runtime (tagged identities, frames, pending
     /// ledger, watermarks, the tagged provisional substitution table).
     pub obligations: ObligationRuntime,
