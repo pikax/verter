@@ -364,6 +364,7 @@ impl verter_execution::blocking::OwnedWait for LoweringWait {
 type LoweredAhead = Arc<parking_lot::Mutex<Vec<(DeclBindingKey, Option<DemandJobOutput>)>>>;
 
 impl SnapshotDemandLease {
+    #[cfg(not(target_arch = "wasm32"))]
     fn adopt_lease(&self, outcome: crate::decl_lowering::LeaseOutcome) {
         if outcome.parsed_now {
             self.counters

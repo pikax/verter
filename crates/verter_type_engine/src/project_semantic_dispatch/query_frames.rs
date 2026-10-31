@@ -3008,7 +3008,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 refused,
                 stopped,
                 handed_off,
-            } = self.run_gated(awaited, || self.run_stage(key, build, &mut **prelude));
+            } = self.run_gated(awaited, || self.run_stage(key, build, prelude));
             let seam = self
                 .stage_seam
                 .take()

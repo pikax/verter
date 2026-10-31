@@ -2035,7 +2035,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             intermediate_nodes: self.intermediate_nodes.clone(),
             walker_diagnostics: self.walker_diagnostics.clone(),
             cache_suppress: self.cache_suppress,
-            completeness: self.completeness.clone(),
+            completeness: self.completeness,
             positional_child_terminal: self.positional_child_terminal,
             positional_children_supported: self.positional_children_supported,
             open_spread_partial: self.open_spread_partial,

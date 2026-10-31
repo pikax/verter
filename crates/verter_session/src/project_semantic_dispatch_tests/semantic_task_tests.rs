@@ -4644,12 +4644,12 @@ mod semantic_poll_contract {
         )
     }
 
+    /// The root key a family's row reads.
+    type FamilyRoot = fn(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey;
+
     /// A root of each family a production poll builds in stages, reaching a
     /// declaration behind the barrel chain.
-    const FAMILY_ROOTS: [(
-        &str,
-        fn(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey,
-    ); 7] = [
+    const FAMILY_ROOTS: [(&str, FamilyRoot); 7] = [
         ("a member path", |_, dispatch| {
             SemanticQueryKey::ProjectPath {
                 base: family_alias(dispatch, "Holder"),
