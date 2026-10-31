@@ -907,14 +907,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Resolve the local headers and route once, retaining the selected
-    /// target across its semantic read. Route preparation is still a driver
-    /// port operation; the target build itself is an owned family need.
+    /// target across its semantic read: the target's build is an owned
+    /// family need. On a production poll this is a stage: a file or lowering
+    /// the route reads that is not ready stops it where it reads.
     pub(super) fn begin_resolve_decl(
         &self,
         key: &ResolveDeclKey,
     ) -> super::family_continuation::FamilyStep {
+        let step = self.resolve_decl_stage(key);
+        // A stage that waits on what it read is not begun: it runs again.
+        if !self.stage_waits() {
+            self.graph().record_continuation_begun();
+        }
+        step
+    }
+
+    fn resolve_decl_stage(&self, key: &ResolveDeclKey) -> super::family_continuation::FamilyStep {
         use super::family_continuation::{FamilyBuild, FamilyStep};
-        self.graph().record_continuation_begun();
         verter_audit::attribute_scope!(ResolveDecl);
         // Self-version rooting: observe the scope canonical.s
         // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the

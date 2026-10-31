@@ -3739,7 +3739,7 @@ mod semantic_poll_contract {
     #[test]
     fn a_class_static_surface_whose_base_surface_is_held_yields_and_reads_what_the_synchronous_entry_reads(
     ) {
-        let synchronous = {
+        let (synchronous, logical_synchronous) = {
             let host = static_class_host();
             let dispatch = ProjectSemanticDispatch::new(&*host);
             let derived = class_static_key(&host, &dispatch, "Derived");
@@ -3751,7 +3751,10 @@ mod semantic_poll_contract {
                 (2, 10),
                 "the derived and base static surfaces each begin once; the derived one reads its file, declaration, constructor, base, base surface and composition once, the base its file, declaration, constructor and composition once"
             );
-            read_summary(&dispatch, &read)
+            (
+                read_summary(&dispatch, &read),
+                logical_summary(&dispatch, &read),
+            )
         };
         assert!(
             synchronous.0.contains("own: \"derived\"")
@@ -3812,7 +3815,7 @@ mod semantic_poll_contract {
         let before = continuation_stages(&host);
         let mut entry = dispatch.poll_query(derived.clone());
         let (first, frames, elsewhere, held_stages) = while_held(leases, || {
-            let first = entry.poll(&waker).is_pending();
+            let first = poll_to_stages(&host, before, (1, 4), || entry.poll(&waker)).is_pending();
             let held_stages = continuation_stages(&host);
             let task = entry.task();
             let frames = task.as_ref().map(|task| task.live_frames_for_tests());
@@ -3861,7 +3864,7 @@ mod semantic_poll_contract {
             (2, 10),
             "no stage runs again: the derived surface resumes at its base's read"
         );
-        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(logical_summary(&dispatch, &read), logical_synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
 
@@ -3940,6 +3943,29 @@ mod semantic_poll_contract {
         };
         let intersection = SemanticQueryKey::reduce_intersection_operands(graph, args);
         (payload, intersection)
+    }
+
+    /// Advance a root until it has run `stages` since `before`, through what it
+    /// handed off, and is stopped at the seam they lead to.
+    fn poll_to_stages<T>(
+        host: &crate::VerterHost,
+        before: (u64, u64),
+        stages: (u64, u64),
+        mut poll: impl FnMut() -> Poll<T>,
+    ) -> Poll<T> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let polled = poll();
+            let ran = continuation_stages(host);
+            if polled.is_ready() || ran.1 - before.1 >= stages.1 {
+                return polled;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the root reaches its seam"
+            );
+            std::thread::yield_now();
+        }
     }
 
     /// The family continuation stages `host` ran: builds begun, and later
@@ -4922,10 +4948,8 @@ mod semantic_poll_contract {
         let make_host = || {
             let host = unloaded_files_host(&[
                 (UNLOADED_OWNER, "export interface Props { a: string }"),
-                (
-                    IMPORTER,
-                    "import { Props } from './owner'; export { Props };",
-                ),
+                (IMPORTER, "export * from './decl-middle';"),
+                ("/semantic-task/decl-middle.ts", "export * from './owner';"),
             ]);
             host.ensure_indexed_ready(IMPORTER).unwrap();
             assert!(host.ensure_loaded(UNLOADED_OWNER));

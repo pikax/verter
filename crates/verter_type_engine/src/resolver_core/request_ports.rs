@@ -196,6 +196,8 @@ pub fn load_gate_stops(canonical: &str, settled: impl FnOnce() -> bool) -> bool 
     if !ask || settled() {
         return false;
     }
+    // What the stage reads from here is kept by no cache it reaches.
+    note_non_cacheable_read_fan_out(NonCacheableReadReason::LeaseMiss);
     LOAD_GATE.with(|gate| {
         if let Some(gate) = gate.borrow_mut().as_mut() {
             gate.stopped.get_or_insert_with(|| Arc::from(canonical));

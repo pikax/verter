@@ -301,8 +301,8 @@ pub(super) fn retired_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
 /// A global declaration lookup a stage names: the first declaration of the
 /// global type `name` that `demand`'s project reads — its library's, else
 /// its program's contributors'. The lookup reads the library and the
-/// contributing files where the driver stands: both drivers make it in
-/// place.
+/// contributing files: a production poll's frame waits on any of them that
+/// is not ready, retaining the build, and looks again.
 pub(super) struct GlobalRead {
     pub(super) demand: Arc<str>,
     pub(super) name: &'static str,
@@ -324,7 +324,7 @@ pub(super) enum FamilyStep {
     Global(GlobalRead, Box<FamilyBuild>),
     /// The build reads prepared declarations and lowers declaration
     /// positions of the files it loaded next, holding everything it
-    /// computed. Both drivers make the read in place.
+    /// computed.
     Declarations(Box<FamilyBuild>),
 }
 
@@ -524,9 +524,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The next stage of `build`, given the declaration the global lookup
     /// it named found.
     #[inline(never)]
-    pub(super) fn resume_family_global(&self, build: FamilyBuild, read: GlobalRead) -> FamilyStep {
+    pub(super) fn resume_family_global(
+        &self,
+        build: FamilyBuild,
+        found: Option<verter_session_query::type_solver::host::ResolvedRootIdentity>,
+    ) -> FamilyStep {
         self.graph().record_continuation_resumed();
-        let found = self.first_global_declaration(read.demand.as_ref(), read.name);
         match build {
             FamilyBuild::ApparentType(build) => self
                 .continuation_stage()
@@ -544,17 +547,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The answer to the declaration read `build` stands at.
+    pub(super) fn family_declaration_answer(
+        &self,
+        build: &FamilyBuild,
+    ) -> super::continuation_stages::ClassStaticAnswer {
+        let FamilyBuild::ClassStaticSurface(build) = build else {
+            unreachable!("only a class's static surface reads declarations")
+        };
+        self.read_class_static_declarations(&build.declaration_read())
+    }
+
     /// The next stage of `build`, given the answer to the declaration read
     /// it stands at.
     #[inline(never)]
-    pub(super) fn resume_family_declarations(&self, build: FamilyBuild) -> FamilyStep {
+    pub(super) fn resume_family_declarations(
+        &self,
+        build: FamilyBuild,
+        answer: super::continuation_stages::ClassStaticAnswer,
+    ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
-            FamilyBuild::ClassStaticSurface(build) => {
-                let answer = self.read_class_static_declarations(&build.declaration_read());
-                self.continuation_stage()
-                    .resume_class_static_declarations(build, answer)
-            }
+            FamilyBuild::ClassStaticSurface(build) => self
+                .continuation_stage()
+                .resume_class_static_declarations(build, answer),
             FamilyBuild::MacroPayload(_)
             | FamilyBuild::ReduceIntersection(_)
             | FamilyBuild::OverloadSet(_)
@@ -669,10 +685,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     step = self.resume_family_source(*build, serve);
                 }
                 FamilyStep::Global(read, build) => {
-                    step = self.resume_family_global(*build, read);
+                    let found = self.first_global_declaration(read.demand.as_ref(), read.name);
+                    step = self.resume_family_global(*build, found);
                 }
                 FamilyStep::Declarations(build) => {
-                    step = self.resume_family_declarations(*build);
+                    let answer = self.family_declaration_answer(&build);
+                    step = self.resume_family_declarations(*build, answer);
                 }
             }
         }

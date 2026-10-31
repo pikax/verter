@@ -298,6 +298,11 @@ pub(super) enum StageProgress {
     /// The family's build is its one stage.
     #[default]
     Build,
+    /// A family written as a continuation, up to its first transition.
+    Family,
+    /// A continuation's read of a global declaration or of prepared
+    /// declarations, the build it resumes retained.
+    Port(Box<FamilyStep>),
     /// A path projection, retained between the hops of its walk.
     Path(super::walk::PathProgress),
 }
@@ -306,7 +311,17 @@ pub(super) enum StageProgress {
 pub(super) enum StageRun {
     /// The next stage runs on.
     Advanced,
+    /// A continuation's first stage: its build goes on from this step.
+    Family(Box<FamilyStep>),
+    /// A continuation's port read: its build resumes with this answer.
+    Ported(Box<PortAnswer>),
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
+}
+
+/// What a continuation's port read answered.
+pub(super) enum PortAnswer {
+    Global(Option<verter_session_query::type_solver::host::ResolvedRootIdentity>),
+    Declarations(super::continuation_stages::ClassStaticAnswer),
 }
 
 /// What the stage a frame is running reads at its seam.
@@ -318,6 +333,15 @@ pub(super) struct StageSeam {
     depth: u32,
     /// How many queries the stage is evaluating in place now.
     nested: u32,
+}
+
+/// One stage run under the gates.
+struct GatedRun<'a, C: crate::resolver_core::ResolverCapabilities, T> {
+    run: super::flow_return_fact::ObservedRead<T>,
+    facts: crate::fact_signature_helpers::StepwiseFactTracer<'a, C::Clocks>,
+    refused: Vec<verter_session_query::facts::reuse::NonCacheableReadReason>,
+    stopped: Option<Arc<str>>,
+    handed_off: Option<Box<dyn verter_execution::blocking::OwnedWait>>,
 }
 
 /// A dependency a stage handed off, waited on as a frame waits on a load.
@@ -364,6 +388,10 @@ pub(super) fn builds_in_stages(key: &SemanticQueryKey) -> bool {
 /// What a frame's build did in one step.
 enum FramePoll<'a> {
     Need(SemanticQueryKey),
+    /// A continuation's first stage finished.
+    Family(Box<FamilyStep>),
+    /// A continuation's port read finished.
+    Ported(Box<PortAnswer>),
     /// The build waits on a file's load before it reads the file.
     Await(LoadWait<'a>),
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
@@ -2702,7 +2730,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &SemanticQueryKey,
         build: &mut Option<FrameBuild>,
-        stage: StageContext<'_>,
+        mut stage: StageContext<'_>,
         suspends_loads: bool,
     ) -> FramePoll<'a> {
         if !super::family_continuation::builds_as_continuation(key) {
@@ -2712,15 +2740,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let FrameBuild::Stage(staged) = build.insert(FrameBuild::Stage(Box::default())) else {
                 unreachable!("the build was just inserted")
             };
-            return self.drain_stage(key, staged, None, stage);
+            return self.drain_stage(key, staged, None, &mut stage);
         }
         if let Some(refusal) = self.cold_build_budget_refusal(key) {
             return FramePoll::Done(Box::new(self.family_value_output(key, refusal)));
         }
+        if suspends_loads {
+            let FrameBuild::Stage(staged) = build.insert(FrameBuild::Stage(Box::new(StageBuild {
+                subject: Some(key.clone()),
+                progress: StageProgress::Family,
+                ..StageBuild::default()
+            }))) else {
+                unreachable!("the build was just inserted")
+            };
+            let poll = self.drain_stage(key, staged, None, &mut stage);
+            return self.continue_stage(key, build, poll, &mut stage);
+        }
         let step = self
             .begin_family_build(key)
             .expect("a continuation family begins its build");
-        self.advance_family_frame(key, build, step, suspends_loads)
+        self.advance_family_frame(key, build, step, &mut stage, suspends_loads)
+    }
+
+    /// Carry a family on from what its stage did: a continuation's first
+    /// stage hands its build to its transitions.
+    fn continue_stage(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut Option<FrameBuild>,
+        poll: FramePoll<'a>,
+        stage: &mut StageContext<'_>,
+    ) -> FramePoll<'a> {
+        let step = match poll {
+            FramePoll::Family(step) => *step,
+            FramePoll::Ported(answer) => {
+                let Some(FrameBuild::Stage(staged)) = build.take() else {
+                    unreachable!("a port read answers its stage's build")
+                };
+                let StageProgress::Port(step) = staged.progress else {
+                    unreachable!("a port read's stage stands at its port")
+                };
+                match (*step, *answer) {
+                    (FamilyStep::Global(_, family), PortAnswer::Global(found)) => {
+                        self.resume_family_global(*family, found)
+                    }
+                    (FamilyStep::Declarations(family), PortAnswer::Declarations(answer)) => {
+                        self.resume_family_declarations(*family, answer)
+                    }
+                    _ => unreachable!("a port read answers what its step names"),
+                }
+            }
+            poll => return poll,
+        };
+        *build = None;
+        self.advance_family_frame(key, build, step, stage, true)
     }
 
     /// Resume a family's build with the delivery of the read it waited on.
@@ -2731,6 +2804,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: &mut Option<FrameBuild>,
         depth: u32,
         delivery: QueryDelivery,
+        stage: &mut StageContext<'_>,
         suspends_loads: bool,
     ) -> FramePoll<'a> {
         let Some(FrameBuild::Family(family)) = build.take() else {
@@ -2749,7 +2823,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
         };
         let step = self.resume_family_build(*family, read);
-        self.advance_family_frame(key, build, step, suspends_loads)
+        self.advance_family_frame(key, build, step, stage, suspends_loads)
     }
 
     /// Carry a family build on from `step`: its output, or the query it
@@ -2765,6 +2839,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &SemanticQueryKey,
         build: &mut Option<FrameBuild>,
         mut step: FamilyStep,
+        stage: &mut StageContext<'_>,
         suspends_loads: bool,
     ) -> FramePoll<'a> {
         loop {
@@ -2786,11 +2861,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*family, serve);
                 }
+                // A port read is a stage of its own on a production poll: what
+                // it reads that is not ready stops it, with the build retained.
+                port @ (FamilyStep::Global(..) | FamilyStep::Declarations(_)) if suspends_loads => {
+                    let FrameBuild::Stage(staged) =
+                        build.insert(FrameBuild::Stage(Box::new(StageBuild {
+                            subject: Some(key.clone()),
+                            progress: StageProgress::Port(Box::new(port)),
+                            ..StageBuild::default()
+                        })))
+                    else {
+                        unreachable!("the build was just inserted")
+                    };
+                    let poll = self.drain_stage(key, staged, None, stage);
+                    return self.continue_stage(key, build, poll, stage);
+                }
                 FamilyStep::Global(read, family) => {
-                    step = self.resume_family_global(*family, read);
+                    let found = self.first_global_declaration(read.demand.as_ref(), read.name);
+                    step = self.resume_family_global(*family, found);
                 }
                 FamilyStep::Declarations(family) => {
-                    step = self.resume_family_declarations(*family);
+                    let answer = self.family_declaration_answer(&family);
+                    step = self.resume_family_declarations(*family, answer);
                 }
                 FamilyStep::Done(output) => {
                     return FramePoll::Done(Box::new(self.family_value_output(key, *output)))
@@ -2822,6 +2914,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Run one stage under the gates and its own observation scopes: what it
+    /// read and what stopped it, for its driver to keep or drop.
+    fn run_gated<T>(
+        &self,
+        awaited: &[(Arc<str>, Option<LoadEnded>)],
+        stage: impl FnOnce() -> T,
+    ) -> GatedRun<'a, C, T> {
+        let files: Vec<Arc<str>> = awaited.iter().map(|(file, _)| Arc::clone(file)).collect();
+        let mut tracer = crate::fact_signature_helpers::StepwiseFactTracer::new(
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
+        );
+        let (((run, stopped), handed_off), refused) = {
+            let _tracer = tracer.install();
+            crate::fact_tracing::with_stage_refusals(|| {
+                verter_execution::blocking::with_stage_gate(|| {
+                    crate::resolver_core::request_ports::with_load_gate(&files, || {
+                        self.observe_read(stage)
+                    })
+                })
+            })
+        };
+        GatedRun {
+            run,
+            facts: tracer,
+            refused,
+            stopped,
+            handed_off,
+        }
+    }
+
+    /// Keep what a finished stage read: its observations reach the frame's
+    /// tracer only now.
+    fn adopt_stage_facts(
+        &self,
+        facts: crate::fact_signature_helpers::StepwiseFactTracer<'a, C::Clocks>,
+        refused: Vec<verter_session_query::facts::reuse::NonCacheableReadReason>,
+    ) {
+        use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+        let finalised = facts.finish();
+        for reason in refused {
+            crate::fact_tracing::note_non_cacheable_read_fan_out(reason);
+        }
+        match finalised {
+            FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts) => {
+                crate::fact_tracing::tracing::observe_fan_out_canonical(&facts);
+            }
+            FactReadSetFinalise::MutationUnstable => {
+                crate::request_context::observe_execution_abort(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                );
+            }
+        }
+    }
+
     /// Carry a family built in stages on: record a delivery as the answer to
     /// the read its stage waited on, then run its stages with every answer
     /// the frame holds until one waits or the family completes. A stage that
@@ -2832,13 +2978,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &SemanticQueryKey,
         build: &mut StageBuild,
         delivery: Option<QueryDelivery>,
-        stage: StageContext<'_>,
+        stage: &mut StageContext<'_>,
     ) -> FramePoll<'a> {
         let StageContext {
             depth,
             awaited,
             prelude,
         } = stage;
+        let depth = *depth;
         if let Some(delivery) = delivery {
             let answered = build
                 .awaiting
@@ -2848,7 +2995,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         loop {
             let charges = self.connected_demand.stage_checkpoint();
-            let files: Vec<Arc<str>> = awaited.iter().map(|(file, _)| Arc::clone(file)).collect();
             let installed = self.stage_seam.replace(Some(StageSeam {
                 answers: std::mem::take(&mut build.answers),
                 needs: SeamNeeds::default(),
@@ -2856,19 +3002,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 nested: 0,
             }));
             verter_debug_assert!(installed.is_none(), "one stage runs per step");
-            let ((run, stopped), handed_off) = verter_execution::blocking::with_stage_gate(|| {
-                crate::resolver_core::request_ports::with_load_gate(&files, || {
-                    self.observe_read(|| self.run_stage(key, build, prelude))
-                })
-            });
+            let GatedRun {
+                run,
+                facts,
+                refused,
+                stopped,
+                handed_off,
+            } = self.run_gated(awaited, || self.run_stage(key, build, &mut **prelude));
             let seam = self
                 .stage_seam
                 .take()
                 .expect("the stage's seam stays installed for its run");
             build.answers = seam.answers;
             if stopped.is_none() && handed_off.is_none() && seam.needs.is_empty() {
+                self.adopt_stage_facts(facts, refused);
                 match run.adopt(self) {
                     Ok(StageRun::Advanced) => continue,
+                    Ok(StageRun::Family(step)) => return FramePoll::Family(step),
+                    Ok(StageRun::Ported(answer)) => return FramePoll::Ported(answer),
                     Ok(StageRun::Done(output)) => return FramePoll::Done(output),
                     Err(abort) => {
                         return FramePoll::Done(Box::new(self.aborted_build_output(abort).into()))
@@ -2927,6 +3078,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match &mut build.progress {
             StageProgress::Build => StageRun::Done(Box::new(self.build_cold_query_family(subject))),
+            StageProgress::Family => StageRun::Family(Box::new(
+                self.begin_family_build(subject)
+                    .expect("a continuation family begins its build"),
+            )),
+            StageProgress::Port(step) => StageRun::Ported(Box::new(match &**step {
+                FamilyStep::Global(read, _) => PortAnswer::Global(
+                    self.first_global_declaration(read.demand.as_ref(), read.name),
+                ),
+                FamilyStep::Declarations(family) => {
+                    PortAnswer::Declarations(self.family_declaration_answer(family))
+                }
+                _ => unreachable!("a port stage stands at a port read"),
+            })),
             StageProgress::Path(progress) => {
                 // The build the walk replaces is refused as the synchronous
                 // producer refuses it.
@@ -3060,7 +3224,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let canonical: &str = match key {
-            SemanticQueryKey::ResolveDecl(key) => key.scope.canonical_id.as_ref(),
             SemanticQueryKey::Instantiate(key) => key.base().defining_canonical.as_ref(),
             SemanticQueryKey::TypeOf { value_root, .. } => {
                 value_root.root.scope.canonical_id.as_ref()
@@ -3085,21 +3248,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let pending = {
             let _tracer = tracer.install();
-            self.observe_read(|| {
-                if let SemanticQueryKey::ResolveDecl(declaration) = key {
-                    // A terminal preload failure is consumed by the builder;
-                    // probing it here must not start a synchronous retry.
-                    self.ctx.authoritative_current_content_hash(canonical)?;
-                    let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-                    if !Self::resolve_decl_needs_route(declaration, &serve.indexed.shallow_state) {
-                        return None;
-                    }
-                }
-                self.ctx.begin_prepared_bundle_load(canonical, &files)
-            })
-            .discard()
-            .ok()
-            .flatten()
+            self.observe_read(|| self.ctx.begin_prepared_bundle_load(canonical, &files))
+                .discard()
+                .ok()
+                .flatten()
         }?;
         let ended = LoadEnded::default();
         awaited.push((pending.canonical, Some(Arc::clone(&ended))));
@@ -3274,6 +3426,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut frame.build,
                             frame.depth,
                             delivery,
+                            &mut StageContext {
+                                depth: frame.depth + 1,
+                                awaited: &mut frame.awaited_loads,
+                                prelude: &mut frame.carrier_prelude,
+                            },
                             suspends_loads,
                         )
                     }
@@ -3308,20 +3465,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &frame.key,
                             &mut frame.build,
                             step,
+                            &mut StageContext {
+                                depth: frame.depth + 1,
+                                awaited: &mut frame.awaited_loads,
+                                prelude: &mut frame.carrier_prelude,
+                            },
                             suspends_loads,
                         )
                     }
                     // A family built in stages keeps its deliveries as answers.
-                    Some(FrameBuild::Stage(build)) => self.drain_stage(
-                        &frame.key,
-                        build,
-                        delivery,
-                        StageContext {
+                    Some(FrameBuild::Stage(build)) => {
+                        let mut stage = StageContext {
                             depth: frame.depth + 1,
                             awaited: &mut frame.awaited_loads,
                             prelude: &mut frame.carrier_prelude,
-                        },
-                    ),
+                        };
+                        let poll = self.drain_stage(&frame.key, build, delivery, &mut stage);
+                        self.continue_stage(&frame.key, &mut frame.build, poll, &mut stage)
+                    }
                     None => self.begin_frame_build(
                         &frame.key,
                         frame.depth,
@@ -3346,6 +3507,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         drop(installed);
         drop(taint);
         match poll {
+            FramePoll::Family(_) | FramePoll::Ported(_) => {
+                unreachable!("a stage's build continues in the step that ran it")
+            }
             FramePoll::Await(load) => EvalStep::Await(PendingWait::Load(load)),
             // The program settles the need's site from the read's claim.
             FramePoll::Need(key) => EvalStep::Need {

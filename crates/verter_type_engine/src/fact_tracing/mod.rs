@@ -36,8 +36,20 @@ use verter_session_query::source::demand::SourceRead;
 /// tracer, recorder or scope is active.
 #[inline]
 pub fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
+    if tracing::hold_stage_refusal(reason) {
+        return;
+    }
     refusal_scope::record_refusal(reason);
     tracing::apply_non_cacheable_mark(reason.propagation(), reason.basis());
+}
+
+/// Run one stage of a polled computation with its refusals held at its
+/// delivering tracer: the scopes it reads under see them, and what the stage
+/// runs inside sees them only when the stage is kept. Returns what it refused.
+pub(crate) fn with_stage_refusals<R>(
+    stage: impl FnOnce() -> R,
+) -> (R, Vec<NonCacheableReadReason>) {
+    tracing::with_stage_refusals(stage)
 }
 
 /// Apply an already-classified refusal to the active tracer stack. Cache

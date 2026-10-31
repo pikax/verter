@@ -93,6 +93,14 @@ fn active_cells() -> SmallVec<[*const FactReadSetCell; 8]> {
     })
 }
 
+std::thread_local! {
+    /// The refusals of the stage running on this thread, until its driver
+    /// keeps or drops it.
+    static STAGE_REFUSALS: std::cell::RefCell<
+        Option<Vec<verter_session_query::facts::reuse::NonCacheableReadReason>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
 /// The tracer cells an observation made now must reach, innermost last:
 /// from the innermost scope down to the first delivering scope inclusive.
 fn observing_cells() -> SmallVec<[*const FactReadSetCell; 8]> {
@@ -500,6 +508,49 @@ fn observe_signature_consumers(sig: &[FactVersionRef], observe: impl Fn(&FactRea
 /// shared-cache admission. Same snapshot-then-iterate reentrancy
 /// discipline as [`observe_fan_out`].
 #[inline]
+/// Note `reason` on the running stage's scopes alone, holding it for the
+/// stage's driver. `false` when no stage is running.
+pub(super) fn hold_stage_refusal(
+    reason: verter_session_query::facts::reuse::NonCacheableReadReason,
+) -> bool {
+    let held = STAGE_REFUSALS.with(|held| match held.borrow_mut().as_mut() {
+        Some(held) => {
+            held.push(reason);
+            true
+        }
+        None => false,
+    });
+    if held {
+        for ptr in observing_cells() {
+            // SAFETY: see module-level SAFETY contract.
+            unsafe { &*ptr }
+                .note_non_cacheable_read_with_basis(reason.propagation(), reason.basis());
+        }
+    }
+    held
+}
+
+pub(super) fn with_stage_refusals<R>(
+    stage: impl FnOnce() -> R,
+) -> (
+    R,
+    Vec<verter_session_query::facts::reuse::NonCacheableReadReason>,
+) {
+    struct Restore(Option<Vec<verter_session_query::facts::reuse::NonCacheableReadReason>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            STAGE_REFUSALS.with(|held| *held.borrow_mut() = outer);
+        }
+    }
+    let outer = STAGE_REFUSALS.with(|held| held.borrow_mut().replace(Vec::new()));
+    let restore = Restore(outer);
+    let value = stage();
+    let refused = STAGE_REFUSALS.with(|held| held.borrow_mut().take().unwrap_or_default());
+    drop(restore);
+    (value, refused)
+}
+
 pub(super) fn apply_non_cacheable_propagation(propagation: NonCacheablePropagation) {
     apply_non_cacheable_mark(propagation, NonCacheableBasis::Untrusted);
 }
