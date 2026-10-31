@@ -1962,7 +1962,7 @@ fn render_merged_decl_own_surface(
     visited: &mut DisplayContext,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for member in &surface.members {
+    for (_, member) in surface.members.entries() {
         parts.push(render_merged_decl_member(
             store, member, needs, depth, visited,
         ));

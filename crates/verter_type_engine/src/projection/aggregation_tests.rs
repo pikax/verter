@@ -1,6 +1,7 @@
 use super::{OrderedMemberAggregation, PropertyKeySet};
 use crate::semantic_query::{
-    AuthoredPropertyKey, CanonicalIndexInt, DeclIdentity, PropertyKey, SemanticNodeId,
+    key_scan_comparisons_for_tests, AuthoredPropertyKey, CanonicalIndexInt, DeclIdentity,
+    PropertyKey, SemanticNodeId,
 };
 
 fn number(value: i64) -> AuthoredPropertyKey {
@@ -56,6 +57,57 @@ fn aggregation_folds_exactly_the_keys_that_address_one_property() {
             (AuthoredPropertyKey::Computed(SemanticNodeId(8)), vec![9]),
             (AuthoredPropertyKey::string("x"), vec![11]),
         ]
+    );
+}
+
+/// The work counted for a key sequence is a fact of the keys. Every count
+/// past hashing is an equality the table's probe chose to make, so an index
+/// seeded per instance would spend a different number on each run and turn
+/// any linear-work bound into a coin toss.
+#[test]
+fn aggregating_the_same_keys_counts_the_same_work_on_every_index() {
+    let keys: Vec<_> = (0..512)
+        .map(|i| AuthoredPropertyKey::string(format!("key-{i}")))
+        .collect();
+    let work = || {
+        let before = key_scan_comparisons_for_tests();
+        let mut aggregation = OrderedMemberAggregation::new();
+        for key in &keys {
+            aggregation.entry(key, || ());
+        }
+        for key in &keys {
+            assert!(aggregation.position(key).is_some());
+        }
+        key_scan_comparisons_for_tests() - before
+    };
+    let first = work();
+    for _ in 0..8 {
+        assert_eq!(work(), first, "one key sequence, one count");
+    }
+}
+
+/// An index sized for its members hashes each key once: growing into the
+/// same keys rehashes every key it already holds, at each doubling.
+#[test]
+fn a_sized_aggregation_hashes_each_key_once() {
+    let keys: Vec<_> = (0..512)
+        .map(|i| AuthoredPropertyKey::string(format!("key-{i}")))
+        .collect();
+    let before = key_scan_comparisons_for_tests();
+    let mut aggregation = OrderedMemberAggregation::with_capacity(keys.len());
+    for key in &keys {
+        aggregation.entry(key, || ());
+    }
+    let sized = key_scan_comparisons_for_tests() - before;
+    let before = key_scan_comparisons_for_tests();
+    let mut aggregation = OrderedMemberAggregation::new();
+    for key in &keys {
+        aggregation.entry(key, || ());
+    }
+    let grown = key_scan_comparisons_for_tests() - before;
+    assert!(
+        sized + keys.len() / 2 < grown,
+        "a sized index skips the rehashes: sized {sized}, grown {grown}"
     );
 }
 

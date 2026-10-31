@@ -1502,7 +1502,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDi
 /// re-implements the peer-merge precedence.
 #[derive(Debug, Default)]
 pub(crate) struct MergedDeclSurface {
-    pub(crate) members: Vec<MergedDeclMember>,
+    pub(crate) members: crate::projection::aggregation::OrderedMemberAggregation<MergedDeclMember>,
     pub(crate) call_signatures: Vec<SemanticNodeId>,
     pub(crate) construct_signatures: Vec<SemanticNodeId>,
     pub(crate) index_signatures: Vec<crate::semantic_query::IndexSignature>,
@@ -1686,7 +1686,12 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         seen_values: rustc_hash::FxHashSet<SemanticNodeId>,
     }
 
-    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::new();
+    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::with_capacity(
+        contributor_surfaces
+            .iter()
+            .map(|surface| surface.members.len())
+            .sum(),
+    );
     for (declaration, surface) in contributor_surfaces.iter().enumerate() {
         for member in &surface.members {
             let accum = by_key.entry(&member.key, || Accum {
@@ -1707,23 +1712,19 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         }
     }
 
-    let members = by_key
-        .into_entries()
-        .into_iter()
-        .map(|(_, accum)| {
-            let (values, declarations) =
-                if accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
-                    (accum.method_values, accum.method_declarations)
-                } else {
-                    (vec![accum.first.value], vec![accum.method_declarations[0]])
-                };
-            MergedDeclMember {
-                member: accum.first,
-                values,
-                declarations,
-            }
-        })
-        .collect();
+    let members = by_key.map(|_, accum| {
+        let (values, declarations) =
+            if accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
+                (accum.method_values, accum.method_declarations)
+            } else {
+                (vec![accum.first.value], vec![accum.method_declarations[0]])
+            };
+        MergedDeclMember {
+            member: accum.first,
+            values,
+            declarations,
+        }
+    });
 
     // First-occurrence order, deduplicated by exact identity through a set
     // per bucket: an overload-heavy declaration stays linear in its
@@ -10181,21 +10182,20 @@ fn merge_declaration_surfaces<M: verter_audit::observe::ObserveExec>(
     contributor_surfaces: &[ShallowSurface],
 ) -> ShallowSurface {
     let core = merge_declaration_surfaces_core(contributor_surfaces);
-    let mut remaining_members = crate::projection::aggregation::OrderedMemberAggregation::new();
-    for merged in core.members {
-        let member = if merged.member.method_kind
-            == Some(verter_type_expr::ObjectMethodKind::Method)
-            && merged.values.len() > 1
-        {
-            ShallowSurfaceMember {
-                value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
-                ..merged.member
-            }
-        } else {
-            merged.member
-        };
-        remaining_members.entry(&member.key.clone(), || Some(member));
-    }
+    let mut remaining_members = core.members.map(|_, merged| {
+        Some(
+            if merged.member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+                && merged.values.len() > 1
+            {
+                ShallowSurfaceMember {
+                    value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
+                    ..merged.member
+                }
+            } else {
+                merged.member
+            },
+        )
+    });
     let core_calls: rustc_hash::FxHashSet<SemanticNodeId> =
         core.call_signatures.iter().copied().collect();
     let core_constructs: rustc_hash::FxHashSet<SemanticNodeId> =
