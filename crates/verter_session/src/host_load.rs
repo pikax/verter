@@ -412,53 +412,33 @@ impl VerterHost {
         self.begin_indexed_ready_load_for(canonical_id, &self.source_input_leases)
     }
 
-    /// Whether `canonical_id`'s indexed input is servable without a load.
-    fn indexed_ready_is_settled(&self, canonical_id: &str) -> bool {
-        if !self.scheduler.has_driver_thread() {
-            return true;
-        }
-        let canonical = self.normalized_analysis_canonical(canonical_id);
-        if canonical.is_empty() || crate::host_manage::is_raw_import_specifier_id(&canonical) {
-            return true;
-        }
-        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
-            verter_audit::observe::Uncaptured,
-        >();
-        self.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
-            &observation,
-            &canonical,
-        )
-        .is_some_and(|indexed| self.indexed_surface_is_current(&canonical, &indexed))
-    }
-
-    /// Whether a read of `canonical_id` stops the stage running on this
-    /// thread, whose frame then waits on the file's owned load. A reader that
-    /// already waited on the file's load and holds no delivery answers from
-    /// that outcome instead of reaching its materialization.
-    pub(crate) fn stops_at_load_gate(&self, canonical_id: &str) -> bool {
-        let normalized = self.normalized_analysis_canonical(canonical_id);
-        verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
-            self.normalized_analysis_canonical(file) == normalized
-        })
-        .is_some()
-            || verter_type_engine::resolver_core::request_ports::load_gate_stops(
-                normalized.as_ref(),
-                || self.indexed_ready_is_settled(canonical_id),
-            )
-    }
-
     pub(crate) fn begin_indexed_ready_load_for<'h>(
         &'h self,
         canonical_id: &str,
         leases: &'h crate::resolver_core::request_inputs::InputArtifactLeases,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'h> {
         use verter_type_engine::resolver_core::request_ports::IndexedReadiness;
-        if self.indexed_ready_is_settled(canonical_id) {
+        if !self.scheduler.has_driver_thread() {
             return IndexedReadiness::Settled;
         }
         let canonical = self
             .normalized_analysis_canonical(canonical_id)
             .into_owned();
+        if canonical.is_empty() || crate::host_manage::is_raw_import_specifier_id(&canonical) {
+            return IndexedReadiness::Settled;
+        }
+        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
+            verter_audit::observe::Uncaptured,
+        >();
+        if self
+            .artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+                &observation,
+                &canonical,
+            )
+            .is_some_and(|indexed| self.indexed_surface_is_current(&canonical, &indexed))
+        {
+            return IndexedReadiness::Settled;
+        }
         let scope = self.scheduler.enter_execution_scope();
         let stop = self.cooperative_drive.cancellation().clone();
         let load = self

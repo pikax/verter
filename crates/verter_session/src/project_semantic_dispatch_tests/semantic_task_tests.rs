@@ -44,43 +44,6 @@ fn chain_host() -> Arc<crate::VerterHost> {
     host
 }
 
-/// Advance a root until it answers, or waits on a producer another task
-/// holds: work the root handed off, such as a cold declaration's lowering,
-/// finishes on its own worker meanwhile.
-fn poll_to_held<T>(
-    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
-    mut poll: impl FnMut() -> Poll<T>,
-) -> Poll<T> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match poll() {
-            Poll::Pending if graph.wait_graph_counts_for_tests().1 == 0 => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the root reaches the held producer"
-                );
-                std::thread::yield_now();
-            }
-            polled => return polled,
-        }
-    }
-}
-
-/// Advance a released root to its answer through what it handed off.
-fn poll_to_answer<T>(mut poll: impl FnMut() -> Poll<T>) -> T {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Poll::Ready(value) = poll() {
-            return value;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the released root answers"
-        );
-        std::thread::yield_now();
-    }
-}
-
 /// The `typeof` of `name` an initializer naming it reads.
 fn typeof_key(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
@@ -691,7 +654,7 @@ fn a_conditional_retains_prepared_operands_across_a_dependency_wait() {
                 let poller = scope.spawn(move || {
                     ready.wait();
                     let before = preparations();
-                    let pending = poll_to_held(graph, || task.poll_read_for_tests(waker));
+                    let pending = task.poll_read_for_tests(waker);
                     let _ = tx.send((pending, preparations() - before));
                 });
                 ready.wait();
@@ -713,9 +676,9 @@ fn a_conditional_retains_prepared_operands_across_a_dependency_wait() {
                 "preparation finishes before the dependency waits"
             );
             let before = preparations();
-            let answer = poll_to_answer(|| task.poll_read_for_tests(&waker));
+            let answer = task.poll_read_for_tests(&waker);
             let resumed = preparations() - before;
-            let Ok(answer) = answer else {
+            let Poll::Ready(Ok(answer)) = answer else {
                 panic!("the released conditional answers: {answer:?}");
             };
             let answer = answer.map_value(|value| match value {
@@ -907,7 +870,7 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
         });
         let before = folds();
         let before_selections = selections();
-        let pending = poll_to_held(graph, || entry.poll(&waker));
+        let pending = entry.poll(&waker);
         let completed = folds() - before;
         let completed_selections = selections() - before_selections;
         let _ = release.send(());
@@ -3423,7 +3386,7 @@ mod semantic_poll_contract {
         let before = continuation_stages(&host);
         let mut entry = dispatch.poll_query(apparent.clone());
         let (first, frames, elsewhere) = while_held(leases, || {
-            let first = poll_to_held(graph, || entry.poll(&waker)).is_pending();
+            let first = entry.poll(&waker).is_pending();
             let task = entry.task();
             let frames = task.as_ref().map(|task| task.live_frames_for_tests());
             let elsewhere = task.map(|task| {
@@ -3451,7 +3414,10 @@ mod semantic_poll_contract {
             counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "the producer going away wakes the root"
         );
-        let read = poll_to_answer(|| entry.poll(&waker));
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken apparent type reads its list itself"),
+        };
         drop(entry);
         let after = continuation_stages(&host);
         assert_eq!(
@@ -3603,7 +3569,7 @@ mod semantic_poll_contract {
         let before = continuation_stages(&host);
         let mut entry = dispatch.poll_query(surface.clone());
         let (first, frames, elsewhere) = while_held(leases, || {
-            let first = poll_to_held(graph, || entry.poll(&waker)).is_pending();
+            let first = entry.poll(&waker).is_pending();
             let task = entry.task();
             let frames = task.as_ref().map(|task| task.live_frames_for_tests());
             let elsewhere = task.map(|task| {
@@ -3631,7 +3597,10 @@ mod semantic_poll_contract {
             counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "the producer going away wakes the root"
         );
-        let read = poll_to_answer(|| entry.poll(&waker));
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken instance surface reads its instantiation itself"),
+        };
         drop(entry);
         let after = continuation_stages(&host);
         assert_eq!(
@@ -3739,7 +3708,7 @@ mod semantic_poll_contract {
     #[test]
     fn a_class_static_surface_whose_base_surface_is_held_yields_and_reads_what_the_synchronous_entry_reads(
     ) {
-        let (synchronous, logical_synchronous) = {
+        let synchronous = {
             let host = static_class_host();
             let dispatch = ProjectSemanticDispatch::new(&*host);
             let derived = class_static_key(&host, &dispatch, "Derived");
@@ -3751,10 +3720,7 @@ mod semantic_poll_contract {
                 (2, 10),
                 "the derived and base static surfaces each begin once; the derived one reads its file, declaration, constructor, base, base surface and composition once, the base its file, declaration, constructor and composition once"
             );
-            (
-                read_summary(&dispatch, &read),
-                logical_summary(&dispatch, &read),
-            )
+            read_summary(&dispatch, &read)
         };
         assert!(
             synchronous.0.contains("own: \"derived\"")
@@ -3815,7 +3781,7 @@ mod semantic_poll_contract {
         let before = continuation_stages(&host);
         let mut entry = dispatch.poll_query(derived.clone());
         let (first, frames, elsewhere, held_stages) = while_held(leases, || {
-            let first = poll_to_stages(&host, before, (1, 4), || entry.poll(&waker)).is_pending();
+            let first = entry.poll(&waker).is_pending();
             let held_stages = continuation_stages(&host);
             let task = entry.task();
             let frames = task.as_ref().map(|task| task.live_frames_for_tests());
@@ -3864,7 +3830,7 @@ mod semantic_poll_contract {
             (2, 10),
             "no stage runs again: the derived surface resumes at its base's read"
         );
-        assert_eq!(logical_summary(&dispatch, &read), logical_synchronous);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
 
@@ -3943,29 +3909,6 @@ mod semantic_poll_contract {
         };
         let intersection = SemanticQueryKey::reduce_intersection_operands(graph, args);
         (payload, intersection)
-    }
-
-    /// Advance a root until it has run `stages` since `before`, through what it
-    /// handed off, and is stopped at the seam they lead to.
-    fn poll_to_stages<T>(
-        host: &crate::VerterHost,
-        before: (u64, u64),
-        stages: (u64, u64),
-        mut poll: impl FnMut() -> Poll<T>,
-    ) -> Poll<T> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let polled = poll();
-            let ran = continuation_stages(host);
-            if polled.is_ready() || ran.1 - before.1 >= stages.1 {
-                return polled;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the root reaches its seam"
-            );
-            std::thread::yield_now();
-        }
     }
 
     /// The family continuation stages `host` ran: builds begun, and later
@@ -4438,8 +4381,7 @@ mod semantic_poll_contract {
             let waker = Waker::from(Arc::clone(&counter));
             let mut entry = Some(dispatch.poll_query(root));
             let (pending, progress, repeated) = while_held(lease, || {
-                let pending =
-                    poll_to_held(graph, || entry.as_mut().unwrap().poll(&waker)).is_pending();
+                let pending = entry.as_mut().unwrap().poll(&waker).is_pending();
                 let progress = continuation_stages(&host);
                 let repeated = entry.as_mut().unwrap().task().map(|task| {
                     std::thread::scope(|scope| {
@@ -4555,250 +4497,35 @@ mod semantic_poll_contract {
         assert_eq!(host.task_registry.wait_count_for_tests(), 0);
     }
 
-    const FAMILY_FILE: &str = "/semantic-task/families.ts";
-
-    /// A file whose types read declarations through a barrel chain, none of
-    /// which is loaded until a family reads it.
-    fn family_host() -> Arc<crate::VerterHost> {
-        let host = unloaded_files_host(&[
-            (
-                FAMILY_FILE,
-                "import type { Inner, Later, Make } from './families-barrel';
-                 export type Holder = { a: Inner; p: Later; f: Make };
-                 export type Left = { a: Inner };
-                 export type Right = { a: number };
-                 export type Either = Left | Right;
-                 export type Mixed = Inner & Left;",
-            ),
-            (
-                "/semantic-task/families-barrel.ts",
-                "export * from './families-deep';",
-            ),
-            (
-                "/semantic-task/families-deep.ts",
-                "export * from './families-dep';",
-            ),
-            (
-                "/semantic-task/families-dep.ts",
-                "export interface Inner { b: string; c: number }
-                 export type Later = Promise<Inner>;
-                 export interface Make { <T>(x: T): Inner }",
-            ),
-        ]);
-        host.ensure_indexed_ready(FAMILY_FILE).unwrap();
-        host
-    }
-
-    fn family_alias(
-        dispatch: &HostDispatch<'_>,
-        name: &str,
-    ) -> verter_type_engine::semantic_query::SemanticNodeId {
-        use verter_type_engine::semantic_query::InstantiateKey;
-        let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::<str>::from(FAMILY_FILE),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::<str>::from(name),
-            ),
-            Arc::from([]),
-            dispatch.instantiate_context_for(
-                FAMILY_FILE,
-                ProjectionReductionContext::published(ProjectionMode::Shallow),
-            ),
-        ));
-        match dispatch.execute_via_cold_build_helper(key).value() {
-            QueryResult::Value(SemanticQueryValue::TypeNode(node)) => *node,
-            other => panic!("{name} reads a node: {other:?}"),
+    #[test]
+    fn a_cancelled_index_load_is_not_retried_on_the_polling_thread() {
+        let host = unloaded_owner_host();
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(entry.poll(Waker::noop()).is_pending());
+            host.cooperative_drive.cancellation().cancel();
         }
-    }
-
-    /// The carrier `Holder`'s member `name` names, unresolved.
-    fn family_member(
-        dispatch: &HostDispatch<'_>,
-        name: &str,
-    ) -> verter_type_engine::semantic_query::SemanticNodeId {
-        use verter_type_engine::semantic_query::PropertyKey;
-        let holder = family_alias(dispatch, "Holder");
-        let data = dispatch.graph_arc().node_data(holder).expect("a live node");
-        let SemanticNodeData::Object(surface) = &*data else {
-            panic!("Holder is an object type: {data:?}");
+        // The owner shards stay held: answering from anywhere but the
+        // retained outcome would park this thread.
+        let read = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            poll_until_ready(|waker| entry.poll(waker))
         };
-        surface
-            .positive_members()
-            .iter()
-            .find(|member| member.key.cloned_known() == Some(PropertyKey::identifier(name)))
-            .expect("Holder declares the member")
-            .value
-    }
-
-    fn family_path(
-        names: &[&str],
-    ) -> verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> {
-        use verter_type_engine::semantic_query::{PathSegment, PropertyKey};
-        verter_type_expr::OwnedSlice::from(
-            names
-                .iter()
-                .map(|name| PathSegment::Member(PropertyKey::identifier(*name)))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        )
-    }
-
-    /// The root key a family's row reads.
-    type FamilyRoot = fn(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey;
-
-    /// A root of each family a production poll builds in stages, reaching a
-    /// declaration behind the barrel chain.
-    const FAMILY_ROOTS: [(&str, FamilyRoot); 7] = [
-        ("a member path", |_, dispatch| {
-            SemanticQueryKey::ProjectPath {
-                base: family_alias(dispatch, "Holder"),
-                path: family_path(&["a", "b"]),
-                context: ProjectionReductionContext::published(ProjectionMode::Expanded),
-            }
-        }),
-        ("a member path over union arms", |_, dispatch| {
-            SemanticQueryKey::ProjectPath {
-                base: family_alias(dispatch, "Either"),
-                path: family_path(&["a"]),
-                context: ProjectionReductionContext::published(ProjectionMode::Expanded),
-            }
-        }),
-        ("a keyof", |_, dispatch| SemanticQueryKey::KeyOf {
-            base: family_alias(dispatch, "Mixed"),
-            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
-        }),
-        ("a signature list", |_, dispatch| {
-            SemanticQueryKey::SignaturesOfType {
-                subject: family_member(dispatch, "f"),
-                kind: verter_type_engine::semantic_query::SignatureKind::Call,
-                context: verter_type_engine::semantic_query::SemanticContextId::production(),
-            }
-        }),
-        ("an awaited operand", |_, dispatch| {
-            SemanticQueryKey::AwaitedNormalize {
-                operand: family_member(dispatch, "p"),
-                context: dispatch.structural_reduce_context(),
-            }
-        }),
-        ("an async return payload", |_, dispatch| {
-            SemanticQueryKey::AsyncReturnPayload {
-                operand: family_member(dispatch, "p"),
-                context: dispatch.structural_reduce_context(),
-            }
-        }),
-        ("an overload set with type arguments", |host, dispatch| {
-            let string = dispatch
-                .graph_arc()
-                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-            SemanticQueryKey::ResolveOverloadSet {
-                callee: family_member(dispatch, "f"),
-                kind: verter_type_engine::semantic_query::SignatureKind::Call,
-                type_args: Arc::from([string]),
-                context: verter_type_engine::semantic_query::OverloadSetContext {
-                    resolve_env_hash: host.host_view_env_hashes_for(FAMILY_FILE).resolve_env_hash,
-                    ..Default::default()
-                },
-            }
-        }),
-    ];
-
-    /// A read's answer, rails, diagnostics and the logical cost its receipt
-    /// pays: frames and the synchronous entry's nested reads record who
-    /// produced each prerequisite differently, and pay the same.
-    fn logical_summary(
-        dispatch: &HostDispatch<'_>,
-        read: &ValueRead,
-    ) -> (String, String, bool, bool, Vec<String>, Option<String>) {
-        let mut summary = read_summary(dispatch, read);
-        summary.5 = read
-            .receipt()
-            .priced()
-            .map(|receipt| format!("{:?}", receipt.closure_usage()));
-        summary
-    }
-
-    /// Every family built in stages yields on a cold file behind its barrel
-    /// chain with the polling thread free, holds nothing when released, and
-    /// reads what the synchronous entry reads, receipt included.
-    #[test]
-    fn a_family_built_in_stages_yields_on_a_cold_file_and_reads_the_synchronous_answer() {
-        for (family, root) in &FAMILY_ROOTS {
-            let synchronous = {
-                let host = family_host();
-                let dispatch = ProjectSemanticDispatch::new(&*host);
-                let _scope = dispatch.enter_construction_scope();
-                let read = dispatch.execute_via_cold_build_helper(root(&host, &dispatch));
-                logical_summary(&dispatch, &read)
-            };
-            for abandon in [false, true] {
-                let host = family_host();
-                let mut dispatch = ProjectSemanticDispatch::new(&*host);
-                let scope = dispatch.enter_construction_scope();
-                let key = root(&host, &dispatch);
-                let mut held = host.decl_lowering.hold_workers_for_tests();
-                let mut entry = Some(dispatch.poll_query(key));
-                {
-                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
-                    let pending = entry.as_mut().unwrap().poll(Waker::noop()).is_pending();
-                    assert!(pending, "{family}: the root yields on the cold file");
-                }
-                if abandon {
-                    drop(entry.take());
-                }
-                held.release();
-                let read = entry
-                    .take()
-                    .map(|mut entry| poll_until_ready(|waker| entry.poll(waker)));
-                drop(entry);
-                if let Some(read) = read {
-                    assert_eq!(logical_summary(&dispatch, &read), synchronous, "{family}");
-                }
-                assert_eq!(
-                    dispatch.open_request_state_for_tests(),
-                    NOTHING_OPEN,
-                    "{family}"
-                );
-                assert_eq!(host.task_registry.wait_count_for_tests(), 0, "{family}");
-                drop(scope);
-            }
-        }
-    }
-
-    #[test]
-    fn a_failed_index_load_is_not_retried_on_the_polling_thread() {
-        for cancelled in [true, false] {
-            let host = unloaded_owner_host();
-            assert!(host.ensure_loaded(UNLOADED_OWNER));
-            let mut held = host.decl_lowering.hold_workers_for_tests();
-            let mut dispatch = ProjectSemanticDispatch::new(&*host);
-            host.test_force
-                .refuse_pollable_indexing
-                .store(!cancelled, std::sync::atomic::Ordering::SeqCst);
-            let mut entry = dispatch.poll_query(declaration_key(UNLOADED_OWNER));
-            if cancelled {
-                let _forbid = verter_execution::blocking::WaitProbe::forbid();
-                assert!(entry.poll(Waker::noop()).is_pending());
-                host.cooperative_drive.cancellation().cancel();
-            }
-            // The owner shards stay held: answering from anywhere but the
-            // retained outcome would park this thread.
-            let read = {
-                let _forbid = verter_execution::blocking::WaitProbe::forbid();
-                poll_until_ready(|waker| entry.poll(waker))
-            };
-            drop(entry);
-            assert!(
-                matches!(
-                    read.value(),
-                    QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
-                ),
-                "a failed load answers as a failed synchronous read"
-            );
-            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
-            assert_eq!(host.task_registry.wait_count_for_tests(), 0);
-            held.release();
-        }
+        drop(entry);
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
+            ),
+            "a failed load answers as a failed synchronous read"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
+        held.release();
     }
 
     #[test]
@@ -4948,8 +4675,10 @@ mod semantic_poll_contract {
         let make_host = || {
             let host = unloaded_files_host(&[
                 (UNLOADED_OWNER, "export interface Props { a: string }"),
-                (IMPORTER, "export * from './decl-middle';"),
-                ("/semantic-task/decl-middle.ts", "export * from './owner';"),
+                (
+                    IMPORTER,
+                    "import { Props } from './owner'; export { Props };",
+                ),
             ]);
             host.ensure_indexed_ready(IMPORTER).unwrap();
             assert!(host.ensure_loaded(UNLOADED_OWNER));
@@ -5672,7 +5401,7 @@ mod semantic_poll_contract {
         let before = continuation_stages(&host);
         let mut entry = dispatch.poll_query(root);
         let (first, frames, pending_elsewhere, held_stages) = while_held(leases, || {
-            let first = poll_to_held(graph, || entry.poll(&waker));
+            let first = entry.poll(&waker);
             let held_stages = continuation_stages(&host);
             let task = entry.task();
             let frames = task.as_ref().map(|task| task.live_frames_for_tests());
@@ -6455,14 +6184,14 @@ mod semantic_poll_contract {
         let (other, lease) = hold_producer(&host, graph, held);
         let waker = Waker::from(Arc::new(CountingWaker::default()));
         let mut entry = dispatch.poll_query(key);
-        let first = while_held(lease, || {
-            poll_to_held(graph, || entry.poll(&waker)).is_pending()
-        });
+        let first = while_held(lease, || entry.poll(&waker).is_pending());
         assert!(
             first,
             "the call yields while its operand dependency is held"
         );
-        let read = poll_to_answer(|| entry.poll(&waker));
+        let Poll::Ready(read) = entry.poll(&waker) else {
+            panic!("the call finishes once its operand is available");
+        };
         drop(entry);
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);

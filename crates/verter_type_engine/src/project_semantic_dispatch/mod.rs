@@ -725,9 +725,6 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// the answers its frame received, the contextual callbacks typing now
     /// and the contextual calls held across its runs.
     flow_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::FlowSeam>>,
-    /// The stage of a family whose frame is stepping, while it runs: the
-    /// answers its frame received and the read it waits on.
-    stage_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::StageSeam>>,
     /// The binder the running substitution walk replaces, classified once
     /// for every node the walk visits ([`Self::substitution_binder`]).
     /// Emptied at each walk's entry, so it never outlives the hold the
@@ -1379,7 +1376,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             driven_root_traced: verter_execution::sync_cell::SyncRefCell::new(None),
             decision_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             call_seam: verter_execution::sync_cell::SyncRefCell::new(None),
-            stage_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             flow_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             substitution_binder: verter_execution::sync_cell::SyncRefCell::new(None),
             operation_depth: verter_execution::sync_cell::SyncU32::new(0),
@@ -1456,7 +1452,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             decision_seam,
             call_seam,
             flow_seam,
-            stage_seam,
             substitution_binder,
             operation_depth,
         } = self;
@@ -1504,7 +1499,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
         flow_seam.swap(&other.flow_seam);
-        stage_seam.swap(&other.stage_seam);
         substitution_binder.swap(&other.substitution_binder);
         // An operation the task's drive enters nests in the lender's open one,
         // so the request's receipts end with the lender's outermost
@@ -4203,9 +4197,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // single publication-capturing executor that drains or retires
         // that batch.
         if matches!(key, SemanticQueryKey::FlowReturn(_)) {
-            if let Some(read) = self.read_at_stage_seam(&key) {
-                return read;
-            }
             return self.execute_flow_return_cold_build(key);
         }
         self.execute_via_cold_build_helper_with_publication_capture(key, None, None)
@@ -4886,7 +4877,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(read) = self
                 .read_at_decision_seam(&key)
                 .or_else(|| self.read_at_flow_seam(&key))
-                .or_else(|| self.read_at_stage_seam(&key))
             {
                 return read;
             }
@@ -5034,60 +5024,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //     relation callers before the family memo or wait graph sees them.
         // Other variants key off [`SemanticNodeId`]s that are already hashed
         // verbatim.
-        let key = self.canonical_admission_key(key);
-
-        // An isolated root whose refusal is sealed answers from it: the
-        // failed evaluation is never run again under the same allowances.
-        let isolated_root = plain_read
-            .then(|| self.isolated_root_identity(&connected_guard, &key))
-            .flatten();
-        if let Some(read) = isolated_root
-            .as_ref()
-            .and_then(|root| self.answer_from_sealed_refusal(root))
-        {
-            return ColdBegin::Answered(read);
-        }
-
-        // Carrier-subject normalization: when the query SUBJECT is a `BareRef`
-        // / `ImportType` carrier (the base of a base-bearing key — `ProjectPath`
-        // / `ProjectMember` / `IndexedAccess` / `KeyOf` / `MappedType`), resolve
-        // its head through the ONE shared resolver and REWRITE the key to the
-        // resolved subject BEFORE cooperative-memo admission, so singleflight /
-        // dedup keys on the real semantic subject (not the unresolved carrier).
-        // The eager `Ref` / `ImportType` lowering arm reaches the SAME
-        // `resolve_bare_ref_head` / `resolve_import_type_head` — one resolver,
-        // two entrances. A non-carrier subject is returned verbatim (cheap
-        // node-data shape check). Nested carriers inside Intersection / Union /
-        // heritage surfaces re-enter this normalization through the
-        // shallow-synthesis worklist's re-dispatch.
-        //
-        // The normalization runs INSIDE its own fact tracer (the carrier-
-        // normalization prelude): its head resolution can serve `IndexedReady` /
-        // scan augmentations, and those facts MUST land on the published memo
-        // entry's read-set or a memoized resolved key could be admitted whose
-        // rewrite depended on UNTRACKED state (cache poisoning). The non-carrier
-        // common case allocates NO tracer. The captured facts merge into the
-        // build admission's signature; a mutation-unstable / fenced-serve prelude
-        // suppresses caching (the value still flows, the memo refuses).
-        let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
-
-        let query_depth = match self.charge_query_entry(&key, preexisting_trip, true) {
-            Ok(guard) => guard,
-            Err(read) => return ColdBegin::Answered(read),
-        };
-        ColdBegin::Entered(ColdEntry {
-            query_depth,
-            key,
-            carrier_prelude,
-            isolated_root,
-            connected: connected_guard,
-        })
-    }
-
-    /// The key `key`'s cold entry admits, its sugar rewritten and its member
-    /// lists in their canonical order.
-    pub(super) fn canonical_admission_key(&self, key: SemanticQueryKey) -> SemanticQueryKey {
-        match key {
+        let key = match key {
             SemanticQueryKey::Relate {
                 mut source,
                 mut target,
@@ -5144,7 +5081,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context,
             },
             other => other,
+        };
+
+        // An isolated root whose refusal is sealed answers from it: the
+        // failed evaluation is never run again under the same allowances.
+        let isolated_root = plain_read
+            .then(|| self.isolated_root_identity(&connected_guard, &key))
+            .flatten();
+        if let Some(read) = isolated_root
+            .as_ref()
+            .and_then(|root| self.answer_from_sealed_refusal(root))
+        {
+            return ColdBegin::Answered(read);
         }
+
+        // Carrier-subject normalization: when the query SUBJECT is a `BareRef`
+        // / `ImportType` carrier (the base of a base-bearing key — `ProjectPath`
+        // / `ProjectMember` / `IndexedAccess` / `KeyOf` / `MappedType`), resolve
+        // its head through the ONE shared resolver and REWRITE the key to the
+        // resolved subject BEFORE cooperative-memo admission, so singleflight /
+        // dedup keys on the real semantic subject (not the unresolved carrier).
+        // The eager `Ref` / `ImportType` lowering arm reaches the SAME
+        // `resolve_bare_ref_head` / `resolve_import_type_head` — one resolver,
+        // two entrances. A non-carrier subject is returned verbatim (cheap
+        // node-data shape check). Nested carriers inside Intersection / Union /
+        // heritage surfaces re-enter this normalization through the
+        // shallow-synthesis worklist's re-dispatch.
+        //
+        // The normalization runs INSIDE its own fact tracer (the carrier-
+        // normalization prelude): its head resolution can serve `IndexedReady` /
+        // scan augmentations, and those facts MUST land on the published memo
+        // entry's read-set or a memoized resolved key could be admitted whose
+        // rewrite depended on UNTRACKED state (cache poisoning). The non-carrier
+        // common case allocates NO tracer. The captured facts merge into the
+        // build admission's signature; a mutation-unstable / fenced-serve prelude
+        // suppresses caching (the value still flows, the memo refuses).
+        let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
+
+        let query_depth = match self.charge_query_entry(&key, preexisting_trip, true) {
+            Ok(guard) => guard,
+            Err(read) => return ColdBegin::Answered(read),
+        };
+        ColdBegin::Entered(ColdEntry {
+            query_depth,
+            key,
+            carrier_prelude,
+            isolated_root,
+            connected: connected_guard,
+        })
     }
 
     /// Deliver a cold-query entry's claimed read: attributed to its key,

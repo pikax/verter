@@ -907,23 +907,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Resolve the local headers and route once, retaining the selected
-    /// target across its semantic read: the target's build is an owned
-    /// family need. On a production poll this is a stage: a file or lowering
-    /// the route reads that is not ready stops it where it reads.
+    /// target across its semantic read. Route preparation is still a driver
+    /// port operation; the target build itself is an owned family need.
     pub(super) fn begin_resolve_decl(
         &self,
         key: &ResolveDeclKey,
     ) -> super::family_continuation::FamilyStep {
-        let step = self.resolve_decl_stage(key);
-        // A stage that waits on what it read is not begun: it runs again.
-        if !self.stage_waits() {
-            self.graph().record_continuation_begun();
-        }
-        step
-    }
-
-    fn resolve_decl_stage(&self, key: &ResolveDeclKey) -> super::family_continuation::FamilyStep {
         use super::family_continuation::{FamilyBuild, FamilyStep};
+        self.graph().record_continuation_begun();
         verter_audit::attribute_scope!(ResolveDecl);
         // Self-version rooting: observe the scope canonical.s
         // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the
@@ -6168,21 +6159,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// utility path's recursive stack. In debug builds, the unused locals of
     /// this path otherwise enlarge every nested builtin instantiation frame.
     #[inline(never)]
-    /// The prepared declaration `slot`'s instantiation begins from.
-    pub(super) fn read_prepared_declaration(
-        &self,
-        slot: &crate::semantic_query::ResolvedDeclSlotIdentity,
-    ) {
-        let root = ResolvedRootIdentity::new_in_owner(
-            slot.defining_canonical.as_ref(),
-            slot.owner,
-            slot.merged_symbol_name.as_ref(),
-        );
-        let _ = crate::resolver_core::bare_name_resolve::resolve_prepared_type_decl_via_host(
-            self.ctx, None, None, &root,
-        );
-    }
-
     fn begin_prepared_instantiation(
         &self,
         base: SemanticNodeId,
@@ -14711,31 +14687,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &verter_type_expr::OwnedSlice<PathSegment>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let start = match self.begin_project_path(base, path, context) {
-            Ok(start) => start,
-            Err(output) => return *output,
-        };
-        // The walker carries the full `ProjectionReductionContext`
-        // (not just `mode`) so the empty-path Shallow synthesiser can
-        // gate per-key Mapped surface materialisation on the demand
-        // axis. Published(Shallow) walks enumerate & substitute mapped
-        // members; StructuralTransit walks carrier-stop without
-        // enumeration (per the boundary constraint that transit is the
-        // non-publication rail).
-        let mut walker = PathWalker::new(self, context, &start.fence);
-        walker.record_prefix_receipts(start.start_base, &start.walker_path);
-        let result = walker.walk(start.start_base, start.walker_path.as_ref());
-        self.finish_project_path(walker, result, base, path, context, &start)
-    }
-
-    /// A path projection's operands: where its walk starts, or its output
-    /// when no walk is needed.
-    pub(super) fn begin_project_path(
-        &self,
-        base: SemanticNodeId,
-        path: &verter_type_expr::OwnedSlice<PathSegment>,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Result<PathWalkStart, Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>> {
         verter_audit::attribute_n!(MacroMemberWalk, path.len());
         // A member read off a class's polymorphic `this` reads the class
         // instance, and binds `this` in the member to the binder itself.
@@ -14744,14 +14695,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let QueryResult::Value(node) = output.result {
                 output.result = QueryResult::Value(self.bind_this_receiver(node, base));
             }
-            return Err(Box::new(output));
+            return output;
         }
         // §22 fast-reject for the `?[K]` indexed-access shape: `any[K]=any`,
         // `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `error[K]=error`.
         // Member projection (`.foo`) is a distinct surface left to the walker.
         if Self::project_path_is_indexed_access(path) {
             if let Some(absorbed) = self.absorb_indexed_access(base) {
-                return Err(Box::new(absorbed));
+                return absorbed;
             }
         }
         // Union-index distribution (`Obj[A | B]` = `Obj[A] | Obj[B]`). A
@@ -14762,7 +14713,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // (one engine — this re-dispatches the shared key, never hand-reduces).
         if let [PathSegment::Index(index)] = path.as_ref() {
             if let Some(distributed) = self.distribute_union_index(base, index, context) {
-                return Err(Box::new(distributed));
+                return distributed;
             }
         }
         let fence = self.project_generation_signature();
@@ -14784,31 +14735,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             verter_type_expr::OwnedSlice::from(path[start_index..].to_vec().into_boxed_slice())
         };
-        Ok(PathWalkStart {
-            fence,
-            start_base,
-            start_index,
-            walker_path,
-        })
-    }
-
-    /// A path projection's output from its finished walk.
-    pub(super) fn finish_project_path(
-        &self,
-        mut walker: PathWalker<'_, 'a, C>,
-        result: SemanticNodeId,
-        base: SemanticNodeId,
-        path: &verter_type_expr::OwnedSlice<PathSegment>,
-        context: crate::semantic_query::ProjectionReductionContext,
-        start: &PathWalkStart,
-    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let PathWalkStart {
-            fence,
-            start_base,
-            start_index,
-            walker_path,
-        } = start;
-        let (start_base, start_index) = (*start_base, *start_index);
+        // The walker carries the full `ProjectionReductionContext`
+        // (not just `mode`) so the empty-path Shallow synthesiser can
+        // gate per-key Mapped surface materialisation on the demand
+        // axis. Published(Shallow) walks enumerate & substitute mapped
+        // members; StructuralTransit walks carrier-stop without
+        // enumeration (per the boundary constraint that transit is the
+        // non-publication rail).
+        let mut walker = PathWalker::new(self, context, &fence);
+        walker.record_prefix_receipts(start_base, &walker_path);
+        let result = walker.walk(start_base, walker_path.as_ref());
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
         // A member read through a reference binds the member's polymorphic
@@ -14896,7 +14832,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return crate::project_semantic_dispatch::walk::QueryBuildOutput {
                 result: QueryResult::Recursive(result),
-                dep_signature: fence.clone(),
+                dep_signature: fence,
                 walker_diagnostics,
                 cache_suppress,
                 completeness,
@@ -14943,7 +14879,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // flagged in `publish_warm_if_absent`).
         let pending_prefix_backfills = collect_prefix_backfills(
             start_base,
-            walker_path,
+            &walker_path,
             &intermediate_nodes,
             prefix_receipts,
         );
@@ -14970,7 +14906,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let observed_self_roots = self.observed_self_roots_from_nodes([base]);
         crate::project_semantic_dispatch::walk::QueryBuildOutput {
             result: QueryResult::Value(result),
-            dep_signature: fence.clone(),
+            dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
             completeness,
@@ -21680,14 +21616,6 @@ pub fn path_walk_materialized_set(
         }
     }
     MaterializedSet::from_points(points)
-}
-
-/// Where a path projection's walk starts, past any warm prefix.
-pub(super) struct PathWalkStart {
-    pub(super) fence: DepSignature,
-    pub(super) start_base: SemanticNodeId,
-    pub(super) start_index: usize,
-    pub(super) walker_path: verter_type_expr::OwnedSlice<PathSegment>,
 }
 
 fn collect_prefix_backfills(
