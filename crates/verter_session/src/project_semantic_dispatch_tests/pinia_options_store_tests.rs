@@ -22,7 +22,7 @@
 //! module-scope namesake is an ordinary interface, in its own module even
 //! where that module also contributes the global declaration, which every
 //! other module still reads as the marker; and with no declaration at all
-//! the checker reports the name and recovers without the marker. Where a
+//! the name is the checker's error type, which infers nothing. Where a
 //! namesake stands for the marker, the actions read their own object literal:
 //! each absent member is the checker's TS2339 and its error type, the action
 //! returning it is circular, and every other member answers on its own. An
@@ -770,32 +770,92 @@ fn a_namesake_shadows_its_own_modules_global_contribution() {
 
 /// With no `ThisType` declared, the checker reports the name (TS2304 at
 /// both `ThisType` references of the options declaration, and TS7006 on
-/// each getter's `state` under `noImplicitAny`) and recovers with
-/// `getters` and `actions` inferring nothing: the state members, `$id`
-/// and `$state` answer as the marker-typed store's, and every getter and
-/// action is absent from the store (TS2339 at each probe reading one), the
-/// error type `any`, never the marker-typed member. Measured on
-/// TypeScript, all four settings. The named demand refuses the store's call
-/// with its typed cause: a mapped parameter over an interface that reads an
-/// undeclared name stays deferred, so the call has no contextual type to
-/// recover with, and no member answers through the marker.
+/// each getter's `state` under `noImplicitAny`) and recovers: `G & <error>`
+/// and `A & <error>` are the error type, so `getters` and `actions` infer
+/// nothing. The state members, `$id` and `$state` answer as the marker-typed
+/// store's, the call is not refused, and neither inference reaches a getter
+/// or an action through the marker: `double` and `first` stay unread on the
+/// store, and no action is typed. Measured on TypeScript, all four settings:
+/// each of those members is absent there (TS2339 at the probe, `any`).
 #[test]
 fn an_undeclared_marker_recovers_without_inferring_through_it() {
-    let failures = refusal_mismatches(
-        &Project::store("", &[]),
-        &ALL,
-        FlowReturnDegradation::ContextSensitiveInference,
-        &[
-            "number",
-            "{ id: number; }[]",
-            "any",
-            "any",
-            "any",
-            "any",
-            "\"counter\"",
-            NAMESAKE_STORE[7],
-        ],
-    );
+    let project = Project::store("", &[]);
+    let probes: Vec<&str> = MEMBERS
+        .iter()
+        .map(|(probe, _)| *probe)
+        .chain(["St['$state']", "St"])
+        .collect();
+    let mut failures = Vec::new();
+    for setting in ALL {
+        let host = project.host(setting.options, &probes);
+        let answers: Vec<TypeExpr> = (0..probes.len())
+            .map(|index| wire_answer(&host, &named_answer(&host, index)))
+            .collect();
+        // The members the checker answers as the marked store's.
+        for ordinal in [0, 1, 6, 7] {
+            failures.extend(
+                answer_mismatch(&answers[ordinal], NAMESAKE_STORE[ordinal])
+                    .map(|failure| format!("{}: `{}`: {failure}", setting.label, probes[ordinal])),
+            );
+        }
+        // No getter or action came through the marker.
+        for ordinal in [2, 3, 4, 5] {
+            if answer_mismatch(&answers[ordinal], MEMBERS[ordinal].1).is_none() {
+                failures.push(format!(
+                    "{}: `{}` was inferred through the undeclared marker",
+                    setting.label, probes[ordinal]
+                ));
+            }
+        }
+        match store_degradation(&host) {
+            Ok(None) => {}
+            refused => failures.push(format!("{}: the store is {refused:?}", setting.label)),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An intersection holding a name nothing declares is the checker's error
+/// type, whatever its other arms hold and however its members are reached (a
+/// parameter's object type, an interface, `Pick`, `Omit`): an argument relates
+/// to it and infers nothing into its type variables, so each call answers its
+/// uninferred parameter's fallback. Under an ambient library a name's absence
+/// proves nothing, so the rule needs `noLib`. Measured on TypeScript.
+#[test]
+fn an_undeclared_name_in_an_intersection_infers_nothing() {
+    let project = Project {
+        declarations: &[],
+        scenario: format!(
+            "{UTILITIES}\
+             interface O<G> {{ id: 1; g?: G & Und<G>; }}\n\
+             interface P<G> {{ id: 1; g?: G & Und<G> & {{ z?: 1 }}; }}\n\
+             declare function m1<G>(o: {{ g?: G & Und<G> }}): G;\n\
+             declare function m2<G>(o: O<G>): G;\n\
+             declare function m3<G>(o: Pick<O<G>, 'g'>): G;\n\
+             declare function m4<G>(o: Omit<O<G>, 'id'>): G;\n\
+             declare function m5<G extends {{ z?: 1 }} = {{}}>(o: Omit<P<G>, 'id'>): G;\n\
+             export const r1 = m1({{ g: {{ a: 1 }} }});\n\
+             export const r2 = m2({{ id: 1, g: {{ a: 1 }} }});\n\
+             export const r3 = m3({{ g: {{ a: 1 }} }});\n\
+             export const r4 = m4({{ g: {{ a: 1 }} }});\n\
+             export const r5 = m5({{ g: {{ z: 1 }} }});\n"
+        ),
+    };
+    let failures = project.mismatches(&[
+        ("typeof r1", "unknown"),
+        ("typeof r2", "unknown"),
+        ("typeof r3", "unknown"),
+        ("typeof r4", "unknown"),
+        ("typeof r5", "{}"),
+        (
+            "{ a: 1 } extends Pick<{ a?: {} & Und<1> }, 'a'> ? 1 : 0",
+            "1",
+        ),
+        (
+            "{ a: 1 } extends Omit<{ a?: {} & Und<1>; b: 1 }, 'b'> ? 1 : 0",
+            "1",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

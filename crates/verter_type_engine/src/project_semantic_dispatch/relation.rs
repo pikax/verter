@@ -12601,7 +12601,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_active_query_build_node(self);
             if matches!(
                 graph.node_data(value).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             ) {
                 return None;
             }
@@ -12688,7 +12688,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if read.iter().any(|&arm| {
             matches!(
                 self.graph().node_data(arm).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             )
         }) {
             return None;
@@ -18143,6 +18143,24 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             }
             results.push(self.relate_to_union_target(source, &members, bindings));
             return;
+        }
+        // A written intersection holding the checker's error type IS that
+        // error type (`getIntersectionType`): no other arm is compared, and
+        // none of its type variables is inferred.
+        if let SemanticNodeData::Intersection(members) = &*target_data {
+            let error_arm = members.iter().copied().find(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Opaque(error))
+                        if super::build::is_certified_recovery(error)
+                )
+            });
+            if let Some(error_arm) = error_arm {
+                drop(source_data);
+                drop(target_data);
+                work.push(same_pair(source, error_arm));
+                return;
+            }
         }
         // A weak target — every property optional — takes no source that
         // has members but shares none of its properties, checked on the

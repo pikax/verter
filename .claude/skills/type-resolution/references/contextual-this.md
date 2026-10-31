@@ -45,10 +45,15 @@ receiver does not declare is the checker's TS2339 and its error type
 through that recovery, never through the marker. A refusal for any other reason
 (a missing dependency, a callee that is not callable) keeps the call's own
 typed cause, so a recovery and a refusal stay distinguishable on the shared
-flow result. With no `ThisType` declared at all the call keeps its typed
-`ContextSensitiveInference` refusal: the checker's error type for the name
-makes the mapped parameter's members `any`, a recovery this lane does not
-model yet.
+flow result. With no `ThisType` declared at all, a project whose `noLib`
+program declares every name reads the reference as the checker's TS2304 error
+type: `G & <error>` is the error type wherever it is reached, an argument
+relates to it, inference deposits nothing into its other arms, and the call
+completes with those parameters uninferred. Two parts are not modelled yet. A
+member the resulting store proves absent keeps its unread access rather than
+TS2339's `any` when the store is an intersection of aliases, and the store
+literal's `this` still reads the literal rather than `any`, so its flow result
+records TS2339 and TS7023 occurrences the checker does not report.
 Structural readers still instantiate the empty interface normally.
 
 Top-level contextual literals and calls containing context-sensitive object

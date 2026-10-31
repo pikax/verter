@@ -15303,13 +15303,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.construction_meter(),
         );
         self.deposit_canonical_evidence(reduced.evidence);
-        matches!(
-            self.graph().node_data(reduced.node).as_deref(),
+        match self.graph().node_data(reduced.node).as_deref() {
             Some(SemanticNodeData::Primitive(
-                PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined
-            ))
-        )
-        .then_some(reduced.node)
+                PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined,
+            )) => Some(reduced.node),
+            Some(SemanticNodeData::Opaque(error)) if is_certified_recovery(error) => {
+                Some(reduced.node)
+            }
+            _ => None,
+        }
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -17711,7 +17713,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// queries; object interiors stay addressable, though Expanded
     /// publication reads their closed operators. Operational partiality
     /// retains its completion and cache-suppression evidence. An opaque
-    /// result keeps the substituted carrier, never the free mapper binder.
+    /// result keeps the substituted carrier, never the free mapper binder;
+    /// a certified checker recovery is the member's answer.
     pub(super) fn materialize_mapped_member_value_for_key(
         &self,
         mapper: &crate::semantic_query::MapperKey,
@@ -17740,13 +17743,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let evaluated = self
             .evaluate_mapped_member_value_outcome(substituted, context)
             .into_active_query_build_node(self);
-        if matches!(
-            self.graph().node_data(evaluated).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ) {
-            substituted
-        } else {
-            evaluated
+        match self.graph().node_data(evaluated).as_deref() {
+            Some(SemanticNodeData::Opaque(error)) if !is_certified_recovery(error) => substituted,
+            _ => evaluated,
         }
     }
 
@@ -22832,4 +22831,11 @@ impl TransactionReadRecording<'_> {
         };
         Some((reuse, replay))
     }
+}
+
+/// Whether `error` is the checker's error type after a diagnostic it
+/// recovers from: an answer, where any other error leaves a position unread.
+pub(super) fn is_certified_recovery(error: &QueryError) -> bool {
+    super::query_error_disposition::query_error_disposition(error)
+        == super::query_error_disposition::QueryErrorDisposition::CheckerRecovery
 }
