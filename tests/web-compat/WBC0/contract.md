@@ -27,7 +27,7 @@ which the data cannot answer. Missing facts stay missing. A Baseline badge, a
 displayed type, an installed upstream package or a passing compile never
 establishes support for a configured target.
 
-This contract consumes three accepted authorities and re-owns none of them:
+This contract consumes the following accepted authorities and re-owns none of them:
 
 - **CFG0** ([configuration](../../../docs/arch/kernel/configuration.md)):
   the `verter.config.jsonc` envelope, its precedence, and captured ecosystem
@@ -46,14 +46,23 @@ This contract consumes three accepted authorities and re-owns none of them:
   support answer derived from BCD is a data-backed static prediction, not a
   runtime observation, and is labelled as such.
 
-The charter names `contracts/web-product-expansion-v1.md` as normative
-companion. That file is absent from this tree: the repository roadmap was
-removed (`chore(ci): remove the repository roadmap; the program DAG is
-database-owned`, 2026-09-18) and the controller owns the frozen charter and
-plan. This contract applies the frozen charter's requirements and the
-accepted WDX0 products that remain in-tree without claiming inspection of
-the unavailable companion, mirroring the component-workbench precedent. The
-reserved module homes under `crates/verter_session/src/compat/`
+- **WDX0 ownership:** the [disposition matrix](../../web-product/WDX0/products/web-product-disposition-matrix.v1.json)
+  and [ownership map](../../web-product/WDX0/products/web-product-ownership-map.json)
+  assign this constitution to expansion.web-compat and qualification to WBC7.
+- **DX0 delivery:** [FeatureExposureContract](../../product-experience/DX0/products/feature-exposure-contract.v1.json),
+  [HostExecutionClass](../../product-experience/DX0/products/host-execution-class.v1.json)
+  and [ProductReceiptBasis](../../product-experience/DX0/products/product-receipt-basis.v1.json)
+  govern operation exposure, host claims and source/config/session-bound receipts.
+
+The WBC0-specific authority amendment, WBC0-COMPANION-AUTHORITY, replaces
+the unavailable `contracts/web-product-expansion-v1.md` with the frozen
+requirements and the named WDX0, CFG0, VID0 and DX0 contracts above. Existing
+Tama authority, review, resource and successor-charter contracts remain in
+force. This does not claim equivalence to unavailable text or generalize the
+CWB0-specific precedent. Readiness is database-owned; no repository ledger
+or roadmap validator is recreated. No prerequisite is added; implementation
+and qualification remain with WBC1–WBC7. The reserved module homes under
+`crates/verter_session/src/compat/`
 (`data`, `targets`, `html_css`, `js_web_api`, `explain`, each documented
 `Filled by WBC1`–`WBC5`) are the intended implementation boundary; nothing
 here moves them.
@@ -72,9 +81,12 @@ here.
   `browserslist` key or `"browserslist".extends` shareable config in a
   captured `package.json` (PM1 payload), a `.browserslistrc` data file, a
   `browserslist.config.js` executable config (static literal extraction only
-  per `CR19`; otherwise `Uncaptured { ExecutionNotAuthorized }` until an
-  authorized execution snapshot exists), captured tsconfig `target`/`lib`
-  (PM1), and captured build-tool targets (SM1 for Vite). Nothing reads
+  per `CR19`: all-literal extraction is `Complete`; mixed literal and
+  non-literal forms retain literal facts as `Partial`, naming unresolved
+  forms; no extractable literal form is `Uncaptured { reason }`. `CR20`
+  requires authorization for dynamic evaluation into a separate snapshot;
+  denied execution never erases a static partial snapshot), captured tsconfig
+  `target`/`lib` (PM1), and captured build-tool targets (SM1 for Vite). Nothing reads
   `$HOME`, ambient `BROWSERSLIST`/`BROWSERSLIST_ENV` variables or any global
   config; the active browserslist environment (`production`/`development`
   sections) is an explicit demand input, carried beside the query identity
@@ -101,11 +113,18 @@ here.
   records its read set and each contribution's source unit, revision and
   rank. Unresolvable or contradictory input answers `Invalid`, `NeedInputs`
   or `Uncaptured` per the CFG0 outcome vocabulary, never an empty success
-  and never an implicit default target set (VID0 `R06`).
+  and never an implicit default target set (VID0 `R06`). A partial captured
+  input retains its known contributions and unresolved forms; it cannot
+  establish a complete target population or a complete compatibility pass.
 - **TR5 — identity and invalidation.** The effective-target query key covers
   the consulted configuration identities and revisions (`CR14`), the pinned
-  snapshot identity (below) and the declared environment. Editing an
-  unrelated section does not invalidate it; edit and revert restore it.
+  snapshot identity (below) and the declared environment. Distinct source
+  revisions never alias, even after reverting to identical bytes. Separately,
+  section-local value fingerprints and span anchors follow `CR16`: unrelated
+  section edits preserve target values and their fingerprints; edit/revert
+  restores the value and span digests. Reused values must re-stamp current
+  `SourceRevision`/`ContentId` provenance, and re-anchor moved spans, without
+  recomputing target values. No old revision-bearing result is republished.
 
 ## Pinned compatibility data snapshot
 
@@ -116,9 +135,11 @@ here.
   (feature groupings and Baseline statuses). If usage/population statistics
   beyond BCD's release data are admitted for `TR2`, they are a separately
   identified dataset in the same snapshot, never an unnamed borrow from
-  toolchain transitive dependencies. WBC1 binds the exact admitted dataset
-  names, versions, official source artifacts and licenses in its own
-  inventory; this decision invents no version claims.
+  toolchain transitive dependencies. The exact admitted releases, artifacts,
+  integrity pins and licenses are fixed in the inventory below. WBC1 owns
+  ingestion and reproducible generation from those inputs, not selection of
+  unspecified releases. No usage/population dataset is admitted initially;
+  queries requiring it retain the typed unsupported/unknown outcome in TR2.
 - **DR2 — exact data versions.** A snapshot identity is the ordered set of
   its constituent dataset identities — name, exact upstream release and
   content digest — plus the generation recipe identity. No floating
@@ -150,17 +171,25 @@ here.
 
 ## Support evidence model
 
-Per (feature identity × target identity), the answer is one of, and only
-one of:
+Per (feature identity × target identity), the answer retains the applicable
+support statements and their conditions. The vocabulary is:
 
 | Support fact       | Meaning and data basis                                                                                          |
 | ------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `supported`        | A support record exists with a version added at or before the target; carries `since` when the data pins a version, and uncertainty when it does not (`version_added: true`) |
+| `supported`        | An applicable support record places the target at or after addition and before removal; carries `since` when known. An unknown addition version retains uncertainty rather than proving support for every historical version |
 | `partial`          | Implemented with named limits (`partial_implementation` and its notes)                                          |
-| `flagged`          | Available only behind a runtime flag; the flag name and `enabled_by_default` state are facts, not defaults      |
+| `flagged`          | Available only behind a runtime flag; preserves BCD `type`, `name`, and optional `value_to_set`; default-enabled state is unknown, not supplied by BCD      |
 | `prefixed`/`aliased` | Available under a vendor prefix or alternative name; the exact spelling is the fact, not general support       |
-| `unsupported`      | An explicit negative record, or `version_added` after / `version_removed` before the target version             |
+| `unsupported`      | An explicit negative record, or `version_added` after / `version_removed` at or before the target version             |
 | `unknown`          | No decidable record: feature absent from the dataset, target family/version absent from the dataset, or the needed statistic is not carried |
+
+Removal is an exclusive upper bound on a support interval: added at 10,
+removed at 20 supports an otherwise unqualified record at 19, but not 20 or
+21. Evaluate each statement's interval before its conditions; preserve all
+conditions and alternative statements rather than dropping a flag when a
+record is also partial or prefixed. An indeterminate boundary cannot prove
+unconditional support at a particular target. The [admitted BCD schema](https://raw.githubusercontent.com/mdn/browser-compat-data/v5.7.6/schemas/compat-data.schema.json)
+defines these version and flag fields.
 
 - **SR1 — unknown never coerces.** `unknown` is never reported as supported
   or unsupported, never hidden behind an empty list, and never answered by
@@ -199,7 +228,7 @@ feature/target, not completion of a row.
 | Capability                        | Existing source/authority and limits                                                                                     | Receiving owner and acceptance                |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
 | Pinned data ingestion/generation  | Reserved `compat/data` home (`Filled by WBC1`); no loader, corpus or script exists at this head                            | WBC1-AC1/AC2/AC3 (`scripts/web-compat`, `test-corpora/web-compat`) |
-| Dataset identity, licensing       | None; exact admitted datasets, versions, sources and attribution obligations are WBC1's inventory                          | WBC1-AC1/AC4                                  |
+| Dataset identity, licensing       | Exact inputs and licenses below; WBC1 implements licensed ingestion and publishes snapshot identity                          | WBC1-AC1/AC4                                  |
 | Project target query              | Reserved `compat/targets` home; `compat` section is a new catalog row; captured inputs belong to PM1/SM1 under CFG0         | WBC2-AC1…; PM/CFG retain capture and identity  |
 | Runtime environment profiles      | Reserved `realms/profiles/browser`; Window/worker distinctions are ENV3's, not target-set members                           | ENV3                                          |
 | HTML/CSS feature recognition      | Existing CSS/HTML syntax and style owners (prefix tolerance exists at the parse layer only); reserved `compat/html_css`    | WBC3-AC1…                                     |
@@ -230,11 +259,37 @@ route is displaced and none is invented to delete.
 
 ## Exact versions and source evidence
 
-These are candidate inventory facts, not supported-version declarations.
+### Admitted inputs
+
+These are intentional initial data pins, not claims of current browser
+coverage. BCD 5.7.6 supplies the reviewed version/flag schema, including
+unknown-version support; web-features 3.44.0 supplies grouping and Baseline
+provenance only. Their release dates need not coincide: a feature mapping
+missing from this BCD remains unknown, never supplemented from Baseline.
+The older BCD release is not selected through the toolchain dependency that
+happens to share its version. A later upgrade is an explicit data change
+subject to WBC6 qualification, never a floating substitution.
+
+| Dataset | Exact release and official artifact | Content identity (SHA-512 SRI of compressed artifact) | Payload and license |
+| --- | --- | --- | --- |
+| MDN browser-compat-data | `@mdn/browser-compat-data@5.7.6`; [npm artifact](https://registry.npmjs.org/@mdn/browser-compat-data/-/browser-compat-data-5.7.6.tgz) | `sha512-7xdrMX0Wk7grrTZQwAoy1GkvPMFoizStUoL+VmtUkAxegbCCec+3FKwOM6yc/uGU5+BEczQHXAlWiqvM8JeENg==` | `package/data.json`, browser releases and support records; `package/LICENSE`, CC0-1.0; upstream MDN browser-compat-data |
+| Web Platform DX web-features | `web-features@3.44.0`; [npm artifact](https://registry.npmjs.org/web-features/-/web-features-3.44.0.tgz) | `sha512-K/+YJI7uVE/b4G8SU67/F/4j81/ajJ6MfBCZyuQaqyuPlVXF8cd6dLqBznXIWJI9nwnvuY2dapKK08OHzTjYww==` | `package/data.json`, validated against `package/data.schema.json`; `package/LICENSE.txt`, Apache-2.0; upstream Web Platform DX |
+
+WBC1 retains these upstream names and license texts with generated output,
+identifies modifications, and preserves applicable attribution and notices.
+It verifies artifact integrity before ingestion. Its recipe identity covers
+the generator and schema inputs; the BCD schema is the release-tagged schema
+linked above, pinned as `sha256:e5faa5c194391a0cc2cbf6e9e78bf2e2de10cc5762337c06ff5c7da13d9de97d` (raw schema bytes). This contract
+admits no caniuse, usage-share or regional-statistics authority. Snapshot
+packaging, generated bytes and executable conformance remain WBC1 work.
+
+### Existing candidate inventory
+
+These are repository inventory facts, not supported-version declarations.
 
 | Source                       | Candidate identity                                                                                                                              | Meaning and receiving obligation                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm-lock.yaml`             | BCD `5.7.6`; browserslist `4.28.1`/`4.29.4`; caniuse-lite `1.0.30001774`/`30001777`/`30001819` (all transitive, toolchain-only)                   | No support or data-version claim; WBC1 binds exact admitted dataset releases from official sources                                  |
+| `pnpm-lock.yaml`             | BCD `5.7.6`; browserslist `4.28.1`/`4.29.4`; caniuse-lite `1.0.30001774`/`30001777`/`30001819` (all transitive, toolchain-only)                   | No support or data-version claim; admitted inputs above are independent of these toolchain copies                                  |
 | `packages/*/package.json`    | No direct browserslist/BCD/web-features/caniuse dependency in any workspace package                                                               | There is no installed data authority to inherit; WBC1 adds the explicit pin or vendored corpus it admits                            |
 | `crates/verter_session/src/compat/` | Six reserved module homes with fill-owners WBC1–WBC5                                                                                              | The implementation boundary; contract-to-code drift is a failing review case, not a silent pass                                     |
 | Root `tsconfig.base.json`    | `"target": "es6"` (Verter's own toolchain)                                                                                                        | Not a product target fact; user-project targets come only from captured configuration                                              |
