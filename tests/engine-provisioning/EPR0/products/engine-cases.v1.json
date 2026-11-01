@@ -20,8 +20,8 @@
       "id": "C02",
       "name": "Explicit opted-in acquisition",
       "input": "Authorized project requests exact compatible platform artifact from approved HTTPS npm origin; enterprise permits online",
-      "required": "Acquisition receipt with exact origin/version/platform/integrity/installed evidence; no selection, execution or availability inferred",
-      "forbidden": "First-use/background download/update, executing package scripts or marking capability Available",
+      "required": "Outcome phase acquire, state Acquired, with an acquisition receipt of exact origin/version/platform/integrity/installed evidence; capability stays Unavailable, no selection, execution or availability inferred",
+      "forbidden": "First-use/background download/update, executing package scripts, marking capability Available, or reporting the success through a refusal or failure state",
       "rules": ["authorization", "network", "trust", "capability"],
       "executableOwner": "EPR2",
       "receivingAcceptance": "EPR2-AC-CONTRACT",
@@ -58,7 +58,7 @@
       "id": "C05",
       "name": "Deterministic order and project isolation",
       "input": "All authorized local tiers populated; reorder enumerator arrival; change captured source order; use sibling project and equivalent pnpm versions; explicit --tsgo-bin rejected while lower tier could pass",
-      "required": "Exact policy order and structural tie-breakers select the same artifact under enumeration permutations; changed order changes policy basis; no sibling engine borrowing; exact manual/CLI choice rejects without lower-tier fallback",
+      "required": "Exact policy order and structural tie-breakers select the same artifact under enumeration permutations; changed order changes policy basis; no sibling engine borrowing; exact manual/CLI choice rejects without lower-tier fallback; a successful selection reports Selected with its receipt and capability Unavailable",
       "forbidden": "Directory read/hash-map order, ambient CWD or an SDK setting changing permissions",
       "rules": ["source-order", "lifecycle"],
       "executableOwner": "EPR4",
@@ -104,9 +104,9 @@
     {
       "id": "C08",
       "name": "Outcomes preserve absence, rejection and activation failure",
-      "input": "Serialize every catalog outcome, each phase, redacted provenance and completeness; missing input vs empty search vs rejected candidate vs child handshake failure",
-      "required": "Distinct reason/state/actionability survives protocol roundtrip; Available only with current selection+activation receipts; unrelated native capabilities preserved",
-      "forbidden": "Generic off/no-provider success or Available from installed/acquired/provisional candidate",
+      "input": "Serialize every catalog outcome, each phase, redacted provenance and completeness; successful acquire/resolve/select stages; missing input vs empty search vs rejected candidate vs child handshake failure",
+      "required": "Distinct reason/state/actionability survives protocol roundtrip; Acquired, Resolved and Selected carry their own stage receipt while capability stays Unavailable; Available only with current selection+activation receipts; unrelated native capabilities preserved",
+      "forbidden": "Generic off/no-provider success, Available from installed/acquired/provisional candidate, or a successful stage reported as a refusal state",
       "rules": ["capability", "enterprise"],
       "executableOwner": "EPR5",
       "receivingAcceptance": "EPR5-AC-CAPABILITY",
@@ -169,12 +169,13 @@
     {
       "id": "C13",
       "name": "Single final owner and complete source transfer",
-      "input": "Plant an independent selector/spawn route or omit a displaced route/owner/receiving acceptance from the catalog",
-      "required": "Duplicate production selection rejected by EPR4 ownership/route guard; activation bypass rejected by EPR5; contract inventory rejects omission/conflicting or non-production owner before cutover",
+      "input": "Plant an independent selector/spawn route, including a CLI/API provisional start or raw-path connect and a raw-path relay launch, or omit a displaced route/owner/receiving acceptance from the catalog",
+      "required": "Duplicate production selection rejected by EPR4 ownership/route guard; activation bypass across R07, R10 and R11 rejected by EPR5; contract inventory rejects omission/conflicting or non-production owner before cutover",
       "forbidden": "Docs-only owner assigned runtime deletion or a production compatibility bypass remaining after cutover",
       "rules": ["authorization", "source-order", "capability"],
       "executableOwner": "EPR4",
       "receivingAcceptance": "EPR4-AC-SOLE",
+      "additionalAcceptances": ["EPR5-AC-SOLE"],
       "existingEvidence": [],
       "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
     },
@@ -206,15 +207,15 @@
   "acceptanceCoverage": [
     {
       "acceptance": ["EPR0-AC1", "EPR0-AC-POLICY", "EPR0-AC-LEGACY"],
-      "contractEvidence": "Policy sources, external requirements, displacedRoutes R01-R09, retainedInvariants and sourceDisposition; all production routes bind a later capable owner and receiving acceptance",
-      "cases": ["C01", "C04", "C05", "C12", "C13"],
+      "contractEvidence": "Policy sources, external requirements, displacedRoutes R01-R11, retainedInvariants and sourceDisposition; all production routes bind a later capable owner and receiving acceptance",
+      "cases": ["C01", "C03", "C04", "C05", "C12", "C13"],
       "runtimeOwners": ["EPR2", "EPR4", "EPR5"]
     },
     {
       "acceptance": ["EPR0-AC2", "EPR0-AC-CONTRACT", "EPR0-AC-OUTCOMES"],
-      "contractEvidence": "Exact named boundaries, per-requirement order, phase/state distinctions, host policy and secret law",
-      "cases": ["C05", "C07", "C08", "C09", "C14"],
-      "runtimeOwners": ["EPR4", "EPR5"]
+      "contractEvidence": "Exact named boundaries, per-requirement order, phase/state distinctions including stage success before activation, host policy and secret law",
+      "cases": ["C02", "C05", "C07", "C08", "C09", "C14"],
+      "runtimeOwners": ["EPR2", "EPR4", "EPR5"]
     },
     {
       "acceptance": ["EPR0-AC-ZERO-NETWORK"],
@@ -255,7 +256,7 @@
     {
       "owner": "EPR4",
       "acceptance": "EPR4-AC-SOLE",
-      "obligation": "Delete/reject R01-R06 and R09 independent selection/probe/bypass authority, enforce source policy and pre-execution validation; planted duplicate source/route and bundle alias controls"
+      "obligation": "Delete/reject R01-R06 and R09 independent selection/probe/bypass authority, enforce source policy and pre-execution validation; supply the selection receipt R10 and R11 consume; planted duplicate source/route and bundle alias controls"
     },
     {
       "owner": "EPR4",
@@ -265,7 +266,7 @@
     {
       "owner": "EPR5",
       "acceptance": "EPR5-AC-SOLE",
-      "obligation": "Delete/reject R07 independent activation and R08 coarse capability inference; prove exact policy/selection/handshake/ProviderEpoch publication, redaction, cancellation and teardown"
+      "obligation": "Delete/reject R07 independent activation, R10 CLI/API provisional and raw-path activation, R11 relay raw-path execution and R08 coarse capability inference; prove exact policy/selection/handshake/ProviderEpoch publication, redaction, cancellation and teardown"
     },
     {
       "owner": "EPR6",

@@ -238,7 +238,8 @@
         "receipts",
         "remediation"
       ],
-      "owner": "EPR4/EPR5 under PUB0 envelope"
+      "owner": "EPR4/EPR5 under PUB0 envelope",
+      "phases": ["acquire", "resolve", "select", "activate"]
     },
     {
       "name": "EngineCapabilityState",
@@ -421,7 +422,41 @@
   },
   "outcomes": [
     {
+      "state": "Acquired",
+      "phase": "acquire",
+      "meaning": "Explicit acquisition completed with its verified acquisition receipt; establishes no selection, execution permission or availability",
+      "remediation": "None for this stage; later stages stay separate requests",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR2",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR2"],
+      "receivingAcceptance": "EPR2-AC-CONTRACT"
+    },
+    {
+      "state": "Resolved",
+      "phase": "resolve",
+      "meaning": "Authorized candidates validated with their resolution receipts; establishes no selection or running provider",
+      "remediation": "None for this stage; later stages stay separate requests",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Selected",
+      "phase": "select",
+      "meaning": "One exact candidate chosen with its selection receipt and complete rejection provenance; establishes no activation",
+      "remediation": "None for this stage; later stages stay separate requests",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
       "state": "Available",
+      "phase": "activate",
       "meaning": "Requested engine capability has current selection AND active handshake receipts",
       "remediation": "None",
       "capability": "Available",
@@ -569,8 +604,15 @@
     {
       "id": "R03",
       "paths": ["crates/verter_type_runtime/src/discovery.rs"],
-      "symbols": ["resolve_tsserver", "TsserverSource", "ResolvedTsserver"],
-      "current": "ProjectLocal -> ConfiguredTsdk -> Global, canonicalized install/default-lib validation; skipped rejections travel with winner",
+      "symbols": [
+        "resolve_tsserver",
+        "TsserverSource",
+        "ResolvedTsserver",
+        "find_node",
+        "global_tsserver_candidate",
+        "detect_shell_path"
+      ],
+      "current": "ProjectLocal -> ConfiguredTsdk -> Global, canonicalized install/default-lib validation; skipped rejections travel with winner; the Global tier and Node lookup run npm root -g and a login shell",
       "disposition": "Replace independent tier selection with authorized adapters; retain distinct serving-tier/version and library requirements",
       "owner": "EPR4",
       "productionCapable": true,
@@ -614,7 +656,8 @@
         "ResolutionRequest::for_environment",
         "engine_request",
         "probe_managed_engine",
-        "choose_managed_engine"
+        "choose_managed_engine",
+        "resolve_tsgo_engine"
       ],
       "current": "CLI/LSP engine admission and per-project routing consume existing resolvers; explicit --tsgo-bin disables every lower tier",
       "disposition": "Remove bypasses and independently reconstructed selection; require EPR4 selection receipt",
@@ -633,7 +676,12 @@
         "crates/verter_lsp/src/main.rs",
         "crates/verter_lsp/src/type_provider/lazy_managed.rs",
         "crates/verter_lsp/src/tsgo/resilient.rs",
-        "crates/verter_lsp/src/tsserver/project_router.rs"
+        "crates/verter_lsp/src/tsserver/project_router.rs",
+        "crates/verter_lsp/src/tsserver/resilient.rs",
+        "crates/verter_type_runtime/src/tsgo/ipc.rs",
+        "crates/verter_type_runtime/src/tsgo/owned.rs",
+        "crates/verter_type_runtime/src/tsserver/ipc.rs",
+        "crates/verter_tsgo_api/src/attach.rs"
       ],
       "symbols": [
         "establishSharedTsgo",
@@ -641,7 +689,12 @@
         "EngineStart",
         "LazyManagedTypeProvider",
         "establish_owned",
-        "try_spawn_tsgo_with_request"
+        "try_spawn_tsgo_with_request",
+        "TsgoTypeProvider::spawn_with_crash_signal",
+        "TsgoOwnedProvider::attach",
+        "TsserverTypeProvider::spawn",
+        "SpawnOwnTsgoLsp",
+        "spawn_own_lsp_connection"
       ],
       "current": "Independent editor attachment, managed spawn and hub publication/lifecycle decisions",
       "disposition": "Replace provisioning activation authority with EPR5 current selection/handshake/ProviderEpoch; preserve transport/process ownership",
@@ -675,6 +728,50 @@
       "productionCapable": true,
       "successorPath": ["EPR0", "EPR1", "EPR4"],
       "receivingAcceptance": "EPR4-AC-SOURCES"
+    },
+    {
+      "id": "R10",
+      "paths": [
+        "crates/verter_tsgo_api/src/client.rs",
+        "crates/verter_tsc/src/api_check.rs",
+        "crates/verter_tsc/src/checker.rs"
+      ],
+      "symbols": [
+        "PreparedEngine::start",
+        "PreparedEngine::run",
+        "SpawnedEngine::spawn_holding_stderr",
+        "TsgoClient::connect",
+        "TsgoClient::connect_spawned",
+        "SessionEngine",
+        "invoke_checker_bounded"
+      ],
+      "current": "CLI/API activation: PreparedEngine resolves provisionally, spawns and accepts from a background cross-check; TsgoClient::connect probes and spawns a raw path; the declaration stage runs its resolved checker binary",
+      "disposition": "Replace provisional and raw-path activation authority with EPR5 activation of a revalidated EPR4 selection receipt; preserve the wire gate, transport actor and bounded process ownership",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-SOLE",
+      "selectionRoute": "R06",
+      "additionalAcceptances": ["EPR4-AC-SOLE", "EPR5-AC-REVALIDATE"]
+    },
+    {
+      "id": "R11",
+      "paths": ["crates/verter_relay_shim/src/main.rs"],
+      "symbols": [
+        "ShimArgs",
+        "parse_args_from_with_env",
+        "REAL_TSGO_ENV",
+        "passthrough",
+        "run_relay"
+      ],
+      "current": "Shipped relay shim takes a raw engine path from --real-tsgo or its environment and executes it directly, in passthrough probes and the --lsp relay",
+      "disposition": "Replace raw-path execution authority with EPR5 activation of a revalidated EPR4 selection receipt before either spawn; preserve relay transport, OS containment and faithful exit ownership",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-SOLE",
+      "selectionRoute": "R04",
+      "additionalAcceptances": ["EPR4-AC1", "EPR5-AC-REVALIDATE"]
     }
   ],
   "retainedInvariants": [
@@ -762,13 +859,13 @@
   },
   "proofBoundary": "Contract data and bounded inspection only. Runtime enforcement, negative controls, fresh/warm and work proofs are mapped to receiving production owners in companion cases; not claimed executed by EPR0.",
   "exactManualSelection": "An exact CLI/manual engine path restricts the source set to that candidate; rejection is a hard typed error, no lower-tier or family fallback",
-  "currentOwner": "Shared tsgo first-working resolver, tsserver tier resolver, editor SDK/project selectors, lazy managed/provider hub activation, coarse status and no-tsgo packaging guards",
+  "currentOwner": "Shared tsgo first-working resolver, tsserver tier resolver, editor SDK/project selectors, lazy managed/provider hub activation, CLI/API engine preparation, relay shim execution, coarse status and no-tsgo packaging guards",
   "stageProducers": {
     "acquire": "EPR2",
     "resolve": "EPR4",
     "select": "EPR4",
     "activate": "EPR5",
-    "law": "Each producer preserves phase-specific typed evidence; EPR5 alone publishes active engine availability. The outcomes receiving owner names the shared projection or representative behavioral boundary, not permission for other phases to erase the state."
+    "law": "Each producer preserves phase-specific typed evidence. A successful stage reports its own state (Acquired, Resolved, Selected) and receipt with capability Unavailable; every other state except Available carries the phase that produced it. Available is activate-only, and EPR5 alone publishes active engine availability. The outcomes receiving owner names the shared projection or representative behavioral boundary, not permission for other phases to erase the state."
   },
   "consumers": [
     {
@@ -790,6 +887,12 @@
       "acceptance": "EPR5-AC-REVALIDATE"
     },
     {
+      "id": "cli-api-relay-activation",
+      "input": "Current EPR4 selection receipt with validated policy/host basis, for CLI/API and relay launches",
+      "consumer": "EPR5",
+      "acceptance": "EPR5-AC-REVALIDATE"
+    },
+    {
       "id": "public-participation",
       "input": "EngineProvisioningOutcome and EngineCapabilityState, preserving PUB0/COX0 meaning",
       "consumer": "EPR5",
@@ -806,6 +909,13 @@
       "input": "Explicit host/platform/trust/execute/source-transfer permission; DX1 exposure descriptor",
       "consumer": "EPR5",
       "acceptance": "EPR5-AC-CONTRACT"
+    }
+  ],
+  "nonProductionCallers": [
+    {
+      "paths": ["crates/verter_dx_baseline/src/provider.rs"],
+      "symbols": ["resolve_tsserver_with"],
+      "law": "Unpublished measurement harness over the resolver and provider APIs; not a production route, follows those APIs through R01, R03 and R07"
     }
   ]
 }

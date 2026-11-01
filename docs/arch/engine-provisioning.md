@@ -201,20 +201,24 @@ evaluation itself performs no I/O.
 **EngineProvisioningOutcome** carries phase (acquire, resolve, select,
 activate), typed state/reason, need/requirement and policy identities,
 completeness, ordered candidate rejections, redacted provenance, applicable
-receipts and actionable user/admin remediation. States are Available,
-NeedInputs, Forbidden, Offline, NotFound, Incompatible, IntegrityFailure,
-TrustFailure, Cancelled and OperationalFailure; Unsupported explicitly covers
-unknown schema, host or capability. Missing input, exhaustive absence, candidate
-rejection and activation failure remain distinct. No missing provider is
-reported as a successful provider-off result.
+receipts and actionable user/admin remediation. Each stage reports its own
+success: Acquired, Resolved or Selected carries that stage's receipt, and only
+activation reports Available. The remaining states are NeedInputs, Forbidden,
+Offline, NotFound, Incompatible, IntegrityFailure, TrustFailure, Cancelled and
+OperationalFailure; Unsupported explicitly covers unknown schema, host or
+capability. Missing input, exhaustive absence, candidate rejection and
+activation failure remain distinct. No missing provider is reported as a
+successful provider-off result.
 
-**EngineCapabilityState** becomes Available only with a current selection AND
-activation receipt proving the requested handshake. An acquisition receipt,
-installed path, provisional resolution, shared-process PID or stale provider
-is insufficient. Unaffected native inspection capabilities keep their own
-authority; they do not replace an absent TypeScript semantic answer. PUB0/COX0
-transport and eligibility rules consume this truth, preserving per-operation
-unsupported/partial/refusal distinctions and provenance.
+Stage success is not capability availability. **EngineCapabilityState** stays
+Unavailable through Acquired, Resolved and Selected, and becomes Available only
+with a current selection AND activation receipt proving the requested
+handshake. An acquisition receipt, installed path, provisional resolution,
+shared-process PID or stale provider is insufficient. Unaffected native
+inspection capabilities keep their own authority; they do not replace an absent
+TypeScript semantic answer. PUB0/COX0 transport and eligibility rules consume
+this truth, preserving per-operation unsupported/partial/refusal distinctions
+and provenance.
 
 Browser-local artifacts can execute only browser-compatible code with explicit
 artifact trust/permissions. A native EngineRequirement there is Unsupported;
@@ -239,7 +243,10 @@ its present disposition is unopened on all platforms, with zero bundle work.
 The catalog inventories current routes and their exact later deletion/receiving
 acceptances. EPR4 replaces independent candidate selectors, cache/bundle probes
 and SDK/environment bypasses; EPR5 replaces independent attach/spawn/status
-decisions. Existing support-policy and platform tables remain shared inputs.
+decisions, including the CLI/API path's provisional start and raw-path connect
+and the relay shim's direct execution of a supplied engine path, while those
+routes keep their transport and process ownership.
+Existing support-policy and platform tables remain shared inputs.
 Existing local routes remain usable until their production owners cut over;
 this constitution neither silently deletes nor certifies them.
 
