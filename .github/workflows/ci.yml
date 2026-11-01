@@ -1358,7 +1358,8 @@ jobs:
       needs.detect-changes.outputs.vscode == 'true' ||
       needs.detect-changes.outputs.editor_lsp == 'true' ||
       needs.detect-changes.outputs.dx == 'true'
-    runs-on: ubuntu-latest
+    # Pinned with `vscode-e2e`, which runs these binaries; see the note there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
@@ -1384,7 +1385,8 @@ jobs:
     name: Build editor integration E2E
     needs: detect-changes
     if: needs.detect-changes.outputs.vscode == 'true' || needs.detect-changes.outputs.editor_lsp == 'true'
-    runs-on: ubuntu-latest
+    # Pinned with `vscode-e2e`, which runs this build; see the note there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     outputs:
       matrix: ${{ steps.e2e-matrix.outputs.matrix }}
@@ -1482,7 +1484,12 @@ jobs:
     name: VS Code E2E (shard ${{ matrix.shard }}/${{ matrix.shard_count }})
     needs: [detect-changes, build-lsp-debug, build-vscode-e2e]
     if: needs.detect-changes.outputs.vscode == 'true' || needs.detect-changes.outputs.editor_lsp == 'true'
-    runs-on: ubuntu-latest
+    # Stopgap, not a fix. `ubuntu-latest` is moving to 26.04, where vue-parity@tsgo
+    # usually fails the language-server restart in the matrix suite's setup: the
+    # new server stalls or stops answering, far beyond the same rare failure on
+    # 24.04. This job and the two build jobs it consumes stay on 24.04 together,
+    # the one pairing with a good record, until that restart hang is fixed.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
