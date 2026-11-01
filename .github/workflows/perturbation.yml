@@ -30,6 +30,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/perturbation.yml
+      - .github/patches/libfaketime-const.patch
       - .github/actions/nextest-evidence/**
       - scripts/perturbation.mjs
       - scripts/ci-junit-metadata.mjs
@@ -41,6 +42,7 @@ on:
       - main
     paths:
       - .github/workflows/perturbation.yml
+      - .github/patches/libfaketime-const.patch
       - .github/actions/nextest-evidence/**
       - scripts/perturbation.mjs
       - scripts/ci-junit-metadata.mjs
@@ -161,6 +163,10 @@ jobs:
             "https://github.com/wolfcw/libfaketime/archive/refs/tags/v${LIBFAKETIME_VERSION}.tar.gz"
           echo "${LIBFAKETIME_SHA256}  $dir/source.tar.gz" | sha256sum --check --strict
           tar -xzf "$dir/source.tar.gz" -C "$dir"
+          # New libc headers preserve const in strchr/strstr results. Both
+          # local pointers only read the input; keep the pinned source and -Werror.
+          patch --batch --forward --fuzz=0 -p1 -d "$dir/libfaketime-${LIBFAKETIME_VERSION}" \
+            < .github/patches/libfaketime-const.patch
           make -C "$dir/libfaketime-${LIBFAKETIME_VERSION}/src" libfaketime.so.1
           echo "library=$dir/libfaketime-${LIBFAKETIME_VERSION}/src/libfaketime.so.1" >> "$GITHUB_OUTPUT"
       - name: Run the core suite perturbed
