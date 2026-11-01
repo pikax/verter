@@ -6,9 +6,7 @@
     "landingTitle": "fix(ci): retry marketplace extension installs in the VS Code E2E (#798)",
     "date": "2026-10-09"
   },
-  "categories": [
-    "untagged-coordinate-or-public-identity"
-  ],
+  "categories": ["untagged-coordinate-or-public-identity"],
   "rules": {
     "oneOwnerPerRoute": "Every row names exactly one production-capable deletion owner (ENCL0 or ENCF0), or names no deletion owner because it is an accepted Rev11 surface that ENCT0 verifies, or a recorded retained/unused item.",
     "inheritedRoutes": "parentRoute names the UAK0 route a row splits (D16 for non-editor public positions, D17 for editor contracts). The parent keeps its owner; the row only narrows it. parentRoute null marks a route UAK0 did not list.",
@@ -23,12 +21,7 @@
       "id": "P01",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "ingress+egress",
@@ -67,12 +60,7 @@
       "id": "P02",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "internal-to-provider",
@@ -110,12 +98,7 @@
       "id": "P03",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "internal",
@@ -123,9 +106,7 @@
       "encodingAtHead": "per argument (UTF-8/16/32)",
       "identifiable": true,
       "tagged": "argument",
-      "paths": [
-        "crates/verter_lsp/src/documents/provider_projection.rs"
-      ],
+      "paths": ["crates/verter_lsp/src/documents/provider_projection.rs"],
       "symbols": [
         "encoded_len",
         "SelfFileProviderMapper::new",
@@ -144,12 +125,7 @@
       "id": "P04",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC2",
       "parentRoute": null,
       "direction": "ingress+egress",
@@ -161,10 +137,7 @@
         "crates/verter_type_runtime/src/codec.rs",
         "crates/verter_lsp/src/documents/line_index.rs"
       ],
-      "symbols": [
-        "scan_line_starts",
-        "IndexRef::line_end"
-      ],
+      "symbols": ["scan_line_starts", "IndexRef::line_end"],
       "defect": "LSP 3.17 also ends a line at a lone \\r; a lone-\\r file gets wrong line numbers on every LSP surface and on tsgo LSP-wire responses (K15).",
       "successor": "LI1 implements the LSP 3.17 terminator set",
       "emission": "produced",
@@ -180,12 +153,7 @@
       "id": "P05",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "ingress",
@@ -193,12 +161,8 @@
       "encodingAtHead": "UTF-16 fallback",
       "identifiable": true,
       "tagged": "no",
-      "paths": [
-        "crates/verter_lsp/src/documents/line_index.rs"
-      ],
-      "symbols": [
-        "to_runtime_encoding"
-      ],
+      "paths": ["crates/verter_lsp/src/documents/line_index.rs"],
+      "symbols": ["to_runtime_encoding"],
       "successor": "a closed encoding type; an unknown kind is unrepresentable after negotiation",
       "emission": "produced",
       "intendedContract": {
@@ -212,12 +176,7 @@
       "id": "P06",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "ingress",
@@ -248,12 +207,7 @@
       "id": "P07",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "egress",
@@ -265,10 +219,7 @@
         "crates/verter_lsp/src/documents/analysis.rs",
         "crates/verter_lsp/src/documents/mod.rs"
       ],
-      "symbols": [
-        "convert_analysis_spans_json",
-        "get_analysis_json"
-      ],
+      "symbols": ["convert_analysis_spans_json", "get_analysis_json"],
       "successor": "editor conversions go through LI1 only",
       "emission": "produced",
       "intendedContract": {
@@ -283,12 +234,7 @@
       "id": "P08",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": null,
       "direction": "egress",
@@ -301,10 +247,7 @@
         "crates/verter_lsp/src/audit_harness.rs",
         "packages/types/audit.generated.ts"
       ],
-      "symbols": [
-        "PositionInfo.line",
-        "PositionInfo.character"
-      ],
+      "symbols": ["PositionInfo.line", "PositionInfo.character"],
       "note": "The value is identifiable inside the session but the record does not carry the encoding, so a reader of the audit record cannot identify it.",
       "successor": "the record carries the session's negotiated encoding beside line/character",
       "emission": "produced",
@@ -320,12 +263,7 @@
       "id": "P09",
       "deletionOwner": "ENCL0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCL0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
       "receivingAcceptance": "ENCL0-AC1",
       "parentRoute": "D17",
       "direction": "client",
@@ -341,11 +279,7 @@
         "packages/vue-vscode/src/AnalysisTreeProvider.ts",
         "packages/vue-vscode/src/css/styleStructure.ts"
       ],
-      "symbols": [
-        "utf16OffsetToPosition",
-        "utf8OffsetToUtf16",
-        "lineCol"
-      ],
+      "symbols": ["utf16OffsetToPosition", "utf8OffsetToUtf16", "lineCol"],
       "successor": "the client consumes server ranges already in the negotiated encoding",
       "emission": "produced",
       "intendedContract": {
@@ -360,12 +294,7 @@
       "id": "P10",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "ingress",
@@ -379,10 +308,7 @@
         "packages/native/index.ts",
         "packages/wasm/src/index.ts"
       ],
-      "symbols": [
-        "getCodeActions(offset)",
-        "utf16_to_byte_offset"
-      ],
+      "symbols": ["getCodeActions(offset)", "utf16_to_byte_offset"],
       "successor": "versioned encoding-tagged offset converted once at the adapter",
       "emission": "produced",
       "intendedContract": {
@@ -396,12 +322,7 @@
       "id": "P11",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -445,12 +366,7 @@
       "id": "P12",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -485,12 +401,7 @@
       "id": "P13",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress+ingress",
@@ -525,12 +436,7 @@
       "id": "P14",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -565,12 +471,7 @@
       "id": "P15",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -608,12 +509,7 @@
       "id": "P16",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -645,12 +541,7 @@
       "id": "P17",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -688,12 +579,7 @@
       "id": "P18",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -728,12 +614,7 @@
       "id": "P19",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -778,12 +659,7 @@
       "id": "P20",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "ingress",
@@ -819,12 +695,7 @@
       "id": "P21",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "ingress+egress",
@@ -860,12 +731,7 @@
       "id": "P22",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "internal",
@@ -873,9 +739,7 @@
       "encodingAtHead": "an offset inside a UTF-8 sequence is clamped down to the previous boundary; an in-pair UTF-16 offset snaps to the pair start",
       "identifiable": true,
       "tagged": "n/a",
-      "paths": [
-        "crates/verter_ffi/src/convert/offset.rs"
-      ],
+      "paths": ["crates/verter_ffi/src/convert/offset.rs"],
       "symbols": [
         "clamp_to_char_boundary",
         "byte_offset_to_utf16",
@@ -896,12 +760,7 @@
       "id": "P23",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": null,
       "direction": "egress",
@@ -915,11 +774,7 @@
         "crates/verter_tsc/src/api_check.rs",
         "crates/verter_tsc/src/error_map.rs"
       ],
-      "symbols": [
-        "reporter::Diagnostic.line/col",
-        "one_indexed_position",
-        "line_col_via_cache"
-      ],
+      "symbols": ["reporter::Diagnostic.line/col", "one_indexed_position", "line_col_via_cache"],
       "successor": "the CLI locks one-based code-unit coordinates in an explicitly selected encoding (ENCF0 subblock 3)",
       "emission": "produced",
       "intendedContract": {
@@ -934,12 +789,7 @@
       "id": "P24",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": null,
       "direction": "egress",
@@ -951,9 +801,7 @@
         "crates/verter_audit/src/payloads/component_meta.rs",
         "packages/types/audit.generated.ts"
       ],
-      "symbols": [
-        "AuditDiagnosticEntry.span"
-      ],
+      "symbols": ["AuditDiagnosticEntry.span"],
       "successor": "tagged span",
       "emission": "produced",
       "intendedContract": {
@@ -968,10 +816,7 @@
       "deletionOwner": null,
       "verifier": "ENCT0",
       "productionCapable": false,
-      "successorPath": [
-        "ENC0",
-        "ENCT0"
-      ],
+      "successorPath": ["ENC0", "ENCT0"],
       "receivingAcceptance": "ENCT0-AC1",
       "direction": "egress",
       "unit": "TCM1 V3 source maps and their extension members",
@@ -999,23 +844,15 @@
       "deletionOwner": null,
       "verifier": "ENCT0",
       "productionCapable": false,
-      "successorPath": [
-        "ENC0",
-        "ENCT0"
-      ],
+      "successorPath": ["ENC0", "ENCT0"],
       "receivingAcceptance": "ENCT0-AC1",
       "direction": "internal",
       "unit": "TCM2 content-mapper projection plane",
       "encodingAtHead": "CD1/CD3 bytes (MappingSpan); typed Refusal, no clamping",
       "identifiable": true,
       "tagged": "typed in Rust",
-      "paths": [
-        "crates/verter_session/src/content_mapper.rs"
-      ],
-      "symbols": [
-        "ContentMapper",
-        "Refusal"
-      ],
+      "paths": ["crates/verter_session/src/content_mapper.rs"],
+      "symbols": ["ContentMapper", "Refusal"],
       "note": "Dormant at the head.",
       "emission": "dormant"
     },
@@ -1024,10 +861,7 @@
       "deletionOwner": null,
       "verifier": "ENCT0",
       "productionCapable": false,
-      "successorPath": [
-        "ENC0",
-        "ENCT0"
-      ],
+      "successorPath": ["ENC0", "ENCT0"],
       "receivingAcceptance": "ENCT0-AC1",
       "direction": "internal-to-provider",
       "unit": "TCM3 certified engine query offset",
@@ -1038,9 +872,7 @@
         "crates/verter_session/src/external_ts/engine.rs",
         "crates/verter_lsp/src/external_ts_sync.rs"
       ],
-      "symbols": [
-        "Query.carrier_offset"
-      ],
+      "symbols": ["Query.carrier_offset"],
       "emission": "produced"
     },
     {
@@ -1048,10 +880,7 @@
       "deletionOwner": null,
       "verifier": "ENCT0",
       "productionCapable": false,
-      "successorPath": [
-        "ENC0",
-        "ENCT0"
-      ],
+      "successorPath": ["ENC0", "ENCT0"],
       "receivingAcceptance": "ENCT0-AC1",
       "direction": "provider wire",
       "unit": "H2 core UTF-8 to provider UTF-16 conversion",
@@ -1084,13 +913,10 @@
       "deletionOwner": null,
       "verifier": "ENCT0",
       "productionCapable": false,
-      "successorPath": [
-        "ENC0",
-        "ENCT0"
-      ],
+      "successorPath": ["ENC0", "ENCT0"],
       "receivingAcceptance": "ENCT0-AC1",
       "direction": "internal",
-      "unit": "TCM4 displaced position routes",
+      "unit": "Live mapping routes; STP58 Vue / STS15 Svelte activation and retirement",
       "encodingAtHead": "(line, UTF-16 column) source-map mapping; CarrierMapper in UTF-16 offsets",
       "identifiable": true,
       "tagged": "no",
@@ -1101,12 +927,8 @@
         "packages/language-shared/src/carrier/remap.ts",
         "packages/typescript-plugin/src/helpers/carrierStore.ts"
       ],
-      "symbols": [
-        "ProviderPositionMapper",
-        "PositionMapper",
-        "CarrierMapper"
-      ],
-      "note": "Residual: TCM4's charter names these as displaced and they are still the live position authority. Under ENCT0's charter the residue reopens the Rev11 owner; ENC0 assigns no successor.",
+      "symbols": ["ProviderPositionMapper", "PositionMapper", "CarrierMapper"],
+      "note": "Still live. Operator ruling tcm4-mapping-plane-sole-owner (2026-10-02) assigns Vue activation/retirement to STP58 and Svelte activation/retirement to STS15, including the plugin sole-response-mapper duty. ENCT0 inventories this population and verifies the accepted identity contract; it neither certifies retirement nor reopens BR0 solely for these routes. Retirement proofs remain with the respective activation owners under sections 9 and 11.",
       "emission": "produced"
     },
     {
@@ -1115,11 +937,7 @@
       "retainedBy": "verter_compiler / verter_session",
       "verifier": "ENC1",
       "productionCapable": false,
-      "successorPath": [
-        "ENC0",
-        "ENCL0",
-        "ENC1"
-      ],
+      "successorPath": ["ENC0", "ENCL0", "ENC1"],
       "receivingAcceptance": "ENC1-AC1",
       "direction": "internal",
       "unit": "Compiler-internal V3 map decoders and UTF-16 column helpers beside LI3",
@@ -1155,10 +973,7 @@
       "encodingAtHead": "CD3 / CD6",
       "identifiable": true,
       "tagged": "typed",
-      "paths": [
-        "crates/verter_span/src/lib.rs",
-        "crates/verter_parser/src/common/span.rs"
-      ],
+      "paths": ["crates/verter_span/src/lib.rs", "crates/verter_parser/src/common/span.rs"],
       "symbols": [
         "PartialGeneratedSpan",
         "GeneratedSpan",
@@ -1172,12 +987,7 @@
       "id": "P32",
       "deletionOwner": "ENCF0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "ENC0",
-        "ENCF0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
       "receivingAcceptance": "ENCF0-AC1",
       "parentRoute": "D16",
       "direction": "egress",
@@ -1216,9 +1026,7 @@
   "alreadyTagged": [
     {
       "unit": "Carrier-geometry ranges",
-      "symbols": [
-        "CanonicalRange (component_meta.proto)"
-      ],
+      "symbols": ["CanonicalRange (component_meta.proto)"],
       "encodingAtHead": "PositionEncoding enum + source_space_token; always UTF8_BYTES offsets",
       "note": "No migration of the shape; P18 covers the consumers that ignore the tag."
     }

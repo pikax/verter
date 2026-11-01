@@ -263,6 +263,9 @@ const GENERIC_RESOLUTION_FAILURE_UNSUPPORTED_EXPRESSION = 4;
 const GENERIC_RESOLUTION_FAILURE_MISSING_USAGE_LINK = 5;
 const GENERIC_RESOLUTION_FAILURE_UNRESOLVED_CHILD_GENERIC_SURFACE = 6;
 
+/** Schema 14 only adds the fan-out reason, so schema 13 decodes as it is. */
+const PREVIOUS_GRAPH_FORMAT_VERSION = 13;
+
 export function decodeTypedComponentMetaPayload(
   payload: ArrayBuffer | ArrayBufferView,
 ): NativeComponentMetaResult {
@@ -303,7 +306,10 @@ function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMeta
 }
 
 function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
-  if (message.schemaVersion !== GRAPH_FORMAT_VERSION)
+  if (
+    message.schemaVersion !== GRAPH_FORMAT_VERSION &&
+    message.schemaVersion !== PREVIOUS_GRAPH_FORMAT_VERSION
+  )
     throw graphError(
       `component-meta protobuf payload version mismatch: expected ${GRAPH_FORMAT_VERSION}, found ${message.schemaVersion}`,
     );

@@ -28,6 +28,15 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
+/// A completed template product, before its shared union reduction.
+enum TemplateReduction {
+    Node(SemanticNodeId),
+    Union {
+        members: Arc<[SemanticNodeId]>,
+        fallback: Box<SemanticNodeData>,
+    },
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static MAPPED_NAME_REMAP_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -847,6 +856,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(roots)
     }
 
+    /// Whether a declaration lookup can answer from its own indexed headers,
+    /// without preparing or following an import/export route. Both the source
+    /// handoff and the builder use this predicate, including framework and
+    /// augmentation declarations.
+    pub(super) fn resolve_decl_is_local(
+        key: &ResolveDeclKey,
+        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    ) -> bool {
+        shallow.effective_type_header_present_in(key.scope.owner, key.name.as_ref())
+            || shallow.effective_value_header_present_in(key.scope.owner, key.name.as_ref())
+            || if key.scope.owner.is_global_augmentation() {
+                shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
+            } else {
+                key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && shallow
+                        .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
+                        .is_some()
+            }
+    }
+
+    /// Whether this lookup follows a route rather than answering locally or
+    /// missing without touching its imports.
+    pub(super) fn resolve_decl_needs_route(
+        key: &ResolveDeclKey,
+        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    ) -> bool {
+        !Self::resolve_decl_is_local(key, shallow)
+            && (shallow
+                .import_target_in(key.scope.owner, key.name.as_ref())
+                .is_some()
+                || (key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && (shallow.exports.contains_key(key.name.as_ref())
+                        || shallow.has_wildcard_reexports())))
+    }
+
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
     /// Declaration identity is carried by the `Instantiate` key's
@@ -859,6 +903,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveDeclKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.drive_family_in_place(self.begin_resolve_decl(key))
+    }
+
+    /// Resolve the local headers and route once, retaining the selected
+    /// target across its semantic read. Route preparation is still a driver
+    /// port operation; the target build itself is an owned family need.
+    pub(super) fn begin_resolve_decl(
+        &self,
+        key: &ResolveDeclKey,
+    ) -> super::family_continuation::FamilyStep {
+        use super::family_continuation::{FamilyBuild, FamilyStep};
+        self.graph().record_continuation_begun();
         verter_audit::attribute_scope!(ResolveDecl);
         // Self-version rooting: observe the scope canonical.s
         // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the
@@ -878,48 +934,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|serve| serve.indexed)
         {
             Some(indexed) => indexed,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            None => {
+                return FamilyStep::Done(Box::new(
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                ))
+            }
         };
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
 
-        // Local PRESENCE through the CENTRALIZED effective header lookup — a
-        // user/synthesized declaration first, then (rune-module-gated) the
-        // ambient rune inventory, so a Svelte rune module's `$state`/`$derived`/
-        // `$effect`/`$inspect` is treated as locally declared and resolves at
-        // this dispatch surface. A plain `.ts` is unaffected (the effective
-        // lookup is rune-module-gated, so it reduces to the header-index probe).
-        // No per-site rune branch — the single authority lives on
-        // `ShallowFileState`.
-        let has_type_symbol =
-            shallow.effective_type_header_present_in(key.scope.owner, key.name.as_ref());
-        let has_value_symbol =
-            shallow.effective_value_header_present_in(key.scope.owner, key.name.as_ref());
         let is_ordinary = key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file();
         let has_export = is_ordinary && shallow.exports.contains_key(key.name.as_ref());
         let has_import_local = shallow
             .import_target_in(key.scope.owner, key.name.as_ref())
             .is_some();
-        // A `declare global { ... }` declaration is not on the file surface but
-        // IS resolvable as the merged global declaration (the prepared-decl
-        // builder falls back to the global augmentation inventory), and so is
-        // the type of the one `declare module "…"` block declaring the name.
-        // An owner's global-augmentation scope declares exactly its own
-        // `declare global` members.
-        let has_global_augmentation = if key.scope.owner.is_global_augmentation() {
-            shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
-        } else {
-            is_ordinary
-                && shallow
-                    .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
-                    .is_some()
-        };
-
-        // A name DECLARED in this file (type / value symbol, or a
-        // `declare global` contribution) resolves here. A name that is
-        // only re-exported / imported through this file resolves at its
-        // DEFINING file instead — see the fall-through below.
-        let has_local_declaration = has_type_symbol || has_value_symbol || has_global_augmentation;
+        let has_local_declaration = Self::resolve_decl_is_local(key, shallow);
 
         if !has_local_declaration {
             // Re-export fall-through. A barrel reaches the declaration via
@@ -932,7 +961,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the declaration's scope — and every member's
             // `declaration_origin`, which anchors typeinfo JSDoc enrichment
             // — labels the file the author wrote it in, not the barrel hop.
-            if has_export || has_import_local || (is_ordinary && shallow.has_wildcard_reexports()) {
+            if Self::resolve_decl_needs_route(key, shallow) {
                 let scope_payload = self
                     .ctx
                     .prepared_decl_bundle(key.scope.canonical_id.as_ref())
@@ -973,21 +1002,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // self-roots, so a content edit to EITHER the
                         // barrel's re-export clause or the defining file
                         // misses the warm read.
-                        let inner = self.build_resolve_decl(&resolved_key);
-                        let barrel_root = (key.scope.canonical_id.clone(), observed_hash);
-                        let mut roots = inner.observed_self_roots.clone();
-                        if !roots
-                            .iter()
-                            .any(|(c, h)| *c == barrel_root.0 && *h == barrel_root.1)
-                        {
-                            roots.push(barrel_root);
-                        }
-                        return inner.with_observed_self_roots(roots);
+                        return FamilyStep::Need(
+                            SemanticQueryKey::ResolveDecl(resolved_key),
+                            Box::new(FamilyBuild::ResolveDecl((
+                                key.scope.canonical_id.clone(),
+                                observed_hash,
+                            ))),
+                        );
                     }
                 }
             }
             if !(has_export || has_import_local) {
-                return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                return FamilyStep::Done(Box::new(
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                ));
             }
             // The export graph could not resolve the defining site (e.g. an
             // unresolvable specifier): fall through to the legacy
@@ -1020,11 +1048,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }),
             scope,
         );
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(node_id),
-            signature,
+        FamilyStep::Done(Box::new(
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node_id),
+                signature,
+            ))
+            .with_observed_self_roots([(key.scope.canonical_id.clone(), observed_hash)]),
         ))
-        .with_observed_self_roots([(key.scope.canonical_id.clone(), observed_hash)])
     }
 
     /// `typeof`-rooted declaration lookup. Shape mirrors [`Self::build_resolve_decl`]
@@ -18853,35 +18883,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &Arc<[SemanticNodeId]>,
         _context: crate::semantic_query::TemplateLiteralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let reduced = self.reduce_template_literal_nodes(
+        self.drive_family_in_place(self.begin_template_literal_reduce(pattern, args))
+    }
+
+    pub(super) fn begin_template_literal_reduce(
+        &self,
+        pattern: &verter_type_expr::OwnedSlice<OwnedStr>,
+        args: &Arc<[SemanticNodeId]>,
+    ) -> super::family_continuation::FamilyStep {
+        use super::family_continuation::{FamilyBuild, FamilyStep};
+        self.graph().record_continuation_begun();
+        let reduced = self.prepare_template_literal_nodes(
             pattern,
             args,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
         );
         let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-        let node = reduced.unwrap_or_else(|_| {
-            self.graph().intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: pattern.clone(),
-                expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
-            })
-        });
+        let (node, union, refused) = match reduced {
+            Ok(TemplateReduction::Node(node)) => (QueryResult::Value(node), None, false),
+            Ok(TemplateReduction::Union { members, fallback }) => (
+                QueryResult::Error(QueryError::Miss),
+                Some((members, fallback)),
+                false,
+            ),
+            Err(_) => (
+                QueryResult::Value(self.graph().intern_node(SemanticNodeData::TemplateLiteral {
+                    quasis: pattern.clone(),
+                    expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
+                })),
+                None,
+                true,
+            ),
+        };
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(node),
+            node,
             self.project_generation_signature(),
         ))
         .with_observed_self_roots(observed_self_roots);
-        if reduced.is_err() {
-            // The ledger refused the construction: the value is the deferred
-            // carrier-stop shell, not the enumerated surface. It is a
-            // non-cacheable budget-tainted partial, never warm-admitted, and
-            // the taint folds into the enclosing request.
+        if refused {
             output.cache_suppress = true;
             output.mark_partial();
-            // The refused Cartesian construction keeps every original quasi
-            // and interpolation operand at the addressed template position.
             output = output.with_positional_guarantee();
         }
-        output
+        match union {
+            Some((members, fallback)) => FamilyStep::Need(
+                SemanticQueryKey::ReduceUnion {
+                    members: super::canonicalize_node_list(self.graph().store(), &members),
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                },
+                Box::new(FamilyBuild::TemplateUnion(Box::new(output), fallback)),
+            ),
+            None => FamilyStep::Done(Box::new(output)),
+        }
     }
 
     /// Whether `node` is a SETTLED shape the awaited relations provably
@@ -20531,6 +20584,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
+        match self.prepare_template_literal_nodes(quasis, args, eval_context)? {
+            TemplateReduction::Node(node) => Ok(node),
+            TemplateReduction::Union { members, fallback } => {
+                let read = self.execute_read(SemanticQueryKey::ReduceUnion {
+                    members,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                });
+                Ok(match read.value {
+                    QueryResult::Value(id) => id,
+                    _ => self.graph().intern_node(*fallback),
+                })
+            }
+        }
+    }
+
+    fn prepare_template_literal_nodes(
+        &self,
+        quasis: &[OwnedStr],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Result<TemplateReduction, crate::semantic_query::PartialReasonSet> {
         let graph = self.graph();
         let spliced = self.spliced_template(quasis, args);
         let (quasis, args): (&[OwnedStr], &[SemanticNodeId]) = match &spliced {
@@ -20550,18 +20624,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // An open template keeps its open holes; its literal holes fold
             // into its text as the checker's construction folds them.
             TemplateSpans::Open => {
-                return Ok(match self.folded_literal_holes(quasis, args) {
-                    Some((quasis, args)) => graph.intern_node(SemanticNodeData::TemplateLiteral {
-                        quasis: verter_type_expr::OwnedSlice::from(quasis.as_slice()),
-                        expressions: crate::semantic_query::PayloadArray::from(
-                            args.into_boxed_slice(),
-                        ),
-                    }),
-                    None => authored(),
-                })
+                return Ok(TemplateReduction::Node(
+                    match self.folded_literal_holes(quasis, args) {
+                        Some((quasis, args)) => {
+                            graph.intern_node(SemanticNodeData::TemplateLiteral {
+                                quasis: verter_type_expr::OwnedSlice::from(quasis.as_slice()),
+                                expressions: crate::semantic_query::PayloadArray::from(
+                                    args.into_boxed_slice(),
+                                ),
+                            })
+                        }
+                        None => authored(),
+                    },
+                ))
             }
             TemplateSpans::TooComplex(refusal) => {
-                return Ok(self.recover_at_operation_budget(refusal, Some(authored())));
+                return Ok(TemplateReduction::Node(
+                    self.recover_at_operation_budget(refusal, Some(authored())),
+                ));
             }
             TemplateSpans::Exhausted(reasons) => {
                 self.fold_local_partial_completeness(reasons);
@@ -20572,7 +20652,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // whole template `string`, as the checker's template
             // construction does.
             TemplateSpans::AnyString => {
-                return Ok(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)))
+                return Ok(TemplateReduction::Node(
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                ))
             }
         };
         // Every concatenation interns one derived node: the work and the
@@ -20593,18 +20675,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         drop(plan);
         Ok(match members.as_slice() {
-            [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
-            [single] => *single,
-            _ => {
-                let read = self.execute_read(SemanticQueryKey::ReduceUnion {
-                    members: Arc::from(members.into_boxed_slice()),
-                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                });
-                match read.value {
-                    QueryResult::Value(id) => id,
-                    _ => authored(),
-                }
-            }
+            [] => TemplateReduction::Node(
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            ),
+            [single] => TemplateReduction::Node(*single),
+            _ => TemplateReduction::Union {
+                members: Arc::from(members.into_boxed_slice()),
+                fallback: Box::new(SemanticNodeData::TemplateLiteral {
+                    quasis: verter_type_expr::OwnedSlice::from(quasis),
+                    expressions: crate::semantic_query::PayloadArray::from(
+                        args.to_vec().into_boxed_slice(),
+                    ),
+                }),
+            },
         })
     }
 
