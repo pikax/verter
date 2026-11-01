@@ -230,6 +230,23 @@ utf8_byte_domain! {
     FormattedByteRange,
 }
 
+impl AuthoredFormatByteRange {
+    /// Internal minting path for edit geometry: an authored range computed by
+    /// scalar-boundary stripping over an already-validated source. Checked
+    /// like every other construction; never raw offsets across a boundary.
+    pub(crate) fn for_authored(
+        source: &str,
+        start: u32,
+        end: u32,
+    ) -> Result<Self, CoordinateError> {
+        Self::for_source(
+            source,
+            AuthoredFormatByteOffset(start),
+            AuthoredFormatByteOffset(end),
+        )
+    }
+}
+
 impl FormattedByteRange {
     /// Internal minting path for the renderer's final UTF-8 sink.
     pub(crate) fn for_emitted(source: &str, start: u32, end: u32) -> Result<Self, CoordinateError> {
