@@ -6,7 +6,9 @@
 //! for one source revision and is the only place an identity becomes valid. A
 //! producer (authored view, renderer) and a consumer (edit derivation, map
 //! join) share exactly these definitions — no bare integer and no separately
-//! declared token can stand in for the identity:
+//! declared token can stand in for the identity. Those negative contracts run
+//! with pinned diagnostics in `tests/compile-fail/` through the workspace
+//! compile-contract lane, which owns them:
 //!
 //! ```compile_fail,E0308
 //! use verter_formatter::provenance::FormatProvenanceId;

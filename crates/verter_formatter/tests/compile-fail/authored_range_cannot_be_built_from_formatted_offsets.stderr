@@ -1,0 +1,23 @@
+error[E0308]: arguments to this function are incorrect
+ --> tests/compile-fail/authored_range_cannot_be_built_from_formatted_offsets.rs:9:13
+  |
+9 |     let _ = AuthoredFormatByteRange::new(formatted_offset(), formatted_offset());
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------------------  ------------------ expected `AuthoredFormatByteOffset`, found `FormattedByteOffset`
+  |                                          |
+  |                                          expected `AuthoredFormatByteOffset`, found `FormattedByteOffset`
+  |
+note: associated function defined here
+ --> src/coordinates.rs
+  |
+  |               pub const fn new(start: $offset, end: $offset) -> Result<Self, CoordinateError> {
+  |                            ^^^
+...
+  | / utf8_byte_domain! {
+  | |     /// Byte offset from the start of the complete authored carrier source.
+  | |     ///
+  | |     /// The authored domain covers the entire authored extent — comments,
+... |
+  | |     AuthoredFormatByteRange,
+  | | }
+  | |_- in this macro invocation
+  = note: this error originates in the macro `utf8_byte_domain` (in Nightly builds, run with -Z macro-backtrace for more info)

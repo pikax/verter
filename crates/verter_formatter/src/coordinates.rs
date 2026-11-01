@@ -13,7 +13,9 @@
 //! (or its formatted twin), which checks the byte index against the exact
 //! source text it claims to index. Every other boundary hands coordinates
 //! over already typed and checked, so no public API takes a bare integer
-//! where a coordinate is meant.
+//! where a coordinate is meant. The negative contracts below run with pinned
+//! diagnostics in `tests/compile-fail/` through the workspace
+//! compile-contract lane, which owns them.
 //!
 //! ```compile_fail,E0308
 //! use verter_formatter::coordinates::{
