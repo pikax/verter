@@ -93,12 +93,12 @@
       "ordinal": 11,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -137,12 +137,12 @@
       "ordinal": 16,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -269,12 +269,12 @@
       "ordinal": 31,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -313,12 +313,12 @@
       "ordinal": 36,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -445,12 +445,12 @@
       "ordinal": 51,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -489,12 +489,12 @@
       "ordinal": 56,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -621,12 +621,12 @@
       "ordinal": 71,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -665,12 +665,12 @@
       "ordinal": 76,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -797,12 +797,12 @@
       "ordinal": 91,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -841,12 +841,12 @@
       "ordinal": 96,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -973,12 +973,12 @@
       "ordinal": 111,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -1017,12 +1017,12 @@
       "ordinal": 116,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -1149,12 +1149,12 @@
       "ordinal": 131,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -1193,12 +1193,12 @@
       "ordinal": 136,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -1325,12 +1325,12 @@
       "ordinal": 151,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -1369,12 +1369,12 @@
       "ordinal": 156,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -1501,12 +1501,12 @@
       "ordinal": 171,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -1545,12 +1545,12 @@
       "ordinal": 176,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -1677,12 +1677,12 @@
       "ordinal": 191,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -1721,12 +1721,12 @@
       "ordinal": 196,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -1853,12 +1853,12 @@
       "ordinal": 211,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -1897,12 +1897,12 @@
       "ordinal": 216,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -2029,12 +2029,12 @@
       "ordinal": 231,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -2073,12 +2073,12 @@
       "ordinal": 236,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -2205,12 +2205,12 @@
       "ordinal": 251,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -2249,12 +2249,12 @@
       "ordinal": 256,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -2381,12 +2381,12 @@
       "ordinal": 271,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -2425,12 +2425,12 @@
       "ordinal": 276,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -2557,12 +2557,12 @@
       "ordinal": 291,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -2601,12 +2601,12 @@
       "ordinal": 296,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -2733,12 +2733,12 @@
       "ordinal": 311,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -2777,12 +2777,12 @@
       "ordinal": 316,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -2909,12 +2909,12 @@
       "ordinal": 331,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -2953,12 +2953,12 @@
       "ordinal": 336,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -3085,12 +3085,12 @@
       "ordinal": 351,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -3129,12 +3129,12 @@
       "ordinal": 356,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -3261,12 +3261,12 @@
       "ordinal": 371,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -3305,12 +3305,12 @@
       "ordinal": 376,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -3437,12 +3437,12 @@
       "ordinal": 391,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -3481,12 +3481,12 @@
       "ordinal": 396,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -3613,12 +3613,12 @@
       "ordinal": 411,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -3657,12 +3657,12 @@
       "ordinal": 416,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -3789,12 +3789,12 @@
       "ordinal": 431,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -3833,12 +3833,12 @@
       "ordinal": 436,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -3965,12 +3965,12 @@
       "ordinal": 451,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -4009,12 +4009,12 @@
       "ordinal": 456,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -4141,12 +4141,12 @@
       "ordinal": 471,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -4185,12 +4185,12 @@
       "ordinal": 476,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -4317,12 +4317,12 @@
       "ordinal": 491,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -4361,12 +4361,12 @@
       "ordinal": 496,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -4493,12 +4493,12 @@
       "ordinal": 511,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -4537,12 +4537,12 @@
       "ordinal": 516,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -4669,12 +4669,12 @@
       "ordinal": 531,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -4713,12 +4713,12 @@
       "ordinal": 536,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -4845,12 +4845,12 @@
       "ordinal": 551,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -4889,12 +4889,12 @@
       "ordinal": 556,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -5021,12 +5021,12 @@
       "ordinal": 571,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -5065,12 +5065,12 @@
       "ordinal": 576,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -5197,12 +5197,12 @@
       "ordinal": 591,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -5241,12 +5241,12 @@
       "ordinal": 596,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -5373,12 +5373,12 @@
       "ordinal": 611,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -5417,12 +5417,12 @@
       "ordinal": 616,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -5549,12 +5549,12 @@
       "ordinal": 631,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -5593,12 +5593,12 @@
       "ordinal": 636,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -5725,12 +5725,12 @@
       "ordinal": 651,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -5769,12 +5769,12 @@
       "ordinal": 656,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -5901,12 +5901,12 @@
       "ordinal": 671,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -5945,12 +5945,12 @@
       "ordinal": 676,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -6077,12 +6077,12 @@
       "ordinal": 691,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -6121,12 +6121,12 @@
       "ordinal": 696,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -6253,12 +6253,12 @@
       "ordinal": 711,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -6297,12 +6297,12 @@
       "ordinal": 716,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -6429,12 +6429,12 @@
       "ordinal": 731,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -6473,12 +6473,12 @@
       "ordinal": 736,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -6605,12 +6605,12 @@
       "ordinal": 751,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -6649,12 +6649,12 @@
       "ordinal": 756,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -6781,12 +6781,12 @@
       "ordinal": 771,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -6825,12 +6825,12 @@
       "ordinal": 776,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -6957,12 +6957,12 @@
       "ordinal": 791,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -7001,12 +7001,12 @@
       "ordinal": 796,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -7133,12 +7133,12 @@
       "ordinal": 811,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -7177,12 +7177,12 @@
       "ordinal": 816,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -7309,12 +7309,12 @@
       "ordinal": 831,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -7353,12 +7353,12 @@
       "ordinal": 836,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -7485,12 +7485,12 @@
       "ordinal": 851,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -7529,12 +7529,12 @@
       "ordinal": 856,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -7661,12 +7661,12 @@
       "ordinal": 871,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -7705,12 +7705,12 @@
       "ordinal": 876,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -7837,12 +7837,12 @@
       "ordinal": 891,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -7881,12 +7881,12 @@
       "ordinal": 896,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -8013,12 +8013,12 @@
       "ordinal": 911,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -8057,12 +8057,12 @@
       "ordinal": 916,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -8189,12 +8189,12 @@
       "ordinal": 931,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -8233,12 +8233,12 @@
       "ordinal": 936,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -8365,12 +8365,12 @@
       "ordinal": 951,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -8409,12 +8409,12 @@
       "ordinal": 956,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -8541,12 +8541,12 @@
       "ordinal": 971,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -8585,12 +8585,12 @@
       "ordinal": 976,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {
@@ -8717,12 +8717,12 @@
       "ordinal": 991,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 50,
+      "end": 50,
       "bias": "right",
       "boundary": "retained-after",
       "expected": {
-        "formatted": 43
+        "formatted": 50
       }
     },
     {
@@ -8761,12 +8761,12 @@
       "ordinal": 996,
       "kind": "map",
       "domain": "authored",
-      "start": 43,
-      "end": 43,
+      "start": 40385,
+      "end": 40386,
       "bias": "right",
-      "boundary": "replaced-after",
+      "boundary": "replaced-span",
       "expected": {
-        "formatted": 43
+        "outcome": "ambiguous-replacement"
       }
     },
     {

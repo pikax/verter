@@ -186,7 +186,7 @@ source_fixture_id = "medium"
 [[fixture]]
 id = "range-cursor"
 path = "fixtures/formatter/performance/range-cursor.json"
-sha256 = "4eda4257ba7b4a753657741910d9152f2813c0711208eaf2187e203d464e4cdb"
+sha256 = "87ff656c77f423c519ce0189e58a591a9a86e8a231645028a88752c6fab2fd65"
 authored_utf8_bytes = 102400
 carrier_blocks = 10
 authored_view_records = 10000
@@ -172965,7 +172965,7 @@ sha256 = "be7db96f61ab6ff9811a7c87156274b6fecd6d4e0ac458ba258a89d3ad6fe31b"
 
 [[asset]]
 path = "fixtures/formatter/performance/range-cursor.json"
-sha256 = "4eda4257ba7b4a753657741910d9152f2813c0711208eaf2187e203d464e4cdb"
+sha256 = "87ff656c77f423c519ce0189e58a591a9a86e8a231645028a88752c6fab2fd65"
 
 [[asset]]
 path = "fixtures/formatter/performance/project-source-000.vue"
