@@ -1,0 +1,75 @@
+{
+  "profiles": [
+    {
+      "id": "profile-0",
+      "carrier": "vue",
+      "syntax": "fixture-inventory"
+    },
+    {
+      "id": "profile-1",
+      "carrier": "vue",
+      "syntax": "fixture-inventory",
+      "attachment_epoch": 1
+    }
+  ],
+  "configs": [
+    {
+      "id": "config-0",
+      "values": {
+        "tabWidth": 2
+      },
+      "provenance": [
+        "captured-project-default"
+      ]
+    },
+    {
+      "id": "config-1",
+      "values": {
+        "tabWidth": 4
+      },
+      "provenance": [
+        "captured-project-override"
+      ]
+    }
+  ],
+  "policies": [
+    {
+      "id": "policy-0",
+      "enabled": true,
+      "version": 1
+    },
+    {
+      "id": "policy-1",
+      "enabled": true,
+      "version": 2
+    }
+  ],
+  "transitions": [
+    {
+      "kind": "profile",
+      "from": "profile-0",
+      "to": "profile-1"
+    },
+    {
+      "kind": "config",
+      "from": "config-0",
+      "to": "config-1"
+    },
+    {
+      "kind": "policy",
+      "from": "policy-0",
+      "to": "policy-1"
+    },
+    {
+      "kind": "capability",
+      "from": "enabled",
+      "to": "disabled"
+    },
+    {
+      "kind": "provider",
+      "from": "provider-0",
+      "to": "provider-1",
+      "formatter_work": 0
+    }
+  ]
+}

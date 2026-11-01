@@ -1,0 +1,27 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/jsx/expected/verbatim-island-wide-auto.txt",
+  "normalized_options": {
+    "printWidth": 120,
+    "endOfLine": "auto"
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      53
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    53
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/jsx/expected/verbatim-island-wide-auto.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}

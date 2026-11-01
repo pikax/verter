@@ -1,0 +1,32 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/verbatim-island-tokens.txt",
+  "normalized_options": {
+    "semi": false,
+    "singleQuote": true,
+    "quoteProps": "consistent",
+    "jsxSingleQuote": true,
+    "trailingComma": "all",
+    "bracketSpacing": false,
+    "arrowParens": "avoid"
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      48
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    48
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/verbatim-island-tokens.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}
