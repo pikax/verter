@@ -2875,7 +2875,9 @@ pub fn type_reference_name_spans(
         name,
         found: Vec::new(),
     };
-    references.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || {
+        references.visit_program(program);
+    });
     references
         .found
         .sort_by_key(|span: &verter_span::Span| span.start);
