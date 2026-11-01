@@ -148,6 +148,7 @@ mod raised_shape_tests;
 mod reactive_wrapper_tests;
 mod reference_inference_tests;
 mod relation_depth_tests;
+mod relation_name_disambiguation_tests;
 mod relation_operand_tests;
 pub(crate) mod relation_reverse_ownership_tests;
 mod relation_variance_tests;

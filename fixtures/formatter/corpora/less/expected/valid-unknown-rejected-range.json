@@ -1,0 +1,26 @@
+{
+  "outcome": "unsupported",
+  "reason": "UnknownOption: unknownFormatterOption",
+  "output": null,
+  "normalized_options": {
+    "unknownFormatterOption": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      69
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    69
+  ],
+  "second_pass": {
+    "output": null,
+    "edits": []
+  },
+  "divergence": null
+}

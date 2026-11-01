@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,9 @@ import {
   SUMMARY_FILE,
   validateManifest,
 } from "./evidence-run.mjs";
+import { loadFormatterLock, ROOT, validateFormatterLock } from "../../tests/formatter/verify.mjs";
+
+import { buildFormatterSummary } from "../../tests/formatter/evidence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "evidence-run-fixtures");
@@ -51,6 +55,177 @@ const quiet = async (fn) => {
     console.log = log;
   }
 };
+
+describe("formatter contract", () => {
+  test("churn cancellation reaches rendering and edit-revert shares two incremental allowances", () => {
+    const actions = loadFormatterLock().performance.churn_action;
+    for (const [i, action] of actions.entries()) {
+      if (action.action === "cancellation") {
+        const previous = actions[i - 1];
+        assert.notEqual(action.source_revision, previous.source_revision);
+      }
+      if (action.action === "edit-revert") {
+        assert.equal(action.ceiling_mode, "incremental");
+        assert.equal(action.pair_start_ordinal, action.ordinal - 1);
+        assert.equal(actions[i - 1].action, "incremental");
+      }
+    }
+  });
+
+  test("exact cells match the pinned local oracle and remain idempotent", () => {
+    const lock = loadFormatterLock();
+    const catalog = lock.compatibility.find((c) => c.languages.length === 10);
+    const require = createRequire(import.meta.url);
+    const oracle = require(
+      join(
+        ROOT,
+        "node_modules",
+        ".pnpm",
+        `prettier@${catalog.prettier_release}`,
+        "node_modules",
+        "prettier",
+      ),
+    );
+    assert.equal(oracle.version, catalog.prettier_release);
+    const corpus = new Map(catalog.corpus.map((c) => [c.id, c]));
+    for (const cell of catalog.cell.filter((c) => c.classification === "prettier-exact")) {
+      const input = lock.artifacts[corpus.get(cell.corpus_id).path].text;
+      const expected = lock.artifacts[cell.expected_outcome].json;
+      const parser =
+        { javascript: "babel", jsx: "babel", tsx: "typescript" }[cell.language] ?? cell.language;
+      const options = { ...expected.normalized_options, parser };
+      const geometry =
+        cell.request_mode === "cursor"
+          ? {
+              cursorOffset: Buffer.from(input).subarray(0, expected.request.cursor).toString()
+                .length,
+            }
+          : cell.request_mode === "range"
+            ? { rangeStart: 0, rangeEnd: input.length }
+            : {};
+      const result = oracle.formatWithCursor(input, { ...options, ...geometry });
+      assert.equal(result.formatted, lock.artifacts[expected.output].text, cell.id);
+      assert.equal(oracle.format(result.formatted, options), result.formatted, cell.id);
+      if (cell.request_mode === "cursor")
+        assert.equal(
+          Buffer.byteLength(result.formatted.slice(0, result.cursorOffset)),
+          expected.formatted_cursor,
+          cell.id,
+        );
+    }
+  });
+
+  test("the complete hermetic lock validates and rejects missing dimensions", () => {
+    const lock = loadFormatterLock();
+    assert.deepEqual(validateFormatterLock(lock), []);
+    const mutations = [
+      ["missing cell", (l) => l.compatibility[0].cell.pop(), /missing cell/],
+      [
+        "duplicate cell",
+        (l) => l.compatibility[0].cell.push(l.compatibility[0].cell[0]),
+        /duplicate cell/,
+      ],
+      ["option vocabulary", (l) => l.compatibility[0].option.pop(), /option vocabulary/],
+      ["corpus digest", (l) => (l.compatibility[0].corpus[0].sha256 = "0".repeat(64)), /digest/],
+      ["outside path", (l) => (l.compatibility[0].corpus[0].path = "../outside.vue"), /path/],
+      ["churn count", (l) => l.performance.churn_action.pop(), /10,000/],
+      ["churn ordinal", (l) => (l.performance.churn_action[1].ordinal = 1), /ordinal/],
+      [
+        "cancellation warm identity",
+        (l) =>
+          (l.performance.churn_action[7].source_revision =
+            l.performance.churn_action[6].source_revision),
+        /cancellation/,
+      ],
+      [
+        "edit-revert pair allowance",
+        (l) => (l.performance.churn_action[3].ceiling_mode = "edit-revert"),
+        /pair allowance/,
+      ],
+      ["calibration", (l) => delete l.performance.calibration.operation_schedule, /calibration/],
+      [
+        "empty operations",
+        (l) => (l.performance.calibration.operation_schedule = []),
+        /calibration/,
+      ],
+      ["empty sampling", (l) => (l.performance.calibration.sample_order = []), /calibration/],
+      ["invalid seed", (l) => (l.performance.calibration.seed = -1), /calibration/],
+      [
+        "query source",
+        (l) => {
+          l.artifacts[
+            "fixtures/formatter/performance/range-cursor.json"
+          ].json.queries[0].source_path = "fixtures/formatter/performance/query-inserted-input.txt";
+        },
+        /query basis/,
+      ],
+      ["numeric mode", (l) => l.performance.mode.pop(), /mode/],
+      ["route owner", (l) => l.inventory.routes.pop(), /route inventory/],
+      ["duplicate owner", (l) => l.inventory.routes.push(l.inventory.routes[0]), /duplicate route/],
+    ];
+    for (const [name, mutate, expected] of mutations) {
+      const copy = structuredClone(lock);
+      mutate(copy);
+      assert.match(validateFormatterLock(copy).join("\n"), expected, name);
+    }
+  });
+
+  test("evidence requires the candidate and a known corpus, with every mode unmeasured", async () => {
+    const lock = loadFormatterLock();
+    const loaded = loadManifest("formatter-performance");
+    for (const corpus of lock.performance.fixture) {
+      const summary = buildFormatterSummary(loaded, {
+        candidate: "review-candidate",
+        corpus: corpus.id,
+        dryRun: true,
+        worker: readWorker(),
+      });
+      assert.equal(summary.run.candidate, "review-candidate");
+      assert.equal(summary.run.corpus, corpus.id);
+      assert.equal(summary.validation.verdict, "not run");
+      assert.equal(summary.cells.length, lock.performance.mode.length);
+      assert.ok(summary.cells.every((c) => c.status === "not run"));
+    }
+    const dir = freshDir();
+    assert.equal(
+      await quiet(() =>
+        main([
+          "--run",
+          "formatter-performance",
+          "--candidate",
+          "review-candidate",
+          "--corpus",
+          "medium",
+          "--dry-run",
+          "--out",
+          dir,
+        ]),
+      ),
+      0,
+    );
+    assert.equal(readSummary(dir).run.corpus, "medium");
+    await assert.rejects(
+      main(["--run", "formatter-performance", "--corpus", "medium", "--dry-run"]),
+      /candidate/,
+    );
+    await assert.rejects(
+      main(["--run", "skr-perf0-structural", "--candidate", "review-candidate", "--dry-run"]),
+      /formatter-only/,
+    );
+    await assert.rejects(
+      main([
+        "--run",
+        "formatter-performance",
+        "--candidate",
+        "review-candidate",
+        "--corpus",
+        "unknown",
+        "--dry-run",
+      ]),
+      /corpus/,
+    );
+  });
+});
 
 describe("manifest validation", () => {
   test("every shipped manifest validates", () => {
