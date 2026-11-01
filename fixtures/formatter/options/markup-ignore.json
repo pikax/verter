@@ -1,0 +1,7 @@
+{
+  "id": "markup-ignore",
+  "values": {
+    "htmlWhitespaceSensitivity": "ignore",
+    "embeddedLanguageFormatting": "off"
+  }
+}

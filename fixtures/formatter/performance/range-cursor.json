@@ -1,0 +1,8876 @@
+{
+  "source_fixture_id": "medium",
+  "queries": [
+    {
+      "ordinal": 1,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 2,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 3,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 4,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 5,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 6,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 7,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 8,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 9,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 10,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 11,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 12,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 13,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 14,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 15,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 16,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 17,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 18,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 19,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 20,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 21,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 22,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 23,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 24,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 25,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 26,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 27,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 28,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 29,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 30,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 31,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 32,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 33,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 34,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 35,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 36,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 37,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 38,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 39,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 40,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 41,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 42,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 43,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 44,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 45,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 46,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 47,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 48,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 49,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 50,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 51,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 52,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 53,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 54,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 55,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 56,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 57,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 58,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 59,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 60,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 61,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 62,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 63,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 64,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 65,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 66,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 67,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 68,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 69,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 70,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 71,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 72,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 73,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 74,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 75,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 76,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 77,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 78,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 79,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 80,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 81,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 82,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 83,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 84,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 85,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 86,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 87,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 88,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 89,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 90,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 91,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 92,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 93,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 94,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 95,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 96,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 97,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 98,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 99,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 100,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 101,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 102,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 103,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 104,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 105,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 106,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 107,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 108,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 109,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 110,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 111,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 112,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 113,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 114,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 115,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 116,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 117,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 118,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 119,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 120,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 121,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 122,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 123,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 124,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 125,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 126,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 127,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 128,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 129,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 130,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 131,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 132,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 133,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 134,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 135,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 136,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 137,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 138,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 139,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 140,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 141,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 142,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 143,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 144,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 145,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 146,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 147,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 148,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 149,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 150,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 151,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 152,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 153,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 154,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 155,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 156,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 157,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 158,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 159,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 160,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 161,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 162,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 163,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 164,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 165,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 166,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 167,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 168,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 169,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 170,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 171,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 172,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 173,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 174,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 175,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 176,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 177,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 178,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 179,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 180,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 181,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 182,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 183,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 184,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 185,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 186,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 187,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 188,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 189,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 190,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 191,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 192,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 193,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 194,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 195,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 196,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 197,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 198,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 199,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 200,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 201,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 202,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 203,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 204,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 205,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 206,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 207,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 208,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 209,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 210,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 211,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 212,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 213,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 214,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 215,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 216,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 217,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 218,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 219,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 220,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 221,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 222,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 223,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 224,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 225,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 226,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 227,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 228,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 229,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 230,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 231,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 232,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 233,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 234,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 235,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 236,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 237,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 238,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 239,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 240,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 241,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 242,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 243,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 244,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 245,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 246,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 247,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 248,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 249,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 250,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 251,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 252,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 253,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 254,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 255,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 256,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 257,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 258,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 259,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 260,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 261,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 262,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 263,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 264,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 265,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 266,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 267,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 268,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 269,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 270,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 271,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 272,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 273,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 274,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 275,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 276,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 277,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 278,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 279,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 280,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 281,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 282,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 283,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 284,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 285,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 286,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 287,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 288,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 289,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 290,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 291,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 292,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 293,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 294,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 295,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 296,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 297,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 298,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 299,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 300,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 301,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 302,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 303,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 304,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 305,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 306,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 307,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 308,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 309,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 310,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 311,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 312,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 313,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 314,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 315,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 316,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 317,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 318,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 319,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 320,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 321,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 322,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 323,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 324,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 325,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 326,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 327,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 328,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 329,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 330,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 331,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 332,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 333,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 334,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 335,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 336,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 337,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 338,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 339,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 340,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 341,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 342,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 343,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 344,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 345,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 346,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 347,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 348,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 349,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 350,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 351,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 352,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 353,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 354,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 355,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 356,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 357,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 358,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 359,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 360,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 361,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 362,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 363,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 364,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 365,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 366,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 367,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 368,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 369,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 370,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 371,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 372,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 373,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 374,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 375,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 376,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 377,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 378,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 379,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 380,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 381,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 382,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 383,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 384,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 385,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 386,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 387,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 388,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 389,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 390,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 391,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 392,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 393,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 394,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 395,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 396,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 397,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 398,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 399,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 400,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 401,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 402,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 403,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 404,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 405,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 406,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 407,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 408,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 409,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 410,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 411,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 412,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 413,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 414,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 415,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 416,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 417,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 418,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 419,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 420,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 421,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 422,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 423,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 424,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 425,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 426,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 427,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 428,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 429,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 430,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 431,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 432,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 433,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 434,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 435,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 436,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 437,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 438,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 439,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 440,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 441,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 442,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 443,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 444,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 445,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 446,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 447,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 448,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 449,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 450,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 451,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 452,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 453,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 454,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 455,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 456,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 457,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 458,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 459,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 460,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 461,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 462,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 463,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 464,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 465,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 466,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 467,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 468,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 469,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 470,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 471,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 472,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 473,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 474,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 475,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 476,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 477,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 478,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 479,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 480,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 481,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 482,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 483,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 484,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 485,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 486,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 487,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 488,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 489,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 490,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 491,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 492,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 493,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 494,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 495,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 496,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 497,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 498,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 499,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 500,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 501,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 502,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 503,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 504,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 505,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 506,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 507,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 508,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 509,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 510,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 511,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 512,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 513,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 514,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 515,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 516,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 517,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 518,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 519,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 520,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 521,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 522,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 523,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 524,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 525,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 526,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 527,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 528,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 529,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 530,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 531,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 532,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 533,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 534,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 535,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 536,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 537,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 538,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 539,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 540,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 541,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 542,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 543,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 544,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 545,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 546,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 547,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 548,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 549,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 550,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 551,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 552,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 553,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 554,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 555,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 556,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 557,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 558,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 559,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 560,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 561,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 562,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 563,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 564,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 565,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 566,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 567,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 568,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 569,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 570,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 571,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 572,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 573,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 574,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 575,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 576,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 577,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 578,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 579,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 580,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 581,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 582,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 583,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 584,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 585,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 586,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 587,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 588,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 589,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 590,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 591,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 592,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 593,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 594,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 595,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 596,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 597,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 598,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 599,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 600,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 601,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 602,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 603,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 604,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 605,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 606,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 607,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 608,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 609,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 610,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 611,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 612,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 613,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 614,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 615,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 616,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 617,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 618,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 619,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 620,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 621,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 622,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 623,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 624,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 625,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 626,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 627,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 628,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 629,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 630,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 631,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 632,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 633,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 634,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 635,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 636,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 637,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 638,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 639,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 640,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 641,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 642,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 643,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 644,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 645,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 646,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 647,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 648,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 649,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 650,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 651,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 652,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 653,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 654,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 655,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 656,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 657,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 658,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 659,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 660,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 661,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 662,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 663,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 664,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 665,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 666,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 667,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 668,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 669,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 670,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 671,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 672,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 673,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 674,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 675,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 676,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 677,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 678,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 679,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 680,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 681,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 682,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 683,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 684,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 685,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 686,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 687,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 688,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 689,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 690,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 691,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 692,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 693,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 694,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 695,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 696,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 697,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 698,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 699,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 700,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 701,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 702,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 703,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 704,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 705,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 706,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 707,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 708,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 709,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 710,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 711,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 712,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 713,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 714,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 715,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 716,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 717,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 718,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 719,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 720,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 721,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 722,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 723,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 724,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 725,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 726,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 727,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 728,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 729,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 730,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 731,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 732,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 733,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 734,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 735,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 736,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 737,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 738,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 739,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 740,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 741,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 742,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 743,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 744,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 745,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 746,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 747,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 748,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 749,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 750,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 751,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 752,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 753,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 754,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 755,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 756,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 757,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 758,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 759,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 760,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 761,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 762,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 763,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 764,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 765,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 766,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 767,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 768,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 769,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 770,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 771,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 772,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 773,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 774,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 775,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 776,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 777,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 778,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 779,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 780,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 781,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 782,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 783,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 784,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 785,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 786,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 787,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 788,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 789,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 790,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 791,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 792,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 793,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 794,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 795,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 796,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 797,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 798,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 799,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 800,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 801,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 802,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 803,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 804,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 805,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 806,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 807,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 808,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 809,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 810,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 811,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 812,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 813,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 814,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 815,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 816,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 817,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 818,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 819,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 820,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 821,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 822,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 823,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 824,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 825,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 826,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 827,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 828,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 829,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 830,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 831,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 832,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 833,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 834,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 835,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 836,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 837,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 838,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 839,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 840,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 841,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 842,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 843,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 844,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 845,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 846,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 847,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 848,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 849,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 850,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 851,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 852,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 853,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 854,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 855,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 856,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 857,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 858,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 859,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 860,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 861,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 862,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 863,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 864,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 865,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 866,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 867,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 868,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 869,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 870,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 871,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 872,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 873,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 874,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 875,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 876,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 877,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 878,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 879,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 880,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 881,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 882,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 883,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 884,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 885,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 886,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 887,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 888,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 889,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 890,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 891,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 892,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 893,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 894,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 895,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 896,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 897,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 898,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 899,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 900,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 901,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 902,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 903,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 904,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 905,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 906,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 907,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 908,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 909,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 910,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 911,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 912,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 913,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 914,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 915,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 916,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 917,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 918,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 919,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 920,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 921,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 922,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 923,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 924,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 925,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 926,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 927,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 928,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 929,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 930,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 931,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 932,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 933,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 934,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 935,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 936,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 937,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 938,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 939,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 940,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 941,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 942,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 943,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 944,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 945,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 946,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 947,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 948,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 949,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 950,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 951,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 952,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 953,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 954,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 955,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 956,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 957,
+      "kind": "map",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 958,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 959,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 960,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 961,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 962,
+      "kind": "cursor",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 963,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 964,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 965,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 966,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 967,
+      "kind": "range",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 968,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 969,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 970,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 971,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 972,
+      "kind": "map",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 973,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 974,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 975,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 976,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 977,
+      "kind": "cursor",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 978,
+      "kind": "map",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 979,
+      "kind": "range",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 980,
+      "kind": "cursor",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 981,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40,
+      "end": 40,
+      "bias": "right",
+      "boundary": "inserted-after",
+      "expected": {
+        "formatted": 41
+      }
+    },
+    {
+      "ordinal": 982,
+      "kind": "range",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 983,
+      "kind": "cursor",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 984,
+      "kind": "map",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 985,
+      "kind": "range",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 986,
+      "kind": "map",
+      "domain": "authored",
+      "start": 43,
+      "end": 43,
+      "bias": "right",
+      "boundary": "deleted-after",
+      "expected": {
+        "formatted": 43
+      }
+    },
+    {
+      "ordinal": 987,
+      "kind": "map",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 988,
+      "kind": "range",
+      "start": 10,
+      "end": 10,
+      "bias": "right",
+      "boundary": "CRLF-before"
+    },
+    {
+      "ordinal": 989,
+      "kind": "cursor",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 990,
+      "kind": "map",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 991,
+      "kind": "map",
+      "domain": "authored",
+      "start": 50,
+      "end": 50,
+      "bias": "right",
+      "boundary": "retained-after",
+      "expected": {
+        "formatted": 50
+      }
+    },
+    {
+      "ordinal": 992,
+      "kind": "cursor",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    },
+    {
+      "ordinal": 993,
+      "kind": "map",
+      "start": 0,
+      "end": 0,
+      "bias": "left",
+      "boundary": "BOF"
+    },
+    {
+      "ordinal": 994,
+      "kind": "range",
+      "start": 29,
+      "end": 29,
+      "bias": "right",
+      "boundary": "Unicode-before"
+    },
+    {
+      "ordinal": 995,
+      "kind": "cursor",
+      "start": 33,
+      "end": 33,
+      "bias": "left",
+      "boundary": "Unicode-after"
+    },
+    {
+      "ordinal": 996,
+      "kind": "map",
+      "domain": "authored",
+      "start": 40385,
+      "end": 40386,
+      "bias": "right",
+      "boundary": "replaced-span",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      }
+    },
+    {
+      "ordinal": 997,
+      "kind": "range",
+      "start": 12,
+      "end": 12,
+      "bias": "left",
+      "boundary": "CRLF-after"
+    },
+    {
+      "ordinal": 998,
+      "kind": "cursor",
+      "start": 40385,
+      "end": 40385,
+      "bias": "right",
+      "boundary": "replaced-before"
+    },
+    {
+      "ordinal": 999,
+      "kind": "map",
+      "start": 40386,
+      "end": 40386,
+      "bias": "left",
+      "boundary": "replaced-after"
+    },
+    {
+      "ordinal": 1000,
+      "kind": "range",
+      "start": 102400,
+      "end": 102400,
+      "bias": "right",
+      "boundary": "EOF"
+    }
+  ],
+  "prepared_result_edits": [
+    {
+      "start": 40,
+      "end": 40,
+      "text": " "
+    },
+    {
+      "start": 42,
+      "end": 43,
+      "text": ""
+    },
+    {
+      "start": 40385,
+      "end": 40386,
+      "text": "1"
+    }
+  ],
+  "geometry_controls": [
+    {
+      "kind": "map",
+      "id": "inserted",
+      "domain": "authored",
+      "start": 2,
+      "end": 2,
+      "bias": "right",
+      "expected": {
+        "formatted": 3
+      },
+      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+    },
+    {
+      "kind": "map",
+      "id": "deleted",
+      "domain": "authored",
+      "start": 3,
+      "end": 3,
+      "bias": "right",
+      "expected": {
+        "formatted": 2
+      },
+      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+    },
+    {
+      "kind": "map",
+      "id": "retained",
+      "domain": "authored",
+      "start": 6,
+      "end": 6,
+      "bias": "right",
+      "expected": {
+        "formatted": 7
+      },
+      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+    },
+    {
+      "kind": "map",
+      "id": "replaced",
+      "domain": "authored",
+      "start": 6,
+      "end": 7,
+      "bias": "right",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      },
+      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+    }
+  ]
+}

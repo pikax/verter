@@ -372,3 +372,13 @@ Targeted package tests are iteration evidence, not proof of future formatting or
 independent acceptance. The workflow owns current-candidate review and the full
 CI gate; no historical Git object, committed transcript or refreshed result count
 is an acceptance input.
+
+## Concrete compatibility and fixture lock
+
+The [formatter artifacts](../../../tests/formatter/README.md) now materialize this
+contract's option/cell/corpus catalogs, exact current-route ownership, geometry
+laws, performance counter units/bounds, calibration and 10,000-action lifecycle
+manifest. Their validator runs through the existing evidence-run script tests.
+This adds authority data and tooling only; it does not ship native formatting or
+promote any public capability. The standing measurement rule still governs every
+numeric table, and implementation state remains controller-owned.

@@ -1475,6 +1475,43 @@ impl VerterHost {
         })
     }
 
+    /// Take the compile capture fence with a module-augmentation answer that
+    /// is current under it.
+    ///
+    /// `HasModuleAugmentation` is probed ONLY for a Content request. The
+    /// closure-aware probe (`owner_has_module_augmentation_dependency`, which
+    /// consults the augmentation target index for every module the owner can
+    /// consume plus ambient / global augmenters) pays a store scan, and a
+    /// Session request preserves Session under every reason while a Stateless
+    /// request is the floor that ignores all reasons (see
+    /// `classify_compile_mode` in `compile_cache_mode.rs`), so neither
+    /// consults this bit.
+    ///
+    /// The probe claims index flights, whose leaders may need this fence, so
+    /// it runs with the fence released. Its answer holds only for the host
+    /// state it walked, so that state is compared again under the fence and a
+    /// moved host walks again. A host that keeps moving answers `true`, which
+    /// only downgrades this compile to Stateless.
+    fn lock_capture_with_augmentation_probe(
+        &self,
+        canonical_id: &str,
+        requested_mode: CompileCacheMode,
+    ) -> (parking_lot::ReentrantMutexGuard<'_, ()>, bool) {
+        const PROBE_ATTEMPTS: usize = 3;
+        if requested_mode != CompileCacheMode::Content {
+            return (self.block_content.admission_fence.lock(), false);
+        }
+        for _ in 0..PROBE_ATTEMPTS {
+            let walked_under = self.current_validation_token();
+            let answer = self.owner_has_module_augmentation_dependency(canonical_id);
+            let fence = self.block_content.admission_fence.lock();
+            if self.current_validation_token() == walked_under {
+                return (fence, answer);
+            }
+        }
+        (self.block_content.admission_fence.lock(), true)
+    }
+
     /// Drive the shared compile for `(canonical, profile)` and return the
     /// full artifact set ([`CompileServe`]): every virtual node PLUS the IDE
     /// `CachedTsx`, produced in one pass. The `demand` is consulted ONLY to
@@ -1499,7 +1536,8 @@ impl VerterHost {
         // state; the capture and its post-compile currentness check provide
         // the atomicity boundary.
         self.hydrate_compile_blockers(&canonical_id);
-        let block_content_capture_fence = self.block_content.admission_fence.lock();
+        let (block_content_capture_fence, owner_has_module_augmentation) =
+            self.lock_capture_with_augmentation_probe(&canonical_id, requested_mode);
 
         // Cache hit check and compile input extraction under a single read lock.
         // This avoids cloning the full file entry and its compile slots.
@@ -1711,19 +1749,6 @@ impl VerterHost {
                 // Classify EXACTLY ONCE per compile, here under the read
                 // lock, so `actual_mode` is known before the warm-hit
                 // consult and reused by the compile / publish routing.
-                // `HasModuleAugmentation` is probed ONLY when
-                // `requested_mode == CompileCacheMode::Content`. The
-                // closure-aware probe (`owner_has_module_augmentation_dependency`,
-                // which consults the augmentation target index for every
-                // module the owner can consume plus ambient / global
-                // augmenters) pays a store scan, and a Session request
-                // preserves Session under every reason while a Stateless
-                // request is the floor that ignores all reasons (see
-                // `classify_compile_mode` in `compile_cache_mode.rs`), so
-                // neither consults this bit and the scan is paid only on
-                // the rare explicit Content opt-in.
-                let owner_has_module_augmentation = requested_mode == CompileCacheMode::Content
-                    && self.owner_has_module_augmentation_dependency(&canonical_id);
                 // Test-only observable: the cache-mode classification the
                 // private Vue render-only worker skips entirely (fixed render
                 // target, no IDE-carrier cache decision). Public non-Vue

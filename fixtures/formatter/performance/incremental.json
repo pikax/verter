@@ -1,0 +1,6 @@
+{
+  "source_fixture_id": "medium",
+  "edit": "fixtures/formatter/performance/edit.json",
+  "revert": "fixtures/formatter/performance/revert.json",
+  "delta_in": 2
+}

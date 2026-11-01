@@ -1,0 +1,6 @@
+{
+  "id": "require-pragma",
+  "values": {
+    "requirePragma": true
+  }
+}

@@ -35,15 +35,25 @@ use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertio
 use verter_session::component_meta_audit::RequestAuditRecord;
 use wasm_bindgen::prelude::*;
 
+mod artifacts;
 mod audit;
 mod compile_request_response;
+mod diagnostics;
+mod edit_transactions;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod feasibility_probe_tests;
+mod file_store;
+mod formatter;
 #[cfg(test)]
 mod host_compile_request_tests;
 mod input_snapshot;
+mod language_ops;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod semantic_poll_wasm_tests;
+mod session;
+mod sfc_projection;
+mod task_budget;
+mod tool_services;
 mod typeinfo;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod workspace_resolution_wasm_tests;
@@ -252,7 +262,7 @@ fn host_config_from_wire(wire: WasmHostConfigWire) -> Result<host::HostConfig, S
 /// Run a closure, converting any panic into a `JsValue` error.
 /// Prevents Rust panics from crashing the WASM runtime and poisoning
 /// RefCell borrow state.
-fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, JsValue> {
+pub(crate) fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, JsValue> {
     // Every `#[wasm_bindgen]` entry body runs inside this wrapper, so one
     // scope here covers every WASM boundary crossing.
     verter_audit::attribute_scope!(WasmBoundaryCall);
@@ -566,8 +576,8 @@ fn normalize_compile_request_undefined_tags(request: JsValue) -> Result<JsValue,
 /// Verter playground.
 #[wasm_bindgen(js_name = VerterHost)]
 pub struct WasmVerterHost {
-    inner: std::sync::Arc<host::VerterHost>,
-    input_snapshots: std::sync::Mutex<input_snapshot::InputSnapshotStore>,
+    pub(crate) inner: std::sync::Arc<host::VerterHost>,
+    pub(crate) input_snapshots: std::sync::Mutex<input_snapshot::InputSnapshotStore>,
 }
 
 impl WasmVerterHost {

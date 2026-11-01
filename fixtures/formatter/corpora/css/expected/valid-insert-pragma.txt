@@ -1,0 +1,12 @@
+/**
+ * hé🙂
+ *
+ * @format
+ */
+
+.box,
+.other {
+  color: red;
+  margin: 0 1px;
+  --label: "keep  spaces";
+}

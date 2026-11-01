@@ -1,0 +1,26 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/tsx/expected/valid-insert-pragma.txt",
+  "normalized_options": {
+    "insertPragma": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      116
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    116
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/tsx/expected/valid-insert-pragma.txt",
+    "edits": []
+  },
+  "divergence": null
+}

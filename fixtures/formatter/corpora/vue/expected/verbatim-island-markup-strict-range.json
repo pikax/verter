@@ -1,0 +1,29 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/verbatim-island-markup-strict.txt",
+  "normalized_options": {
+    "bracketSameLine": true,
+    "htmlWhitespaceSensitivity": "strict",
+    "vueIndentScriptAndStyle": true,
+    "singleAttributePerLine": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      48
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    48
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/verbatim-island-markup-strict.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}

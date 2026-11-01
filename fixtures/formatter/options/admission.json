@@ -1,0 +1,18 @@
+{
+  "unknown": "UnknownOption",
+  "wrong_type": "InvalidOption",
+  "known_inapplicable": "InapplicableOption",
+  "known_unsupported": "UnsupportedOption",
+  "missing": "apply only an admitted default, preserving default provenance",
+  "parser": "A parser name must match the resolved source carrier; it cannot switch the host parser.",
+  "filepath": "Canonical resolved source only; no disk discovery.",
+  "plugins": "Only empty plugins/pluginSearchDirs arrays; no execution or lookup.",
+  "rangeEnd": "source-end is the pinned positive-infinity sentinel; bind to the exact authored source length during admission.",
+  "deprecated": "jsxBracketSameLine is explicitly unsupported; use bracketSameLine.",
+  "config_envelope": {
+    "ignore": "captured ignore data only; matched files return skipped",
+    "overrides": "captured ordered selector/provenance records; no private discovery",
+    "config": "captured config only; formatter executes no code"
+  },
+  "option_sets": "Family option sets select their applicable language subset, recorded in each exact expectation. The inapplicable-rejected set deliberately does not filter. Sets are finite admitted configurations, not the infinite Cartesian product of numeric options."
+}

@@ -1,0 +1,11 @@
+{
+  "retained-recovery-island": {
+    "reason": "An explicitly admitted whole-source recovery island is retained byte for byte; Prettier syntax errors are not reformatted.",
+    "outside_island_edits": [],
+    "publication": "complete only under verbatim-island recovery policy"
+  },
+  "native-svelte-basic-carrier": {
+    "reason": "Pinned Prettier has no built-in Svelte parser. These simple Svelte carrier outputs are native defaults, with script/style and markup layout explicitly locked; no Svelte plugin is loaded.",
+    "scope": "only the exact checked-in Svelte sources and option cells"
+  }
+}

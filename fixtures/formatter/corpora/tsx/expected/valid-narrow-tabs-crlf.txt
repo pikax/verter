@@ -1,0 +1,14 @@
+// hé🙂
+const Button = ({
+	label,
+}: {
+	label: string;
+}) => (
+	<button
+		title="hello"
+		disabled
+	>
+		{label}
+		<span>ok</span>
+	</button>
+);

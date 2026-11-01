@@ -1,0 +1,18 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/svelte/expected/valid-default.txt",
+  "normalized_options": {},
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/svelte/expected/valid-default.txt",
+    "edits": []
+  },
+  "divergence": "native-svelte-basic-carrier"
+}

@@ -1,0 +1,22 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/svelte/expected/verbatim-island-markup-strict.txt",
+  "normalized_options": {
+    "bracketSameLine": true,
+    "htmlWhitespaceSensitivity": "strict",
+    "singleAttributePerLine": true
+  },
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/svelte/expected/verbatim-island-markup-strict.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}

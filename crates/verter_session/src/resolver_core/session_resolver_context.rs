@@ -215,7 +215,11 @@ impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
         {
             return verter_type_engine::resolver_core::request_ports::IndexedReadiness::Settled;
         }
-        crate::VerterHost::begin_indexed_ready_load(self.inner, canonical_id)
+        crate::VerterHost::begin_indexed_ready_load_for(
+            self.inner,
+            canonical_id,
+            &self.request_view.overlay().input_artifacts,
+        )
     }
 
     fn shallow_file_state(

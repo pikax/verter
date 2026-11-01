@@ -2200,7 +2200,8 @@ pub struct ArgumentRegularPosition {
     pub path: Arc<[ArgumentPathStep]>,
     /// The position's regular literals: `None` when every literal at the
     /// position and nested in it is regular; otherwise exactly these
-    /// literals at the position are, and the others it holds are fresh.
+    /// constituents at the position are, and the others it holds are fresh.
+    /// A listed composite preserves its entire subtree.
     pub literals: Option<Arc<[SemanticNodeId]>>,
 }
 

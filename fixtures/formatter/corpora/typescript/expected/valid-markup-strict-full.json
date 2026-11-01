@@ -1,0 +1,18 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/typescript/expected/valid-markup-strict.txt",
+  "normalized_options": {},
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/typescript/expected/valid-markup-strict.txt",
+    "edits": []
+  },
+  "divergence": null
+}
