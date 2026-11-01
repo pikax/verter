@@ -471,13 +471,6 @@ fn assert_exhausted_follower_abort(
         Enclosing,
     }
 
-    struct ProduceHookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
-    impl Drop for ProduceHookGuard<'_> {
-        fn drop(&mut self) {
-            self.0.set_produce_hook_for_tests(None);
-        }
-    }
-
     for delivery in [Follower::Raw, Follower::Audited, Follower::Enclosing] {
         let host = make_host_with_config(HostConfig {
             audit_enabled: true,
@@ -505,41 +498,21 @@ fn assert_exhausted_follower_abort(
                     },
                     name: verter_type_expr::OwnedStr::from("Enclosing"),
                 });
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let release_rx = std::sync::Mutex::new(release_rx);
-            let hold_once = std::sync::atomic::AtomicBool::new(true);
-            let held_key = inner_key.clone();
-            dispatch
-                .graph()
-                .set_produce_hook_for_tests(Some(Arc::new(move |key, _| {
-                    if key == &held_key
-                        && hold_once.swap(false, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        let _ = ready_tx.send(());
-                        let _ = release_rx
-                            .lock()
-                            .unwrap()
-                            .recv_timeout(std::time::Duration::from_secs(10));
-                    }
-                })));
-            let hook = ProduceHookGuard(dispatch.graph().store());
             let fault = dispatch
                 .graph()
                 .store()
                 .test_exhausted_join_abort(inner_key.clone(), completion);
             std::thread::scope(|threads| {
+                let graph = dispatch.graph();
+                let rendezvous = graph.arm_flight_rendezvous(inner_key.clone());
                 let producer = threads.spawn(|| {
                     with_dispatch(&host, |dispatch| {
                         dispatch.execute_via_cold_build_helper(inner_key.clone())
                     })
                 });
-                let ready = ready_rx.recv_timeout(std::time::Duration::from_secs(10));
-                if ready.is_err() {
-                    let _ = release_tx.send(());
-                    let _ = producer.join();
-                    panic!("the raw producer must reach the held flight: {ready:?}");
-                }
+                rendezvous
+                    .wait_producer_parked(std::time::Duration::from_secs(10))
+                    .expect("the raw producer parks on the inner flight");
                 let follower = threads.spawn(|| {
                     if matches!(delivery, Follower::Audited) {
                         let public = host.get_flow_return_type_with_audit(
@@ -605,15 +578,14 @@ fn assert_exhausted_follower_abort(
                         });
                     }
                 });
-                let joined = dispatch
-                    .graph()
-                    .task_registry_for_tests()
-                    .wait_for_wait_count_for_tests(1, std::time::Duration::from_secs(10));
-                // Release before asserting or joining, including a failed rendezvous.
-                let _ = release_tx.send(());
+                // Source/index waits share the registry. Only the held inner
+                // flight's subscriber proves that the abort injection will run.
+                rendezvous
+                    .wait_subscriber_registered(std::time::Duration::from_secs(10))
+                    .expect("the follower subscribes to the held inner flight");
+                rendezvous.release();
                 let produced = producer.join().expect("the producer completes");
                 follower.join().expect("the follower completes");
-                assert!(joined, "the follower must join the held inner flight");
                 assert!(
                     matches!(
                         &produced.value(),
@@ -629,7 +601,7 @@ fn assert_exhausted_follower_abort(
                 0,
                 "no enclosing result may admit around the exhausted follower"
             );
-            drop((fault, hook));
+            drop(fault);
             if matches!(delivery, Follower::Enclosing) {
                 let node = dispatch.graph().intern_node(SemanticNodeData::Primitive(
                     verter_type_engine::semantic_query::PrimitiveKind::String,

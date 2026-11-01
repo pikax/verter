@@ -1,0 +1,18 @@
+{
+  "outcome": "unsupported",
+  "reason": "UnsafeRecovery: no safe complete authored unit",
+  "output": null,
+  "normalized_options": {},
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 24
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": null,
+    "edits": []
+  },
+  "divergence": null
+}

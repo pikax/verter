@@ -1,0 +1,26 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/html/expected/valid-require-pragma.txt",
+  "normalized_options": {
+    "requirePragma": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      94
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    94
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/html/expected/valid-require-pragma.txt",
+    "edits": []
+  },
+  "divergence": null
+}

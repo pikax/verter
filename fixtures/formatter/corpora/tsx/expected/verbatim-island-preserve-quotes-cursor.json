@@ -1,0 +1,22 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/tsx/expected/verbatim-island-preserve-quotes.txt",
+  "normalized_options": {
+    "quoteProps": "preserve",
+    "trailingComma": "none",
+    "arrowParens": "always"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 39
+  },
+  "formatted_cursor": 39,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/tsx/expected/verbatim-island-preserve-quotes.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}
