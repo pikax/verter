@@ -1508,19 +1508,20 @@ fn diagnostics_all_severity_levels() {
         ],
         has_errors: true,
     };
-    let ffi = host_diagnostics_to_ffi(&snapshot, None);
+    let source = "x".repeat(32);
+    let ffi = host_diagnostics_to_ffi(&snapshot, Some(&source));
     assert!(ffi.has_errors);
     assert_eq!(ffi.diagnostics.len(), 3);
     assert_eq!(ffi.diagnostics[0].severity, "error");
     assert_eq!(ffi.diagnostics[0].code, "E001");
-    assert_eq!(ffi.diagnostics[0].span_start, 0);
-    assert_eq!(ffi.diagnostics[0].span_end, 10);
+    assert_eq!(ffi.diagnostics[0].span_start, Some(0));
+    assert_eq!(ffi.diagnostics[0].span_end, Some(10));
     assert_eq!(ffi.diagnostics[1].severity, "warning");
-    assert_eq!(ffi.diagnostics[1].span_start, 12);
-    assert_eq!(ffi.diagnostics[1].span_end, 15);
+    assert_eq!(ffi.diagnostics[1].span_start, Some(12));
+    assert_eq!(ffi.diagnostics[1].span_end, Some(15));
     assert_eq!(ffi.diagnostics[2].severity, "info");
-    assert_eq!(ffi.diagnostics[2].span_start, 20);
-    assert_eq!(ffi.diagnostics[2].span_end, 24);
+    assert_eq!(ffi.diagnostics[2].span_start, Some(20));
+    assert_eq!(ffi.diagnostics[2].span_end, Some(24));
 }
 
 #[test]
@@ -1548,16 +1549,16 @@ fn host_diagnostics_to_ffi_converts_utf8_spans_to_utf16_with_unicode_source() {
 
     let ffi = host_diagnostics_to_ffi(&snapshot, Some(source));
     assert_eq!(ffi.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics[0].span_start, 1);
-    assert_eq!(ffi.diagnostics[0].span_end, 3);
+    assert_eq!(ffi.diagnostics[0].span_start, Some(1));
+    assert_eq!(ffi.diagnostics[0].span_end, Some(3));
 }
 
 #[test]
-fn host_diagnostics_to_ffi_falls_back_to_raw_offsets_without_source() {
+fn host_diagnostics_to_ffi_refuses_spans_without_source() {
     // `HostDiagnostic.span` is mandatory — every diagnostic carries a real
-    // mapped byte range. When the caller has no source text to convert
-    // against, the FFI boundary preserves the raw byte offsets as-is
-    // rather than manufacturing a missing span.
+    // mapped byte range. With no source snapshot to convert against, the
+    // diagnostic is still reported but carries the typed refusal instead of
+    // a byte pass-through that a consumer would misread as UTF-16.
     let snapshot = host::DiagnosticsSnapshot {
         diagnostics: vec![host::HostDiagnostic {
             severity: host::HostSeverity::Warning,
@@ -1570,12 +1571,47 @@ fn host_diagnostics_to_ffi_falls_back_to_raw_offsets_without_source() {
     };
     let ffi = host_diagnostics_to_ffi(&snapshot, None);
     assert_eq!(ffi.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics[0].span_start, 1);
-    assert_eq!(ffi.diagnostics[0].span_end, 3);
+    let d = &ffi.diagnostics[0];
+    assert_eq!((d.span_start, d.span_end), (None, None));
+    assert_eq!(d.span_error.as_deref(), Some("SourceUnavailable"));
+    assert_eq!(d.span_encoding, SpanEncodingTag::Utf16);
+    assert_eq!(d.message, "raw", "the diagnostic itself is still reported");
 }
 
 #[test]
-fn lint_diagnostics_to_utf16_converts_spans() {
+fn host_diagnostics_to_ffi_refuses_off_boundary_and_past_end_spans() {
+    // "a😀b": byte 2 is inside the emoji, byte 99 is past the end.
+    let source = "a😀b";
+    let span_of = |start, end| {
+        let snapshot = host::DiagnosticsSnapshot {
+            diagnostics: vec![host::HostDiagnostic {
+                severity: host::HostSeverity::Error,
+                code: "E".to_string(),
+                message: "m".to_string(),
+                arguments: Vec::new(),
+                span: verter_span::Span::new(start, end),
+            }],
+            has_errors: true,
+        };
+        host_diagnostics_to_ffi(&snapshot, Some(source))
+            .diagnostics
+            .remove(0)
+    };
+    assert_eq!(span_of(2, 5).span_error.as_deref(), Some("NotCharBoundary"));
+    assert_eq!(
+        span_of(1, 99).span_error.as_deref(),
+        Some("InvalidBoundary")
+    );
+    assert_eq!(span_of(5, 1).span_error.as_deref(), Some("InvalidBoundary"));
+    let ok = span_of(1, 5);
+    assert_eq!(
+        (ok.span_start, ok.span_end, ok.span_error),
+        (Some(1), Some(3), None)
+    );
+}
+
+#[test]
+fn lint_diagnostics_to_wire_utf16_tags_a_separate_span() {
     let source = "a😀b";
     let input = vec![verter_diagnostics::LintDiagnostic {
         rule: "r".to_string(),
@@ -1590,18 +1626,36 @@ fn lint_diagnostics_to_utf16_converts_spans() {
         related_files: Vec::new(),
     }];
 
-    let out = lint_diagnostics_to_utf16(input, Some(source));
+    let out = lint_diagnostics_to_wire_utf16(input.clone(), Some(source));
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].span.start, 1);
-    assert_eq!(out[0].span.end, 3);
-    assert!(out[0].tags.is_empty(), "tags should be unchanged");
+    assert_eq!((out[0].span.start, out[0].span.end), (Some(1), Some(3)));
+    assert_eq!(out[0].span.encoding, SpanEncodingTag::Utf16);
+    // The native span stays UTF-8 bytes — never rewritten in place.
+    assert_eq!(out[0].diagnostic.span, verter_span::Span::new(1, 5));
+    assert!(
+        out[0].diagnostic.tags.is_empty(),
+        "tags should be unchanged"
+    );
+
+    let json = serde_json::to_value(&out[0]).expect("wire lint serializes");
+    assert_eq!(json["spanStart"], 1);
+    assert_eq!(json["spanEnd"], 3);
+    assert_eq!(json["spanEncoding"], "utf16.v1");
+    assert!(json.get("spanError").is_none());
+
+    let sourceless = lint_diagnostics_to_wire_utf16(input, None);
+    assert_eq!(sourceless[0].span.error, Some("SourceUnavailable"));
+    let json = serde_json::to_value(&sourceless[0]).expect("wire lint serializes");
+    assert!(json.get("spanStart").is_none(), "no byte pass-through");
+    assert_eq!(json["spanError"], "SourceUnavailable");
 }
 
 // ── Output direction: host_update_to_ffi ─────────────────────────
 
 #[test]
 fn update_result_full_round_trip() {
-    let source = "a😀b";
+    // The module references below index this exact source.
+    let source = "const mod = import('./Foo.vue');";
     let host_result = host::HostUpdateResult {
         canonical_id: "/src/App.vue".to_string(),
         changed: true,
@@ -1628,7 +1682,7 @@ fn update_result_full_round_trip() {
                 code: "W002".to_string(),
                 message: "unused var".to_string(),
                 arguments: Vec::new(),
-                span: verter_span::Span::new(42, 45),
+                span: verter_span::Span::new(6, 9),
             }],
             has_errors: false,
         },
@@ -1653,7 +1707,7 @@ fn update_result_full_round_trip() {
         parse_duration_ms: 1.5,
     };
 
-    let ffi = host_update_to_ffi(host_result, Some(source));
+    let ffi = host_update_to_ffi(host_result, Some(source)).expect("spans convert");
     assert_eq!(ffi.canonical_id, "/src/App.vue");
     assert!(ffi.changed);
 
@@ -1715,6 +1769,9 @@ fn update_result_full_round_trip() {
     assert_eq!(ffi.parse_duration_ms, 1.5);
 }
 
+const BARREL_SOURCE: &str =
+    "export { default as Button } from './Button.vue';\nexport type { Props } from './types';";
+
 #[test]
 fn host_update_to_ffi_export_signatures() {
     // Use the host to produce real export signatures from a barrel file
@@ -1723,9 +1780,7 @@ fn host_update_to_ffi_export_signatures() {
         .upsert(host::UpsertRequest {
             canonical_id: Some("/src/barrel.ts".to_string()),
             input_id: "/src/barrel.ts".to_string(),
-            source: std::sync::Arc::from(
-                "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
-            ),
+            source: std::sync::Arc::from(BARREL_SOURCE),
             file_language: host::FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
@@ -1737,7 +1792,7 @@ fn host_update_to_ffi_export_signatures() {
         "barrel file must produce export signatures"
     );
 
-    let ffi = host_update_to_ffi(result, None);
+    let ffi = host_update_to_ffi(result, Some(BARREL_SOURCE)).expect("spans convert");
 
     // Positive: re-export signatures are mapped correctly
     let button_sig = ffi.export_signatures.iter().find(|s| s.name == "Button");
@@ -1767,7 +1822,7 @@ fn host_update_to_ffi_export_signatures_local_exports() {
         })
         .unwrap();
 
-    let ffi = host_update_to_ffi(result, None);
+    let ffi = host_update_to_ffi(result, None).expect("spans convert");
 
     let greet_sig = ffi.export_signatures.iter().find(|s| s.name == "greet");
     assert!(greet_sig.is_some(), "local export must be present");
@@ -1783,7 +1838,7 @@ fn host_update_to_ffi_export_signatures_local_exports() {
 #[test]
 fn host_update_to_ffi_export_signatures_empty() {
     let result = host::HostUpdateResult::no_change("/src/Empty.vue".to_string());
-    let ffi = host_update_to_ffi(result, None);
+    let ffi = host_update_to_ffi(result, None).expect("spans convert");
     assert!(
         ffi.export_signatures.is_empty(),
         "no-change result must have empty export_signatures"
@@ -1807,10 +1862,10 @@ fn host_update_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
         ..host::HostUpdateResult::no_change("x".to_string())
     };
 
-    let ffi = host_update_to_ffi(result, Some(source));
+    let ffi = host_update_to_ffi(result, Some(source)).expect("spans convert");
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, 3);
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
 }
 
 #[test]
@@ -1826,7 +1881,7 @@ fn update_result_external_block_kinds() {
             external_source_requests: vec![external_source_request(*host_kind)],
             ..host::HostUpdateResult::no_change("x".to_string())
         };
-        let ffi = host_update_to_ffi(result, Some("source"));
+        let ffi = host_update_to_ffi(result, Some("source")).expect("spans convert");
         assert_eq!(
             ffi.external_source_requests[0].block_kind, *expected_str,
             "block kind mismatch"
@@ -1875,8 +1930,8 @@ fn virtual_file_arc_to_string() {
     assert_eq!(ffi.meta.scope_id, Some("data-v-abc123".to_string()));
     assert!(ffi.meta.block_type.is_none());
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, 3);
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
 }
 
 #[test]
@@ -1907,8 +1962,8 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
 
     let ffi = host_virtual_file_to_ffi(response, Some(source));
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, 3);
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
 }
 
 #[test]
@@ -2108,69 +2163,77 @@ fn ffi_conversion_error_display_all_variants() {
 /// Empty source: byte_offset 0 → UTF-16 offset 0.
 #[test]
 fn utf16_empty_source() {
-    assert_eq!(byte_offset_to_utf16("", 0), 0);
+    assert_eq!(byte_offset_to_utf16("", 0), Ok(0));
 }
 
-/// Out-of-bounds offset: an offset beyond the end of the source clamps
-/// to the end, returning the total UTF-16 length rather than panicking.
+/// Out-of-bounds offset: an offset beyond the end of the source is refused
+/// (`InvalidBoundary`), never clamped to the end.
 #[test]
-fn utf16_out_of_bounds_clamps_to_end() {
+fn utf16_out_of_bounds_is_refused_not_clamped() {
+    use verter_span::CoordError;
     let source = "hello"; // 5 bytes, 5 UTF-16 code units
-                          // offset 999 is way past the end
-    assert_eq!(byte_offset_to_utf16(source, 999), 5);
-    // offset exactly one past the end also clamps
-    assert_eq!(byte_offset_to_utf16(source, 6), 5);
+    assert_eq!(byte_offset_to_utf16(source, 5), Ok(5));
+    assert_eq!(
+        byte_offset_to_utf16(source, 6),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        byte_offset_to_utf16(source, 999),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        utf8_to_utf32_offset(source, 6),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        OffsetIndex::new(source).to_utf16(6),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        OffsetIndex::new(source).to_utf32(6),
+        Err(CoordError::InvalidBoundary)
+    );
 }
 
-/// Mid-character clamping for a 2-byte UTF-8 sequence (U+00E9, "é").
-///
-/// "é" encodes as `[0xC3, 0xA9]` (2 bytes).  A byte offset that lands on
-/// the continuation byte (offset 1 inside "é") must clamp backward to the
-/// start of the character (offset 0) rather than producing an invalid
-/// UTF-8 slice.  The resulting UTF-16 offset is 0 (nothing before "é").
+/// A byte offset on a continuation byte of a 2-byte sequence (U+00E9, "é")
+/// is refused (`NotCharBoundary`), never snapped back to the character start.
 #[test]
-fn utf16_mid_char_2byte_clamps_to_char_start() {
-    // "é" = U+00E9, UTF-8: [0xC3, 0xA9] (2 bytes), 1 UTF-16 code unit
+fn utf16_mid_char_2byte_is_refused_not_snapped() {
+    use verter_span::CoordError;
     let source = "é"; // byte length == 2
     assert_eq!(source.len(), 2, "sanity: é is 2 bytes");
-
-    // byte offset 0: before "é" → 0 UTF-16 code units
-    assert_eq!(byte_offset_to_utf16(source, 0), 0);
-
-    // byte offset 1 falls on the continuation byte → clamps to 0 → 0 UTF-16 CUs
+    assert_eq!(byte_offset_to_utf16(source, 0), Ok(0));
     assert_eq!(
         byte_offset_to_utf16(source, 1),
-        0,
-        "mid-character offset must clamp to char start"
+        Err(CoordError::NotCharBoundary)
     );
-
-    // byte offset 2: at/after end → 1 UTF-16 code unit (the full "é")
-    assert_eq!(byte_offset_to_utf16(source, 2), 1);
+    assert_eq!(byte_offset_to_utf16(source, 2), Ok(1));
 }
 
-/// Mid-character clamping for a 4-byte UTF-8 sequence (U+1F600, "😀").
-///
-/// "😀" encodes as 4 bytes and requires 2 UTF-16 code units (a surrogate
-/// pair).  Any byte offset landing inside the 4-byte sequence must clamp
-/// backward to byte 0 of the character, yielding 0 UTF-16 code units
-/// (nothing before the emoji).
+/// Every byte offset inside the 4-byte sequence "😀" is refused; the offsets
+/// on either side convert exactly (0 and 2 UTF-16 code units).
 #[test]
-fn utf16_mid_char_4byte_surrogate_pair_clamps_to_char_start() {
-    // "😀" = U+1F600, UTF-8: 4 bytes, UTF-16: 2 code units (surrogate pair)
+fn utf16_mid_char_4byte_is_refused_not_snapped() {
+    use verter_span::CoordError;
     let source = "😀";
     assert_eq!(source.len(), 4, "sanity: 😀 is 4 bytes");
-
-    // offsets 1, 2, 3 all land inside the 4-byte sequence
     for mid in 1u32..=3 {
         assert_eq!(
             byte_offset_to_utf16(source, mid),
-            0,
-            "byte offset {mid} inside 😀 must clamp to 0 UTF-16 CUs"
+            Err(CoordError::NotCharBoundary),
+            "byte offset {mid} inside 😀 is not a boundary"
+        );
+        assert_eq!(
+            OffsetIndex::new(source).to_utf16(mid),
+            Err(CoordError::NotCharBoundary)
+        );
+        assert_eq!(
+            utf8_to_utf32_offset(source, mid),
+            Err(CoordError::NotCharBoundary)
         );
     }
-
-    // byte offset 4 (past the char) → 2 UTF-16 code units
-    assert_eq!(byte_offset_to_utf16(source, 4), 2);
+    assert_eq!(byte_offset_to_utf16(source, 0), Ok(0));
+    assert_eq!(byte_offset_to_utf16(source, 4), Ok(2));
 }
 
 /// A requester UTF-16 offset converts exactly or is refused with a typed
@@ -2203,6 +2266,43 @@ fn utf16_to_byte_offset_is_exact_or_refused() {
     assert_eq!(utf16_to_byte_offset("\u{e9}x", 1), Ok(2));
 }
 
+/// The request-offset adapter honours the declared tag and refuses an
+/// unknown one — a position is never interpreted under a guessed encoding.
+#[test]
+fn request_offset_adapter_honours_the_declared_tag() {
+    let source = "a\u{1F600}b";
+    assert_eq!(
+        request_offset_to_byte(source, 3, SpanEncodingTag::Utf16),
+        Ok(5)
+    );
+    assert_eq!(
+        request_offset_to_byte(source, 3, SpanEncodingTag::Utf8),
+        Err(FfiConversionError::InvalidPosition("NotCharBoundary")),
+        "byte 3 is inside the emoji"
+    );
+    assert_eq!(
+        request_offset_to_byte(source, 5, SpanEncodingTag::Utf8),
+        Ok(5)
+    );
+    assert_eq!(
+        request_offset_to_byte(source, 7, SpanEncodingTag::Utf8),
+        Err(FfiConversionError::InvalidPosition("InvalidBoundary"))
+    );
+    assert_eq!(
+        parse_request_encoding_tag("utf16.v1"),
+        Ok(SpanEncodingTag::Utf16)
+    );
+    for bad in ["", "utf16", "utf8", "utf-16", "utf16.v2", "UTF16.v1"] {
+        assert!(
+            matches!(
+                parse_request_encoding_tag(bad),
+                Err(FfiConversionError::InvalidEncodingTag(_))
+            ),
+            "{bad:?} is not a versioned tag"
+        );
+    }
+}
+
 /// Verify that ASCII text is a 1:1 mapping (byte offset == UTF-16 offset).
 #[test]
 fn utf16_ascii_identity() {
@@ -2210,7 +2310,7 @@ fn utf16_ascii_identity() {
     for i in 0..=(source.len() as u32) {
         assert_eq!(
             byte_offset_to_utf16(source, i),
-            i,
+            Ok(i),
             "ASCII byte offset {i} should equal its UTF-16 offset"
         );
     }
@@ -2220,60 +2320,68 @@ fn utf16_ascii_identity() {
 /// correct UTF-16 value (prior ASCII chars + 1 CU for the 2-byte char).
 #[test]
 fn utf16_mixed_ascii_and_multibyte() {
+    use verter_span::CoordError;
     // "aé" = 'a' (1 byte) + 'é' (2 bytes) = 3 bytes total, 2 UTF-16 CUs
     let source = "aé";
     assert_eq!(source.len(), 3);
-
-    assert_eq!(byte_offset_to_utf16(source, 0), 0); // before 'a'
-    assert_eq!(byte_offset_to_utf16(source, 1), 1); // after 'a', before 'é'
-                                                    // byte offset 2 is the continuation byte of 'é' → clamps to byte 1 → 1 UTF-16 CU
+    assert_eq!(byte_offset_to_utf16(source, 0), Ok(0)); // before 'a'
+    assert_eq!(byte_offset_to_utf16(source, 1), Ok(1)); // after 'a', before 'é'
     assert_eq!(
         byte_offset_to_utf16(source, 2),
-        1,
-        "continuation byte of é clamps to its char start"
+        Err(CoordError::NotCharBoundary),
+        "continuation byte of é is refused"
     );
-    assert_eq!(byte_offset_to_utf16(source, 3), 2); // after 'é'
+    assert_eq!(byte_offset_to_utf16(source, 3), Ok(2)); // after 'é'
 }
 
 // ── Offset encoding conversion tests ────────────────────────
 
 #[test]
 fn utf8_to_utf16_ascii_identity() {
-    assert_eq!(utf8_to_utf16_offset("hello world", 5), 5);
+    assert_eq!(utf8_to_utf16_offset("hello world", 5), Ok(5));
 }
 
 #[test]
 fn utf8_to_utf16_cjk() {
     // "日本" = 2 CJK chars, 3 bytes each = 6 bytes
     let text = "日本abc";
-    assert_eq!(utf8_to_utf16_offset(text, 0), 0);
-    assert_eq!(utf8_to_utf16_offset(text, 3), 1); // after first CJK
-    assert_eq!(utf8_to_utf16_offset(text, 6), 2); // after second CJK
-    assert_eq!(utf8_to_utf16_offset(text, 7), 3); // after 'a'
+    assert_eq!(utf8_to_utf16_offset(text, 0), Ok(0));
+    assert_eq!(utf8_to_utf16_offset(text, 3), Ok(1)); // after first CJK
+    assert_eq!(utf8_to_utf16_offset(text, 6), Ok(2)); // after second CJK
+    assert_eq!(utf8_to_utf16_offset(text, 7), Ok(3)); // after 'a'
 }
 
 #[test]
 fn utf8_to_utf16_emoji_surrogate() {
     // 😀 = 4 bytes UTF-8, 2 code units UTF-16
     let text = "a😀b";
-    assert_eq!(utf8_to_utf16_offset(text, 0), 0);
-    assert_eq!(utf8_to_utf16_offset(text, 1), 1); // after 'a'
-    assert_eq!(utf8_to_utf16_offset(text, 5), 3); // after emoji (1+2)
-    assert_eq!(utf8_to_utf16_offset(text, 6), 4); // after 'b'
+    assert_eq!(utf8_to_utf16_offset(text, 0), Ok(0));
+    assert_eq!(utf8_to_utf16_offset(text, 1), Ok(1)); // after 'a'
+    assert_eq!(utf8_to_utf16_offset(text, 5), Ok(3)); // after emoji (1+2)
+    assert_eq!(utf8_to_utf16_offset(text, 6), Ok(4)); // after 'b'
 }
 
 #[test]
-fn convert_offset_utf8_passthrough() {
-    assert_eq!(convert_offset("hello", 3, OffsetEncoding::Utf8), 3);
+fn convert_offset_utf8_is_validated_not_blind_passthrough() {
+    use verter_span::CoordError;
+    assert_eq!(convert_offset("hello", 3, OffsetEncoding::Utf8), Ok(3));
+    assert_eq!(
+        convert_offset("hello", 9, OffsetEncoding::Utf8),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        convert_offset("é", 1, OffsetEncoding::Utf8),
+        Err(CoordError::NotCharBoundary)
+    );
 }
 
 #[test]
 fn utf8_to_utf32_basic() {
     let text = "a😀b";
-    assert_eq!(utf8_to_utf32_offset(text, 0), 0);
-    assert_eq!(utf8_to_utf32_offset(text, 1), 1); // after 'a'
-    assert_eq!(utf8_to_utf32_offset(text, 5), 2); // after emoji (1 codepoint)
-    assert_eq!(utf8_to_utf32_offset(text, 6), 3); // after 'b'
+    assert_eq!(utf8_to_utf32_offset(text, 0), Ok(0));
+    assert_eq!(utf8_to_utf32_offset(text, 1), Ok(1)); // after 'a'
+    assert_eq!(utf8_to_utf32_offset(text, 5), Ok(2)); // after emoji (1 codepoint)
+    assert_eq!(utf8_to_utf32_offset(text, 6), Ok(3)); // after 'b'
 }
 
 // ── E1 origin graph tests ────────────────────────────────────────
@@ -3279,22 +3387,25 @@ fn binding_return_wrapper_role_crosses_the_ffi_boundary_with_exactness_intact() 
 // scalar helpers (which carry their own ASCII fast path and would mask a
 // shared error).
 
-/// Prefix-rescan reference for the UTF-16 axis. Deliberately naive.
-fn reference_utf16(source: &str, byte_offset: u32) -> u32 {
-    let mut clamped = (byte_offset as usize).min(source.len());
-    while clamped > 0 && !source.is_char_boundary(clamped) {
-        clamped -= 1;
-    }
-    source[..clamped].encode_utf16().count() as u32
+/// Prefix-rescan reference for the UTF-16 axis. Deliberately naive, and
+/// exact-or-refused like the contract: no clamping, no snapping.
+fn reference_utf16(source: &str, byte_offset: u32) -> Result<u32, verter_span::CoordError> {
+    reference_prefix(source, byte_offset).map(|p| p.encode_utf16().count() as u32)
 }
 
 /// Prefix-rescan reference for the UTF-32 axis.
-fn reference_utf32(source: &str, byte_offset: u32) -> u32 {
-    let mut clamped = (byte_offset as usize).min(source.len());
-    while clamped > 0 && !source.is_char_boundary(clamped) {
-        clamped -= 1;
+fn reference_utf32(source: &str, byte_offset: u32) -> Result<u32, verter_span::CoordError> {
+    reference_prefix(source, byte_offset).map(|p| p.chars().count() as u32)
+}
+
+fn reference_prefix(source: &str, byte_offset: u32) -> Result<&str, verter_span::CoordError> {
+    let offset = byte_offset as usize;
+    if offset > source.len() {
+        return Err(verter_span::CoordError::InvalidBoundary);
     }
-    source[..clamped].chars().count() as u32
+    source
+        .get(..offset)
+        .ok_or(verter_span::CoordError::NotCharBoundary)
 }
 
 /// Sources exercising every UTF-8 width, surrogate pairs, combining marks,
@@ -3365,64 +3476,96 @@ fn scalar_conversions_match_prefix_rescan_for_every_byte_offset() {
 
 #[test]
 fn offset_index_astral_and_combining_hand_computed() {
+    use verter_span::CoordError;
     // "a😀é" — 'a' 1 byte / 1 unit, '😀' 4 bytes / 2 units (surrogate pair),
     // 'é' (precomposed U+00E9) 2 bytes / 1 unit. 7 bytes, 4 UTF-16 units,
     // 3 scalars.
     let source = "a\u{1F600}\u{00E9}";
     assert_eq!(source.len(), 7);
     let index = OffsetIndex::new(source);
-    assert_eq!(index.to_utf16(0), 0);
-    assert_eq!(index.to_utf16(1), 1);
-    // Offsets 2..=4 land inside the emoji and clamp back to its start.
-    assert_eq!(index.to_utf16(2), 1);
-    assert_eq!(index.to_utf16(3), 1);
-    assert_eq!(index.to_utf16(4), 1);
-    assert_eq!(index.to_utf16(5), 3, "after the surrogate pair");
-    assert_eq!(index.to_utf16(6), 3, "continuation byte of é clamps back");
-    assert_eq!(index.to_utf16(7), 4);
-    assert_eq!(index.to_utf32(5), 2, "two scalars precede é");
-    assert_eq!(index.to_utf32(7), 3);
+    assert_eq!(index.to_utf16(0), Ok(0));
+    assert_eq!(index.to_utf16(1), Ok(1));
+    // Offsets 2..=4 land inside the emoji and are refused, never snapped.
+    for inside in 2..=4 {
+        assert_eq!(index.to_utf16(inside), Err(CoordError::NotCharBoundary));
+        assert_eq!(index.to_utf32(inside), Err(CoordError::NotCharBoundary));
+    }
+    assert_eq!(index.to_utf16(5), Ok(3), "after the surrogate pair");
+    assert_eq!(
+        index.to_utf16(6),
+        Err(CoordError::NotCharBoundary),
+        "continuation byte of é is refused"
+    );
+    assert_eq!(index.to_utf16(7), Ok(4));
+    assert_eq!(index.to_utf32(5), Ok(2), "two scalars precede é");
+    assert_eq!(index.to_utf32(7), Ok(3));
+    assert_eq!(index.to_utf16(8), Err(CoordError::InvalidBoundary));
 
     // Combining mark: 'e' + U+0301. Three bytes, two UTF-16 units, two
     // scalars — the combining mark is NOT folded into the base character.
     let combining = "e\u{0301}";
     assert_eq!(combining.len(), 3);
     let index = OffsetIndex::new(combining);
-    assert_eq!(index.to_utf16(1), 1, "after the base 'e'");
-    assert_eq!(index.to_utf16(2), 1, "inside the combining mark, clamps");
-    assert_eq!(index.to_utf16(3), 2, "base plus combining mark");
-    assert_eq!(index.to_utf32(3), 2);
+    assert_eq!(index.to_utf16(1), Ok(1), "after the base 'e'");
+    assert_eq!(
+        index.to_utf16(2),
+        Err(CoordError::NotCharBoundary),
+        "inside the combining mark"
+    );
+    assert_eq!(index.to_utf16(3), Ok(2), "base plus combining mark");
+    assert_eq!(index.to_utf32(3), Ok(2));
 }
 
 #[test]
-fn offset_index_pure_ascii_is_clamped_identity() {
+fn offset_index_pure_ascii_is_checked_identity() {
+    use verter_span::CoordError;
     let source = "hello world";
     let index = OffsetIndex::new(source);
     for byte_offset in 0..=(source.len() as u32) {
-        assert_eq!(index.to_utf16(byte_offset), byte_offset);
-        assert_eq!(index.to_utf32(byte_offset), byte_offset);
+        assert_eq!(index.to_utf16(byte_offset), Ok(byte_offset));
+        assert_eq!(index.to_utf32(byte_offset), Ok(byte_offset));
     }
-    assert_eq!(index.to_utf16(999), source.len() as u32);
-    assert_eq!(index.to_utf32(999), source.len() as u32);
+    assert_eq!(index.to_utf16(999), Err(CoordError::InvalidBoundary));
+    assert_eq!(index.to_utf32(999), Err(CoordError::InvalidBoundary));
 }
 
 #[test]
-fn offset_index_convert_honours_utf8_passthrough() {
+fn offset_index_convert_validates_every_encoding() {
+    use verter_span::CoordError;
     let source = "a\u{1F600}b";
     let index = OffsetIndex::new(source);
-    // UTF-8 is a pass-through, NOT a clamp: the raw byte offset survives.
-    assert_eq!(index.convert(3, OffsetEncoding::Utf8), 3);
-    assert_eq!(index.convert(999, OffsetEncoding::Utf8), 999);
-    assert_eq!(index.convert(5, OffsetEncoding::Utf16), 3);
-    assert_eq!(index.convert(5, OffsetEncoding::Utf32), 2);
+    // UTF-8 is validated against the source, not passed through blind.
+    assert_eq!(index.convert(1, OffsetEncoding::Utf8), Ok(1));
+    assert_eq!(
+        index.convert(3, OffsetEncoding::Utf8),
+        Err(CoordError::NotCharBoundary)
+    );
+    assert_eq!(
+        index.convert(999, OffsetEncoding::Utf8),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(index.convert(5, OffsetEncoding::Utf16), Ok(3));
+    assert_eq!(index.convert(5, OffsetEncoding::Utf32), Ok(2));
+    // Ranges: both endpoints are validated and an inverted range is refused.
+    assert_eq!(index.convert_range(1, 5, OffsetEncoding::Utf16), Ok((1, 3)));
+    assert_eq!(
+        index.convert_range(5, 1, OffsetEncoding::Utf16),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        index.convert_range(0, 3, OffsetEncoding::Utf16),
+        Err(CoordError::NotCharBoundary)
+    );
 }
 
 #[test]
-fn lint_diagnostics_to_utf16_converts_every_span_in_source_order_agnostic_batches() {
+fn lint_diagnostics_to_wire_utf16_converts_every_span_in_source_order_agnostic_batches() {
     // Two astral characters and spans supplied OUT of ascending order: one
-    // shared index must convert each span independently of visit order.
+    // shared index must convert each span independently of visit order. The
+    // spans sit on character boundaries (an off-boundary endpoint is refused,
+    // see the refusal test).
     let source = "\u{1F600}abc\u{1F601}def";
-    let spans = [(9u32, 13u32), (0, 4), (4, 5), (13, 16)];
+    let spans = [(7u32, 11u32), (0, 4), (4, 5), (11, 14)];
     let input: Vec<_> = spans
         .iter()
         .map(|(start, end)| verter_diagnostics::LintDiagnostic {
@@ -3439,26 +3582,47 @@ fn lint_diagnostics_to_utf16_converts_every_span_in_source_order_agnostic_batche
         })
         .collect();
 
-    let out = lint_diagnostics_to_utf16(input, Some(source));
+    let out = lint_diagnostics_to_wire_utf16(input, Some(source));
     assert_eq!(out.len(), 4);
     for (diagnostic, (start, end)) in out.iter().zip(spans.iter()) {
         assert_eq!(
             diagnostic.span.start,
-            reference_utf16(source, *start),
+            Some(reference_utf16(source, *start).expect("boundary")),
             "start of span ({start}, {end})"
         );
         assert_eq!(
             diagnostic.span.end,
-            reference_utf16(source, *end),
+            Some(reference_utf16(source, *end).expect("boundary")),
             "end of span ({start}, {end})"
         );
     }
-    // Concretely, for the first (out-of-order, mid-character) span (9, 13):
-    // byte 9 is inside the second emoji (bytes 7..11) and clamps back to 7,
-    // which is 2 + 3 = 5 UTF-16 units in. Byte 13 sits at 'f' in the trailing
-    // "def", which is 2 + 3 + 2 + 2 = 9 units in.
-    assert_eq!(out[0].span.start, 5);
-    assert_eq!(out[0].span.end, 9);
+    // Concretely, for the first (out-of-order) span (7, 11): byte 7 starts the
+    // second emoji, which is 2 + 3 = 5 UTF-16 units in; byte 11 follows it.
+    assert_eq!(out[0].span.start, Some(5));
+    assert_eq!(out[0].span.end, Some(7));
+}
+
+#[test]
+fn lint_diagnostics_to_wire_utf16_refuses_an_off_boundary_endpoint_per_diagnostic() {
+    // Byte 9 is inside the second emoji (bytes 7..11): that diagnostic carries
+    // the typed refusal and no span; its neighbour still converts.
+    let source = "\u{1F600}abc\u{1F601}def";
+    let make = |start, end| verter_diagnostics::LintDiagnostic {
+        rule: "r".to_string(),
+        category: "c".to_string(),
+        severity: verter_diagnostics::Severity::Error,
+        message: "m".to_string(),
+        span: verter_span::Span::new(start, end),
+        tags: vec![],
+        span_kind: verter_diagnostics::DiagnosticSpanKind::ElementOpenTag,
+        certainty: verter_diagnostics::Certainty::Definite,
+        evidence: Vec::new(),
+        related_files: Vec::new(),
+    };
+    let out = lint_diagnostics_to_wire_utf16(vec![make(9, 13), make(0, 4)], Some(source));
+    assert_eq!((out[0].span.start, out[0].span.end), (None, None));
+    assert_eq!(out[0].span.error, Some("NotCharBoundary"));
+    assert_eq!((out[1].span.start, out[1].span.end), (Some(0), Some(2)));
 }
 
 // ── Sealed style block token (wire identity) ─────────────────────────

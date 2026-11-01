@@ -2021,7 +2021,9 @@ impl DocumentRegistry {
             // UTF-8 byte offsets are native — no conversion needed.
             // For UTF-16 or UTF-32, convert all span offsets.
             let source = self.documents.get(uri.as_str())?.source.clone();
-            convert_analysis_spans_json(&mut json, &source, &encoding);
+            // A span the negotiated encoding cannot name exactly refuses the
+            // whole payload rather than publishing a wrong range.
+            convert_analysis_spans_json(&mut json, &source, &encoding).ok()?;
         }
         Some(json)
     }

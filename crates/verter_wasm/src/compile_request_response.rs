@@ -97,21 +97,22 @@ pub(crate) struct WasmCompileRequestResponse {
 pub(crate) fn ide_response_to_ffi(
     response: &host::IdeResponse,
     sfc_source: Option<&str>,
-) -> FfiIdeResponse {
-    FfiIdeResponse {
+) -> Result<FfiIdeResponse, String> {
+    Ok(FfiIdeResponse {
         code: response.code.to_string(),
         source_map: response.source_map.as_ref().map(ToString::to_string),
         is_jsx: response.is_jsx,
-        destructured_block: destructured_block_to_ffi(response, sfc_source),
-    }
+        destructured_block: destructured_block_to_ffi(response, sfc_source)?,
+    })
 }
 
 fn destructured_block_to_ffi(
     response: &host::IdeResponse,
     sfc_source: Option<&str>,
-) -> Option<FfiDestructuredBlockMeta> {
-    let meta = response.destructured_block.as_ref()?;
-    let sfc = sfc_source.unwrap_or("");
+) -> Result<Option<FfiDestructuredBlockMeta>, String> {
+    let Some(meta) = response.destructured_block.as_ref() else {
+        return Ok(None);
+    };
     let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
         .bindings
         .iter()
@@ -121,14 +122,16 @@ fn destructured_block_to_ffi(
             source_end: binding.source_span.end,
         })
         .collect();
-    Some(verter_ffi::convert::convert_destructured_block_meta(
+    verter_ffi::convert::convert_destructured_block_meta(
         &bindings,
         meta.block_start,
         meta.block_end,
-        sfc,
+        sfc_source,
         &response.code,
-        verter_ffi::convert::OffsetEncoding::Utf16,
-    ))
+        verter_protocol::types::SpanEncodingTag::Utf16,
+    )
+    .map(Some)
+    .map_err(|error| format!("destructured block span cannot be converted exactly: {error}"))
 }
 
 /// Project the session's typed envelope for JavaScript.
@@ -194,7 +197,7 @@ fn compiled_product_to_wasm(
             }
         }
         host::CompiledProduct::Ide(response) => {
-            WasmCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source))
+            WasmCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source)?)
         }
         host::CompiledProduct::Analysis(snapshot) => {
             WasmCompiledProduct::Analysis { analysis: snapshot }

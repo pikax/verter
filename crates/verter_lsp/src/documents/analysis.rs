@@ -883,11 +883,15 @@ impl DocumentRegistry {
 /// One document publish rewrites every span in the analysis payload, so the
 /// source is indexed once (shared `verter_ffi` owner) and every span converts
 /// against that index instead of rescanning the prefix per span.
+///
+/// Exact or refused: a span that is off-boundary or past the end of `source`
+/// refuses the whole payload (`value` is then partially converted and must be
+/// discarded), never a clamped or byte pass-through span.
 pub(super) fn convert_analysis_spans_json(
     value: &mut serde_json::Value,
     source: &str,
     encoding: &PositionEncodingKind,
-) {
+) -> Result<(), verter_span::CoordError> {
     let encoding = if *encoding == PositionEncodingKind::UTF16 {
         verter_ffi::convert::OffsetEncoding::Utf16
     } else if *encoding == PositionEncodingKind::UTF32 {
@@ -896,17 +900,17 @@ pub(super) fn convert_analysis_spans_json(
         verter_ffi::convert::OffsetEncoding::Utf8
     };
     if encoding == verter_ffi::convert::OffsetEncoding::Utf8 {
-        return;
+        return Ok(());
     }
     let index = verter_ffi::convert::OffsetIndex::new(source);
-    convert_analysis_spans_with_index(value, &index, encoding);
+    convert_analysis_spans_with_index(value, &index, encoding)
 }
 
 fn convert_analysis_spans_with_index(
     value: &mut serde_json::Value,
     index: &verter_ffi::convert::OffsetIndex<'_>,
     encoding: verter_ffi::convert::OffsetEncoding,
-) {
+) -> Result<(), verter_span::CoordError> {
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
@@ -914,20 +918,23 @@ fn convert_analysis_spans_with_index(
                     .as_u64()
                     .filter(|_| key == "spanStart" || key == "spanEnd")
                 {
-                    let converted = index.convert(byte_offset as u32, encoding);
+                    let byte_offset = u32::try_from(byte_offset)
+                        .map_err(|_| verter_span::CoordError::Overflow)?;
+                    let converted = index.convert(byte_offset, encoding)?;
                     *val = serde_json::Value::Number(serde_json::Number::from(converted));
                 } else {
-                    convert_analysis_spans_with_index(val, index, encoding);
+                    convert_analysis_spans_with_index(val, index, encoding)?;
                 }
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                convert_analysis_spans_with_index(value, index, encoding);
+                convert_analysis_spans_with_index(value, index, encoding)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1014,7 +1021,8 @@ mod tests {
             ..Default::default()
         };
         let mut json = serde_json::to_value(&snapshot).expect("serialize snapshot");
-        convert_analysis_spans_json(&mut json, source, &PositionEncodingKind::UTF16);
+        convert_analysis_spans_json(&mut json, source, &PositionEncodingKind::UTF16)
+            .expect("spans are in extent");
         let diag = &json["expressionDiagnostics"][0];
         assert_eq!(
             diag["spanStart"],

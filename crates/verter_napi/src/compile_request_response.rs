@@ -8,8 +8,8 @@
 use napi::bindgen_prelude::*;
 use napi::{Env, Error, Result, Status};
 use verter_compiler::compile_request::{CompileRequestError, ProductKind};
-use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string};
-use verter_protocol::types::FfiDiagnostic;
+use verter_ffi::convert::host_error_to_string;
+use verter_protocol::types::{FfiDiagnostic, SpanEncodingTag};
 use verter_session as host;
 
 use crate::{
@@ -44,22 +44,24 @@ impl From<FfiDiagnostic> for NapiDiagnostic {
             message: diagnostic.message,
             spanStart: diagnostic.span_start,
             spanEnd: diagnostic.span_end,
+            spanEncoding: diagnostic.span_encoding.as_wire().to_string(),
+            spanError: diagnostic.span_error,
         }
     }
-}
-
-pub(crate) fn host_diagnostic_to_napi(
-    diagnostic: &host::HostDiagnostic,
-    source: Option<&str>,
-) -> NapiDiagnostic {
-    verter_ffi::convert::host_diagnostic_to_ffi(diagnostic, source).into()
 }
 
 pub(crate) fn host_diagnostics_to_napi(
     input: &host::DiagnosticsSnapshot,
     source: Option<&str>,
 ) -> NapiDiagnosticsSnapshot {
-    let snapshot = host_diagnostics_to_ffi(input, source);
+    host_diagnostics_to_napi_with(input, &verter_ffi::convert::SpanConverter::new(source))
+}
+
+pub(crate) fn host_diagnostics_to_napi_with(
+    input: &host::DiagnosticsSnapshot,
+    spans: &verter_ffi::convert::SpanConverter<'_>,
+) -> NapiDiagnosticsSnapshot {
+    let snapshot = verter_ffi::convert::host_diagnostics_to_ffi_with(input, spans);
     NapiDiagnosticsSnapshot {
         diagnostics: snapshot.diagnostics.into_iter().map(Into::into).collect(),
         hasErrors: snapshot.has_errors,
@@ -73,45 +75,57 @@ fn empty_diagnostics_snapshot() -> NapiDiagnosticsSnapshot {
     }
 }
 
-pub(crate) fn host_ide_to_napi(input: host::IdeResponse, source: &str) -> NapiIdeResponse {
-    let destructured_block = input.destructured_block.as_ref().map(|meta| {
-        let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
-            .bindings
-            .iter()
-            .map(|binding| verter_ffi::convert::DestructuredBindingInput {
-                name: &binding.name,
-                source_start: binding.source_span.start,
-                source_end: binding.source_span.end,
-            })
-            .collect();
-        let ffi = verter_ffi::convert::convert_destructured_block_meta(
-            &bindings,
-            meta.block_start,
-            meta.block_end,
-            source,
-            &input.code,
-            verter_ffi::convert::OffsetEncoding::Utf16,
-        );
-        NapiDestructuredBlockMeta {
-            bindings: ffi
+pub(crate) fn host_ide_to_napi(input: host::IdeResponse, source: &str) -> Result<NapiIdeResponse> {
+    let destructured_block = input
+        .destructured_block
+        .as_ref()
+        .map(|meta| {
+            let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
                 .bindings
-                .into_iter()
-                .map(|binding| NapiDestructuredBinding {
-                    name: binding.name,
-                    sourceStart: binding.source_start,
-                    sourceEnd: binding.source_end,
+                .iter()
+                .map(|binding| verter_ffi::convert::DestructuredBindingInput {
+                    name: &binding.name,
+                    source_start: binding.source_span.start,
+                    source_end: binding.source_span.end,
                 })
-                .collect(),
-            blockStart: ffi.block_start,
-            blockEnd: ffi.block_end,
-        }
-    });
-    NapiIdeResponse {
+                .collect();
+            let ffi = verter_ffi::convert::convert_destructured_block_meta(
+                &bindings,
+                meta.block_start,
+                meta.block_end,
+                Some(source),
+                &input.code,
+                SpanEncodingTag::Utf16,
+            )
+            .map_err(|error| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("destructured block span cannot be converted exactly: {error}"),
+                )
+            })?;
+            Ok::<_, Error>(NapiDestructuredBlockMeta {
+                bindings: ffi
+                    .bindings
+                    .into_iter()
+                    .map(|binding| NapiDestructuredBinding {
+                        name: binding.name,
+                        sourceStart: binding.source_start,
+                        sourceEnd: binding.source_end,
+                        sourceEncoding: binding.source_encoding.as_wire().to_string(),
+                    })
+                    .collect(),
+                blockStart: ffi.block_start,
+                blockEnd: ffi.block_end,
+                blockEncoding: ffi.block_encoding.as_wire().to_string(),
+            })
+        })
+        .transpose()?;
+    Ok(NapiIdeResponse {
         code: input.code.to_string(),
         sourceMap: input.source_map.map(|map| map.to_string()),
         isJsx: input.is_jsx,
         destructuredBlock: destructured_block,
-    }
+    })
 }
 
 pub(crate) fn compile_request_response_to_napi(
@@ -163,7 +177,7 @@ pub(crate) fn compile_request_response_to_napi(
             host::CompiledProduct::Ide(ide) => Ok(NapiCompileRequestProduct {
                 kind: ProductKind::IdeCompanion.wire_tag().to_string(),
                 nodes: None,
-                ide: Some(host_ide_to_napi(ide, source)),
+                ide: Some(host_ide_to_napi(ide, source)?),
                 analysis: None,
             }),
             host::CompiledProduct::Analysis(analysis) => {

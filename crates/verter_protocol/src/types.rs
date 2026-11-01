@@ -15,6 +15,52 @@
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
+// Coordinate contract (versioned span / offset encoding tags)
+// =============================================================================
+
+/// Version of the public coordinate contract: the tag vocabulary below plus
+/// the rule that every wire span names its encoding. A change to either bumps
+/// the version suffix of every tag.
+pub const COORDINATE_CONTRACT_VERSION: u32 = 1;
+
+/// Closed, versioned tag naming the unit a wire span or offset is measured
+/// in. Positions are 0-based, half-open for ranges, counted from the start of
+/// the file the owning record names. The wire string carries the contract
+/// version so a consumer rejects a tag from a future contract instead of
+/// misreading it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SpanEncodingTag {
+    /// UTF-8 bytes (Rust-native; MCP).
+    #[serde(rename = "utf8.v1")]
+    Utf8,
+    /// UTF-16 code units (JavaScript strings; NAPI / WASM).
+    #[serde(rename = "utf16.v1")]
+    Utf16,
+}
+
+impl SpanEncodingTag {
+    /// The wire spelling of this tag.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf8.v1",
+            Self::Utf16 => "utf16.v1",
+        }
+    }
+
+    /// Parse a wire tag; an unknown tag (including an unversioned or
+    /// future-version spelling) is refused.
+    #[must_use]
+    pub fn from_wire(tag: &str) -> Option<Self> {
+        match tag {
+            "utf8.v1" => Some(Self::Utf8),
+            "utf16.v1" => Some(Self::Utf16),
+            _ => None,
+        }
+    }
+}
+
+// =============================================================================
 // Shared (both input and output)
 // =============================================================================
 
@@ -567,8 +613,19 @@ pub struct FfiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Span start in `span_encoding` units; absent when the span could not be
+    /// converted exactly (see `span_error`). Never a byte pass-through.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_start: Option<u32>,
+    /// Span end in `span_encoding` units; absent with `span_start`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_end: Option<u32>,
+    /// Encoding of `span_start`/`span_end`.
+    pub span_encoding: SpanEncodingTag,
+    /// Typed refusal (`SourceUnavailable`, `NotCharBoundary`,
+    /// `InvalidBoundary`, `Overflow`) when the span could not be produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_error: Option<String>,
 }
 
 /// Collection of diagnostics with a precomputed `hasErrors` flag.
@@ -618,6 +675,8 @@ pub struct FfiModuleReference {
     pub span_end: u32,
     pub expr_span_start: u32,
     pub expr_span_end: u32,
+    /// Encoding of all four span fields (one declared encoding per record).
+    pub span_encoding: SpanEncodingTag,
 }
 
 /// A block that needs external preprocessing before compilation.
@@ -746,6 +805,8 @@ pub struct FfiDestructuredBinding {
     pub source_start: u32,
     /// SFC-absolute end offset of the original source declaration (target encoding).
     pub source_end: u32,
+    /// Encoding of `source_start`/`source_end` (domain: the SFC source).
+    pub source_encoding: SpanEncodingTag,
 }
 
 /// Metadata for the destructured block region in the generated TSX output
@@ -758,6 +819,8 @@ pub struct FfiDestructuredBlockMeta {
     pub block_start: u32,
     /// End offset of the destructured block in the generated TSX output (target encoding).
     pub block_end: u32,
+    /// Encoding of `block_start`/`block_end` (domain: the generated TSX).
+    pub block_encoding: SpanEncodingTag,
 }
 
 /// IDE output for type checking (TSX or JSX, dedicated API, not a virtual file).
@@ -918,6 +981,8 @@ pub struct FfiTextEdit {
     pub span_start: u32,
     /// End offset (UTF-16 for browser consumption).
     pub span_end: u32,
+    /// Encoding of `span_start`/`span_end`.
+    pub span_encoding: SpanEncodingTag,
     /// Replacement text.
     pub new_text: String,
 }
@@ -960,6 +1025,8 @@ pub struct FfiDocumentSymbol {
     pub selection_start: u32,
     /// Selection span end (UTF-16).
     pub selection_end: u32,
+    /// Encoding of the span and selection offsets.
+    pub span_encoding: SpanEncodingTag,
     /// Child symbols.
     pub children: Vec<FfiDocumentSymbol>,
 }
@@ -978,6 +1045,8 @@ pub struct FfiSelectorMatchResult {
     pub selector_start: u32,
     /// Selector span end (UTF-16).
     pub selector_end: u32,
+    /// Encoding of the selector offsets.
+    pub span_encoding: SpanEncodingTag,
     /// Match results against template elements.
     pub matches: Vec<FfiElementMatch>,
 }
@@ -992,6 +1061,8 @@ pub struct FfiElementMatch {
     pub span_start: u32,
     /// Element span end (UTF-16).
     pub span_end: u32,
+    /// Encoding of the element offsets.
+    pub span_encoding: SpanEncodingTag,
     /// Match result: "match", "maybe", or "no".
     pub result: String,
 }

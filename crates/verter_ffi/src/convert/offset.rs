@@ -1,6 +1,8 @@
 //! UTF-8 ↔ UTF-16 / UTF-32 offset conversions and destructured-binding span
 //! translation between encodings used at the FFI boundary.
 
+use super::error::FfiConversionError;
+use super::wire_span::SpanConversionError;
 use crate::types::*;
 use verter_span::CoordError;
 
@@ -41,25 +43,34 @@ use visit_counter::record as record_source_visit;
 #[inline(always)]
 fn record_source_visit(_units: usize) {}
 
-pub(super) fn clamp_to_char_boundary(source: &str, byte_offset: usize) -> usize {
-    let mut clamped = byte_offset.min(source.len());
-    while clamped > 0 && !source.is_char_boundary(clamped) {
-        clamped -= 1;
+/// Validate that `byte_offset` names a position inside `source`: on a UTF-8
+/// character boundary and no further than end-of-file. Never snaps and never
+/// clamps (R06: exact or refused).
+fn checked_boundary(source: &str, byte_offset: u32) -> Result<usize, CoordError> {
+    let offset = byte_offset as usize;
+    if offset > source.len() {
+        return Err(CoordError::InvalidBoundary);
     }
-    clamped
+    if !source.is_char_boundary(offset) {
+        return Err(CoordError::NotCharBoundary);
+    }
+    Ok(offset)
 }
 
-pub fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
-    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
-    let prefix = &source.as_bytes()[..clamped];
+/// UTF-8 byte offset → UTF-16 code-unit offset against `source`, exact or
+/// refused: past-end is [`CoordError::InvalidBoundary`], inside a UTF-8
+/// sequence is [`CoordError::NotCharBoundary`].
+pub fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> Result<u32, CoordError> {
+    let checked = checked_boundary(source, byte_offset)?;
+    let prefix = &source.as_bytes()[..checked];
     // A pure-ASCII prefix has one UTF-16 unit per byte. `is_ascii` is a
     // vectorised byte scan; the fallback decodes and counts per character.
-    record_source_visit(clamped);
+    record_source_visit(checked);
     if prefix.is_ascii() {
-        return clamped as u32;
+        return Ok(byte_offset);
     }
-    record_source_visit(clamped);
-    source[..clamped].encode_utf16().count() as u32
+    record_source_visit(checked);
+    u32::try_from(source[..checked].encode_utf16().count()).map_err(|_| CoordError::Overflow)
 }
 
 /// One-pass offset-conversion index over a single source string.
@@ -123,44 +134,59 @@ impl<'a> OffsetIndex<'a> {
     }
 
     /// Deficits accumulated by every character that ends at or before
-    /// `clamped`. `clamped` is always a character boundary, so no character
-    /// straddles it.
-    fn deficits_before(&self, clamped: u32) -> (u32, u32) {
-        let settled = self.marks.partition_point(|mark| mark.end <= clamped);
+    /// `boundary`. `boundary` has been validated as a character boundary, so
+    /// no character straddles it.
+    fn deficits_before(&self, boundary: u32) -> (u32, u32) {
+        let settled = self.marks.partition_point(|mark| mark.end <= boundary);
         match settled.checked_sub(1).map(|last| self.marks[last]) {
             Some(mark) => (mark.utf16_deficit, mark.utf32_deficit),
             None => (0, 0),
         }
     }
 
-    /// UTF-8 byte offset → UTF-16 code-unit offset.
-    #[must_use]
-    pub fn to_utf16(&self, byte_offset: u32) -> u32 {
-        let clamped = clamp_to_char_boundary(self.source, byte_offset as usize) as u32;
+    /// UTF-8 byte offset → UTF-16 code-unit offset, exact or refused.
+    pub fn to_utf16(&self, byte_offset: u32) -> Result<u32, CoordError> {
+        checked_boundary(self.source, byte_offset)?;
         if self.marks.is_empty() {
-            return clamped;
+            return Ok(byte_offset);
         }
-        clamped - self.deficits_before(clamped).0
+        Ok(byte_offset - self.deficits_before(byte_offset).0)
     }
 
-    /// UTF-8 byte offset → UTF-32 (Unicode scalar) offset.
-    #[must_use]
-    pub fn to_utf32(&self, byte_offset: u32) -> u32 {
-        let clamped = clamp_to_char_boundary(self.source, byte_offset as usize) as u32;
+    /// UTF-8 byte offset → UTF-32 (Unicode scalar) offset, exact or refused.
+    pub fn to_utf32(&self, byte_offset: u32) -> Result<u32, CoordError> {
+        checked_boundary(self.source, byte_offset)?;
         if self.marks.is_empty() {
-            return clamped;
+            return Ok(byte_offset);
         }
-        clamped - self.deficits_before(clamped).1
+        Ok(byte_offset - self.deficits_before(byte_offset).1)
     }
 
-    /// UTF-8 byte offset → the target encoding's offset.
-    #[must_use]
-    pub fn convert(&self, byte_offset: u32, encoding: OffsetEncoding) -> u32 {
+    /// UTF-8 byte offset → the target encoding's offset, exact or refused.
+    pub fn convert(&self, byte_offset: u32, encoding: OffsetEncoding) -> Result<u32, CoordError> {
         match encoding {
-            OffsetEncoding::Utf8 => byte_offset,
+            OffsetEncoding::Utf8 => {
+                checked_boundary(self.source, byte_offset)?;
+                Ok(byte_offset)
+            }
             OffsetEncoding::Utf16 => self.to_utf16(byte_offset),
             OffsetEncoding::Utf32 => self.to_utf32(byte_offset),
         }
+    }
+
+    /// Half-open byte range → the target encoding's range. Both endpoints are
+    /// validated against the source and an inverted range is
+    /// [`CoordError::InvalidBoundary`], never swapped or emptied.
+    pub fn convert_range(
+        &self,
+        start: u32,
+        end: u32,
+        encoding: OffsetEncoding,
+    ) -> Result<(u32, u32), CoordError> {
+        if start > end {
+            return Err(CoordError::InvalidBoundary);
+        }
+        Ok((self.convert(start, encoding)?, self.convert(end, encoding)?))
     }
 }
 
@@ -190,21 +216,31 @@ pub fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> Result<u32, Coor
     Err(CoordError::InvalidBoundary)
 }
 
-/// Convert a mandatory byte offset to UTF-16 when a source string is
-/// available, otherwise pass the byte offset through unconverted.
-pub(super) fn mandatory_utf16_offset(byte_offset: u32, source: Option<&str>) -> u32 {
-    source
-        .map(|s| byte_offset_to_utf16(s, byte_offset))
-        .unwrap_or(byte_offset)
+/// Parse the versioned encoding tag a request declares for its offsets. An
+/// unknown, unversioned or future-version tag is refused — a request position
+/// is never interpreted under a guessed encoding.
+pub fn parse_request_encoding_tag(tag: &str) -> Result<SpanEncodingTag, FfiConversionError> {
+    SpanEncodingTag::from_wire(tag)
+        .ok_or_else(|| FfiConversionError::InvalidEncodingTag(tag.to_string()))
 }
 
-/// Batch form of [`mandatory_utf16_offset`]: convert through the source's
-/// index when there is one, otherwise pass the byte offset through.
-pub(super) fn mandatory_utf16_offset_with(
-    byte_offset: u32,
-    index: Option<&OffsetIndex<'_>>,
-) -> u32 {
-    index.map_or(byte_offset, |index| index.to_utf16(byte_offset))
+/// Requester offset (in the encoding its request tag declares) → UTF-8 byte
+/// offset of `source`, converted once, exact or refused: an offset inside a
+/// UTF-16 surrogate pair or UTF-8 sequence is
+/// [`FfiConversionError::InvalidPosition`]`("NotCharBoundary")`, one past the
+/// end is `InvalidPosition("InvalidBoundary")`.
+pub fn request_offset_to_byte(
+    source: &str,
+    offset: u32,
+    encoding: SpanEncodingTag,
+) -> Result<u32, FfiConversionError> {
+    let converted = match encoding {
+        SpanEncodingTag::Utf16 => utf16_to_byte_offset(source, offset),
+        SpanEncodingTag::Utf8 => checked_boundary(source, offset).map(|_| offset),
+    };
+    converted.map_err(|error| {
+        FfiConversionError::InvalidPosition(SpanConversionError::from(error).code())
+    })
 }
 
 // ── Offset encoding conversion ──────────────────────────────────
@@ -220,34 +256,39 @@ pub enum OffsetEncoding {
     Utf32,
 }
 
-/// Convert a UTF-8 byte offset to the target encoding's offset.
+/// Convert a UTF-8 byte offset to the target encoding's offset, exact or
+/// refused.
 ///
 /// The `text` must be the string the byte offset refers to (either SFC source
 /// or generated TSX). The function counts encoding units from the start of
 /// `text` up to `byte_offset`.
-pub fn convert_offset(text: &str, byte_offset: u32, encoding: OffsetEncoding) -> u32 {
+pub fn convert_offset(
+    text: &str,
+    byte_offset: u32,
+    encoding: OffsetEncoding,
+) -> Result<u32, CoordError> {
     match encoding {
-        OffsetEncoding::Utf8 => byte_offset,
+        OffsetEncoding::Utf8 => checked_boundary(text, byte_offset).map(|_| byte_offset),
         OffsetEncoding::Utf16 => byte_offset_to_utf16(text, byte_offset),
         OffsetEncoding::Utf32 => utf8_to_utf32_offset(text, byte_offset),
     }
 }
 
-/// Convert a UTF-8 byte offset to UTF-16 code unit offset.
-pub fn utf8_to_utf16_offset(text: &str, byte_offset: u32) -> u32 {
+/// Convert a UTF-8 byte offset to UTF-16 code unit offset, exact or refused.
+pub fn utf8_to_utf16_offset(text: &str, byte_offset: u32) -> Result<u32, CoordError> {
     byte_offset_to_utf16(text, byte_offset)
 }
 
-/// Convert a UTF-8 byte offset to UTF-32 (codepoint) offset.
-pub(super) fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> u32 {
-    let clamped = clamp_to_char_boundary(text, byte_offset as usize);
-    let prefix = &text.as_bytes()[..clamped];
-    record_source_visit(clamped);
+/// Convert a UTF-8 byte offset to UTF-32 (codepoint) offset, exact or refused.
+pub(super) fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> Result<u32, CoordError> {
+    let checked = checked_boundary(text, byte_offset)?;
+    let prefix = &text.as_bytes()[..checked];
+    record_source_visit(checked);
     if prefix.is_ascii() {
-        return clamped as u32;
+        return Ok(byte_offset);
     }
-    record_source_visit(clamped);
-    text[..clamped].chars().count() as u32
+    record_source_visit(checked);
+    u32::try_from(text[..checked].chars().count()).map_err(|_| CoordError::Overflow)
 }
 
 /// Input for a single binding's source span conversion.
@@ -257,40 +298,58 @@ pub struct DestructuredBindingInput<'a> {
     pub source_end: u32,
 }
 
-/// Convert destructured block metadata from UTF-8 to the target encoding.
+/// Convert destructured block metadata from UTF-8 to the tagged wire encoding.
 ///
-/// `sfc_source` is the original SFC text (for converting source spans).
-/// `tsx_code` is the generated TSX text (for converting block_start/block_end).
+/// `sfc_source` is the original SFC text the binding spans index; it is
+/// required whenever there is a binding to convert, and its absence is
+/// [`SpanConversionError::SourceUnavailable`] — never zero offsets.
+/// `tsx_code` is the generated TSX the block bounds index (a different
+/// coordinate domain: each field pair names its own encoding). Every endpoint
+/// is validated against its snapshot; an off-boundary, past-end or inverted
+/// range refuses the whole conversion.
 pub fn convert_destructured_block_meta(
     bindings: &[DestructuredBindingInput<'_>],
     block_start: u32,
     block_end: u32,
-    sfc_source: &str,
+    sfc_source: Option<&str>,
     tsx_code: &str,
-    encoding: OffsetEncoding,
-) -> FfiDestructuredBlockMeta {
-    // One index per source, built only when it converts anything: UTF-8 is a
-    // pass-through and an empty binding list touches no SFC offset.
-    let index_for = |text, needed: bool| {
-        (needed && encoding != OffsetEncoding::Utf8).then(|| OffsetIndex::new(text))
+    encoding: SpanEncodingTag,
+) -> Result<FfiDestructuredBlockMeta, SpanConversionError> {
+    let offset_encoding = match encoding {
+        SpanEncodingTag::Utf8 => OffsetEncoding::Utf8,
+        SpanEncodingTag::Utf16 => OffsetEncoding::Utf16,
     };
-    let convert = |index: &Option<OffsetIndex<'_>>, byte_offset| {
-        index
-            .as_ref()
-            .map_or(byte_offset, |index| index.convert(byte_offset, encoding))
+    let tsx_index = OffsetIndex::new(tsx_code);
+    let (block_start, block_end) =
+        tsx_index.convert_range(block_start, block_end, offset_encoding)?;
+    // One index per source, built only when there is a binding to convert.
+    let sfc_index = if bindings.is_empty() {
+        None
+    } else {
+        Some(OffsetIndex::new(
+            sfc_source.ok_or(SpanConversionError::SourceUnavailable)?,
+        ))
     };
-    let sfc_index = index_for(sfc_source, !bindings.is_empty());
-    let tsx_index = index_for(tsx_code, true);
-    FfiDestructuredBlockMeta {
-        bindings: bindings
-            .iter()
-            .map(|b| FfiDestructuredBinding {
+    let bindings = bindings
+        .iter()
+        .map(|b| {
+            let index = sfc_index
+                .as_ref()
+                .ok_or(SpanConversionError::SourceUnavailable)?;
+            let (source_start, source_end) =
+                index.convert_range(b.source_start, b.source_end, offset_encoding)?;
+            Ok(FfiDestructuredBinding {
                 name: b.name.to_string(),
-                source_start: convert(&sfc_index, b.source_start),
-                source_end: convert(&sfc_index, b.source_end),
+                source_start,
+                source_end,
+                source_encoding: encoding,
             })
-            .collect(),
-        block_start: convert(&tsx_index, block_start),
-        block_end: convert(&tsx_index, block_end),
-    }
+        })
+        .collect::<Result<Vec<_>, SpanConversionError>>()?;
+    Ok(FfiDestructuredBlockMeta {
+        bindings,
+        block_start,
+        block_end,
+        block_encoding: encoding,
+    })
 }

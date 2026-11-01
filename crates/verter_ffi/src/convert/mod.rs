@@ -15,6 +15,7 @@
 //! - [`output`] — host → FFI output conversions (diagnostics, updates, errors).
 //! - [`actions`] — `verter_actions::CodeAction` → FFI projection.
 //! - [`lint`] — lint diagnostics span conversion and lint-rule metadata projection.
+//! - [`wire_span`] — checked UTF-16 egress of byte spans to tagged wire spans.
 //! - [`offset`] — UTF-8 ↔ UTF-16 / UTF-32 offset conversions and destructured-binding
 //!   span translation.
 
@@ -27,7 +28,9 @@ mod lint;
 mod offset;
 mod output;
 mod string_helpers;
+mod symbols;
 mod typeinfo;
+mod wire_span;
 
 #[cfg(test)]
 mod capture_equivalence_tests;
@@ -45,4 +48,6 @@ pub use input::*;
 pub use lint::*;
 pub use offset::*;
 pub use output::*;
+pub use symbols::*;
 pub use typeinfo::*;
+pub use wire_span::*;

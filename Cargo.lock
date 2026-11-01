@@ -3676,6 +3676,7 @@ version = "0.0.1-beta.7"
 dependencies = [
  "log",
  "prost",
+ "serde",
  "serde_json",
  "verter_actions",
  "verter_audit",

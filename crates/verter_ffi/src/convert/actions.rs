@@ -4,13 +4,18 @@
 
 use crate::types::*;
 
-use super::offset::OffsetIndex;
+use verter_span::CoordError;
 
+use super::offset::{OffsetEncoding, OffsetIndex};
+
+///
+/// An edit whose range cannot be converted exactly is refused for the whole
+/// action — never clamped — so no partial edit set is ever returned.
 pub fn code_action_to_ffi(
     action: &verter_actions::CodeAction,
     index: &OffsetIndex<'_>,
-) -> FfiCodeAction {
-    FfiCodeAction {
+) -> Result<FfiCodeAction, CoordError> {
+    Ok(FfiCodeAction {
         title: action.title.clone(),
         kind: match action.kind {
             verter_actions::ActionKind::QuickFix => "quickfix".to_string(),
@@ -20,13 +25,18 @@ pub fn code_action_to_ffi(
         edits: action
             .edits
             .iter()
-            .map(|edit| FfiTextEdit {
-                span_start: index.to_utf16(edit.span.start),
-                span_end: index.to_utf16(edit.span.end),
-                new_text: edit.replacement.clone(),
+            .map(|edit| {
+                let (span_start, span_end) =
+                    index.convert_range(edit.span.start, edit.span.end, OffsetEncoding::Utf16)?;
+                Ok(FfiTextEdit {
+                    span_start,
+                    span_end,
+                    span_encoding: SpanEncodingTag::Utf16,
+                    new_text: edit.replacement.clone(),
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, CoordError>>()?,
         is_preferred: action.is_preferred,
         diagnostic_rule: action.diagnostic_rule.clone(),
-    }
+    })
 }

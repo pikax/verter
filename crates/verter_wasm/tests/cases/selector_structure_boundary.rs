@@ -40,10 +40,11 @@ fn wasm_boundary_skips_unstructurable_selector() {
     );
 
     let before = parse_selector_thread_invocations();
-    let results = verter_wasm::build_selector_match_results(
+    let results = verter_ffi::convert::build_selector_match_results(
         &analysis,
         &host.get_source(&update.canonical_id).expect("source"),
-    );
+    )
+    .expect("selector spans in extent");
     assert_eq!(
         parse_selector_thread_invocations() - before,
         0,

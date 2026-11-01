@@ -5,6 +5,7 @@ use verter_session as host;
 
 use super::offset::visit_counter;
 use super::*;
+use verter_protocol::types::SpanEncodingTag;
 
 /// Diagnostic counts a file can realistically carry in one snapshot.
 const BATCH_SIZES: [usize; 4] = [128, 256, 512, 1024];
@@ -45,13 +46,18 @@ fn large_sources() -> [String; 2] {
     [ascii, astral]
 }
 
-/// Reference conversion: decode the clamped prefix and count UTF-16 units.
-fn reference_utf16(source: &str, byte_offset: u32) -> u32 {
-    let mut clamped = (byte_offset as usize).min(source.len());
-    while !source.is_char_boundary(clamped) {
-        clamped -= 1;
+/// Reference conversion: decode the prefix and count UTF-16 units. Exact or
+/// refused with the wire code a diagnostic carries — an independent model of
+/// the contract, not the production path.
+fn reference_utf16(source: &str, byte_offset: u32) -> Result<u32, &'static str> {
+    let offset = byte_offset as usize;
+    if offset > source.len() {
+        return Err("InvalidBoundary");
     }
-    source[..clamped].encode_utf16().count() as u32
+    if !source.is_char_boundary(offset) {
+        return Err("NotCharBoundary");
+    }
+    Ok(source[..offset].encode_utf16().count() as u32)
 }
 
 #[test]
@@ -66,12 +72,12 @@ fn end_position_diagnostic_batches_visit_the_source_once() {
                 converted = Some(host_diagnostics_to_ffi(&input, Some(&source)));
             }));
             let converted = converted.expect("batch converted");
-            let expected_end = reference_utf16(&source, end);
+            let expected_end = reference_utf16(&source, end).expect("end of file is a boundary");
             assert!(
                 converted
                     .diagnostics
                     .iter()
-                    .all(|d| d.span_end == expected_end),
+                    .all(|d| d.span_end == Some(expected_end)),
                 "every end-position span maps to the source's UTF-16 length"
             );
         }
@@ -125,11 +131,11 @@ fn empty_and_sourceless_batches_visit_nothing() {
     assert_eq!(
         visits(|| {
             let ffi = host_diagnostics_to_ffi(&input, None);
-            // An absent source passes byte offsets through unclamped.
-            assert_eq!(
-                (ffi.diagnostics[0].span_start, ffi.diagnostics[0].span_end),
-                (3, 999_999)
-            );
+            // An absent source is a typed refusal, never a byte pass-through.
+            let d = &ffi.diagnostics[0];
+            assert_eq!((d.span_start, d.span_end), (None, None));
+            assert_eq!(d.span_error.as_deref(), Some("SourceUnavailable"));
+            assert_eq!(d.span_encoding, SpanEncodingTag::Utf16);
         }),
         0
     );
@@ -150,10 +156,9 @@ fn parity_sources() -> [&'static str; 6] {
 #[test]
 fn batch_diagnostics_convert_exactly_like_lone_conversions() {
     for source in parity_sources() {
-        // Every interior byte (continuation bytes clamp back), EOF, and
-        // offsets past EOF (clamp to the end), as starts and ends, including
-        // inverted spans the host never produces but the boundary must not
-        // reorder.
+        // Every interior byte (continuation bytes are refused), EOF, and
+        // offsets past EOF (refused), as starts and ends, including inverted
+        // spans the host never produces but the boundary must not reorder.
         let offsets: Vec<u32> = (0..=source.len() as u32 + 3).chain([u32::MAX]).collect();
         let spans: Vec<(u32, u32)> = offsets
             .iter()
@@ -167,14 +172,36 @@ fn batch_diagnostics_convert_exactly_like_lone_conversions() {
             for (converted, original) in batch.diagnostics.iter().zip(&input.diagnostics) {
                 let lone = host_diagnostic_to_ffi(original, source);
                 assert_eq!(
-                    (converted.span_start, converted.span_end),
-                    (lone.span_start, lone.span_end),
+                    (
+                        converted.span_start,
+                        converted.span_end,
+                        &converted.span_error
+                    ),
+                    (lone.span_start, lone.span_end, &lone.span_error),
                     "span {:?} of {source:?}",
                     original.span
                 );
-                let expected = |offset| source.map_or(offset, |s| reference_utf16(s, offset));
-                assert_eq!(converted.span_start, expected(original.span.start));
-                assert_eq!(converted.span_end, expected(original.span.end));
+                assert_eq!(converted.span_encoding, SpanEncodingTag::Utf16);
+                let (start, end) = (original.span.start, original.span.end);
+                let expected = match source {
+                    None => Err("SourceUnavailable"),
+                    Some(_) if start > end => Err("InvalidBoundary"),
+                    Some(s) => reference_utf16(s, start)
+                        .and_then(|start| reference_utf16(s, end).map(|end| (start, end))),
+                };
+                match expected {
+                    Ok((start, end)) => {
+                        assert_eq!(
+                            (converted.span_start, converted.span_end),
+                            (Some(start), Some(end))
+                        );
+                        assert_eq!(converted.span_error, None);
+                    }
+                    Err(code) => {
+                        assert_eq!((converted.span_start, converted.span_end), (None, None));
+                        assert_eq!(converted.span_error.as_deref(), Some(code));
+                    }
+                }
             }
         }
     }
@@ -185,37 +212,70 @@ fn destructured_bindings_convert_exactly_and_share_one_index() {
     for sfc in parity_sources() {
         let tsx = "const {\u{1F600}: x} = props;";
         let offsets: Vec<u32> = (0..=sfc.len() as u32 + 3).chain([u32::MAX]).collect();
-        let bindings: Vec<DestructuredBindingInput<'_>> = offsets
-            .iter()
-            .map(|&offset| DestructuredBindingInput {
-                name: "x",
-                source_start: offset,
-                source_end: sfc.len() as u32,
-            })
-            .collect();
-        for encoding in [
-            OffsetEncoding::Utf8,
-            OffsetEncoding::Utf16,
-            OffsetEncoding::Utf32,
-        ] {
+        for encoding in [SpanEncodingTag::Utf8, SpanEncodingTag::Utf16] {
+            let offset_encoding = match encoding {
+                SpanEncodingTag::Utf8 => OffsetEncoding::Utf8,
+                SpanEncodingTag::Utf16 => OffsetEncoding::Utf16,
+            };
             for block_end in [3, 6, tsx.len() as u32, 999] {
-                let meta =
-                    convert_destructured_block_meta(&bindings, 1, block_end, sfc, tsx, encoding);
-                for (converted, input) in meta.bindings.iter().zip(&bindings) {
-                    assert_eq!(
-                        converted.source_start,
-                        convert_offset(sfc, input.source_start, encoding)
+                for &offset in &offsets {
+                    let bindings = [DestructuredBindingInput {
+                        name: "x",
+                        source_start: offset,
+                        source_end: sfc.len() as u32,
+                    }];
+                    let meta = convert_destructured_block_meta(
+                        &bindings,
+                        1,
+                        block_end,
+                        Some(sfc),
+                        tsx,
+                        encoding,
                     );
-                    assert_eq!(
-                        converted.source_end,
-                        convert_offset(sfc, input.source_end, encoding)
-                    );
+                    let expected_source =
+                        convert_offset(sfc, offset, offset_encoding).and_then(|start| {
+                            convert_offset(sfc, sfc.len() as u32, offset_encoding)
+                                .map(|end| (start, end))
+                        });
+                    let expected_block =
+                        convert_offset(tsx, 1, offset_encoding).and_then(|start| {
+                            convert_offset(tsx, block_end, offset_encoding).map(|end| (start, end))
+                        });
+                    match (expected_source, expected_block) {
+                        (Ok((start, end)), Ok((block_start, block_end))) => {
+                            let meta = meta.expect("exact spans convert");
+                            assert_eq!(
+                                (meta.bindings[0].source_start, meta.bindings[0].source_end),
+                                (start, end)
+                            );
+                            assert_eq!(
+                                (meta.block_start, meta.block_end),
+                                (block_start, block_end)
+                            );
+                            assert_eq!(meta.bindings[0].source_encoding, encoding);
+                            assert_eq!(meta.block_encoding, encoding);
+                        }
+                        _ => assert!(
+                            meta.is_err(),
+                            "an off-boundary or past-end span refuses the whole conversion"
+                        ),
+                    }
                 }
-                assert_eq!(meta.block_start, convert_offset(tsx, 1, encoding));
-                assert_eq!(meta.block_end, convert_offset(tsx, block_end, encoding));
             }
         }
     }
+
+    // A missing SFC source is a typed failure when there is a binding to
+    // convert, never zero offsets.
+    let one = [DestructuredBindingInput {
+        name: "x",
+        source_start: 0,
+        source_end: 1,
+    }];
+    assert!(matches!(
+        convert_destructured_block_meta(&one, 0, 0, None, "", SpanEncodingTag::Utf16),
+        Err(SpanConversionError::SourceUnavailable)
+    ));
 
     // Visits do not grow with the binding count.
     let [_, sfc] = large_sources();
@@ -235,9 +295,9 @@ fn destructured_bindings_convert_exactly_and_share_one_index() {
                     &bindings,
                     0,
                     0,
-                    &sfc,
+                    Some(&sfc),
                     "",
-                    OffsetEncoding::Utf16,
+                    SpanEncodingTag::Utf16,
                 );
             })
         })
