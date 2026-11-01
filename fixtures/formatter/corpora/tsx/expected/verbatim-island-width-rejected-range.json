@@ -1,0 +1,26 @@
+{
+  "outcome": "unsupported",
+  "reason": "InvalidOption: printWidth must be a nonnegative 32-bit integer",
+  "output": null,
+  "normalized_options": {
+    "printWidth": -1
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      53
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    53
+  ],
+  "second_pass": {
+    "output": null,
+    "edits": []
+  },
+  "divergence": null
+}

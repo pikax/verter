@@ -1,0 +1,20 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/valid-require-pragma.txt",
+  "normalized_options": {
+    "requirePragma": true
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 55
+  },
+  "formatted_cursor": 55,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/valid-require-pragma.txt",
+    "edits": []
+  },
+  "divergence": null
+}

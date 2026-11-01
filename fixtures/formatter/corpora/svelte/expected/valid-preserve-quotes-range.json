@@ -1,0 +1,28 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/svelte/expected/valid-preserve-quotes.txt",
+  "normalized_options": {
+    "quoteProps": "preserve",
+    "trailingComma": "none",
+    "arrowParens": "always"
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      140
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    140
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/svelte/expected/valid-preserve-quotes.txt",
+    "edits": []
+  },
+  "divergence": "native-svelte-basic-carrier"
+}

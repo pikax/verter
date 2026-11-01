@@ -1,0 +1,9 @@
+{
+  "id": "markup-strict",
+  "values": {
+    "bracketSameLine": true,
+    "htmlWhitespaceSensitivity": "strict",
+    "vueIndentScriptAndStyle": true,
+    "singleAttributePerLine": true
+  }
+}

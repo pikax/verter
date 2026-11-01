@@ -1,0 +1,21 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/valid-markup-ignore.txt",
+  "normalized_options": {
+    "htmlWhitespaceSensitivity": "ignore",
+    "embeddedLanguageFormatting": "off"
+  },
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/valid-markup-ignore.txt",
+    "edits": []
+  },
+  "divergence": null
+}

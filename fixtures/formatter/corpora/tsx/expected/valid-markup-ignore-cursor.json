@@ -1,0 +1,20 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/tsx/expected/valid-markup-ignore.txt",
+  "normalized_options": {
+    "embeddedLanguageFormatting": "off"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 10
+  },
+  "formatted_cursor": 10,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/tsx/expected/valid-markup-ignore.txt",
+    "edits": []
+  },
+  "divergence": null
+}

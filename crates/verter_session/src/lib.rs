@@ -479,6 +479,24 @@ mod testing;
 mod workspace_index;
 mod workspace_intel;
 
+// Reserved homes for planned session product modules in the lint, CSS,
+// accessibility, formatter, action, interpretation and profile programs.
+// Each module below is declaration-only: its doc line names the node that
+// fills it, and product nodes write inside their own reserved module only.
+mod a11y;
+mod action_verification;
+mod css;
+mod css_in_js;
+mod formatter;
+mod fragment_facts;
+mod html;
+mod interpretation;
+mod lint;
+mod project_profiles;
+mod recovery;
+mod style_facts;
+mod utility_css;
+
 // The TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
 // `oracle-gen` feature, so the `src/bin/oracle_gen` binary (a separate crate that
 // sees only non-test `pub` lib items) can invoke it. NEVER on the default build:

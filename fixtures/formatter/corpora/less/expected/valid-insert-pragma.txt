@@ -1,0 +1,13 @@
+/**
+ * hé🙂
+ *
+ * @format
+ */
+
+@color: red;
+.box {
+  color: @color;
+  &:hover {
+    margin: 0 1px;
+  }
+}

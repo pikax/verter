@@ -29,9 +29,10 @@ use verter_type_engine::request_context::{ObserveExec, Uncaptured};
 
 fn observe_availability(
     canonical: &str,
-    serve: &crate::host_manage::prepared_decl::IndexedReadyServe,
+    store_published: bool,
+    route_interface_hash: verter_session_query::analysis::types::Hash16,
 ) {
-    if !serve.store_published {
+    if !store_published {
         note_non_cacheable_read_fan_out(NonCacheableReadReason::FencedServe);
     }
     // This port exposes only availability, not the source payload or its
@@ -41,9 +42,7 @@ fn observe_availability(
         canonical_id: canonical.into(),
         key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
         lane: verter_session_query::facts::FactLane::Semantic,
-        expected_hash: crate::resolver_store::syntactic_route_interface_hash(
-            &serve.indexed.shallow_state,
-        ),
+        expected_hash: route_interface_hash,
     }));
 }
 
@@ -199,6 +198,12 @@ impl IndexedInputs for crate::VerterHost {
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        if let Some(serve) = retained_indexed_input(self, canonical_id) {
+            return Some(serve);
+        }
+        if consumed_load_ended(self, canonical_id) {
+            return None;
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id).map(|serve| {
             super::owned_lowering_port::observe_whole_content(
                 canonical_id,
@@ -209,8 +214,15 @@ impl IndexedInputs for crate::VerterHost {
     }
 
     fn source_is_available(&self, canonical: &str) -> bool {
+        if let Some(available) = consumed_availability(self, canonical) {
+            return available;
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical).is_some_and(|serve| {
-            observe_availability(canonical, &serve);
+            observe_availability(
+                canonical,
+                serve.store_published,
+                crate::resolver_store::syntactic_route_interface_hash(&serve.indexed.shallow_state),
+            );
             true
         })
     }
@@ -707,7 +719,11 @@ pub(crate) trait RequestBoundLifecycle: Sync {
         &self,
         canonical_id: &str,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
-        crate::VerterHost::begin_indexed_ready_load(self.host(), canonical_id)
+        crate::VerterHost::begin_indexed_ready_load_for(
+            self.host(),
+            canonical_id,
+            &self.request_view().overlay().input_artifacts,
+        )
     }
 
     fn shallow_file_state(
@@ -969,6 +985,13 @@ where
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        if let Some(serve) = retained_indexed_input(self.0.host(), canonical_id) {
+            self.0.complete_canonical(canonical_id);
+            return Some(serve);
+        }
+        if consumed_load_ended(self.0.host(), canonical_id) {
+            return None;
+        }
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::ensure_indexed_ready_serve"
         );
@@ -991,11 +1014,23 @@ where
     }
 
     fn source_is_available(&self, canonical: &str) -> bool {
+        if let Some(available) = consumed_availability(self.0.host(), canonical) {
+            if available {
+                self.0.complete_canonical(canonical);
+            }
+            return available;
+        }
         self.0
             .materialize_indexed_ready_serve(canonical)
             .is_some_and(|serve| {
                 self.0.complete_canonical(canonical);
-                observe_availability(canonical, &serve);
+                observe_availability(
+                    canonical,
+                    serve.store_published,
+                    crate::resolver_store::syntactic_route_interface_hash(
+                        &serve.indexed.shallow_state,
+                    ),
+                );
                 true
             })
     }
@@ -1559,6 +1594,8 @@ impl<L> RequestBoundAdapter<L> {
         L: RequestBoundLifecycle,
         Self: verter_type_engine::resolver_core::request_ports::OwnedLowering,
     {
+        #[cfg(test)]
+        self.0.request_view().note_validation_preparation();
         // Completing parse facts serves the validation: what it reads is no
         // dependency of the computation that is validating a candidate.
         verter_type_engine::resolver_core::resolver_context::without_fact_observers(|| {
@@ -1862,12 +1899,25 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_retained_signature_with_self_roots"
         );
-        self.prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Set(sig))
-            .is_ok()
-            && self
-                .0
-                .request_view()
-                .validates_retained_signature(sig, self_root_canonicals)
+        let view = self.0.request_view();
+        let settled = view.settled_retained_signature(sig, self_root_canonicals);
+        if settled == Some(false) {
+            return false;
+        }
+        // Sampled before the walk: a mutation landing during it leaves this
+        // token behind the live one, so the next read walks again.
+        let inputs = self.0.host().current_validation_token();
+        if settled == Some(true) && view.signature_prepared_under(sig, &inputs) {
+            return true;
+        }
+        if self
+            .prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Set(sig))
+            .is_err()
+        {
+            return false;
+        }
+        view.note_signature_prepared(sig, inputs);
+        view.validates_retained_signature(sig, self_root_canonicals)
     }
     fn promote_route_completion(
         &self,
@@ -1881,5 +1931,260 @@ where
         self.0
             .request_view()
             .promote_route_completion(canonical, whole_hash, route_hash)
+    }
+}
+
+/// Whether this reader already waited on a load of `canonical` that ended
+/// without a delivery. The reader answers with that outcome, as after a
+/// synchronous load that ended the same way, and never materializes the file
+/// again on the polling thread.
+fn consumed_load_ended(host: &crate::VerterHost, canonical: &str) -> bool {
+    let canonical = host.normalized_analysis_canonical(canonical);
+    verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
+        host.normalized_analysis_canonical(file) == canonical
+    })
+    .is_some()
+}
+
+/// The load delivery this reader already consumed for `canonical`.
+fn consumed_delivery(host: &crate::VerterHost, canonical: &str) -> Option<IndexedInputServe> {
+    let canonical = host.normalized_analysis_canonical(canonical);
+    verter_type_engine::resolver_core::request_ports::consumed_indexed_input(|file| {
+        host.normalized_analysis_canonical(file) == canonical
+    })
+}
+
+/// A file's availability as this reader's consumed load already answered it:
+/// present through its delivery, absent through a load that ended without
+/// one. `None` leaves the question to a live serve.
+fn consumed_availability(host: &crate::VerterHost, canonical: &str) -> Option<bool> {
+    if let Some(serve) = consumed_delivery(host, canonical) {
+        observe_availability(
+            canonical,
+            serve.store_published,
+            verter_session_query::inputs::route_surface::syntactic_route_interface_hash(
+                &serve.indexed.shallow_state,
+            ),
+        );
+        return Some(true);
+    }
+    consumed_load_ended(host, canonical).then_some(false)
+}
+
+/// Consume a load delivery through the same input observations as a live
+/// serve, preserving its ReturnOnly status without rematerializing it.
+fn retained_indexed_input(host: &crate::VerterHost, canonical: &str) -> Option<IndexedInputServe> {
+    let serve = consumed_delivery(host, canonical)?;
+    let canonical = host.normalized_analysis_canonical(canonical);
+    super::owned_lowering_port::observe_whole_content(&canonical, serve.indexed.whole_hash);
+    if serve.store_published
+        && verter_type_engine::resolver_core::resolver_context::fact_tracer_installed()
+    {
+        if let Some(artifacts) = host.current_content_pinned_artifacts(&canonical) {
+            if Arc::ptr_eq(&artifacts.indexed.input_record(), &serve.indexed)
+                && host.indexed_surface_is_current(&canonical, &artifacts.indexed)
+            {
+                if let Some(fact) = crate::VerterHost::syntactic_route_interface_fact_of(
+                    Arc::from(canonical.as_ref()),
+                    &artifacts,
+                ) {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
+                    );
+                }
+            }
+        }
+    }
+    if !serve.store_published {
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+        );
+    }
+    Some(serve)
+}
+
+#[cfg(test)]
+mod retained_validation_tests {
+    use std::sync::Arc;
+
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+    use verter_session_query::facts::fact_set::FactSet;
+    use verter_session_query::facts::policy::FactPolicy;
+    use verter_session_query::facts::{FactKey, FactLane};
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+
+    use super::RequestBoundLifecycle;
+    use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
+
+    const CANONICAL: &str = "/proj/button.ts";
+
+    fn route_interface(expected_hash: [u8; 16]) -> FactSet {
+        FactPolicy::production().set_of(vec![FactVersionRef::Parse(ParseFactRef {
+            canonical_id: CANONICAL.into(),
+            key: FactKey::SyntacticRouteInterface,
+            lane: FactLane::Semantic,
+            expected_hash,
+        })])
+    }
+
+    fn served_host() -> (crate::VerterHost, [u8; 16]) {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: CANONICAL.to_string(),
+                source: Arc::from(
+                    "export interface ButtonProps { label: string }
+",
+                ),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("the file is admitted");
+        let serve = host
+            .ensure_indexed_ready_serve(CANONICAL)
+            .expect("the file is served");
+        let current =
+            crate::resolver_store::syntactic_route_interface_hash(&serve.indexed.shallow_state);
+        (host, current)
+    }
+
+    /// The answer to one read, and how many signatures it prepared.
+    fn probe(ctx: &HostResolverContext<'_>, signature: &FactSet) -> (bool, usize) {
+        let view = ctx.0.request_view();
+        let before = view.validation_preparations_for_tests();
+        let answer = ctx.validates_retained_signature_with_self_roots(signature, &[]);
+        (answer, view.validation_preparations_for_tests() - before)
+    }
+
+    /// Preparing inputs walks every fact of a signature, so it belongs to the
+    /// read that settles the signature. A warm read meets the same signature
+    /// many times in a request; preparing it each time costs as much as
+    /// validating it would, and turned the settled verdict's one lookup into
+    /// the larger part of a whole-store inference. Stale verdicts count too:
+    /// a candidate that will not serve is met as often as one that will.
+    #[test]
+    fn a_settled_retained_signature_prepares_its_inputs_once() {
+        let (host, current) = served_host();
+        let base = host.resolver_store_view_read().into_owned_view();
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+
+        for (signature, valid) in [
+            (route_interface(current), true),
+            (route_interface([0xEE; 16]), false),
+        ] {
+            assert_eq!(
+                probe(&ctx, &signature),
+                (valid, 1),
+                "the read that settles it"
+            );
+            assert_eq!(
+                probe(&ctx, &signature),
+                (valid, 0),
+                "a read of the settled verdict"
+            );
+        }
+    }
+
+    /// A settled verdict speaks for the request's base; whether the file is
+    /// still served as published is a fact of the live host. The host fences
+    /// a serve only after a mutation moved a generation the flight captured,
+    /// so the fence below is armed together with that move: it needs nothing
+    /// a production fence lacks. A refused read proves nothing to reuse, and
+    /// the proof returns with the published serve.
+    #[test]
+    fn a_settled_valid_signature_observes_a_fence_raised_after_it_settled() {
+        let (host, current) = served_host();
+        let base = host.resolver_store_view_read().into_owned_view();
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+        let signature = route_interface(current);
+        assert_eq!(
+            probe(&ctx, &signature),
+            (true, 1),
+            "the read that settles it"
+        );
+        assert_eq!(probe(&ctx, &signature), (true, 0), "unchanged host");
+
+        let fence = &host.test_force.force_indexed_ready_serve_fence_for_tests;
+        fence.store(true, std::sync::atomic::Ordering::Relaxed);
+        host.bump_store_view_epoch();
+        assert_eq!(probe(&ctx, &signature), (false, 1), "the fenced serve");
+        assert_eq!(probe(&ctx, &signature), (false, 1), "still fenced");
+
+        fence.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(probe(&ctx, &signature), (true, 1), "published again");
+        assert_eq!(probe(&ctx, &signature), (true, 0), "unchanged host");
+    }
+
+    /// The same boundary with no test seam in the path: the host retires the
+    /// file the signature was settled against while the request runs.
+    #[test]
+    fn a_settled_valid_signature_is_refused_once_its_file_is_removed() {
+        let (host, current) = served_host();
+        let base = host.resolver_store_view_read().into_owned_view();
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+        let signature = route_interface(current);
+        assert_eq!(
+            probe(&ctx, &signature),
+            (true, 1),
+            "the read that settles it"
+        );
+
+        host.remove(CANONICAL).expect("the file is tracked");
+        assert_eq!(probe(&ctx, &signature), (false, 1), "the removed file");
+    }
+
+    /// A proof holds from before its walk, not from after it: a walk that
+    /// publishes moved the host itself, as a mutation landing during the walk
+    /// would, so the first warm read proves the host it finds.
+    #[test]
+    fn a_preparation_that_moved_the_host_does_not_prove_the_host_it_left() {
+        let (_, current) = served_host();
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: CANONICAL.to_string(),
+                source: Arc::from(
+                    "export interface ButtonProps { label: string }
+",
+                ),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("the file is admitted");
+        let base = host.resolver_store_view_read().into_owned_view();
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+        let signature = route_interface(current);
+        assert_eq!(
+            probe(&ctx, &signature),
+            (true, 1),
+            "the walk that publishes"
+        );
+        assert_eq!(probe(&ctx, &signature), (true, 1), "the host it moved");
+        assert_eq!(probe(&ctx, &signature), (true, 0), "unchanged host");
+    }
+
+    /// A stale verdict stays stale whatever the host does next, so moving
+    /// the host costs it no walk.
+    #[test]
+    fn a_settled_stale_signature_is_not_prepared_again_when_the_host_moves() {
+        let (host, _) = served_host();
+        let base = host.resolver_store_view_read().into_owned_view();
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+        let signature = route_interface([0xEE; 16]);
+        assert_eq!(
+            probe(&ctx, &signature),
+            (false, 1),
+            "the read that settles it"
+        );
+
+        host.bump_store_view_epoch();
+        assert_eq!(probe(&ctx, &signature), (false, 0), "the moved host");
     }
 }

@@ -1,0 +1,24 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/tsx/expected/verbatim-island-default.txt",
+  "normalized_options": {},
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      53
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    53
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/tsx/expected/verbatim-island-default.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}

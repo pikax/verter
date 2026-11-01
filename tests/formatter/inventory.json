@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "source_inventory": "tests/kernel/FMK0/products/formatter-inventory.v1.json",
+  "routes": [
+    {
+      "path": "crates/verter_lsp/src/features/formatting.rs",
+      "symbol": "format_document",
+      "disposition": "replace-and-delete",
+      "owner": "FMT3"
+    },
+    {
+      "path": "crates/verter_lsp/src/server/mod.rs",
+      "symbol": "LanguageServer::formatting",
+      "disposition": "retain-dispatch",
+      "owner": "FMT3"
+    },
+    {
+      "path": "crates/verter_lsp/src/server/aux_features.rs",
+      "symbol": "handle_formatting",
+      "disposition": "switch-to-FMT4L",
+      "owner": "FMT3"
+    },
+    {
+      "path": "crates/verter_lsp/src/capabilities.rs",
+      "symbol": "document_formatting_provider",
+      "disposition": "retain-continuously",
+      "owner": "FMT3"
+    },
+    {
+      "path": "crates/verter_lsp/src/server/mod.rs",
+      "symbol": "LanguageServer::on_type_formatting",
+      "disposition": "retain-outside-formatter",
+      "owner": "markup-auto-close"
+    },
+    {
+      "path": "crates/verter_lsp/src/server/aux_features.rs",
+      "symbol": "handle_on_type_formatting",
+      "disposition": "retain-outside-formatter",
+      "owner": "markup-auto-close"
+    },
+    {
+      "path": "crates/verter_lsp/src/capabilities.rs",
+      "symbol": "document_on_type_formatting_provider",
+      "disposition": "retain-outside-formatter",
+      "owner": "markup-auto-close"
+    }
+  ],
+  "private_owners": {
+    "FMT1P": "typed byte/provenance foundation",
+    "FMT1": "Doc/renderer",
+    "FMT1A": "views/recovery",
+    "FMT1B": "edits",
+    "FMT1C": "maps",
+    "FMT1D": "range",
+    "FMT1E": "cursor",
+    "FMT2": "JS",
+    "FMT2T": "TS",
+    "FMT2X": "JSX",
+    "FMT2TX": "TSX",
+    "FMTC0": "CSS",
+    "FMTCS0": "SCSS",
+    "FMTCL0": "Less",
+    "FMTH0": "HTML",
+    "FMTV0": "Vue",
+    "FMTS0": "Svelte",
+    "FMT3C": "composition/cache",
+    "FMT4P": "protocol",
+    "FMT4L": "dormant LSP adapter",
+    "FMT4F": "shared UTF16 boundary",
+    "FMT4N": "NAPI",
+    "FMT4W": "WASM",
+    "FMT4M": "MCP",
+    "FMT4": "proof-only promotion"
+  },
+  "empty_deletions": [
+    "FMT1P",
+    "FMT1",
+    "FMT1A",
+    "FMT1B",
+    "FMT1C",
+    "FMT1D",
+    "FMT1E",
+    "FMT2",
+    "FMT2T",
+    "FMT2X",
+    "FMT2TX",
+    "FMTC0",
+    "FMTCS0",
+    "FMTCL0",
+    "FMTH0",
+    "FMTV0",
+    "FMTS0",
+    "FMT3C",
+    "FMT4P",
+    "FMT4L",
+    "FMT4F",
+    "FMT4N",
+    "FMT4W",
+    "FMT4M",
+    "FMT4"
+  ],
+  "public_surfaces": [
+    {
+      "id": "private",
+      "full": true,
+      "range": true,
+      "cursor": true,
+      "coordinates": "nonserializable authored/formatted UTF8"
+    },
+    {
+      "id": "protocol",
+      "full": true,
+      "range": true,
+      "cursor": false,
+      "coordinates": "SFC-absolute Span"
+    },
+    {
+      "id": "lsp",
+      "full": true,
+      "range": false,
+      "cursor": false,
+      "coordinates": "negotiated LineIndex"
+    },
+    {
+      "id": "napi",
+      "full": true,
+      "range": true,
+      "cursor": true,
+      "coordinates": "strict UTF16 through shared boundary"
+    },
+    {
+      "id": "wasm",
+      "full": true,
+      "range": true,
+      "cursor": true,
+      "coordinates": "strict UTF16 through shared boundary"
+    },
+    {
+      "id": "mcp",
+      "full": true,
+      "range": true,
+      "cursor": false,
+      "coordinates": "SFC-absolute Span"
+    }
+  ]
+}

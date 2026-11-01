@@ -1,0 +1,15 @@
+<!-- @format -->
+
+<script setup lang="ts">
+const greeting: string = "hé🙂";
+const f = (x: number) => ({ value: x });
+</script>
+<template>
+  <button title="hello" disabled>{{ greeting }}</button>
+</template>
+<style scoped>
+.box {
+  color: red;
+  margin: 0 1px;
+}
+</style>

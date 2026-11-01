@@ -1,0 +1,26 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/valid-tokens.txt",
+  "normalized_options": {
+    "semi": false,
+    "singleQuote": true,
+    "quoteProps": "consistent",
+    "jsxSingleQuote": true,
+    "trailingComma": "all",
+    "bracketSpacing": false,
+    "arrowParens": "avoid"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 55
+  },
+  "formatted_cursor": 57,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/valid-tokens.txt",
+    "edits": []
+  },
+  "divergence": null
+}

@@ -1,0 +1,21 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/html/expected/valid-wide-auto.txt",
+  "normalized_options": {
+    "printWidth": 120,
+    "endOfLine": "auto"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 36
+  },
+  "formatted_cursor": 36,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/html/expected/valid-wide-auto.txt",
+    "edits": []
+  },
+  "divergence": null
+}

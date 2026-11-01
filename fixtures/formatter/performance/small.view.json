@@ -1,0 +1,562 @@
+{
+  "authored_utf8_bytes": 4096,
+  "carrier_blocks": [
+    {
+      "start": 0,
+      "end": 3536,
+      "language": "vue"
+    },
+    {
+      "start": 3536,
+      "end": 3822,
+      "language": "svelte"
+    },
+    {
+      "start": 3822,
+      "end": 4096,
+      "language": "html"
+    }
+  ],
+  "records": [
+    {
+      "start": 0,
+      "end": 10,
+      "kind": "delimiter",
+      "block": 0
+    },
+    {
+      "start": 10,
+      "end": 12,
+      "kind": "trivia",
+      "block": 0
+    },
+    {
+      "start": 12,
+      "end": 3293,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3293,
+      "end": 3307,
+      "kind": "recovery-island",
+      "block": 0
+    },
+    {
+      "start": 3307,
+      "end": 3316,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3316,
+      "end": 3325,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3325,
+      "end": 3334,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3334,
+      "end": 3343,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3343,
+      "end": 3352,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3352,
+      "end": 3361,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3361,
+      "end": 3370,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3370,
+      "end": 3379,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3379,
+      "end": 3388,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3388,
+      "end": 3397,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3397,
+      "end": 3406,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3406,
+      "end": 3415,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3415,
+      "end": 3424,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3424,
+      "end": 3433,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3433,
+      "end": 3442,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3442,
+      "end": 3451,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3451,
+      "end": 3460,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3460,
+      "end": 3469,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3469,
+      "end": 3478,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3478,
+      "end": 3487,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3487,
+      "end": 3496,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3496,
+      "end": 3505,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3505,
+      "end": 3514,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3514,
+      "end": 3523,
+      "kind": "syntax-or-trivia",
+      "block": 0
+    },
+    {
+      "start": 3523,
+      "end": 3534,
+      "kind": "delimiter",
+      "block": 0
+    },
+    {
+      "start": 3534,
+      "end": 3536,
+      "kind": "trivia",
+      "block": 0
+    },
+    {
+      "start": 3536,
+      "end": 3559,
+      "kind": "delimiter",
+      "block": 1
+    },
+    {
+      "start": 3559,
+      "end": 3561,
+      "kind": "trivia",
+      "block": 1
+    },
+    {
+      "start": 3561,
+      "end": 3585,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3585,
+      "end": 3594,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3594,
+      "end": 3603,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3603,
+      "end": 3612,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3612,
+      "end": 3621,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3621,
+      "end": 3630,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3630,
+      "end": 3639,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3639,
+      "end": 3648,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3648,
+      "end": 3657,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3657,
+      "end": 3666,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3666,
+      "end": 3675,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3675,
+      "end": 3684,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3684,
+      "end": 3693,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3693,
+      "end": 3702,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3702,
+      "end": 3711,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3711,
+      "end": 3720,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3720,
+      "end": 3729,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3729,
+      "end": 3738,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3738,
+      "end": 3747,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3747,
+      "end": 3756,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3756,
+      "end": 3765,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3765,
+      "end": 3774,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3774,
+      "end": 3783,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3783,
+      "end": 3792,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3792,
+      "end": 3801,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3801,
+      "end": 3810,
+      "kind": "syntax-or-trivia",
+      "block": 1
+    },
+    {
+      "start": 3810,
+      "end": 3820,
+      "kind": "delimiter",
+      "block": 1
+    },
+    {
+      "start": 3820,
+      "end": 3822,
+      "kind": "trivia",
+      "block": 1
+    },
+    {
+      "start": 3822,
+      "end": 3832,
+      "kind": "delimiter",
+      "block": 2
+    },
+    {
+      "start": 3832,
+      "end": 3834,
+      "kind": "trivia",
+      "block": 2
+    },
+    {
+      "start": 3834,
+      "end": 3858,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3858,
+      "end": 3867,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3867,
+      "end": 3876,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3876,
+      "end": 3885,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3885,
+      "end": 3894,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3894,
+      "end": 3903,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3903,
+      "end": 3912,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3912,
+      "end": 3921,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3921,
+      "end": 3930,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3930,
+      "end": 3939,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3939,
+      "end": 3948,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3948,
+      "end": 3957,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3957,
+      "end": 3966,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3966,
+      "end": 3975,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3975,
+      "end": 3984,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3984,
+      "end": 3993,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 3993,
+      "end": 4002,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4002,
+      "end": 4011,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4011,
+      "end": 4020,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4020,
+      "end": 4029,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4029,
+      "end": 4038,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4038,
+      "end": 4047,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4047,
+      "end": 4056,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4056,
+      "end": 4065,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4065,
+      "end": 4074,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4074,
+      "end": 4083,
+      "kind": "syntax-or-trivia",
+      "block": 2
+    },
+    {
+      "start": 4083,
+      "end": 4094,
+      "kind": "delimiter",
+      "block": 2
+    },
+    {
+      "start": 4094,
+      "end": 4096,
+      "kind": "trivia",
+      "block": 2
+    }
+  ]
+}

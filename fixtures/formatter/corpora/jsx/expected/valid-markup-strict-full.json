@@ -1,0 +1,21 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/jsx/expected/valid-markup-strict.txt",
+  "normalized_options": {
+    "bracketSameLine": true,
+    "singleAttributePerLine": true
+  },
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/jsx/expected/valid-markup-strict.txt",
+    "edits": []
+  },
+  "divergence": null
+}

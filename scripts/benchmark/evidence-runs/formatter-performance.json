@@ -1,0 +1,258 @@
+{
+  "name": "formatter-performance",
+  "kind": "formatter",
+  "schema": 1,
+  "description": "Parameterized native formatter corpus evidence; answer/work acceptance with advisory latency and memory.",
+  "catalog": "catalogs/formatter-performance-v1.toml",
+  "parameters": [
+    "candidate",
+    "corpus"
+  ],
+  "noise": {
+    "doc": "docs/contributing/semantic-benchmark.md",
+    "verdicts": "verdicts",
+    "schedule": "schedule"
+  },
+  "requiredCells": [
+    {
+      "mode": "cold-medium",
+      "latencyP95Ms": 40,
+      "peakRssDeltaBytes": 25165824,
+      "peakRssApplicable": true,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "first-warm-medium",
+      "latencyP95Ms": 20,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "repeated-warm-medium",
+      "latencyP95Ms": 12,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "incremental",
+      "latencyP95Ms": 8,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "edit-revert",
+      "latencyP95Ms": 18,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "range-cursor",
+      "latencyP95Ms": 5,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "profile-config-transition",
+      "latencyP95Ms": 40,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "policy-capability-transition",
+      "latencyP95Ms": 40,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "provider-transition",
+      "latencyP95Ms": 0,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "project-open",
+      "latencyP95Ms": 5,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "project-close",
+      "latencyP95Ms": 5,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "long-churn",
+      "latencyP95Ms": 20,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "cold-large",
+      "latencyP95Ms": 300,
+      "peakRssDeltaBytes": 100663296,
+      "peakRssApplicable": true,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "cancellation",
+      "latencyP95Ms": 5,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    },
+    {
+      "mode": "disabled-unsupported-unopened-masked",
+      "latencyP95Ms": 2,
+      "peakRssDeltaBytes": 0,
+      "peakRssApplicable": false,
+      "metrics": [
+        "answerClass",
+        "workCounts",
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ],
+      "evidenceOnly": [
+        "normalizedP95Ms",
+        "peakRssDeltaBytes"
+      ]
+    }
+  ]
+}
