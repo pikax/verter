@@ -226,6 +226,20 @@ fn merged_interface_indexed_access_work_is_linear() {
     );
 }
 
+/// The linear bound below compares counts taken on separate engines, so it
+/// means something only if one project costs one count: two fresh engines
+/// answering the same probe spend exactly the same work.
+#[test]
+fn merged_interface_work_repeats_exactly_on_a_fresh_engine() {
+    for global in [false, true] {
+        assert_eq!(
+            probe(128, global, narrow_strict_root_policy()),
+            probe(128, global, narrow_strict_root_policy()),
+            "global={global}: one project, one work count"
+        );
+    }
+}
+
 /// Collection, ordering and probe work grow linearly across `sizes` (each
 /// four times the one before), for global and for module contributors as
 /// `globals` lists, and the completed probe stays inside one linear

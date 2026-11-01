@@ -780,25 +780,12 @@ pub enum MacroFieldPayloadLowering {
 /// Content-free: spans, ordinals and kinds only — no names, no type text, no
 /// AST borrows — so a host may keep it beside the retained snapshot it was
 /// built from (the table is valid exactly as long as that program is).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, verter_retention::heap_size::HeapSize)]
 pub struct MacroFieldAddressTable {
     macros: Vec<MacroAddress>,
-    #[cfg(feature = "semantic-observe")]
-    work: verter_audit::observe::ObservedU64,
-}
-
-impl verter_retention::heap_size::HeapSize for MacroFieldAddressTable {
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        let Self {
-            macros,
-            #[cfg(feature = "semantic-observe")]
-                work: _,
-        } = self;
-        macros.heap_size(meter)
-    }
+    /// Every member list a field addresses, shared by the macros that
+    /// draw fields from it.
+    lists: Vec<MemberListAddress>,
 }
 
 #[derive(Debug, verter_retention::heap_size::HeapSize)]
@@ -806,7 +793,37 @@ struct MacroAddress {
     owner: TopLevelOwnerId,
     kind: AnalyzedMacroKind,
     span: verter_span::Span,
+    /// `None` when no macro-shaped call sits at `span`.
+    call: Option<MacroCallAddress>,
     fields: Vec<FieldAddress>,
+}
+
+/// Where a macro call sits: the analyzer's statement positions (a top-level
+/// expression statement, a variable declarator initializer) and the nested
+/// call arguments of a `withDefaults(defineProps<T>(), …)` wrapper.
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+struct MacroCallAddress {
+    statement: u32,
+    /// The declarator of a variable-declaration statement; zero otherwise.
+    declarator: u32,
+    /// The argument ordinal of each nested call, outermost first.
+    arguments: Vec<u32>,
+}
+
+/// Where one `TSSignature` member list sits: a root node, then the
+/// intersection arm taken at each nested intersection.
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
+struct MemberListAddress {
+    root: MemberListRoot,
+    arms: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, verter_retention::heap_size::HeapSize)]
+enum MemberListRoot {
+    /// The first type argument of the `macro_index`-th macro's call.
+    MacroTypeArgument { macro_index: u32 },
+    /// The interface body or alias annotation at a top-level statement.
+    Declaration { statement: u32 },
 }
 
 /// Where one field's authored payload node sits in the retained program.
@@ -819,8 +836,8 @@ enum FieldAddress {
     Unlocated,
     /// A `defineModel` field: the payload is the macro's type argument.
     ModelTypeArgument,
-    /// The `member`-th signature of the `list`-th member list
-    /// ([`field_payload_member_lists`]) whose family span is `span`.
+    /// The `member`-th signature of the table's `list`-th member list,
+    /// whose family span is `span`.
     Member {
         list: u32,
         member: u32,
@@ -836,7 +853,7 @@ enum FieldAddress {
 
 /// The member families a field payload can live in: a prop's key, an emit's
 /// key or call-signature event name, a slot's key or method name.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MemberFamily {
     Prop,
     Emit,
@@ -931,40 +948,107 @@ impl MemberFamily {
 
 impl MacroFieldAddressTable {
     /// Replay the analyzer's macro assembly over `program` once and record
-    /// every macro's and field's address.
+    /// every macro's and field's address. `work` receives one unit per
+    /// statement, declarator, call, member list, member, runtime property
+    /// and field visited: linear in the program's macro surface. Fields held
+    /// in a macro's own arguments never touch unrelated declarations; the
+    /// first field resolved through a named declaration indexes every visible
+    /// declaration's members once, each charged here.
     #[must_use]
-    pub fn build(program: &Program<'_>, source: &str, owners: &TopLevelOwnerTable) -> Self {
+    pub fn build(
+        program: &Program<'_>,
+        source: &str,
+        owners: &TopLevelOwnerTable,
+        work: &verter_audit::observe::ObservedU64,
+    ) -> Self {
         let macros = analyze_macros_from_program_with_owners(program, source, owners, None);
-        let work = verter_audit::observe::ObservedU64::default();
+        let calls = locate_macro_calls(program, &macros, work);
+        let mut builder = AddressBuilder {
+            program,
+            owners,
+            work,
+            registries: None,
+            declaration_members: FxHashMap::default(),
+            lists: Vec::new(),
+        };
         let macros = macros
             .iter()
-            .map(|mac| MacroAddress::of(program, owners, mac, &work))
+            .enumerate()
+            .map(|(index, mac)| builder.address(index as u32, mac, calls.get(&mac.span).cloned()))
             .collect();
         Self {
             macros,
-            #[cfg(feature = "semantic-observe")]
-            work,
+            lists: builder.lists,
         }
     }
 
-    /// Units of address work the build performed: one per field addressed
-    /// and one per member or runtime property indexed. Linear in the
-    /// program's macro surface; a measurement of the build, never a
-    /// semantic input.
-    #[must_use]
-    #[cfg(feature = "semantic-observe")]
-    pub fn work(&self) -> u64 {
-        self.work.load(std::sync::atomic::Ordering::Relaxed)
+    /// The call of `mac`. The span check fails a table built from another
+    /// program closed.
+    fn macro_call<'a>(
+        mac: &MacroAddress,
+        program: &'a Program<'a>,
+        work: &verter_audit::observe::ObservedU64,
+    ) -> Option<&'a CallExpression<'a>> {
+        let call = mac.call.as_ref()?.locate(program, work)?;
+        (verter_span::Span::new(call.span.start, call.span.end) == mac.span).then_some(call)
+    }
+
+    /// The table's `list`-th member list, reached directly from its address.
+    fn member_list<'a>(
+        &self,
+        program: &'a Program<'a>,
+        list: u32,
+        work: &verter_audit::observe::ObservedU64,
+    ) -> Option<&'a [TSSignature<'a>]> {
+        let address = self.lists.get(list as usize)?;
+        let mut ts_type = match address.root {
+            MemberListRoot::MacroTypeArgument { macro_index } => macro_type_argument(
+                Self::macro_call(self.macros.get(macro_index as usize)?, program, work)?,
+            )?,
+            MemberListRoot::Declaration { statement } => {
+                work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match declared_members(program.body.get(statement as usize)?)? {
+                    DeclaredMembers::Interface(body) => {
+                        return address.arms.is_empty().then_some(&body.body);
+                    }
+                    DeclaredMembers::Alias(ts_type) => ts_type,
+                }
+            }
+        };
+        for &arm in &address.arms {
+            work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let TSType::TSIntersectionType(intersection) = ts_type else {
+                return None;
+            };
+            ts_type = intersection.types.get(arm as usize)?;
+        }
+        match ts_type {
+            TSType::TSTypeLiteral(literal) => Some(&literal.members),
+            _ => None,
+        }
     }
 }
 
-impl MacroAddress {
-    fn of(
-        program: &Program<'_>,
-        owners: &TopLevelOwnerTable,
+/// Assembles one [`MacroFieldAddressTable`]: the declaration registries and
+/// each visible declaration index are built at most once, and only for a
+/// field its macro's own arguments do not author.
+struct AddressBuilder<'a, 'w> {
+    program: &'a Program<'a>,
+    owners: &'w TopLevelOwnerTable,
+    work: &'w verter_audit::observe::ObservedU64,
+    registries: Option<FxHashMap<TopLevelOwnerId, FxHashMap<String, LocalTypeDecl<'a>>>>,
+    declaration_members:
+        FxHashMap<(TopLevelOwnerId, MemberFamily), FxHashMap<verter_span::Span, (u32, u32)>>,
+    lists: Vec<MemberListAddress>,
+}
+
+impl<'a> AddressBuilder<'a, '_> {
+    fn address(
+        &mut self,
+        macro_index: u32,
         mac: &AnalyzedMacro,
-        work: &verter_audit::observe::ObservedU64,
-    ) -> Self {
+        call: Option<MacroCallAddress>,
+    ) -> MacroAddress {
         let (family, authored): (Option<MemberFamily>, Vec<bool>) = match mac.kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => (
                 Some(MemberFamily::Prop),
@@ -1005,30 +1089,27 @@ impl MacroAddress {
             AnalyzedMacroKind::DefineSlots => mac.slot_fields.iter().map(|f| f.span).collect(),
             _ => mac.prop_fields.iter().map(|f| f.span).collect(),
         };
-        // Index the family's member positions once, first occurrence wins
-        // (the order a span search over the same lists would meet them).
+        // The macro's own arguments are indexed first; a field they author
+        // never reaches the declaration index.
         let mut members: FxHashMap<verter_span::Span, (u32, u32)> = FxHashMap::default();
         let mut runtime: FxHashMap<verter_span::Span, u32> = FxHashMap::default();
         if let Some(family) = family.filter(|_| authored.iter().any(|a| *a)) {
-            for (list_index, list) in
-                field_payload_member_lists(program, owners, mac.span, mac.owner)
-                    .into_iter()
-                    .enumerate()
-            {
-                for (member_index, member) in list.iter().enumerate() {
-                    work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(span) = family.address_span(member) {
-                        members
-                            .entry(span)
-                            .or_insert((list_index as u32, member_index as u32));
-                    }
-                }
+            let call = call
+                .as_ref()
+                .and_then(|address| address.locate(self.program, self.work));
+            if let Some(type_argument) = call.and_then(macro_type_argument) {
+                self.index_member_lists(
+                    type_argument,
+                    MemberListRoot::MacroTypeArgument { macro_index },
+                    family,
+                    &mut members,
+                );
             }
             // Runtime object argument: `name: { type: X as PropType<T> }`.
             if matches!(family, MemberFamily::Prop) {
-                if let Some(obj) = runtime_props_object(program, mac.span) {
+                if let Some(obj) = call.and_then(runtime_props_object) {
                     for (property_index, prop) in obj.properties.iter().enumerate() {
-                        work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if let ObjectPropertyKind::ObjectProperty(p) = prop {
                             let key = verter_span::Span::new(p.key.span().start, p.key.span().end);
                             runtime.entry(key).or_insert(property_index as u32);
@@ -1041,13 +1122,13 @@ impl MacroAddress {
             .iter()
             .zip(&spans)
             .map(|(authored, span)| {
-                work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if !authored {
                     return FieldAddress::Unauthored;
                 }
-                if family.is_none() {
+                let Some(family) = family else {
                     return FieldAddress::ModelTypeArgument;
-                }
+                };
                 if let Some(&(list, member)) = members.get(span) {
                     return FieldAddress::Member {
                         list,
@@ -1055,23 +1136,284 @@ impl MacroAddress {
                         span: *span,
                     };
                 }
-                match runtime.get(span) {
-                    Some(&property) => FieldAddress::RuntimeProperty {
+                if let Some(&property) = runtime.get(span) {
+                    return FieldAddress::RuntimeProperty {
                         property,
+                        span: *span,
+                    };
+                }
+                match self.declaration_member(mac.owner, family, *span) {
+                    Some((list, member)) => FieldAddress::Member {
+                        list,
+                        member,
                         span: *span,
                     },
                     None => FieldAddress::Unlocated,
                 }
             })
             .collect();
-        Self {
+        MacroAddress {
             owner: mac.owner,
             kind: mac.kind,
             span: mac.span,
+            call,
             fields,
         }
     }
 
+    /// Record every member list of `ts_type` (a type literal, or the literal
+    /// arms of an intersection, nested intersections included) in source
+    /// order, and index its family spans into `members`. First occurrence
+    /// wins.
+    fn index_member_lists(
+        &mut self,
+        ts_type: &'a TSType<'a>,
+        root: MemberListRoot,
+        family: MemberFamily,
+        members: &mut FxHashMap<verter_span::Span, (u32, u32)>,
+    ) {
+        let mut pending = vec![(ts_type, Vec::new())];
+        while let Some((ts_type, arms)) = pending.pop() {
+            match ts_type {
+                TSType::TSTypeLiteral(literal) => {
+                    self.index_member_list(&literal.members, root, arms, family, members);
+                }
+                // Arms are pushed in reverse, so they pop in source order.
+                TSType::TSIntersectionType(intersection) => {
+                    pending.extend(intersection.types.iter().enumerate().rev().map(
+                        |(arm, ts_type)| {
+                            let mut arms = arms.clone();
+                            arms.push(arm as u32);
+                            (ts_type, arms)
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn index_member_list(
+        &mut self,
+        list: &'a [TSSignature<'a>],
+        root: MemberListRoot,
+        arms: Vec<u32>,
+        family: MemberFamily,
+        members: &mut FxHashMap<verter_span::Span, (u32, u32)>,
+    ) {
+        self.work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let list_index = self.lists.len() as u32;
+        self.lists.push(MemberListAddress { root, arms });
+        for (member_index, member) in list.iter().enumerate() {
+            self.work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(span) = family.address_span(member) {
+                members
+                    .entry(span)
+                    .or_insert((list_index, member_index as u32));
+            }
+        }
+    }
+
+    /// The member of a declaration visible to `owner` at `span`. The first
+    /// demand for an owner and family indexes the visible declarations
+    /// (interface bodies and alias object literals — the bodies
+    /// `resolve_macro_type_references_with_owners` draws fields from).
+    fn declaration_member(
+        &mut self,
+        owner: TopLevelOwnerId,
+        family: MemberFamily,
+        span: verter_span::Span,
+    ) -> Option<(u32, u32)> {
+        if !self.declaration_members.contains_key(&(owner, family)) {
+            let index = self.index_declarations(owner, family);
+            self.declaration_members.insert((owner, family), index);
+        }
+        self.declaration_members
+            .get(&(owner, family))?
+            .get(&span)
+            .copied()
+    }
+
+    fn index_declarations(
+        &mut self,
+        owner: TopLevelOwnerId,
+        family: MemberFamily,
+    ) -> FxHashMap<verter_span::Span, (u32, u32)> {
+        let (program, owners) = (self.program, self.owners);
+        let registries = self
+            .registries
+            .get_or_insert_with(|| build_local_type_registries(program, owners));
+        let mut visible: FxHashSet<verter_span::Span> = FxHashSet::default();
+        LocalTypeRegistryView::new(registries, owners, owner).for_each_visible(|decl| {
+            let span = match decl {
+                LocalTypeDecl::Interface { body, .. } => body.span,
+                LocalTypeDecl::Alias(ts_type) => ts_type.span(),
+                LocalTypeDecl::Class => return,
+            };
+            visible.insert(verter_span::Span::new(span.start, span.end));
+        });
+        let mut members = FxHashMap::default();
+        for (statement, stmt) in program.body.iter().enumerate() {
+            self.work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(declared) = declared_members(stmt) else {
+                continue;
+            };
+            let span = declared.span();
+            if !visible.contains(&verter_span::Span::new(span.start, span.end)) {
+                continue;
+            }
+            let root = MemberListRoot::Declaration {
+                statement: statement as u32,
+            };
+            match declared {
+                DeclaredMembers::Interface(body) => {
+                    self.index_member_list(&body.body, root, Vec::new(), family, &mut members);
+                }
+                DeclaredMembers::Alias(ts_type) => {
+                    self.index_member_lists(ts_type, root, family, &mut members);
+                }
+            }
+        }
+        members
+    }
+}
+
+/// The member-bearing body a top-level statement declares.
+#[derive(Clone, Copy)]
+enum DeclaredMembers<'a> {
+    Interface(&'a TSInterfaceBody<'a>),
+    Alias(&'a TSType<'a>),
+}
+
+impl DeclaredMembers<'_> {
+    fn span(self) -> oxc_span::Span {
+        match self {
+            Self::Interface(body) => body.span,
+            Self::Alias(ts_type) => ts_type.span(),
+        }
+    }
+}
+
+fn declared_members<'a>(stmt: &'a Statement<'a>) -> Option<DeclaredMembers<'a>> {
+    match stmt {
+        Statement::TSInterfaceDeclaration(decl) => Some(DeclaredMembers::Interface(&decl.body)),
+        Statement::TSTypeAliasDeclaration(decl) => {
+            Some(DeclaredMembers::Alias(&decl.type_annotation))
+        }
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::TSInterfaceDeclaration(decl) => {
+                Some(DeclaredMembers::Interface(&decl.body))
+            }
+            Declaration::TSTypeAliasDeclaration(decl) => {
+                Some(DeclaredMembers::Alias(&decl.type_annotation))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+impl MacroCallAddress {
+    /// The call at this address: one hop per nesting level.
+    fn locate<'a>(
+        &self,
+        program: &'a Program<'a>,
+        work: &verter_audit::observe::ObservedU64,
+    ) -> Option<&'a CallExpression<'a>> {
+        work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let top = match program.body.get(self.statement as usize)? {
+            Statement::ExpressionStatement(statement) => Some(&statement.expression),
+            Statement::VariableDeclaration(declaration) => declaration
+                .declarations
+                .get(self.declarator as usize)?
+                .init
+                .as_ref(),
+            _ => None,
+        };
+        let Some(Expression::CallExpression(call)) = top else {
+            return None;
+        };
+        let mut call: &'a CallExpression<'a> = call;
+        for &argument in &self.arguments {
+            work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match call.arguments.get(argument as usize)?.as_expression()? {
+                Expression::CallExpression(inner) => call = inner,
+                _ => return None,
+            }
+        }
+        Some(call)
+    }
+}
+
+/// Every call of `macros` in one pass over the program, replaying the
+/// analyzer's statement-position walk (see [`find_macro_call_at_span`]).
+fn locate_macro_calls(
+    program: &Program<'_>,
+    macros: &[AnalyzedMacro],
+    work: &verter_audit::observe::ObservedU64,
+) -> FxHashMap<verter_span::Span, MacroCallAddress> {
+    fn visit(
+        root: &CallExpression<'_>,
+        wanted: &FxHashSet<verter_span::Span>,
+        address: &mut MacroCallAddress,
+        found: &mut FxHashMap<verter_span::Span, MacroCallAddress>,
+        work: &verter_audit::observe::ObservedU64,
+    ) {
+        let mut enter = |call: &CallExpression<'_>, address: &MacroCallAddress| {
+            work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let span = verter_span::Span::new(call.span.start, call.span.end);
+            if wanted.contains(&span) {
+                found.entry(span).or_insert_with(|| address.clone());
+            }
+        };
+        enter(root, address);
+        // One frame per nesting level: the arguments of the call open there.
+        let mut open = vec![root.arguments.iter().enumerate()];
+        while let Some(arguments) = open.last_mut() {
+            let Some((ordinal, argument)) = arguments.next() else {
+                open.pop();
+                address.arguments.pop();
+                continue;
+            };
+            if let Some(Expression::CallExpression(inner)) = argument.as_expression() {
+                address.arguments.push(ordinal as u32);
+                enter(inner, address);
+                open.push(inner.arguments.iter().enumerate());
+            }
+        }
+    }
+
+    let wanted: FxHashSet<verter_span::Span> = macros.iter().map(|mac| mac.span).collect();
+    let mut found = FxHashMap::default();
+    for (statement, stmt) in program.body.iter().enumerate() {
+        work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut address = MacroCallAddress {
+            statement: statement as u32,
+            declarator: 0,
+            arguments: Vec::new(),
+        };
+        match stmt {
+            Statement::ExpressionStatement(expr_stmt) => {
+                if let Expression::CallExpression(call) = &expr_stmt.expression {
+                    visit(call, &wanted, &mut address, &mut found, work);
+                }
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                for (declarator, decl) in var_decl.declarations.iter().enumerate() {
+                    work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(Expression::CallExpression(call)) = &decl.init {
+                        address.declarator = declarator as u32;
+                        visit(call, &wanted, &mut address, &mut found, work);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+impl MacroAddress {
     fn family(&self) -> Option<MemberFamily> {
         match self.kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
@@ -1084,12 +1426,8 @@ impl MacroAddress {
     }
 }
 
-/// The runtime object argument of the macro call at `macro_span`, if any.
-fn runtime_props_object<'a>(
-    program: &'a Program<'a>,
-    macro_span: verter_span::Span,
-) -> Option<&'a ObjectExpression<'a>> {
-    let call = find_macro_call_at_span(program, macro_span)?;
+/// The runtime object argument of a macro call, if any.
+fn runtime_props_object<'a>(call: &'a CallExpression<'a>) -> Option<&'a ObjectExpression<'a>> {
     match call.arguments.first()?.as_expression()? {
         Expression::ObjectExpression(obj) => Some(obj),
         _ => None,
@@ -1127,30 +1465,32 @@ pub fn lower_macro_field_payload_at(
     field_index: u32,
 ) -> MacroFieldPayloadLowering {
     let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
-    let addresses = MacroFieldAddressTable::build(program, source, &owners);
+    let work = verter_audit::observe::ObservedU64::default();
+    let addresses = MacroFieldAddressTable::build(program, source, &owners, &work);
     lower_macro_field_payload_at_with_owners(
         program,
         source,
-        &owners,
         &addresses,
         TopLevelOwnerId::ordinary_file(),
         macro_index,
         field_index,
+        &work,
     )
 }
 
 /// [`lower_macro_field_payload_at`] against `addresses`, the address table
-/// built once from the SAME `program` and `owners`: constant work per field
-/// beyond re-locating the field's member list.
+/// built once from the SAME `program`: the field's node is reached directly
+/// from its address, so a field's work is independent of how many statements,
+/// members and member lists surround it. `work` receives one unit per hop.
 #[must_use]
 pub fn lower_macro_field_payload_at_with_owners(
     program: &Program<'_>,
     source: &str,
-    owners: &TopLevelOwnerTable,
     addresses: &MacroFieldAddressTable,
     expected_owner: TopLevelOwnerId,
     macro_index: u32,
     field_index: u32,
+    work: &verter_audit::observe::ObservedU64,
 ) -> MacroFieldPayloadLowering {
     let Some(mac) = addresses.macros.get(macro_index as usize) else {
         return MacroFieldPayloadLowering::NoField;
@@ -1165,8 +1505,12 @@ pub fn lower_macro_field_payload_at_with_owners(
         FieldAddress::Unauthored => MacroFieldPayloadLowering::Unauthored,
         FieldAddress::Unlocated => MacroFieldPayloadLowering::NoField,
         FieldAddress::ModelTypeArgument => {
-            match lower_macro_type_argument_at_span(program, source, mac.span) {
-                Some(expr) => MacroFieldPayloadLowering::Payload(expr),
+            match MacroFieldAddressTable::macro_call(mac, program, work)
+                .and_then(macro_type_argument)
+            {
+                Some(ts_type) => MacroFieldPayloadLowering::Payload(
+                    verter_type_expr_oxc::lower_ts_type(ts_type, source),
+                ),
                 None => MacroFieldPayloadLowering::NoField,
             }
         }
@@ -1174,7 +1518,8 @@ pub fn lower_macro_field_payload_at_with_owners(
             let Some(family) = mac.family() else {
                 return MacroFieldPayloadLowering::NoField;
             };
-            match field_payload_member_list(program, owners, mac.span, mac.owner, list as usize)
+            match addresses
+                .member_list(program, list, work)
                 .and_then(|members| members.get(member as usize))
             {
                 // The member must still author the recorded span: a table
@@ -1185,7 +1530,8 @@ pub fn lower_macro_field_payload_at_with_owners(
         }
         FieldAddress::RuntimeProperty { property, span } => {
             let Some(ObjectPropertyKind::ObjectProperty(p)) =
-                runtime_props_object(program, mac.span)
+                MacroFieldAddressTable::macro_call(mac, program, work)
+                    .and_then(runtime_props_object)
                     .and_then(|obj| obj.properties.get(property as usize))
             else {
                 return MacroFieldPayloadLowering::NoField;
@@ -1198,81 +1544,9 @@ pub fn lower_macro_field_payload_at_with_owners(
     }
 }
 
-/// Collect every `TSSignature` member list an analyzer field span can live
-/// in: the macro call's type-argument literal (plus intersection arms) and
-/// every local registry declaration body (interface bodies and alias object
-/// literals — the bodies `resolve_macro_type_references_with_owners` draws fields from).
-fn field_payload_member_lists<'a>(
-    program: &'a Program<'a>,
-    owners: &TopLevelOwnerTable,
-    macro_span: verter_span::Span,
-    macro_owner: TopLevelOwnerId,
-) -> Vec<&'a [TSSignature<'a>]> {
-    let mut lists = macro_type_argument_member_lists(program, macro_span);
-    let registries = build_local_type_registries(program, owners);
-    let registry = LocalTypeRegistryView::new(&registries, owners, macro_owner);
-    registry.for_each_visible(|decl| match decl {
-        LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
-        LocalTypeDecl::Alias(ts_type) => collect_member_lists_from_type(ts_type, &mut lists),
-        LocalTypeDecl::Class => {}
-    });
-    lists
-}
-
-/// The `list`-th member list of [`field_payload_member_lists`]. The macro's
-/// own type-argument lists come first, so a field authored there is found
-/// without building the local type registries.
-fn field_payload_member_list<'a>(
-    program: &'a Program<'a>,
-    owners: &TopLevelOwnerTable,
-    macro_span: verter_span::Span,
-    macro_owner: TopLevelOwnerId,
-    list: usize,
-) -> Option<&'a [TSSignature<'a>]> {
-    let own = macro_type_argument_member_lists(program, macro_span);
-    if let Some(members) = own.get(list) {
-        return Some(members);
-    }
-    field_payload_member_lists(program, owners, macro_span, macro_owner)
-        .get(list)
-        .copied()
-}
-
-/// The member lists of the macro call's type argument at `macro_span` (a
-/// type literal, or the literal arms of an intersection).
-fn macro_type_argument_member_lists<'a>(
-    program: &'a Program<'a>,
-    macro_span: verter_span::Span,
-) -> Vec<&'a [TSSignature<'a>]> {
-    let mut lists: Vec<&'a [TSSignature<'a>]> = Vec::new();
-    if let Some(call) = find_macro_call_at_span(program, macro_span) {
-        if let Some(type_args) = call.type_arguments.as_ref() {
-            if let Some(first) = type_args.params.first() {
-                collect_member_lists_from_type(first, &mut lists);
-            }
-        }
-    }
-    lists
-}
-
-/// The member lists of `ts_type` (a type literal, or the literal arms of an
-/// intersection, nested intersections included) in source order, walked
-/// from an explicit stack.
-fn collect_member_lists_from_type<'a>(
-    ts_type: &'a TSType<'a>,
-    out: &mut Vec<&'a [TSSignature<'a>]>,
-) {
-    let mut pending = vec![ts_type];
-    while let Some(ts_type) = pending.pop() {
-        match ts_type {
-            TSType::TSTypeLiteral(literal) => out.push(&literal.members),
-            // Arms are pushed in reverse, so they pop in source order.
-            TSType::TSIntersectionType(intersection) => {
-                pending.extend(intersection.types.iter().rev());
-            }
-            _ => {}
-        }
-    }
+/// The macro call's authored type argument.
+fn macro_type_argument<'a>(call: &'a CallExpression<'a>) -> Option<&'a TSType<'a>> {
+    call.type_arguments.as_ref()?.params.first()
 }
 
 /// Find the macro CALL node at `macro_span`, replaying the analyzer's own

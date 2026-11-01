@@ -1,0 +1,9 @@
+{
+  "sources_fixture_id": "project-lifecycle",
+  "actions_catalog": "catalogs/formatter-performance-v1.toml",
+  "actions_table": "churn_action",
+  "initial_state": "128 open sources, revision 0, profile-0/config-0/policy-0; empty cache",
+  "edit": "fixtures/formatter/performance/edit.json",
+  "revert": "fixtures/formatter/performance/revert.json",
+  "identity_payload": "fixtures/formatter/performance/identities.json"
+}
