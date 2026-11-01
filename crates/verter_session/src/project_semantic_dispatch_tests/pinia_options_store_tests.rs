@@ -422,10 +422,10 @@ fn state_equivalence(state: &str) -> String {
     format!("{state} extends {checker} ? {checker} extends {state} ? 1 : 0 : 0")
 }
 
-/// Every failure of a marker-typed store: each member prints as the
-/// checker's, `$state` retains its generic-interface contributor and full
+/// Every failure of a marker-typed store in one compiler setting: each member
+/// prints as the checker's, `$state` retains its generic-interface contributor and full
 /// denotation, and the whole store answers element by element alike.
-fn marked_store_mismatches(project: &Project<'_>) -> Vec<String> {
+fn marked_store_mismatches(project: &Project<'_>, setting: Setting) -> Vec<String> {
     let equivalence = state_equivalence("St['$state']");
     let whole_equivalence = state_equivalence(&format!("({WHOLE_STORE})[7]"));
     let probes: Vec<&str> = MEMBERS
@@ -439,49 +439,46 @@ fn marked_store_mismatches(project: &Project<'_>) -> Vec<String> {
         ])
         .collect();
     let mut failures = Vec::new();
-    for setting in ALL {
-        let host = project.host(setting.options, &probes);
-        let answers: Vec<TypeExpr> = (0..probes.len())
-            .map(|index| wire_answer(&host, &named_answer(&host, index)))
-            .collect();
-        let store = store_degradation(&host);
-        if store != Ok(None) {
-            failures.push(format!(
-                "{}: the store's initializer is {store:?}, not a complete value",
-                setting.label
-            ));
-        }
-        let mut report = |probe: &str, failure: Option<String>| {
-            failures
-                .extend(failure.map(|failure| format!("{}: `{probe}`: {failure}", setting.label)));
-        };
-        for ((probe, checker), answer) in MEMBERS.iter().zip(&answers) {
-            report(probe, answer_mismatch(answer, checker));
-        }
-        let state = &answers[MEMBERS.len()];
-        report("St['$state']", state_mismatch(state));
-        report(
-            &equivalence,
-            answer_mismatch(&answers[MEMBERS.len() + 1], "1"),
-        );
-        let whole = &answers[MEMBERS.len() + 2];
-        let TypeExpr::Tuple { elements, .. } = whole else {
-            report(WHOLE_STORE, Some(format!("is `{}`", display(whole))));
-            continue;
-        };
-        if elements.len() != MEMBERS.len() + 1 {
-            report(WHOLE_STORE, Some(format!("is `{}`", display(whole))));
-            continue;
-        }
-        for (element, (_, checker)) in elements.iter().zip(&MEMBERS) {
-            report(WHOLE_STORE, answer_mismatch(&element.ty, checker));
-        }
-        report(WHOLE_STORE, state_mismatch(&elements[MEMBERS.len()].ty));
-        report(
-            &whole_equivalence,
-            answer_mismatch(&answers[MEMBERS.len() + 3], "1"),
-        );
+    let host = project.host(setting.options, &probes);
+    let answers: Vec<TypeExpr> = (0..probes.len())
+        .map(|index| wire_answer(&host, &named_answer(&host, index)))
+        .collect();
+    let store = store_degradation(&host);
+    if store != Ok(None) {
+        failures.push(format!(
+            "{}: the store's initializer is {store:?}, not a complete value",
+            setting.label
+        ));
     }
+    let mut report = |probe: &str, failure: Option<String>| {
+        failures.extend(failure.map(|failure| format!("{}: `{probe}`: {failure}", setting.label)));
+    };
+    for ((probe, checker), answer) in MEMBERS.iter().zip(&answers) {
+        report(probe, answer_mismatch(answer, checker));
+    }
+    let state = &answers[MEMBERS.len()];
+    report("St['$state']", state_mismatch(state));
+    report(
+        &equivalence,
+        answer_mismatch(&answers[MEMBERS.len() + 1], "1"),
+    );
+    let whole = &answers[MEMBERS.len() + 2];
+    let TypeExpr::Tuple { elements, .. } = whole else {
+        report(WHOLE_STORE, Some(format!("is `{}`", display(whole))));
+        return failures;
+    };
+    if elements.len() != MEMBERS.len() + 1 {
+        report(WHOLE_STORE, Some(format!("is `{}`", display(whole))));
+        return failures;
+    }
+    for (element, (_, checker)) in elements.iter().zip(&MEMBERS) {
+        report(WHOLE_STORE, answer_mismatch(&element.ty, checker));
+    }
+    report(WHOLE_STORE, state_mismatch(&elements[MEMBERS.len()].ty));
+    report(
+        &whole_equivalence,
+        answer_mismatch(&answers[MEMBERS.len() + 3], "1"),
+    );
     failures
 }
 
@@ -501,7 +498,7 @@ fn state_mismatch(state: &TypeExpr) -> Option<String> {
 /// `add` and `increment` read the store through the actions' `this`.
 #[test]
 fn an_options_store_answers_every_member_as_the_checker_does() {
-    let failures = marked_store_mismatches(&Project::store("", MARKED));
+    let failures = marked_store_mismatches(&Project::store("", MARKED), STRICT);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -510,10 +507,10 @@ fn an_options_store_answers_every_member_as_the_checker_does() {
 /// diagnostics.
 #[test]
 fn an_authored_global_marker_types_the_store() {
-    let failures = marked_store_mismatches(&Project::store(
-        "declare global { interface ThisType<T> {} }\n",
-        &[],
-    ));
+    let failures = marked_store_mismatches(
+        &Project::store("declare global { interface ThisType<T> {} }\n", &[]),
+        STRICT,
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -523,10 +520,85 @@ fn an_authored_global_marker_types_the_store() {
 /// diagnostics.
 #[test]
 fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store() {
-    let failures = marked_store_mismatches(&Project::store(
-        "",
-        &[("contrib.d.ts", CONTRIBUTING_MODULE)],
-    ));
+    let failures = marked_store_mismatches(
+        &Project::store("", &[("contrib.d.ts", CONTRIBUTING_MODULE)]),
+        STRICT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_options_store_answers_every_member_as_the_checker_does_with_strict_null_checks_off() {
+    let failures = marked_store_mismatches(&Project::store("", MARKED), LOOSE);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_options_store_answers_every_member_as_the_checker_does_with_no_implicit_any_off() {
+    let failures = marked_store_mismatches(&Project::store("", MARKED), STRICT_IMPLICIT);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_options_store_answers_every_member_as_the_checker_does_with_both_checks_off() {
+    let failures = marked_store_mismatches(&Project::store("", MARKED), LOOSE_IMPLICIT);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_authored_global_marker_types_the_store_with_strict_null_checks_off() {
+    let failures = marked_store_mismatches(
+        &Project::store("declare global { interface ThisType<T> {} }\n", &[]),
+        LOOSE,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_authored_global_marker_types_the_store_with_no_implicit_any_off() {
+    let failures = marked_store_mismatches(
+        &Project::store("declare global { interface ThisType<T> {} }\n", &[]),
+        STRICT_IMPLICIT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_authored_global_marker_types_the_store_with_both_checks_off() {
+    let failures = marked_store_mismatches(
+        &Project::store("declare global { interface ThisType<T> {} }\n", &[]),
+        LOOSE_IMPLICIT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store_with_strict_null_checks_off(
+) {
+    let failures = marked_store_mismatches(
+        &Project::store("", &[("contrib.d.ts", CONTRIBUTING_MODULE)]),
+        LOOSE,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store_with_no_implicit_any_off(
+) {
+    let failures = marked_store_mismatches(
+        &Project::store("", &[("contrib.d.ts", CONTRIBUTING_MODULE)]),
+        STRICT_IMPLICIT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_global_marker_contributed_beside_a_namesake_types_another_modules_store_with_both_checks_off()
+{
+    let failures = marked_store_mismatches(
+        &Project::store("", &[("contrib.d.ts", CONTRIBUTING_MODULE)]),
+        LOOSE_IMPLICIT,
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
