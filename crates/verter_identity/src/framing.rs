@@ -1,17 +1,17 @@
 //! Shared canonical-framing primitives.
 //!
 //! The streaming [`CanonicalEncoder`](crate::encoding::CanonicalEncoder)
-//! and the exact-size construction path
-//! ([`crate::exact`](crate::exact)) are one grammar, not two serializers
-//! kept in agreement: every length, every header part and the set
-//! canonicalization policy live here, and both paths consume them. A
-//! change to this module is by construction a change to both encodings.
+//! and the exact-size construction path ([`crate::exact`]) are one grammar,
+//! not two serializers kept in agreement. Every framing byte is produced by
+//! the `put_*` routines here, over the [`FrameOut`] destination each path
+//! supplies; every length and the set canonicalization policy live here too.
+//! A change to this module is by construction a change to both encodings.
 
 use crate::encoding::CanonicalDigest;
 
 /// A field record is `u16 tag LE, u64 payload_length LE, payload`.
-pub(crate) const TAG_BYTES: usize = 2;
-pub(crate) const LEN_BYTES: usize = 8;
+const TAG_BYTES: usize = 2;
+const LEN_BYTES: usize = 8;
 
 /// A digest payload is a fixed 32 bytes, which is what lets a digest set
 /// canonicalize inside a pre-sized buffer instead of scratch storage.
@@ -19,7 +19,12 @@ pub(crate) const DIGEST_BYTES: usize = 32;
 
 /// A set payload is `u64 element_count LE` then each element as
 /// `u64 length LE + bytes`.
-pub(crate) const SET_COUNT_BYTES: usize = 8;
+const SET_COUNT_BYTES: usize = 8;
+
+/// Option presence byte: absent (`0`) and present (`1`) stay distinguishable,
+/// including from a present-empty value.
+const OPTION_ABSENT: u8 = 0;
+const OPTION_PRESENT: u8 = 1;
 
 /// Total length of one field record (`tag`, `length`, `payload`).
 #[inline]
@@ -37,16 +42,103 @@ pub(crate) fn option_payload_len(value: Option<&[u8]>) -> usize {
     }
 }
 
-/// One length-prefixed set element.
-#[inline]
-pub(crate) fn set_element_len(element_len: usize) -> usize {
-    LEN_BYTES + element_len
-}
-
 /// Total set payload length for `count` fixed-size elements.
 #[inline]
 pub(crate) fn set_payload_len(count: usize, element_len: usize) -> usize {
-    SET_COUNT_BYTES + count * set_element_len(element_len)
+    SET_COUNT_BYTES + count * (LEN_BYTES + element_len)
+}
+
+/// Destination of framed bytes: the streaming encoder's growing buffer, or
+/// the exact-size path's pre-sized retained storage.
+pub(crate) trait FrameOut {
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl FrameOut for Vec<u8> {
+    #[inline]
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// Fills a pre-sized buffer from the front. Overrunning it panics, so a
+/// writer that was sized too small cannot produce truncated bytes.
+pub(crate) struct SliceOut<'a> {
+    out: &'a mut [u8],
+    at: usize,
+}
+
+impl<'a> SliceOut<'a> {
+    pub(crate) fn new(out: &'a mut [u8]) -> Self {
+        Self { out, at: 0 }
+    }
+
+    /// Bytes written so far.
+    pub(crate) fn written(&self) -> usize {
+        self.at
+    }
+}
+
+impl FrameOut for SliceOut<'_> {
+    #[inline]
+    fn put(&mut self, bytes: &[u8]) {
+        self.out[self.at..self.at + bytes.len()].copy_from_slice(bytes);
+        self.at += bytes.len();
+    }
+}
+
+#[inline]
+fn put_field_header<O: FrameOut>(out: &mut O, tag: u16, payload_len: usize) {
+    out.put(&tag.to_le_bytes());
+    out.put(&(payload_len as u64).to_le_bytes());
+}
+
+/// `u64 length LE` then the bytes: the delimiter that keeps neighbouring set
+/// elements and map entries from fusing.
+#[inline]
+pub(crate) fn put_length_prefixed<O: FrameOut>(out: &mut O, bytes: &[u8]) {
+    out.put(&(bytes.len() as u64).to_le_bytes());
+    out.put(bytes);
+}
+
+/// A set or map payload's leading element count.
+#[inline]
+pub(crate) fn put_element_count<O: FrameOut>(out: &mut O, count: usize) {
+    out.put(&(count as u64).to_le_bytes());
+}
+
+/// One raw field record.
+#[inline]
+pub(crate) fn put_raw_field<O: FrameOut>(out: &mut O, tag: u16, payload: &[u8]) {
+    put_field_header(out, tag, payload.len());
+    out.put(payload);
+}
+
+/// One optional field record: presence byte, plus the value when present.
+#[inline]
+pub(crate) fn put_option_field<O: FrameOut>(out: &mut O, tag: u16, value: Option<&[u8]>) {
+    put_field_header(out, tag, option_payload_len(value));
+    match value {
+        None => out.put(&[OPTION_ABSENT]),
+        Some(bytes) => {
+            out.put(&[OPTION_PRESENT]);
+            out.put(bytes);
+        }
+    }
+}
+
+/// One digest-set field record, canonicalized by the shared set policy.
+pub(crate) fn put_digest_set_field<O: FrameOut>(
+    out: &mut O,
+    tag: u16,
+    elements: &[CanonicalDigest],
+) {
+    let count = distinct_digest_count(elements);
+    put_field_header(out, tag, set_payload_len(count, DIGEST_BYTES));
+    put_element_count(out, count);
+    visit_sorted_distinct_digests(elements, &mut |element| {
+        put_length_prefixed(out, element.as_bytes());
+    });
 }
 
 /// Wire header: `u32 domain_tag_length LE, domain tag, u32 field_count LE`.
@@ -75,8 +167,8 @@ impl HeaderLayout {
         }
     }
 
-    /// Header parts in wire order. The streaming finish, the shared-slice
-    /// finish and the in-place digest all hash/copy these same parts.
+    /// Header parts in wire order. Every finish copies and the in-place
+    /// digest hashes these same parts.
     pub(crate) fn parts<'a>(&'a self, domain_tag: &'a str) -> [&'a [u8]; 3] {
         [
             &self.domain_len[..],
@@ -85,14 +177,11 @@ impl HeaderLayout {
         ]
     }
 
-    /// Writes the header at the front of `out` and returns its length.
-    pub(crate) fn write_into(&self, domain_tag: &str, out: &mut [u8]) -> usize {
-        let mut at = 0;
+    /// Puts the header parts, in wire order.
+    pub(crate) fn put_into<O: FrameOut>(&self, domain_tag: &str, out: &mut O) {
         for part in self.parts(domain_tag) {
-            out[at..at + part.len()].copy_from_slice(part);
-            at += part.len();
+            out.put(part);
         }
-        at
     }
 }
 
@@ -106,7 +195,7 @@ impl HeaderLayout {
 /// allocation. The measuring pass and the writing pass both count and
 /// emit through this one routine, so they cannot disagree on which
 /// elements a set contributes.
-pub(crate) fn visit_sorted_distinct_digests<F>(elements: &[CanonicalDigest], visit: &mut F)
+fn visit_sorted_distinct_digests<F>(elements: &[CanonicalDigest], visit: &mut F)
 where
     F: FnMut(&CanonicalDigest),
 {
@@ -174,21 +263,26 @@ mod tests {
         assert_eq!(visited, expected);
     }
 
-    /// The header parts a streaming finish writes, a shared-slice finish
-    /// copies and an in-place digest hashes are the same bytes in the
-    /// same order.
+    /// The header a finish copies, into either destination, and the parts an
+    /// in-place digest hashes are the same bytes in the same order.
     #[test]
-    fn header_layout_writes_and_reports_the_same_parts() {
+    fn header_layout_puts_and_reports_the_same_parts() {
         let layout = HeaderLayout::new("hdr-test", 3);
-        let mut written = [0u8; 32];
-        let len = layout.write_into("hdr-test", &mut written);
-        let expected_len = header_len("hdr-test");
-        assert_eq!(len, expected_len);
         let mut expected = Vec::new();
         for part in layout.parts("hdr-test") {
             expected.extend_from_slice(part);
         }
-        assert_eq!(&written[..len], &expected[..]);
-        assert_eq!(total_len("hdr-test", 7), expected_len + 7);
+        assert_eq!(expected.len(), header_len("hdr-test"));
+        assert_eq!(total_len("hdr-test", 7), header_len("hdr-test") + 7);
+
+        let mut growing = Vec::new();
+        layout.put_into("hdr-test", &mut growing);
+        assert_eq!(growing, expected);
+
+        let mut buffer = [0u8; 32];
+        let mut sized = SliceOut::new(&mut buffer);
+        layout.put_into("hdr-test", &mut sized);
+        let written = sized.written();
+        assert_eq!(&buffer[..written], &expected[..]);
     }
 }

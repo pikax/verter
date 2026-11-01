@@ -58,32 +58,33 @@ impl Canonical {
     /// finished bytes once. There is no growing body buffer and no
     /// encoding scratch, so the total work is bounded to that single
     /// allocation and single hash, digest-set processing included. The
-    /// bytes are exactly the streaming grammar's: the measuring and
-    /// writing passes share [`crate::framing`] with
-    /// [`CanonicalEncoder`].
+    /// bytes are exactly the streaming grammar's: the passes share their
+    /// framing with [`CanonicalEncoder`].
     ///
-    /// Descriptors must be deterministic per borrow — `exact_fields` is
-    /// driven once to size and once to write, and a descriptor whose two
-    /// passes disagree fails an assertion rather than producing wrong
-    /// bytes.
+    /// # Panics
+    ///
+    /// Descriptors must be deterministic per borrow: `exact_fields` is driven
+    /// once to size and once to write. Passes that disagree on the body length
+    /// or the field count panic rather than producing wrong bytes.
     pub fn from_exact<T: ExactCanonicalEncode + ?Sized>(value: &T) -> Self {
         let mut sizing = SizingSink::new();
         value.exact_fields(&mut sizing);
 
         // The one allocating call: retained storage at the exact finished
         // length.
-        let len = framing::total_len(T::DOMAIN_TAG, sizing.body_len());
+        let domain_tag = <T as ExactCanonicalEncode>::DOMAIN_TAG;
+        let len = framing::total_len(domain_tag, sizing.body_len());
         let mut shared: Arc<[u8]> = std::iter::repeat_n(0, len).collect();
-        let out = Arc::get_mut(&mut shared).expect("a fresh slice has one handle");
+        let mut out = framing::SliceOut::new(
+            Arc::get_mut(&mut shared).expect("a fresh slice has one handle"),
+        );
 
-        let header = framing::HeaderLayout::new(T::DOMAIN_TAG, sizing.field_count());
-        let header_len = header.write_into(T::DOMAIN_TAG, out);
-        let mut writer = WriterSink::new(&mut out[header_len..]);
+        framing::HeaderLayout::new(domain_tag, sizing.field_count()).put_into(domain_tag, &mut out);
+        let mut writer = WriterSink::new(out);
         value.exact_fields(&mut writer);
-        assert_eq!(
-            writer.written(),
-            sizing.body_len(),
-            "an exact-size descriptor described different bytes to its sizing \
+        assert!(
+            writer.written() == len && writer.field_count() == sizing.field_count(),
+            "an exact-size descriptor described different fields to its sizing \
              and writing passes; exact_fields must be deterministic per borrow"
         );
 

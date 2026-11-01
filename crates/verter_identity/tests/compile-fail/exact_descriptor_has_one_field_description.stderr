@@ -1,0 +1,9 @@
+error[E0119]: conflicting implementations of trait `CanonicalEncode` for type `Drifting`
+  --> tests/compile-fail/exact_descriptor_has_one_field_description.rs:19:1
+   |
+19 | impl CanonicalEncode for Drifting {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `verter_identity`:
+           - impl<T> CanonicalEncode for T
+             where T: ExactCanonicalEncode, T: ?Sized;

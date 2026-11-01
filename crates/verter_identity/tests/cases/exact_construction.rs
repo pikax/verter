@@ -38,11 +38,10 @@ use verter_identity::exact::{CanonicalFieldSink, ExactCanonicalEncode};
 /// option bytes, a raw byte field, and an unordered, possibly repeated
 /// fixed-size digest set.
 ///
-/// `encode_fields` is deliberately NOT implemented by hand: the streaming
-/// encoding comes from the shared default that drives the same
-/// `exact_fields` description through the encoder's field-sink
-/// implementation, which is exactly the sharing the byte-parity tests
-/// hold to load-bearing.
+/// Only the exact description is written: the streaming `CanonicalEncode`
+/// comes from the blanket implementation that drives this same
+/// `exact_fields` through the encoder's field-sink implementation, which is
+/// exactly the sharing the byte-parity tests hold to load-bearing.
 struct StageLike<'a> {
     epoch: u32,
     predecessor: &'a CanonicalDigest,
@@ -51,16 +50,10 @@ struct StageLike<'a> {
     digests: &'a [CanonicalDigest],
 }
 
-impl CanonicalEncode for StageLike<'_> {
+impl ExactCanonicalEncode for StageLike<'_> {
     const DOMAIN_TAG: &'static str = "exact-test.stage-like.v1";
 
-    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-        self.exact_fields(encoder);
-    }
-}
-
-impl ExactCanonicalEncode for StageLike<'_> {
-    fn exact_fields<S: verter_identity::exact::CanonicalFieldSink>(&self, sink: &mut S) {
+    fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
         sink.field_u32(1, self.epoch);
         sink.field_digest(2, self.predecessor);
         sink.field_option(3, self.options);
@@ -94,10 +87,9 @@ fn populated_stage<'a>(digests: &'a [CanonicalDigest]) -> StageLike<'a> {
 
 mod wire_parity {
     //! Bytes and digests from the exact path must equal the streaming
-    //! grammar's. The streaming side here routes through the shared
-    //! field-sink default, so a defect planted in the common framing
-    //! fails both sides — while a defect planted only in the exact path
-    //! fails the comparison against the hand-assembled layout.
+    //! grammar's. Both paths frame through the same routines, so a defect in
+    //! the common framing moves both alike; the hand-assembled layout is the
+    //! comparison that catches it.
 
     use super::*;
 
@@ -186,14 +178,10 @@ mod wire_parity {
     #[test]
     fn domain_tag_separates_exact_identities() {
         struct OtherDomain<'a>(&'a StageLike<'a>);
-        impl CanonicalEncode for OtherDomain<'_> {
-            const DOMAIN_TAG: &'static str = "exact-test.other.v1";
-            fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-                self.0.exact_fields(encoder);
-            }
-        }
         impl ExactCanonicalEncode for OtherDomain<'_> {
-            fn exact_fields<S: verter_identity::exact::CanonicalFieldSink>(&self, sink: &mut S) {
+            const DOMAIN_TAG: &'static str = "exact-test.other.v1";
+
+            fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
                 self.0.exact_fields(sink);
             }
         }
@@ -216,14 +204,10 @@ mod wire_parity {
     #[test]
     fn field_order_is_significant_through_the_exact_path() {
         struct Swapped<'a>(&'a StageLike<'a>);
-        impl CanonicalEncode for Swapped<'_> {
-            const DOMAIN_TAG: &'static str = "exact-test.stage-like.v1";
-            fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-                self.0.exact_fields(encoder);
-            }
-        }
         impl ExactCanonicalEncode for Swapped<'_> {
-            fn exact_fields<S: verter_identity::exact::CanonicalFieldSink>(&self, sink: &mut S) {
+            const DOMAIN_TAG: &'static str = "exact-test.stage-like.v1";
+
+            fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
                 let inner = self.0;
                 // raw before epoch: same fields, different schema order.
                 sink.field_raw(4, inner.raw);
@@ -346,9 +330,12 @@ mod identity_semantics {
         };
         let b = Canonical::from_exact(&other);
         assert_ne!(a, b);
-        let ordering = a.cmp(&b);
-        assert_eq!(ordering, a.cmp(&b), "ordering is stable");
-        assert_eq!(b.cmp(&a), ordering.reverse(), "ordering is antisymmetric");
+        let expected = a
+            .digest()
+            .cmp(&b.digest())
+            .then_with(|| a.bytes().cmp(b.bytes()));
+        assert_eq!(a.cmp(&b), expected, "ordering is digest, then bytes");
+        assert_eq!(b.cmp(&a), expected.reverse(), "ordering is antisymmetric");
     }
 
     #[test]
@@ -360,6 +347,83 @@ mod identity_semantics {
             Arc::ptr_eq(original.shared_bytes(), clone.shared_bytes()),
             "a clone shares the one constructed allocation"
         );
+    }
+}
+
+mod descriptor_determinism {
+    //! A descriptor is driven twice, once to size and once to write. One
+    //! whose passes describe different fields must fail rather than yield
+    //! bytes that are not its canonical encoding.
+
+    use std::cell::Cell;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use super::*;
+
+    type Fields<'a> = &'a [&'a [u8]];
+
+    /// Describes `sized` on its first pass and `written` on every later one.
+    struct TwoFaced<'a> {
+        passes: Cell<u32>,
+        sized: Fields<'a>,
+        written: Fields<'a>,
+    }
+
+    impl ExactCanonicalEncode for TwoFaced<'_> {
+        const DOMAIN_TAG: &'static str = "exact-test.two-faced.v1";
+
+        fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
+            let pass = self.passes.get();
+            self.passes.set(pass + 1);
+            let fields = if pass == 0 { self.sized } else { self.written };
+            for (tag, payload) in (1u16..).zip(fields) {
+                sink.field_raw(tag, payload);
+            }
+        }
+    }
+
+    #[test]
+    fn passes_that_disagree_fail_instead_of_yielding_bytes() {
+        let cases: [(&str, Fields, Fields); 3] = [
+            ("writes less", &[&[0; 12]], &[&[0; 4]]),
+            ("writes more", &[&[0; 4]], &[&[0; 12]]),
+            // One 12-byte record against two 1-byte records: the same body
+            // length (22 bytes), but a header counting the wrong fields.
+            (
+                "same length, different field count",
+                &[&[0; 12]],
+                &[&[0; 1], &[0; 1]],
+            ),
+        ];
+        for (name, sized, written) in cases {
+            let descriptor = TwoFaced {
+                passes: Cell::new(0),
+                sized,
+                written,
+            };
+            let outcome = catch_unwind(AssertUnwindSafe(|| Canonical::from_exact(&descriptor)));
+            assert!(outcome.is_err(), "{name}: construction must fail");
+            assert_eq!(descriptor.passes.get(), 2, "{name}: both passes ran");
+        }
+    }
+
+    #[test]
+    fn passes_that_agree_construct_normally() {
+        let fields: Fields = &[&[1; 12], &[2; 1]];
+        let descriptor = TwoFaced {
+            passes: Cell::new(0),
+            sized: fields,
+            written: fields,
+        };
+        let payload = Canonical::from_exact(&descriptor);
+        assert_eq!(
+            descriptor.passes.get(),
+            2,
+            "one sizing and one writing pass"
+        );
+        let mut expected = CanonicalEncoder::new("exact-test.two-faced.v1");
+        expected.field_bytes(1, &[1; 12]).field_bytes(2, &[2; 1]);
+        assert_eq!(payload.bytes(), &expected.finish()[..]);
     }
 }
 
@@ -403,15 +467,10 @@ mod neutral_consumer {
         admitted: &'a [CanonicalDigest],
     }
 
-    impl CanonicalEncode for DemandBasis<'_> {
-        const DOMAIN_TAG: &'static str = "consumer-test.demand-basis.v1";
-        fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-            self.exact_fields(encoder);
-        }
-    }
-
     impl ExactCanonicalEncode for DemandBasis<'_> {
-        fn exact_fields<S: verter_identity::exact::CanonicalFieldSink>(&self, sink: &mut S) {
+        const DOMAIN_TAG: &'static str = "consumer-test.demand-basis.v1";
+
+        fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
             sink.field_u32(1, self.semantic_epoch);
             sink.field_digest(2, self.profile);
             sink.field_option(3, self.options);
@@ -467,6 +526,15 @@ mod construction_oracle {
     use verter_identity::encoding::{canonical_hash_calls, reset_canonical_hash_calls};
 
     use super::*;
+
+    /// Stops the sibling when dropped, so it cannot outlive a failing window.
+    struct StopOnDrop(Arc<AtomicBool>);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
 
     thread_local! {
         /// Allocating calls (`alloc`/`alloc_zeroed`/`realloc`) on this
@@ -606,8 +674,9 @@ mod construction_oracle {
         let digests = [seeded_digest(12), seeded_digest(11)];
         let stage = populated_stage(&digests);
         start.wait();
+        let stop = StopOnDrop(finished);
         let (payload, allocs, hashes) = measured(|| Canonical::from_exact(&stage));
-        finished.store(true, Ordering::Relaxed);
+        drop(stop);
         sibling.join().expect("sibling thread");
 
         assert_eq!(

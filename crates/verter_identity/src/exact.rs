@@ -11,22 +11,26 @@
 //! digest-set canonicalization included.
 //!
 //! The grammar is not duplicated here. A descriptor describes its fields
-//! once, through [`CanonicalFieldSink`]; the streaming
-//! [`CanonicalEncoder`](crate::encoding::CanonicalEncoder), the measuring
-//! pass ([`SizingSink`]) and the writing pass ([`WriterSink`]) are three
-//! sinks over the same field description, and every length and header
-//! part they emit comes from [`crate::framing`]. A descriptor that
-//! implements [`ExactCanonicalEncode`] and does not override
-//! [`CanonicalEncode::encode_fields`] therefore cannot drift from the
-//! streaming grammar: it has one field description.
+//! once, through [`CanonicalFieldSink`]; the streaming [`CanonicalEncoder`],
+//! the measuring pass and the writing pass are three sinks over that one
+//! description, and every length and framing byte they produce comes from the
+//! crate's private framing module. An [`ExactCanonicalEncode`] descriptor
+//! receives [`CanonicalEncode`] from that same description and cannot supply
+//! a second one (it would not compile), so its streaming and exact bytes
+//! cannot drift apart.
 //!
 //! ```text
 //! Canonical::from_exact(&descriptor)
-//!   1. SizingSink:   value.exact_fields(&mut sizer)   -> body length, field count
+//!   1. measuring pass: value.exact_fields(..) -> body length, field count
 //!   2. one allocation at the exact finished length
-//!   3. WriterSink:   value.exact_fields(&mut writer)  -> header + fields written in place
+//!   3. writing pass:   value.exact_fields(..) -> header + fields written in place
 //!   4. one hash over the finished bytes
 //! ```
+//!
+//! Digest sets cost `O(elements × distinct)` comparisons per pass: they
+//! canonicalize without scratch storage, so only prepared, bounded sets belong
+//! on this path. Descriptors outside this contract keep the general streaming
+//! API, whose `field_sorted_set` sorts through temporary storage.
 //!
 //! # Example
 //!
@@ -38,7 +42,7 @@
 //! ```
 //! use verter_identity::canonical::Canonical;
 //! use verter_identity::digest_identity;
-//! use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
+//! use verter_identity::encoding::{CanonicalDigest, CanonicalEncode};
 //! use verter_identity::exact::{CanonicalFieldSink, ExactCanonicalEncode};
 //!
 //! struct StageDescriptor<'a> {
@@ -49,16 +53,9 @@
 //!     demand: &'a [CanonicalDigest],
 //! }
 //!
-//! impl CanonicalEncode for StageDescriptor<'_> {
-//!     const DOMAIN_TAG: &'static str = "example.stage.v1";
-//!     // The streaming encoding IS the shared field description; there is
-//!     // no second encode_fields implementation to keep in agreement.
-//!     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-//!         self.exact_fields(encoder);
-//!     }
-//! }
-//!
 //! impl ExactCanonicalEncode for StageDescriptor<'_> {
+//!     const DOMAIN_TAG: &'static str = "example.stage.v1";
+//!
 //!     fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
 //!         sink.field_u32(1, self.epoch);
 //!         sink.field_digest(2, self.predecessor);
@@ -81,7 +78,8 @@
 //! };
 //!
 //! // Retained payload, one allocation, one hash — and byte-identical to
-//! // the streaming grammar:
+//! // the streaming grammar, which the descriptor receives from the same
+//! // description:
 //! let key = StageKey::from_exact(&descriptor);
 //! assert_eq!(key.canonical_bytes(), descriptor.canonical_bytes().as_slice());
 //! ```
@@ -89,26 +87,31 @@
 //! Descriptors must be deterministic: `exact_fields` is driven twice
 //! (once to size, once to write) and must describe the same fields, in
 //! the same order, from the same borrow. The construction asserts the
-//! two passes agree on the body length, so a descriptor that cannot
-//! honour that fails loudly instead of producing silently wrong bytes.
+//! two passes agree on the body length and the field count, so a descriptor
+//! whose passes differ in either fails loudly instead of producing silently
+//! wrong bytes.
+//!
+//! # Proving the construction bound
+//!
+//! The bound is deterministic work evidence, and a consumer can prove it over
+//! its own real construction without a second encoder. Enable this crate's
+//! `test-support` feature, run the construction between
+//! `encoding::reset_canonical_hash_calls` and `encoding::canonical_hash_calls`,
+//! and count `alloc`, `alloc_zeroed` and `realloc` over the same window with a
+//! thread-local counting `#[global_allocator]` in the test binary. Both counters
+//! are scoped to the measuring thread, so sibling tests cannot enter them. This
+//! crate's `tests/cases/exact_construction.rs` is the reference oracle.
 
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use crate::framing;
 
 /// Field description surface shared by every encoding path.
 ///
-/// Implementors describe schema fields only; framing (tags, lengths,
-/// header, set canonicalization) belongs to the sinks and
-/// [`crate::framing`]. The required methods are the field kinds
-/// composition identities need; the defaulted ones route through
-/// [`Self::field_raw`] so they share the same framing.
+/// Descriptors describe schema fields only; framing (tags, lengths, header,
+/// set canonicalization) belongs to the sinks. The required methods are the
+/// three payload shapes; the defaulted ones route through [`Self::field_raw`]
+/// so they share the same framing.
 pub trait CanonicalFieldSink {
-    /// A fixed-width `u32` field, little-endian (compatibility epochs).
-    fn field_u32(&mut self, tag: u16, value: u32);
-
-    /// A fixed-width 32-byte digest field.
-    fn field_digest(&mut self, tag: u16, digest: &CanonicalDigest);
-
     /// A raw byte field, exact bytes, no transformation.
     fn field_raw(&mut self, tag: u16, bytes: &[u8]);
 
@@ -119,6 +122,17 @@ pub trait CanonicalFieldSink {
     /// Digest set: unordered, possibly repeated, fixed-size elements;
     /// encoded sorted and deduplicated by the shared set policy.
     fn field_digest_set(&mut self, tag: u16, elements: &[CanonicalDigest]);
+
+    /// A fixed-width `u32` field, little-endian (compatibility epochs).
+    fn field_u32(&mut self, tag: u16, value: u32) {
+        let bytes = value.to_le_bytes();
+        self.field_raw(tag, &bytes);
+    }
+
+    /// A fixed-width 32-byte digest field.
+    fn field_digest(&mut self, tag: u16, digest: &CanonicalDigest) {
+        self.field_raw(tag, digest.as_bytes());
+    }
 
     /// A fixed-width `u64` field, little-endian.
     fn field_u64(&mut self, tag: u16, value: u64) {
@@ -141,17 +155,23 @@ pub trait CanonicalFieldSink {
 /// A descriptor whose encoding can be sized before it is written.
 ///
 /// Implement this for borrowed, immutable descriptors and get
-/// [`CanonicalEncode`] for free: the default
-/// [`CanonicalEncode::encode_fields`] drives the same
-/// [`Self::exact_fields`] description through the streaming
-/// [`CanonicalEncoder`]'s field-sink implementation, so the streaming and
-/// exact-size encodings share one grammar instead of two serializers.
-pub trait ExactCanonicalEncode: CanonicalEncode {
+/// [`CanonicalEncode`] from the blanket implementation below, which drives
+/// the same [`Self::exact_fields`] description through the streaming
+/// [`CanonicalEncoder`]. A separate hand-written `CanonicalEncode` conflicts
+/// with that implementation and does not compile, so a descriptor cannot
+/// hold two field descriptions that drift apart.
+pub trait ExactCanonicalEncode {
+    /// Fixed domain tag. Changing it is a new compatibility domain.
+    const DOMAIN_TAG: &'static str;
+
     /// Describes the schema fields to `sink`. Must be deterministic per
     /// borrow: the same fields, in the same order, every call.
     fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S);
+}
 
-    /// Streaming encoding from the shared field description.
+impl<T: ExactCanonicalEncode + ?Sized> CanonicalEncode for T {
+    const DOMAIN_TAG: &'static str = <T as ExactCanonicalEncode>::DOMAIN_TAG;
+
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         self.exact_fields(encoder);
     }
@@ -186,14 +206,6 @@ impl SizingSink {
 }
 
 impl CanonicalFieldSink for SizingSink {
-    fn field_u32(&mut self, _tag: u16, _value: u32) {
-        self.record_payload(4);
-    }
-
-    fn field_digest(&mut self, _tag: u16, _digest: &CanonicalDigest) {
-        self.record_payload(framing::DIGEST_BYTES);
-    }
-
     fn field_raw(&mut self, _tag: u16, bytes: &[u8]) {
         self.record_payload(bytes.len());
     }
@@ -208,88 +220,50 @@ impl CanonicalFieldSink for SizingSink {
     }
 }
 
-/// Writing pass: fills the pre-sized buffer in place. Every write is
-/// bounds-checked against the measuring pass's lengths, and
-/// [`Canonical::from_exact`](crate::canonical::Canonical::from_exact)
-/// verifies the written body length afterwards, so a descriptor whose two
-/// passes disagree cannot produce silently truncated or padded bytes.
+/// Writing pass: fills the pre-sized retained storage in place, through the
+/// same framing routines as the streaming encoder. Writes are bounds-checked
+/// against the measuring pass's length, and
+/// [`Canonical::from_exact`](crate::canonical::Canonical::from_exact) verifies
+/// the written length and field count afterwards, so a descriptor whose two
+/// passes disagree cannot produce silently wrong bytes.
 pub(crate) struct WriterSink<'a> {
-    out: &'a mut [u8],
-    at: usize,
+    out: framing::SliceOut<'a>,
+    field_count: u32,
 }
 
 impl<'a> WriterSink<'a> {
-    pub(crate) fn new(out: &'a mut [u8]) -> Self {
-        Self { out, at: 0 }
+    /// Continues writing at `out`'s position, after the header.
+    pub(crate) fn new(out: framing::SliceOut<'a>) -> Self {
+        Self {
+            out,
+            field_count: 0,
+        }
     }
 
-    /// Bytes written so far (the body length, header excluded).
+    /// Total bytes written, header included.
     pub(crate) fn written(&self) -> usize {
-        self.at
+        self.out.written()
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        let (head, _) = self.out[self.at..].split_at_mut(bytes.len());
-        head.copy_from_slice(bytes);
-        self.at += bytes.len();
-    }
-
-    fn write_field_header(&mut self, tag: u16, payload_len: usize) {
-        let (head, _) = self.out[self.at..].split_at_mut(framing::TAG_BYTES + framing::LEN_BYTES);
-        head[..framing::TAG_BYTES].copy_from_slice(&tag.to_le_bytes());
-        let len_bytes = (payload_len as u64).to_le_bytes();
-        head[framing::TAG_BYTES..].copy_from_slice(&len_bytes);
-        self.at += framing::TAG_BYTES + framing::LEN_BYTES;
+    pub(crate) fn field_count(&self) -> u32 {
+        self.field_count
     }
 }
 
 impl CanonicalFieldSink for WriterSink<'_> {
-    fn field_u32(&mut self, tag: u16, value: u32) {
-        let bytes = value.to_le_bytes();
-        self.field_raw(tag, &bytes);
-    }
-
-    fn field_digest(&mut self, tag: u16, digest: &CanonicalDigest) {
-        self.field_raw(tag, digest.as_bytes());
-    }
-
     fn field_raw(&mut self, tag: u16, bytes: &[u8]) {
-        self.write_field_header(tag, bytes.len());
-        self.write(bytes);
+        framing::put_raw_field(&mut self.out, tag, bytes);
+        self.field_count += 1;
     }
 
     fn field_option(&mut self, tag: u16, value: Option<&[u8]>) {
-        match value {
-            None => {
-                self.write_field_header(tag, framing::option_payload_len(None));
-                self.write(&[0u8]);
-            }
-            Some(bytes) => {
-                self.write_field_header(tag, framing::option_payload_len(Some(bytes)));
-                self.write(&[1u8]);
-                self.write(bytes);
-            }
-        }
+        framing::put_option_field(&mut self.out, tag, value);
+        self.field_count += 1;
     }
 
     fn field_digest_set(&mut self, tag: u16, elements: &[CanonicalDigest]) {
-        let count = framing::distinct_digest_count(elements);
-        let payload_len = framing::set_payload_len(count, framing::DIGEST_BYTES);
-        self.write_field_header(tag, payload_len);
-        self.write(&(count as u64).to_le_bytes());
-        let at = &mut self.at;
-        let out = &mut *self.out;
-        framing::visit_sorted_distinct_digests(elements, &mut |element| {
-            // `at`/`out` are reborrowed per element; the set was sized
-            // for exactly `count` elements, so writes stay in bounds.
-            let len_bytes = (framing::DIGEST_BYTES as u64).to_le_bytes();
-            let (head, _) = out[*at..].split_at_mut(framing::LEN_BYTES);
-            head.copy_from_slice(&len_bytes);
-            *at += framing::LEN_BYTES;
-            let (head, _) = out[*at..].split_at_mut(framing::DIGEST_BYTES);
-            head.copy_from_slice(element.as_bytes());
-            *at += framing::DIGEST_BYTES;
-        });
+        framing::put_digest_set_field(&mut self.out, tag, elements);
+        self.field_count += 1;
     }
 }
 
@@ -320,7 +294,7 @@ mod tests {
         sizer.field_str(9, "s");
 
         let mut buffer = vec![0u8; sizer.body_len()];
-        let mut writer = WriterSink::new(&mut buffer);
+        let mut writer = WriterSink::new(framing::SliceOut::new(&mut buffer));
         writer.field_u32(1, 7);
         writer.field_digest(2, &digests[0]);
         writer.field_option(3, None);
@@ -332,5 +306,6 @@ mod tests {
         writer.field_str(9, "s");
 
         assert_eq!(writer.written(), sizer.body_len());
+        assert_eq!(writer.field_count(), sizer.field_count());
     }
 }

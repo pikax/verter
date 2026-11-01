@@ -16,12 +16,12 @@
 //! digest is an index, not identity authority — collision-sensitive
 //! callers compare full canonical bytes.
 //!
-//! The byte grammar itself lives in [`crate::framing`], shared with the
-//! exact-size construction path ([`crate::exact`]); this type is the
-//! streaming, growing-buffer encoding of it.
+//! The byte grammar itself lives in the crate's private framing module,
+//! shared with the exact-size construction path ([`crate::exact`]); this
+//! type is the streaming, growing-buffer encoding of it.
 
 use crate::exact::CanonicalFieldSink;
-use crate::framing;
+use crate::framing::{self, FrameOut};
 
 /// Canonical-encoding builder. Callers push fields in schema order; this
 /// type does not reorder them.
@@ -54,18 +54,9 @@ impl CanonicalEncoder {
     /// in the same domain — bump the domain tag or compatibility epoch.
     pub fn field_bytes(&mut self, tag: u16, payload: &[u8]) -> &mut Self {
         self.body.reserve(framing::field_record_len(payload.len()));
-        self.push_field_header(tag, payload.len());
-        self.body.extend_from_slice(payload);
+        framing::put_raw_field(&mut self.body, tag, payload);
         self.field_count += 1;
         self
-    }
-
-    /// Pushes one field record header (`tag`, `payload_len`) — the shared
-    /// field framing every raw field is written through.
-    fn push_field_header(&mut self, tag: u16, payload_len: usize) {
-        self.body.extend_from_slice(&tag.to_le_bytes());
-        self.body
-            .extend_from_slice(&(payload_len as u64).to_le_bytes());
     }
 
     /// A fixed-width `u64` field, little-endian.
@@ -88,26 +79,17 @@ impl CanonicalEncoder {
         self.field_bytes(tag, value.as_bytes())
     }
 
-    /// A fixed-width 32-byte digest field (a [`CanonicalDigest`] payload),
-    /// the shape composition identities use for predecessor keys and
-    /// basis digests.
-    pub fn field_digest(&mut self, tag: u16, digest: &CanonicalDigest) -> &mut Self {
-        self.field_bytes(tag, digest.as_bytes())
-    }
-
     /// Optional field: one-byte presence (`0`/`1`) plus payload when
     /// present. Omitting the field is indistinguishable from a zero-length
     /// present value, so the tag is required.
     pub fn field_option(&mut self, tag: u16, value: Option<&[u8]>) -> &mut Self {
-        match value {
-            None => self.field_bytes(tag, &[0u8]),
-            Some(bytes) => {
-                let mut payload = Vec::with_capacity(framing::option_payload_len(Some(bytes)));
-                payload.push(1u8);
-                payload.extend_from_slice(bytes);
-                self.field_bytes(tag, &payload)
-            }
-        }
+        self.body
+            .reserve(framing::field_record_len(framing::option_payload_len(
+                value,
+            )));
+        framing::put_option_field(&mut self.body, tag, value);
+        self.field_count += 1;
+        self
     }
 
     /// Set field: elements sorted, deduplicated, then each length-delimited
@@ -129,10 +111,9 @@ impl CanonicalEncoder {
         sorted.sort();
         sorted.dedup();
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(sorted.len() as u64).to_le_bytes());
+        framing::put_element_count(&mut payload, sorted.len());
         for element in sorted {
-            payload.extend_from_slice(&(element.len() as u64).to_le_bytes());
-            payload.extend_from_slice(&element);
+            framing::put_length_prefixed(&mut payload, &element);
         }
         self.field_bytes(tag, &payload)
     }
@@ -156,12 +137,10 @@ impl CanonicalEncoder {
             }
         }
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(sorted.len() as u64).to_le_bytes());
+        framing::put_element_count(&mut payload, sorted.len());
         for (key, value) in sorted {
-            payload.extend_from_slice(&(key.len() as u64).to_le_bytes());
-            payload.extend_from_slice(&key);
-            payload.extend_from_slice(&(value.len() as u64).to_le_bytes());
-            payload.extend_from_slice(&value);
+            framing::put_length_prefixed(&mut payload, &key);
+            framing::put_length_prefixed(&mut payload, &value);
         }
         Some(self.field_bytes(tag, &payload))
     }
@@ -176,9 +155,7 @@ impl CanonicalEncoder {
     pub fn finish(&self) -> Vec<u8> {
         let header = framing::HeaderLayout::new(self.domain_tag, self.field_count);
         let mut out = Vec::with_capacity(framing::total_len(self.domain_tag, self.body.len()));
-        for part in header.parts(self.domain_tag) {
-            out.extend_from_slice(part);
-        }
+        header.put_into(self.domain_tag, &mut out);
         out.extend_from_slice(&self.body);
         out
     }
@@ -191,9 +168,11 @@ impl CanonicalEncoder {
         let len = framing::total_len(self.domain_tag, self.body.len());
         // One allocation at the final length, then each part copied whole.
         let mut shared: std::sync::Arc<[u8]> = std::iter::repeat_n(0, len).collect();
-        let out = std::sync::Arc::get_mut(&mut shared).expect("a fresh slice has one handle");
-        let header_len = header.write_into(self.domain_tag, out);
-        out[header_len..].copy_from_slice(&self.body);
+        let mut out = framing::SliceOut::new(
+            std::sync::Arc::get_mut(&mut shared).expect("a fresh slice has one handle"),
+        );
+        header.put_into(self.domain_tag, &mut out);
+        out.put(&self.body);
         shared
     }
 
@@ -214,18 +193,10 @@ impl CanonicalEncoder {
 }
 
 /// The streaming encoder is one of the field sinks over a descriptor's
-/// single field description: [`ExactCanonicalEncode`](crate::exact::ExactCanonicalEncode)'s
-/// default streaming encoding drives the same `exact_fields` through
-/// these methods, so both encodings share one grammar.
+/// single field description: the [`CanonicalEncode`] implementation every
+/// [`ExactCanonicalEncode`](crate::exact::ExactCanonicalEncode) descriptor
+/// receives drives its `exact_fields` through these methods.
 impl CanonicalFieldSink for CanonicalEncoder {
-    fn field_u32(&mut self, tag: u16, value: u32) {
-        Self::field_u32(self, tag, value);
-    }
-
-    fn field_digest(&mut self, tag: u16, digest: &CanonicalDigest) {
-        Self::field_digest(self, tag, digest);
-    }
-
     fn field_raw(&mut self, tag: u16, bytes: &[u8]) {
         Self::field_bytes(self, tag, bytes);
     }
@@ -235,16 +206,7 @@ impl CanonicalFieldSink for CanonicalEncoder {
     }
 
     fn field_digest_set(&mut self, tag: u16, elements: &[CanonicalDigest]) {
-        let count = framing::distinct_digest_count(elements);
-        let payload_len = framing::set_payload_len(count, framing::DIGEST_BYTES);
-        self.body.reserve(framing::field_record_len(payload_len));
-        self.push_field_header(tag, payload_len);
-        self.body.extend_from_slice(&(count as u64).to_le_bytes());
-        let body = &mut self.body;
-        framing::visit_sorted_distinct_digests(elements, &mut |element| {
-            body.extend_from_slice(&(framing::DIGEST_BYTES as u64).to_le_bytes());
-            body.extend_from_slice(element.as_bytes());
-        });
+        framing::put_digest_set_field(&mut self.body, tag, elements);
         self.field_count += 1;
     }
 }
@@ -287,6 +249,10 @@ impl core::fmt::Debug for CanonicalDigest {
 /// Encode a descriptor into a [`CanonicalEncoder`] under a fixed domain
 /// tag. Implementors own the domain fields; this crate owns the encoding
 /// primitive and the identity wrapper.
+///
+/// A descriptor that also needs bounded construction implements
+/// [`ExactCanonicalEncode`](crate::exact::ExactCanonicalEncode) instead and
+/// receives this trait from that one field description.
 pub trait CanonicalEncode {
     /// Fixed domain tag. Changing it is a new compatibility domain.
     const DOMAIN_TAG: &'static str;
@@ -355,15 +321,14 @@ fn record_hash_call() {
 }
 
 /// Resets the thread's canonical-byte hash counter
-/// ([`canonical_hash_calls`](Self)). `test-support` proof instrumentation
-/// only.
+/// ([`canonical_hash_calls`]). `test-support` proof instrumentation only.
 #[cfg(feature = "test-support")]
 pub fn reset_canonical_hash_calls() {
     hash_calls::reset();
 }
 
-/// Canonical-byte hashes (`CanonicalDigest::of_bytes` and
-/// [`CanonicalEncoder::digest`] on them) made on this thread since the
+/// Canonical-byte hashes ([`CanonicalDigest::of_bytes`] and
+/// [`CanonicalEncoder::digest`]) made on this thread since the
 /// last [`reset_canonical_hash_calls`]. `test-support` proof
 /// instrumentation only: bounded-work proofs scope a construction window
 /// by resetting before it and reading after, and sibling threads never

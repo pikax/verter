@@ -41,9 +41,8 @@ macro_rules! digest_identity_shared {
 
 /// Digest-backed identity newtype over [`crate::canonical::Canonical`]
 /// whose descriptor is caller-owned: the caller defines the fields, so
-/// [`Self::from_canonical`] (streaming) and [`Self::from_exact`]
-/// (one allocating call, one canonical-byte hash) are the construction
-/// paths. Each invocation is a distinct Rust type — the macro does not
+/// `from_canonical` (streaming) and `from_exact` (one allocating call, one
+/// canonical-byte hash) are the construction paths. Each invocation is a distinct Rust type — the macro does not
 /// introduce a shared base they can coerce through.
 #[macro_export]
 macro_rules! digest_identity {
@@ -58,10 +57,9 @@ macro_rules! digest_identity {
             }
 
             /// Build from a borrowed exact-size descriptor
-            /// ([`ExactCanonicalEncode`](crate::exact::ExactCanonicalEncode)):
-            /// the retained payload is constructed in one allocating call
-            /// and one canonical-byte hash, byte-identical to
-            /// [`Self::from_canonical`].
+            /// (`verter_identity::exact::ExactCanonicalEncode`): the retained
+            /// payload is constructed in one allocating call and one
+            /// canonical-byte hash, byte-identical to `from_canonical`.
             pub fn from_exact<T: $crate::exact::ExactCanonicalEncode + ?Sized>(
                 value: &T,
             ) -> Self {
