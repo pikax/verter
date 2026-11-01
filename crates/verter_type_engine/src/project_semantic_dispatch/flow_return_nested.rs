@@ -327,6 +327,7 @@ pub(super) struct NestedActivation<'d, 'a, D: FlowDemandDriver> {
 pub(super) struct NestedFinish<'d> {
     circular: bool,
     declared_return_none: bool,
+    report_name: Option<(verter_span::Span, Arc<str>)>,
     signature_params: Vec<crate::semantic_query::FunctionParam>,
     type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
     contextual: Option<ContextualSignature>,
@@ -808,12 +809,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let parts = match step {
             NestedSignatureStep::Done(signature) => {
                 self.end_nested_signature_recording(recording);
-                return NestedPrepared::Value(self.nested_function_postlude(
+                let (value, occurrence) = self.nested_function_postlude(
                     circular,
                     declared_return_none,
                     false,
                     signature,
-                ));
+                    matched.entry().report_name(),
+                );
+                if let Some(occurrence) = occurrence {
+                    self.record_checker_diagnostic(occurrence);
+                }
+                return NestedPrepared::Value(value);
             }
             NestedSignatureStep::Child(parts) => *parts,
         };
@@ -951,6 +957,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             finish: NestedFinish {
                 circular,
                 declared_return_none,
+                report_name: matched.entry().report_name().cloned(),
                 signature_params,
                 type_param_decls,
                 contextual,
@@ -976,6 +983,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let NestedFinish {
             circular,
             declared_return_none,
+            report_name,
             signature_params,
             type_param_decls,
             contextual,
@@ -1295,8 +1303,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let found_in_body = nested_evaluator.circular_return.get();
         drop(nested_evaluator);
-        let value =
-            self.nested_function_postlude(circular, declared_return_none, found_in_body, signature);
+        let (value, occurrence) = self.nested_function_postlude(
+            circular,
+            declared_return_none,
+            found_in_body,
+            signature,
+            report_name.as_ref(),
+        );
+        if let Some(occurrence) = occurrence {
+            if let Some(effects) = recorded_effects.as_mut() {
+                effects.checker_diagnostics.push(occurrence.clone());
+            }
+            self.record_checker_diagnostic(occurrence);
+        }
         if let Some(recording) = recording {
             self.admit_nested_signature(
                 *recording,
@@ -1332,14 +1351,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         declared_return_none: bool,
         found_in_body: bool,
         signature: SemanticNodeId,
-    ) -> SemanticNodeId {
+        report_name: Option<&(verter_span::Span, Arc<str>)>,
+    ) -> (
+        SemanticNodeId,
+        Option<crate::semantic_query::CheckerDiagnosticOccurrence>,
+    ) {
         let found_circular = !circular
             && self.resolving_functions.borrow_mut().pop().unwrap_or(false)
             || found_in_body;
         if found_circular && declared_return_none {
-            return self.signature_returning_any(signature);
+            return (
+                self.signature_returning_any(signature),
+                report_name.and_then(|name| self.circular_return_occurrence(name)),
+            );
         }
-        signature
+        (signature, None)
     }
 
     /// The signature the root evaluation composed for `function` on

@@ -457,3 +457,26 @@ fn a_cancelled_request_keeps_no_recovery() {
         .expect("the value projects");
     assert_eq!(answer_mismatch(&printed, "any"), None);
 }
+
+/// A nested declaration reports its own circular return on the enclosing flow.
+#[test]
+fn a_local_declarations_circular_return_reports_at_its_name() {
+    assert_row(
+        "export function outer() { function local() { return 1 + local(); } return local(); }",
+        &[("ReturnType<typeof outer>", "any")],
+        &declaration("outer"),
+        &[ts7023("local", "local() {")],
+    );
+    assert_row(
+        "export function outer() { function local(): number { return 1 + local(); } return local(); }",
+        &[("ReturnType<typeof outer>", "number")],
+        &declaration("outer"),
+        &[],
+    );
+    assert_row(
+        "export function outer() { function local() { return local(); } return local(); }",
+        &[("ReturnType<typeof outer>", "never")],
+        &declaration("outer"),
+        &[],
+    );
+}

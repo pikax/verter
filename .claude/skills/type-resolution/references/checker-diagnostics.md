@@ -180,7 +180,9 @@ refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
   return reading an absent member off its own literal's `this`, whose message prints the signature
   being inferred. A method reading a member already found circular is circular too, since that
   message prints every member. A declared return is never inferred. The bare self-call is exempt:
-  `return f()` of a function declaration, awaited or not, is skipped.
+  `return f()` of a function declaration, awaited or not, is skipped. Nested function declarations retain
+  their report name through signature composition; their TS7023 occurrence rides the enclosing flow
+  result and the nested body's replayed diagnostic effects.
 
 Known limits, each a narrower diagnostic rather than a wrong answer: TS2339 on a declared literal's
 `this` prints `typeof value`, and on a literal a generic call infers it prints the literal rather

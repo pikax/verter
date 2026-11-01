@@ -2646,6 +2646,13 @@ fn discover_nested_callable<'ast>(
         contributor: parent_locator.contributor,
         descent,
     };
+    if let FunctionNode::Function(function) = node {
+        if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
+            if let Some(id) = &function.id {
+                ctx.reported_by(id.span);
+            }
+        }
+    }
     let mut entry = ctx.build_entry(key.clone(), locator.clone(), params, body, span.start, node);
     entry.lexical_parent = Some(Box::new(parent_key.clone()));
     entry.class_member = class_member;

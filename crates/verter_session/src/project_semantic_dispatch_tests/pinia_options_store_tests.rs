@@ -44,7 +44,9 @@ use std::sync::Arc;
 use verter_type_engine::semantic_query::{FlowReturnDegradation, QueryError, SemanticNodeData};
 use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
-use super::differential_harness_tests::{canonical_text, ALL};
+use super::differential_harness_tests::{
+    canonical_text, Setting, ALL, LOOSE, LOOSE_IMPLICIT, STRICT, STRICT_IMPLICIT,
+};
 
 /// The library both arms of the semantic benchmark read.
 const BENCHMARK_LIBRARY: &str =
@@ -559,69 +561,66 @@ fn namesake_diagnostics(scenario: &str, no_implicit_any: bool) -> Vec<(u32, u32,
 }
 
 /// Every failure of a store a namesake stands beside to answer as the
-/// checker's recovery does, in all four settings: each member alone and in
+/// checker's recovery does, in one compiler setting: each member alone and in
 /// the whole store, the shared flow result of the store's initializer free
 /// of any refusal, and its diagnostics each at the checker's position.
-fn namesake_mismatches(project: &Project<'_>) -> Vec<String> {
+fn namesake_mismatches(project: &Project<'_>, setting: Setting) -> Vec<String> {
     let probes: Vec<&str> = MEMBERS
         .iter()
         .map(|(probe, _)| *probe)
         .chain(["St['$state']", WHOLE_STORE])
         .collect();
     let mut failures = Vec::new();
-    for setting in ALL {
-        let host = project.host(setting.options, &probes);
-        let answers: Vec<TypeExpr> = (0..probes.len())
-            .map(|index| wire_answer(&host, &named_answer(&host, index)))
-            .collect();
-        for ((probe, checker), answer) in probes.iter().zip(&NAMESAKE_STORE).zip(&answers) {
-            failures.extend(
-                answer_mismatch(answer, checker)
-                    .map(|failure| format!("{}: `{probe}`: {failure}", setting.label)),
-            );
-        }
-        match &answers[probes.len() - 1] {
-            TypeExpr::Tuple { elements, .. } if elements.len() == NAMESAKE_STORE.len() => {
-                for (element, checker) in elements.iter().zip(&NAMESAKE_STORE) {
-                    failures.extend(
-                        answer_mismatch(&element.ty, checker).map(|failure| {
-                            format!("{}: `{WHOLE_STORE}`: {failure}", setting.label)
-                        }),
-                    );
-                }
+    let host = project.host(setting.options, &probes);
+    let answers: Vec<TypeExpr> = (0..probes.len())
+        .map(|index| wire_answer(&host, &named_answer(&host, index)))
+        .collect();
+    for ((probe, checker), answer) in probes.iter().zip(&NAMESAKE_STORE).zip(&answers) {
+        failures.extend(
+            answer_mismatch(answer, checker)
+                .map(|failure| format!("{}: `{probe}`: {failure}", setting.label)),
+        );
+    }
+    match &answers[probes.len() - 1] {
+        TypeExpr::Tuple { elements, .. } if elements.len() == NAMESAKE_STORE.len() => {
+            for (element, checker) in elements.iter().zip(&NAMESAKE_STORE) {
+                failures.extend(
+                    answer_mismatch(&element.ty, checker)
+                        .map(|failure| format!("{}: `{WHOLE_STORE}`: {failure}", setting.label)),
+                );
             }
-            whole => failures.push(format!(
-                "{}: the store is `{}`",
-                setting.label,
-                display(whole)
-            )),
         }
-        let store = store_result(&host);
-        match store {
-            Ok(store) => {
-                if store.degradation().is_some() {
-                    failures.push(format!(
-                        "{}: the store is refused for {:?}",
-                        setting.label,
-                        store.degradation()
-                    ));
-                }
-                let found: Vec<(u32, u32, u32)> = store
-                    .checker_diagnostics()
-                    .iter()
-                    .map(|found| (found.code().code(), found.start(), found.end()))
-                    .collect();
-                let scenario = format!("type __BenchInit = 0;\n{}\n", project.scenario);
-                let no_implicit_any = !setting.options.contains("noImplicitAny");
-                if found != namesake_diagnostics(&scenario, no_implicit_any) {
-                    failures.push(format!(
-                        "{}: the store's diagnostics are {found:?}",
-                        setting.label
-                    ));
-                }
+        whole => failures.push(format!(
+            "{}: the store is `{}`",
+            setting.label,
+            display(whole)
+        )),
+    }
+    let store = store_result(&host);
+    match store {
+        Ok(store) => {
+            if store.degradation().is_some() {
+                failures.push(format!(
+                    "{}: the store is refused for {:?}",
+                    setting.label,
+                    store.degradation()
+                ));
             }
-            Err(error) => failures.push(format!("{}: the store is {error}", setting.label)),
+            let found: Vec<(u32, u32, u32)> = store
+                .checker_diagnostics()
+                .iter()
+                .map(|found| (found.code().code(), found.start(), found.end()))
+                .collect();
+            let scenario = format!("type __BenchInit = 0;\n{}\n", project.scenario);
+            let no_implicit_any = !setting.options.contains("noImplicitAny");
+            if found != namesake_diagnostics(&scenario, no_implicit_any) {
+                failures.push(format!(
+                    "{}: the store's diagnostics are {found:?}",
+                    setting.label
+                ));
+            }
         }
+        Err(error) => failures.push(format!("{}: the store is {error}", setting.label)),
     }
     failures
 }
@@ -750,7 +749,7 @@ const NAMESAKE_STORE: [&str; 8] = [
 /// members, `$id` and `$state` each answer independently.
 #[test]
 fn a_module_scope_namesake_is_not_the_marker() {
-    let failures = namesake_mismatches(&Project::store("interface ThisType<T> {}\n", &[]));
+    let failures = namesake_mismatches(&Project::store("interface ThisType<T> {}\n", &[]), STRICT);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -761,10 +760,73 @@ fn a_module_scope_namesake_is_not_the_marker() {
 /// diagnostics (TypeScript, all four settings).
 #[test]
 fn a_namesake_shadows_its_own_modules_global_contribution() {
-    let failures = namesake_mismatches(&Project::store(
-        "interface ThisType<T> {}\ndeclare global { interface ThisType<T> {} }\n",
-        &[],
-    ));
+    let failures = namesake_mismatches(
+        &Project::store(
+            "interface ThisType<T> {}\ndeclare global { interface ThisType<T> {} }\n",
+            &[],
+        ),
+        STRICT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_module_scope_namesake_is_not_the_marker_with_strict_null_checks_off() {
+    let failures = namesake_mismatches(&Project::store("interface ThisType<T> {}\n", &[]), LOOSE);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_namesake_shadows_its_own_modules_global_contribution_with_strict_null_checks_off() {
+    let failures = namesake_mismatches(
+        &Project::store(
+            "interface ThisType<T> {}\ndeclare global { interface ThisType<T> {} }\n",
+            &[],
+        ),
+        LOOSE,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_module_scope_namesake_is_not_the_marker_with_no_implicit_any_off() {
+    let failures = namesake_mismatches(
+        &Project::store("interface ThisType<T> {}\n", &[]),
+        STRICT_IMPLICIT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_namesake_shadows_its_own_modules_global_contribution_with_no_implicit_any_off() {
+    let failures = namesake_mismatches(
+        &Project::store(
+            "interface ThisType<T> {}\ndeclare global { interface ThisType<T> {} }\n",
+            &[],
+        ),
+        STRICT_IMPLICIT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_module_scope_namesake_is_not_the_marker_with_both_checks_off() {
+    let failures = namesake_mismatches(
+        &Project::store("interface ThisType<T> {}\n", &[]),
+        LOOSE_IMPLICIT,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_namesake_shadows_its_own_modules_global_contribution_with_both_checks_off() {
+    let failures = namesake_mismatches(
+        &Project::store(
+            "interface ThisType<T> {}\ndeclare global { interface ThisType<T> {} }\n",
+            &[],
+        ),
+        LOOSE_IMPLICIT,
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -777,8 +839,7 @@ fn a_namesake_shadows_its_own_modules_global_contribution() {
 /// or an action through the marker: `double` and `first` stay unread on the
 /// store, and no action is typed. Measured on TypeScript, all four settings:
 /// each of those members is absent there (TS2339 at the probe, `any`).
-#[test]
-fn an_undeclared_marker_recovers_without_inferring_through_it() {
+fn assert_undeclared_marker_recovery(setting: Setting) {
     let project = Project::store("", &[]);
     let probes: Vec<&str> = MEMBERS
         .iter()
@@ -786,33 +847,51 @@ fn an_undeclared_marker_recovers_without_inferring_through_it() {
         .chain(["St['$state']", "St"])
         .collect();
     let mut failures = Vec::new();
-    for setting in ALL {
-        let host = project.host(setting.options, &probes);
-        let answers: Vec<TypeExpr> = (0..probes.len())
-            .map(|index| wire_answer(&host, &named_answer(&host, index)))
-            .collect();
-        // The members the checker answers as the marked store's.
-        for ordinal in [0, 1, 6, 7] {
-            failures.extend(
-                answer_mismatch(&answers[ordinal], NAMESAKE_STORE[ordinal])
-                    .map(|failure| format!("{}: `{}`: {failure}", setting.label, probes[ordinal])),
-            );
-        }
-        // No getter or action came through the marker.
-        for ordinal in [2, 3, 4, 5] {
-            if answer_mismatch(&answers[ordinal], MEMBERS[ordinal].1).is_none() {
-                failures.push(format!(
-                    "{}: `{}` was inferred through the undeclared marker",
-                    setting.label, probes[ordinal]
-                ));
-            }
-        }
-        match store_degradation(&host) {
-            Ok(None) => {}
-            refused => failures.push(format!("{}: the store is {refused:?}", setting.label)),
+    let host = project.host(setting.options, &probes);
+    let answers: Vec<TypeExpr> = (0..probes.len())
+        .map(|index| wire_answer(&host, &named_answer(&host, index)))
+        .collect();
+    // The members the checker answers as the marked store's.
+    for ordinal in [0, 1, 6, 7] {
+        failures.extend(
+            answer_mismatch(&answers[ordinal], NAMESAKE_STORE[ordinal])
+                .map(|failure| format!("{}: `{}`: {failure}", setting.label, probes[ordinal])),
+        );
+    }
+    // No getter or action came through the marker.
+    for ordinal in [2, 3, 4, 5] {
+        if answer_mismatch(&answers[ordinal], MEMBERS[ordinal].1).is_none() {
+            failures.push(format!(
+                "{}: `{}` was inferred through the undeclared marker",
+                setting.label, probes[ordinal]
+            ));
         }
     }
+    match store_degradation(&host) {
+        Ok(None) => {}
+        refused => failures.push(format!("{}: the store is {refused:?}", setting.label)),
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_undeclared_marker_recovers_without_inferring_through_it() {
+    assert_undeclared_marker_recovery(STRICT);
+}
+
+#[test]
+fn an_undeclared_marker_recovers_without_inferring_through_it_with_strict_null_checks_off() {
+    assert_undeclared_marker_recovery(LOOSE);
+}
+
+#[test]
+fn an_undeclared_marker_recovers_without_inferring_through_it_with_no_implicit_any_off() {
+    assert_undeclared_marker_recovery(STRICT_IMPLICIT);
+}
+
+#[test]
+fn an_undeclared_marker_recovers_without_inferring_through_it_with_both_checks_off() {
+    assert_undeclared_marker_recovery(LOOSE_IMPLICIT);
 }
 
 /// An intersection holding a name nothing declares is the checker's error
