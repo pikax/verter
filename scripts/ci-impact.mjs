@@ -322,6 +322,9 @@ export const PATH_FILTERS = Object.freeze({
     // The CLI contract tests run in js-build-test and read both JSON inputs.
     "tests/cli/**",
     "docs/arch/cli/*.json",
+    "tests/formatter/**",
+    "catalogs/formatter-*.toml",
+    "fixtures/formatter/**",
     ".github/workflows/nightly.yml",
     ".github/workflows/tsserver-nightly.yml",
     ".github/workflows/release-check.yml",

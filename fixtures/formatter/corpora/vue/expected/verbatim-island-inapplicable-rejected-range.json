@@ -1,0 +1,26 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/verbatim-island-inapplicable-rejected.txt",
+  "normalized_options": {
+    "vueIndentScriptAndStyle": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      48
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    48
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/verbatim-island-inapplicable-rejected.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}

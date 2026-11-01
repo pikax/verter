@@ -41,3 +41,8 @@ tests/sfc-projection/STP18/probes/
 # pinned by the advanced generic use Rust tests, so formatting them would
 # disconnect the probes from actual compiler output.
 tests/sfc-projection/STP19/probes/
+
+# Formatter contract inputs and outputs are byte-exact captures, including
+# intentional malformed syntax, CRLF and recovery trivia. Their catalogs own
+# hashes and geometry; automatic formatting must not rewrite the fixtures.
+fixtures/formatter/**

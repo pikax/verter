@@ -593,15 +593,24 @@ test("matchPathFilters reports every filter and owns exactly the files some filt
     "packages/vue-vscode/src/extension.ts",
     "scripts/jetbrains-gate.mjs",
     "docs/guide.md",
+    "catalogs/formatter-compatibility-v1.toml",
+    "catalogs/formatter-compatibility-yaml-v1.toml",
+    "fixtures/formatter/corpora/vue/valid.txt",
+    "tests/formatter/verify.mjs",
   ]);
   assert.deepEqual(Object.keys(hits).sort(), Object.keys(PATH_FILTERS).sort());
   assert.equal(hits.jetbrains, true);
   assert.equal(hits.js, true);
   assert.equal(hits.proto, true);
+  assert.equal(hits.scripts, true);
   assert.deepEqual([...owned].sort(), [
+    "catalogs/formatter-compatibility-v1.toml",
+    "catalogs/formatter-compatibility-yaml-v1.toml",
+    "fixtures/formatter/corpora/vue/valid.txt",
     "package.json",
     "packages/vue-vscode/src/extension.ts",
     "scripts/jetbrains-gate.mjs",
+    "tests/formatter/verify.mjs",
   ]);
 });
 
@@ -1009,4 +1018,13 @@ test("unreadable selection data breaks no importer: every lane runs and the audi
       rmSync(root, { recursive: true, force: true });
     }
   }
+});
+
+test("formatter catalog changes reach validation in the configured CI script lane", () => {
+  const { hits } = matchPathFilters(["catalogs/formatter-performance-v1.toml"]);
+  assert.equal(hits.scripts, true);
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(
+    pkg.scripts["test:scripts:ci"].includes("node --test scripts/benchmark/evidence-run.test.mjs"),
+  );
 });

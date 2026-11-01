@@ -1,0 +1,3 @@
+# Inputs and expected outputs deliberately include CRLF, BOM and exact trivia.
+# Content digests and geometry refer to these bytes on every platform.
+* -text whitespace=-trailing-space

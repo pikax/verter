@@ -1,0 +1,8 @@
+/** @format */
+
+// hé🙂
+interface Box<T> {
+  value: T;
+  label?: string;
+}
+const arrow = (x: number): Box<number> => ({ value: x + 1, label: "ok" });

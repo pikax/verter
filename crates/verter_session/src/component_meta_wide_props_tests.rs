@@ -146,6 +146,142 @@ fn wide_props_address_every_payload_from_one_macro_assembly() {
     }
 }
 
+/// Where a component's props are authored. Each shape reaches its payloads
+/// through a different chain of member lists.
+#[derive(Clone, Copy, Debug)]
+enum Shape {
+    Literal,
+    InlineIntersection,
+    Alias,
+    AliasIntersection,
+    Interface,
+}
+
+impl Shape {
+    const ALL: [Self; 5] = [
+        Self::Literal,
+        Self::InlineIntersection,
+        Self::Alias,
+        Self::AliasIntersection,
+        Self::Interface,
+    ];
+
+    /// Address units one prop costs: its member, its field and the hop from
+    /// the field's address to its member list, plus one for the list and one
+    /// for the arm hop where every prop has its own intersection arm.
+    fn work_per_prop(self) -> u64 {
+        match self {
+            Self::Literal | Self::Alias | Self::Interface => 3,
+            Self::InlineIntersection | Self::AliasIntersection => 5,
+        }
+    }
+
+    fn component(self, props: usize, tag: &str) -> String {
+        let member = |index: usize| format!("p{index}: {}", primitive_of(index).0);
+        let members = || (0..props).map(member).collect::<Vec<_>>().join("; ");
+        let arms = || {
+            (0..props)
+                .map(|index| format!("{{ {} }}", member(index)))
+                .collect::<Vec<_>>()
+                .join(" & ")
+        };
+        let script = match self {
+            Self::Literal => format!("defineProps<{{ {} }}>()", members()),
+            Self::InlineIntersection => format!("defineProps<{}>()", arms()),
+            Self::Alias => format!("type Props = {{ {} }}\ndefineProps<Props>()", members()),
+            Self::AliasIntersection => {
+                format!("type Props = {}\ndefineProps<Props>()", arms())
+            }
+            Self::Interface => {
+                format!("interface Props {{ {} }}\ndefineProps<Props>()", members())
+            }
+        };
+        format!("<script setup lang=\"ts\">\n// {tag}\n{script}\n</script>\n")
+    }
+}
+
+/// Every prop shape pays a constant, exact address cost per prop, whether it
+/// is read through one member list or one list per prop. Re-walking a
+/// macro's lists, or the file's declarations, for each field grows the cost
+/// with the prop count and fails the exact increment.
+#[test]
+fn every_prop_shape_pays_constant_address_work_per_prop() {
+    const SIZES: [usize; 3] = [16, 32, 64];
+    for shape in Shape::ALL {
+        let mut cold_work = Vec::new();
+        for props in SIZES {
+            let host = ClosingHost(VerterHost::new_standalone(HostConfig::default()));
+            publish(&host, &shape.component(props, "v1"));
+
+            let (builds, work) = demand_complete(&host, props, "cold");
+            assert_eq!(builds, 1, "{shape:?} cold {props}: one assembly");
+            cold_work.push(work);
+
+            let (warm_builds, warm_work) = demand_complete(&host, props, "warm");
+            assert_eq!(
+                (warm_builds, warm_work),
+                (0, 0),
+                "{shape:?} warm {props}: the cold answer is reused"
+            );
+
+            publish(&host, &shape.component(props, "v2 with shifted spans"));
+            let (edit_builds, edit_work) = demand_complete(&host, props, "edit");
+            assert_eq!(edit_builds, 1, "{shape:?} edit {props}: one assembly");
+            assert_eq!(edit_work, work, "{shape:?} edit {props}: the same work");
+        }
+        let expected = shape.work_per_prop();
+        for (pair, sizes) in cold_work.windows(2).zip(SIZES.windows(2)) {
+            assert_eq!(
+                pair[1] - pair[0],
+                expected * (sizes[1] - sizes[0]) as u64,
+                "{shape:?}: {expected} units per prop: {cold_work:?} at sizes {SIZES:?}"
+            );
+        }
+    }
+}
+
+/// A field its macro's own arguments author costs the same beside a huge
+/// unrelated interface as beside a tiny one: declarations no field resolves
+/// into are never indexed.
+#[test]
+fn unrelated_declaration_members_cost_no_address_work() {
+    for macro_call in [
+        "defineProps<{ value: string }>()",
+        "defineProps<{ value: string } & { other: number }>()",
+        "defineProps({ value: { type: String as PropType<string> } })",
+    ] {
+        let work_beside = |members: usize| {
+            let unused = (0..members)
+                .map(|index| format!("u{index}: string"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let host = ClosingHost(VerterHost::new_standalone(HostConfig::default()));
+            publish(
+                &host,
+                &format!(
+                    "<script setup lang=\"ts\">\n\
+                     import type {{ PropType }} from 'vue'\n\
+                     interface Unused {{ {unused} }}\n\
+                     {macro_call}\n\
+                     </script>\n"
+                ),
+            );
+            let (_, work) = address_counters(&host);
+            let delivery = host
+                .get_component_meta(COMPONENT)
+                .expect("component-meta delivers");
+            assert_eq!(delivery.analysis().props[0].name, "value", "{macro_call}");
+            let (_, work_after) = address_counters(&host);
+            work_after - work
+        };
+        assert_eq!(
+            work_beside(4),
+            work_beside(256),
+            "{macro_call}: the unused interface's members are never visited"
+        );
+    }
+}
+
 /// A small component with props, emits and slots answers the same way: one
 /// assembly serves every field family.
 #[test]
