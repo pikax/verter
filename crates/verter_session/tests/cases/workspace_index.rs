@@ -1876,3 +1876,55 @@ fn the_project_models_own_observation_is_sufficient_read_evidence_for_membership
     }]);
     assert!(publishable_membership(observed, &admission(), &account).is_ok());
 }
+
+#[test]
+fn a_walk_that_never_settles_answers_privately_and_warms_nothing() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        &vue_source("--brand"),
+        FileLanguage::vue(),
+    );
+    upsert_file(
+        &host,
+        "/src/B.vue",
+        &vue_source("--brand"),
+        FileLanguage::vue(),
+    );
+    let demand = css_demand();
+    let edits = Cell::new(0_u32);
+    let edit_every_step = || {
+        edits.set(edits.get() + 1);
+        let comment = format!("<!-- {} -->{}", edits.get(), vue_source("--brand"));
+        upsert_file(&host, "/src/B.vue", &comment, FileLanguage::vue());
+        false
+    };
+
+    let (snapshot, status, _) = host.workspace_index_reconcile(&demand, &edit_every_step);
+    assert_eq!(status, ReconcileStatus::ReturnOnly(PartialCause::Stale));
+    assert!(snapshot.is_return_only());
+    let store = host.project_type_store().workspace_index().snapshot();
+    assert!(
+        store.coverage(&demand.scope()).is_none(),
+        "no population was certified"
+    );
+
+    let (page, _) =
+        host.workspace_index_candidates(&demand, css_keys("--brand"), WIDE, &edit_every_step);
+    assert!(
+        !page.candidates.is_empty(),
+        "positive candidates still answer"
+    );
+    assert!(matches!(
+        page.status,
+        EnumerationStatus::Partial {
+            cause: PartialCause::Stale,
+            ..
+        }
+    ));
+
+    let (settled, _) =
+        host.workspace_index_candidates(&demand, css_keys("--brand"), WIDE, &never());
+    assert_eq!(settled.status, EnumerationStatus::Complete);
+}
