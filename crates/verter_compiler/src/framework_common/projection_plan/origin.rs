@@ -504,15 +504,15 @@ pub fn projected_class_for_emit_op_with(
         EmitOp::PreserveOriginal { source } => preserved_classes_from_mapping(
             mapping,
             MappingSpan {
-                start: source.start.0,
-                end: source.end.0,
+                start: source.start().0,
+                end: source.end().0,
             },
         ),
         EmitOp::MoveOriginal { source, .. } => moved_classes_from_mapping(
             mapping,
             MappingSpan {
-                start: source.start.0,
-                end: source.end.0,
+                start: source.start().0,
+                end: source.end().0,
             },
         ),
         EmitOp::InsertMapped {

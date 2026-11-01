@@ -14,7 +14,9 @@
 //! UTF-8-session conversion buffer) belong to the boundary owners, not
 //! here.
 
+use super::encoding_support::{in_u32, wire_line_col};
 use super::*;
+use crate::utf16_line_index::LineCol;
 
 // ======================== K04–K08: checked arithmetic ========================
 
