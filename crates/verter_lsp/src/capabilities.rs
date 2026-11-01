@@ -191,3 +191,7 @@ pub fn server_capabilities(
     code_actions::contribute(&mut caps, &ctx);
     caps
 }
+
+#[cfg(test)]
+#[path = "capabilities_tests.rs"]
+mod tests;
