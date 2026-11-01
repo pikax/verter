@@ -1,0 +1,177 @@
+{
+  "__meta": { "version": "fixture-1", "timestamp": "2026-01-01T00:00:00.000Z" },
+  "browsers": {
+    "chrome": {
+      "name": "Chrome",
+      "type": "desktop",
+      "accepts_flags": true,
+      "accepts_webextensions": true,
+      "pref_url": "chrome://flags",
+      "preview_name": "Canary",
+      "releases": {
+        "9": { "status": "retired", "release_date": "2011-02-03", "engine": "WebKit", "engine_version": "534", "release_notes": "https://example.test/9" },
+        "10": { "status": "retired", "release_date": "2011-03-08", "engine": "WebKit" },
+        "19": { "status": "retired" },
+        "20": { "status": "retired" },
+        "21": { "status": "retired" },
+        "30": { "status": "retired" },
+        "36": { "status": "retired" },
+        "37": { "status": "retired" },
+        "38": { "status": "retired" },
+        "100": { "status": "current", "release_date": "2022-03-29", "engine": "Blink", "engine_version": "100" },
+        "101": { "status": "beta" }
+      }
+    },
+    "firefox": {
+      "name": "Firefox",
+      "type": "desktop",
+      "accepts_flags": true,
+      "releases": {
+        "50": { "status": "retired" },
+        "60": { "status": "esr" },
+        "100": { "status": "current" }
+      }
+    },
+    "safari": {
+      "name": "Safari",
+      "type": "desktop",
+      "releases": {
+        "1.5": { "status": "retired" },
+        "1.10": { "status": "retired" },
+        "15.4": { "status": "current" }
+      }
+    },
+    "oculus": {
+      "name": "Quest Browser",
+      "type": "xr",
+      "releases": { "23.0": { "status": "current" } }
+    }
+  },
+  "api": {
+    "Boundary": {
+      "__compat": {
+        "mdn_url": "https://developer.mozilla.org/docs/Web/API/Boundary",
+        "spec_url": "https://example.test/spec#boundary",
+        "source_file": "api/Boundary.json",
+        "tags": ["web-features:boundary"],
+        "status": { "experimental": false, "standard_track": true, "deprecated": true },
+        "support": {
+          "chrome": { "version_added": "10", "version_removed": "20", "version_last": "19", "impl_url": "https://crbug.com/1" }
+        }
+      },
+      "alternatives": {
+        "__compat": {
+          "status": { "experimental": false, "standard_track": true, "deprecated": false },
+          "support": {
+            "chrome": [
+              { "version_added": "38" },
+              { "version_added": "20", "version_removed": "38", "version_last": "37", "prefix": "webkit" }
+            ],
+            "firefox": { "version_added": "50", "alternative_name": "legacyAlternatives" }
+          }
+        }
+      }
+    },
+    "Conditions": {
+      "flag_with_value": {
+        "__compat": {
+          "status": { "experimental": true, "standard_track": true, "deprecated": false },
+          "support": {
+            "chrome": {
+              "version_added": "30",
+              "flags": [{ "type": "preference", "name": "#enable-feature", "value_to_set": "Enabled" }]
+            },
+            "firefox": {
+              "version_added": "50",
+              "partial_implementation": true,
+              "notes": "Only for documents.",
+              "flags": [{ "type": "runtime_flag", "name": "--enable-feature" }]
+            },
+            "safari": {
+              "version_added": "1.5",
+              "partial_implementation": true,
+              "notes": ["First limit.", "Second limit."]
+            }
+          }
+        }
+      }
+    },
+    "Uncertain": {
+      "added_unknown_version": {
+        "__compat": {
+          "status": { "experimental": false, "standard_track": true, "deprecated": false },
+          "support": {
+            "chrome": { "version_added": true },
+            "firefox": { "version_added": null },
+            "safari": { "version_added": false }
+          }
+        }
+      },
+      "added_at_or_before": {
+        "__compat": {
+          "status": { "experimental": false, "standard_track": true, "deprecated": false },
+          "support": { "chrome": { "version_added": "≤37" } }
+        }
+      },
+      "added_in_preview": {
+        "__compat": {
+          "status": { "experimental": true, "standard_track": true, "deprecated": false },
+          "support": { "chrome": { "version_added": "preview" } }
+        }
+      },
+      "removed_unknown_version": {
+        "__compat": {
+          "status": { "experimental": false, "standard_track": true, "deprecated": true },
+          "support": { "chrome": { "version_added": "10", "version_removed": true, "version_last": true } }
+        }
+      }
+    },
+    "Mismatch": {
+      "one_browser": {
+        "__compat": {
+          "status": { "experimental": false, "standard_track": true, "deprecated": false },
+          "support": {
+            "chrome": { "version_added": "latest" },
+            "firefox": { "version_added": "50" },
+            "oculus": { "version_added": "21.0", "version_removed": false }
+          }
+        }
+      },
+      "whole_record": {
+        "__compat": {
+          "mdn_url": "https://example.test/not-an-mdn-url",
+          "status": { "experimental": false, "standard_track": true, "deprecated": false },
+          "support": { "chrome": { "version_added": "1" } }
+        }
+      },
+      "mirrored": {
+        "__compat": {
+          "status": { "experimental": false, "standard_track": true, "deprecated": false },
+          "support": { "chrome": "mirror" }
+        }
+      }
+    },
+    "WidelyAvailable": {
+      "__compat": {
+        "status": { "experimental": false, "standard_track": true, "deprecated": false },
+        "support": {
+          "chrome": { "version_added": false },
+          "firefox": {
+            "version_added": "50",
+            "flags": [{ "type": "preference", "name": "dom.widely.enabled" }]
+          },
+          "safari": { "version_added": "1.5", "partial_implementation": true, "notes": "Limited." }
+        }
+      }
+    }
+  },
+  "webextensions": {
+    "api": {
+      "runtime": {
+        "__compat": {
+          "support": { "firefox": { "version_added": "50" } }
+        }
+      }
+    }
+  }
+}
