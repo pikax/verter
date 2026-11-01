@@ -120,6 +120,53 @@ describe("acceptCompletion", () => {
     await expect(acceptCompletion(deps)).rejects.toThrow(/document|doc/i);
   });
 
+  it("keeps accepting until the list has loaded, then waits for the import edit", async () => {
+    const state = { doc: "comput", imports: "", accepts: 0 };
+    const commands: string[] = [];
+    let importDue = false;
+    const outcome = await acceptCompletion({
+      runCommand(command) {
+        commands.push(command);
+        if (command === ACCEPT_SUGGESTION_COMMAND && ++state.accepts === 3) {
+          state.doc = "computed";
+          importDue = true;
+        }
+      },
+      readDocText: () => state.doc,
+      readImportText: () => state.imports,
+      settle() {
+        if (importDue && commands.length === 4) state.imports = "import { computed } from 'vue'";
+      },
+    });
+    expect(outcome.accepted).toBe(true);
+    // The trigger is not repeated while its list loads: that would cancel the
+    // request, and an accepted item is never accepted twice.
+    expect(commands).toEqual([
+      TRIGGER_SUGGEST_COMMAND,
+      ACCEPT_SUGGESTION_COMMAND,
+      ACCEPT_SUGGESTION_COMMAND,
+      ACCEPT_SUGGESTION_COMMAND,
+    ]);
+  });
+
+  it("triggers again when the list closed without an accept", async () => {
+    const state = { doc: "comput", imports: "", triggers: 0 };
+    const commands: string[] = [];
+    await acceptCompletion({
+      runCommand(command) {
+        commands.push(command);
+        if (command === TRIGGER_SUGGEST_COMMAND) state.triggers += 1;
+        if (command === ACCEPT_SUGGESTION_COMMAND && state.triggers === 2) {
+          state.doc = "computed";
+          state.imports = "import { computed } from 'vue'";
+        }
+      },
+      readDocText: () => state.doc,
+      readImportText: () => state.imports,
+    });
+    expect(commands.filter((command) => command === TRIGGER_SUGGEST_COMMAND)).toHaveLength(2);
+  });
+
   it("awaits the optional settle hook after each command", async () => {
     const { deps, commands } = fakeWorld();
     const settleAt: number[] = [];

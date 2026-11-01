@@ -83,7 +83,7 @@ export interface AcceptCompletionDeps {
   readDocText: () => string;
   /** Reads the current import-region text. */
   readImportText: () => string;
-  /** Optional settle hook awaited after each command (e.g. let the widget open). */
+  /** Settle hook awaited after each command and between observations. */
   settle?: () => void | PromiseLike<void>;
 }
 
@@ -93,10 +93,21 @@ export interface AcceptOutcome extends AcceptClassification, AcceptSnapshot {
   readonly commands: string[];
 }
 
+/** Settles an accept may take, from the trigger to its import edit landing. */
+const MAX_ACCEPT_SETTLES = 16;
 /**
- * Drive the real accept path: snapshot, `triggerSuggest`, settle, then
- * `acceptSelectedSuggestion`, settle, snapshot, classify. Throws if the accept did
- * not change both the document and the import text. Returns the outcome on success.
+ * Accepts issued per trigger. Triggering again cancels a list still loading, so
+ * it waits this long for a list that closed without offering anything.
+ */
+const ACCEPTS_PER_TRIGGER = 7;
+
+/**
+ * Drive the real accept path: snapshot, `triggerSuggest`, `acceptSelectedSuggestion`,
+ * then observe the document and import text. VS Code reports neither the list
+ * loading nor the import edit landing, and accepting before the list has loaded
+ * does nothing, so the accept is issued until the document changes and the import
+ * is then awaited. Throws if the document and the import text did not both change
+ * within {@link MAX_ACCEPT_SETTLES}. Returns the outcome on success.
  */
 export async function acceptCompletion(deps: AcceptCompletionDeps): Promise<AcceptOutcome> {
   const commands: string[] = [];
@@ -109,12 +120,31 @@ export async function acceptCompletion(deps: AcceptCompletionDeps): Promise<Acce
     await deps.settle?.();
   };
 
-  await run(TRIGGER_SUGGEST_COMMAND);
-  await run(ACCEPT_SUGGESTION_COMMAND);
+  const observe = (): AcceptSnapshot => ({
+    docBefore,
+    docAfter: deps.readDocText(),
+    importBefore,
+    importAfter: deps.readImportText(),
+  });
 
-  const docAfter = deps.readDocText();
-  const importAfter = deps.readImportText();
-  const snap: AcceptSnapshot = { docBefore, docAfter, importBefore, importAfter };
+  let acceptsSinceTrigger = ACCEPTS_PER_TRIGGER;
+  let snap = observe();
+  for (let settles = 0; settles < MAX_ACCEPT_SETTLES; ) {
+    if (!classifyAcceptOutcome(snap).docChanged) {
+      if (acceptsSinceTrigger === ACCEPTS_PER_TRIGGER) {
+        await run(TRIGGER_SUGGEST_COMMAND);
+        settles += 1;
+        acceptsSinceTrigger = 0;
+      }
+      await run(ACCEPT_SUGGESTION_COMMAND);
+      acceptsSinceTrigger += 1;
+    } else {
+      await deps.settle?.();
+    }
+    settles += 1;
+    snap = observe();
+    if (classifyAcceptOutcome(snap).accepted) break;
+  }
   const classification = classifyAcceptOutcome(snap);
 
   if (!classification.accepted) {
