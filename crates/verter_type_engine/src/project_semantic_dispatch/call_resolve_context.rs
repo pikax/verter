@@ -335,7 +335,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // inference deposits at the call boundary.
                     if position.root {
                         if let Some(regular) = &regular_here {
-                            for literal in literal_members(graph.store(), node) {
+                            for literal in constituent_members(graph.store(), node) {
                                 if regular
                                     .as_ref()
                                     .is_none_or(|values| values.contains(&literal))
@@ -353,7 +353,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // as authored, nested composites included: it keeps its
                     // type, and every parameter the argument deposits into
                     // takes it as it is.
-                    if matches!(regular_here, Some(None)) && !position.root {
+                    if regular_here.as_ref().is_some_and(|regular| {
+                        regular.as_ref().is_none_or(|values| values.contains(&node))
+                    }) {
                         for literal in
                             std::iter::once(node).chain(literal_members(graph.store(), node))
                         {
@@ -511,7 +513,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 );
                             }
                         }
-                        Some(SemanticNodeData::Literal(_)) if !position.root => {
+                        Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+                            if !position.root =>
+                        {
                             drop(data);
                             let authored_literal = !provenance
                                 .is_some_and(|provenance| provenance.reads_fresh(&position.path));
@@ -785,7 +789,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                         Some(WideningMembership::Partial(values)) => {
                                             // Classify the literals of the actual read: narrowing
                                             // may have removed some reaching fresh values.
-                                            for literal in literal_members(graph.store(), node) {
+                                            for literal in constituent_members(graph.store(), node)
+                                            {
                                                 if values.iter().any(|&value| {
                                                     same_literal(graph.store(), value, literal)
                                                 }) {
@@ -839,7 +844,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let mut literals = Vec::new();
                 for (index, (regular, _)) in arms.iter().enumerate() {
                     for node in regular.iter().filter_map(&type_of) {
-                        for literal in literal_members(graph.store(), node) {
+                        for literal in constituent_members(graph.store(), node) {
                             let fresh_elsewhere = arms.iter().enumerate().any(|(other, arm)| {
                                 other != index
                                     && arm
@@ -885,7 +890,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let graph = self.graph();
         let shape = match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(_)) => PositionShape::Literal,
+            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                PositionShape::Literal
+            }
             Some(SemanticNodeData::Object(surface)) => PositionShape::Object(surface.clone()),
             Some(SemanticNodeData::Tuple { elements, readonly }) => PositionShape::Tuple(
                 elements
@@ -1536,13 +1543,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         policy: ConstParamPolicy,
     ) -> SemanticNodeId {
         let graph = self.graph();
-        let kept = |node: SemanticNodeId| {
-            keeps.contains(&node)
-                && matches!(
-                    graph.node_data(node).as_deref(),
-                    Some(SemanticNodeData::Literal(_))
-                )
-        };
+        let kept = |node: SemanticNodeId| keeps.contains(&node);
         if kept(bound) {
             return bound;
         }
@@ -1728,20 +1729,20 @@ fn literal_members(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
 ) -> Vec<SemanticNodeId> {
-    let is_literal = |node: SemanticNodeId| {
-        matches!(
-            graph.node_data(node).as_deref(),
-            Some(SemanticNodeData::Literal(_))
-        )
-    };
+    constituent_members(graph, node)
+        .into_iter()
+        .filter(|&member| super::super::enum_type::is_literal_type(graph, member))
+        .collect()
+}
+
+/// The actual read's union arms, including regular composite subtrees.
+fn constituent_members(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Vec<SemanticNodeId> {
     match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Literal(_)) => vec![node],
-        Some(SemanticNodeData::Union(members)) => members
-            .iter()
-            .copied()
-            .filter(|member| is_literal(*member))
-            .collect(),
-        _ => Vec::new(),
+        Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+        _ => vec![node],
     }
 }
 
@@ -2281,6 +2282,11 @@ fn same_literal(
         || matches!(
             (graph.node_data(a).as_deref(), graph.node_data(b).as_deref()),
             (Some(SemanticNodeData::Literal(a)), Some(SemanticNodeData::Literal(b))) if a == b
+        )
+        || matches!(
+            (graph.node_data(a).as_deref(), graph.node_data(b).as_deref()),
+            (Some(SemanticNodeData::EnumLiteral(a)), Some(SemanticNodeData::EnumLiteral(b)))
+                if a.enum_decl == b.enum_decl && a.module_specifier == b.module_specifier && a.member == b.member
         )
 }
 

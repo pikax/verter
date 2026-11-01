@@ -3180,6 +3180,8 @@ pub enum SliceFreshness {
     Fresh,
     /// Not a fresh literal position: the literal (if any) stays pinned.
     Pinned,
+    /// An authored type or const assertion pins even a widening read.
+    Asserted,
     /// A bare `null` / `undefined` / `void` value position: no literal to
     /// widen (pinned for every literal rule), but the checker's WIDENING
     /// nullable type — with `strictNullChecks` off, a function whose whole
@@ -3197,7 +3199,7 @@ impl SliceFreshness {
     pub fn all_fresh(&self) -> bool {
         match self {
             Self::Fresh => true,
-            Self::Pinned | Self::WideningNullish => false,
+            Self::Pinned | Self::Asserted | Self::WideningNullish => false,
             Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_fresh),
         }
     }
@@ -3207,7 +3209,7 @@ impl SliceFreshness {
     pub fn any_fresh(&self) -> bool {
         match self {
             Self::Fresh => true,
-            Self::Pinned | Self::WideningNullish => false,
+            Self::Pinned | Self::Asserted | Self::WideningNullish => false,
             Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
         }
     }
@@ -3226,7 +3228,7 @@ impl SliceFreshness {
     pub fn all_widening_nullish(&self) -> bool {
         match self {
             Self::WideningNullish => true,
-            Self::Fresh | Self::Pinned => false,
+            Self::Fresh | Self::Pinned | Self::Asserted => false,
             Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_widening_nullish),
         }
     }

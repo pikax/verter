@@ -220,3 +220,50 @@ export function fresh() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Partial reads keep regular composite arms and enum member identity.
+#[test]
+fn partial_call_reads_preserve_composites_and_enums() {
+    let source = r##"
+declare function box<T>(value: T): { value: T };
+declare function nestedBox<T>(anchor: unknown, value: { value: T }): { value: { value: T } };
+enum E { A, B }
+export function composite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    return box(value);
+}
+export function nestedComposite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    return nestedBox(value, { value: value });
+}
+export function narrowedComposite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    if (typeof value === "string") return box({ v: "fixed" as const });
+    return box(value);
+}
+export function pinnedEnum(flag: boolean) {
+    const value = flag ? "fresh" : E.A as const;
+    return nestedBox(value, { value: value });
+}
+export function freshEnum(flag: boolean) {
+    const value = flag ? E.A : "fixed" as const;
+    return box(value);
+}
+export function nestedFreshEnum(flag: boolean) {
+    const value = flag ? E.A : "fixed" as const;
+    return nestedBox(value, { value: value });
+}
+"##;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("composite", r#"{ value: string | { v: "fixed"; }; }"#),
+        (
+            "nestedComposite",
+            r#"{ value: { value: string | { v: "fixed"; }; }; }"#,
+        ),
+        ("narrowedComposite", r#"{ value: { v: "fixed"; }; }"#),
+        ("pinnedEnum", "{ value: { value: string | E.A; }; }"),
+        ("freshEnum", r#"{ value: E | "fixed"; }"#),
+        ("nestedFreshEnum", r#"{ value: { value: E | "fixed"; }; }"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

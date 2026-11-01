@@ -14321,7 +14321,6 @@ struct PendingReturn<'r> {
     expr: &'r verter_session_query::flow::slice::SliceExpr,
     freshness: &'r verter_session_query::flow::slice::SliceFreshness,
     predicate_test: &'r Option<verter_session_query::flow::slice::ReturnPredicateTest>,
-    bare_literal: bool,
     fresh_literal: bool,
     holds_before: usize,
     run: ExprRun<'r>,
@@ -18194,13 +18193,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             freshness,
             verter_session_query::flow::slice::SliceFreshness::Fresh
         );
-        let fresh = bare_literal
+        let fresh = !matches!(
+            freshness,
+            verter_session_query::flow::slice::SliceFreshness::Asserted
+        ) && (bare_literal
             || self.reads_widening_literal_local(expr)
             || self
                 .fresh_call_return_for(expr, node)
                 .is_some_and(|call| call.values.contains(&node))
-            || self.fresh_narrowed_literal(expr, node) == Some(node);
-        let fresh_values = self.position_fresh_values(expr, node, bare_literal);
+            || self.fresh_narrowed_literal(expr, node) == Some(node));
+        let fresh_values = self.position_fresh_values(expr, node, freshness);
         parts.push(EvolvingPart {
             node,
             arm: self.reduction_arm(expr, node),
@@ -18308,8 +18310,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
-        bare_literal: bool,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Vec<SemanticNodeId> {
+        use verter_session_query::flow::slice::SliceFreshness;
+        if matches!(freshness, SliceFreshness::Asserted) {
+            return Vec::new();
+        }
+        let bare_literal = matches!(freshness, SliceFreshness::Fresh);
         let graph = self.dispatch.graph();
         if bare_literal
             && matches!(
@@ -18728,6 +18735,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     | (
                         false,
                         verter_session_query::flow::slice::SliceFreshness::Pinned
+                        | verter_session_query::flow::slice::SliceFreshness::Asserted
                         | verter_session_query::flow::slice::SliceFreshness::WideningNullish,
                     ) => Some(node),
                     (false, verter_session_query::flow::slice::SliceFreshness::Fresh) => {
@@ -25449,6 +25457,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         node: SemanticNodeId,
         freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Option<WideningMembership> {
+        if matches!(
+            freshness,
+            verter_session_query::flow::slice::SliceFreshness::Asserted
+        ) {
+            return None;
+        }
         if kind == verter_session_query::flow::slice::SliceBindingKind::Const
             && freshness.all_fresh()
         {
@@ -26135,13 +26149,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         expr,
                         freshness,
                         predicate_test,
-                        bare_literal,
                         fresh_literal,
                         holds_before,
                         ..
                     } = *pending;
                     let evaluated = self.settle(outcome).map(|node| {
-                        let fresh_values = self.position_fresh_values(expr, node, bare_literal);
+                        let fresh_values = self.position_fresh_values(expr, node, freshness);
                         (node, fresh_values)
                     });
                     if let Some(contribution) = self.return_contribution(
@@ -26476,7 +26489,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                                             expr,
                                                             freshness,
                                                             predicate_test,
-                                                            bare_literal,
                                                             fresh_literal,
                                                             holds_before,
                                                             run,
@@ -26491,7 +26503,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     };
                                     self.settle(outcome).map(|node| {
                                         let fresh_values =
-                                            self.position_fresh_values(expr, node, bare_literal);
+                                            self.position_fresh_values(expr, node, freshness);
                                         (node, fresh_values)
                                     })
                                 }
@@ -27101,17 +27113,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // an unselected sibling.
                     if let Some(init) = init {
                         self.prescan_statement_value_writes(Some(init));
-                        // A MIXED-freshness conditional `const`
-                        // initializer (a bare fresh literal arm beside an
-                        // authored pin, a call, a reference): evaluate
-                        // per-arm so the binding records EXACTLY which
-                        // values widen at a widening read — pinned-wins
-                        // collapse of equal constituents, then Partial
-                        // membership over the surviving fresh values. An
-                        // all-fresh or all-pinned tree keeps the plain
-                        // path below.
+                        // A conditional's references may carry fresh literals even
+                        // when no arm is a bare literal. Classify every read
+                        // per arm before recording the binding's membership.
                         if *kind == verter_session_query::flow::slice::SliceBindingKind::Const
-                            && freshness.is_mixed()
                             && matches!(
                                 init,
                                 verter_session_query::flow::slice::SliceExpr::Union { .. }

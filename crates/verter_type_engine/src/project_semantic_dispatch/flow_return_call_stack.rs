@@ -854,8 +854,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if let FlowIndexedArgumentBinding::ValueRead(binding) = &binding {
                 if let Some(WideningMembership::Partial(fresh)) = self.membership_of(binding) {
                     let graph = self.dispatch.graph();
-                    let regular = self
-                        .top_level_literal_nodes(ty)
+                    let members = match graph.node_data(ty).as_deref() {
+                        Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                        _ => vec![ty],
+                    };
+                    let regular = members
                         .into_iter()
                         .filter(|literal| {
                             let data = graph.node_data(*literal);
