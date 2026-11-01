@@ -1,11 +1,12 @@
-//! VID0's case table, executable half (VID0T-AC1–AC5). The identity-level
-//! fixtures follow `tests/kernel/VID0/products/identity-case-table.v1.json`:
-//! `VC01`–`VC08` and `VC11` rows whose `executableOwner` is VID0T live here;
-//! activation (`VC04`/`VC05`/`VC10` beyond the typed rejection), ambiguity
-//! resolution (`VC03`) and the capability/catalog halves of `VC11` belong to
-//! FWA1, COX0 and CPF1 and are never proved through a substitute encoder
-//! here. Vue 2.6, Solid 1 and htmx 1 releases are fixture values pinned by
-//! this table, not admitted products.
+//! Successor identity case table, executable half. Each test pins one
+//! durable identity invariant: nominal distinctness, exact-release
+//! admission, cross-major coexistence without cache collision, source-key
+//! serialization round-trips and collision safety, and change propagation
+//! from a release to exactly its derived identities. Activation reporting,
+//! ambiguity resolution and the capability/catalog halves of the
+//! release-change case belong to the types that own them and are never
+//! proved through a substitute encoder here. Vue 2.6, Solid 1 and htmx 1
+//! releases are fixture values, not admitted products.
 
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{
@@ -45,9 +46,9 @@ impl CanonicalEncode for MapConstruction {
     }
 }
 
-/// Canonical configuration identity of one configured project (VID0 `I08`:
-/// the descriptor the project owner derives; the `ConfigurationRevision`
-/// is its neighbour, never a field of it).
+/// Canonical configuration identity of one configured project: the
+/// descriptor the project owner derives; the `ConfigurationRevision` is
+/// its neighbour, never a field of it.
 struct ConfigurationIdentity(&'static str, &'static str);
 impl CanonicalEncode for ConfigurationIdentity {
     const DOMAIN_TAG: &'static str = "successor-test.configuration_identity.v1";
@@ -56,9 +57,9 @@ impl CanonicalEncode for ConfigurationIdentity {
     }
 }
 
-/// R12/R15 semantic cache key: source-text key plus the exact semantic
-/// profile the entry computes under. A family-wide or carrier-only key is
-/// forbidden (`R15`); composing the profile into the key is what this
+/// Semantic cache key: source-text key plus the exact semantic profile the
+/// entry computes under. A family-wide or carrier-only key would collide
+/// across profiles; composing the profile into the key is what this
 /// fixture pins.
 struct SemanticCacheKey<'a> {
     unit: &'a SourceUnitId,
@@ -77,7 +78,7 @@ impl CanonicalEncode for SemanticCacheKey<'_> {
     }
 }
 
-/// R12 source-text key: `(SourceUnitId, SourceRevision, ContentId)`.
+/// Source-text key: `(SourceUnitId, SourceRevision, ContentId)`.
 struct SourceTextKey<'a> {
     unit: &'a SourceUnitId,
     revision: &'a SourceRevision,
@@ -93,7 +94,7 @@ impl CanonicalEncode for SourceTextKey<'_> {
     }
 }
 
-/// R12 map key: `(SourceUnitId, SourceRevision, MapRevision)`.
+/// Source-map key: `(SourceUnitId, SourceRevision, MapRevision)`.
 struct SourceMapKey<'a> {
     unit: &'a SourceUnitId,
     revision: &'a SourceRevision,
@@ -110,8 +111,8 @@ impl CanonicalEncode for SourceMapKey<'_> {
 }
 
 /// Three raw byte payloads in fixed field order — the colliding-payload
-/// shape `R13` names: two tuples whose concatenated payloads coincide must
-/// still encode (and digest) differently.
+/// shape the collision-safety law names: two tuples whose concatenated
+/// payloads coincide must still encode (and digest) differently.
 struct RawTriple<'a>(&'a [u8], &'a [u8], &'a [u8]);
 impl CanonicalEncode for RawTriple<'_> {
     const DOMAIN_TAG: &'static str = "successor-test.raw_triple.v1";
@@ -121,6 +122,63 @@ impl CanonicalEncode for RawTriple<'_> {
             .field_bytes(2, self.1)
             .field_bytes(3, self.2);
     }
+}
+
+/// One field recovered from a finished canonical frame.
+struct RecoveredField<'a> {
+    tag: u16,
+    payload: &'a [u8],
+}
+
+/// Decode a finished canonical frame back into its domain tag and fields —
+/// the reconstruction half of an exact round-trip. Walks every length
+/// prefix of the wire layout (`verter_identity::encoding`: `u32` tag
+/// length + tag, `u32` field count, then per field `u16` tag, `u64`
+/// payload length, payload) and fails unless the fields land exactly at
+/// the end of the buffer with the header's count, so an encoding whose
+/// field boundaries are not recoverable cannot pass as a round-trip.
+fn decode_canonical_frame(bytes: &[u8]) -> (&str, Vec<RecoveredField<'_>>) {
+    fn le_u16(at: &[u8]) -> u16 {
+        u16::from_le_bytes([at[0], at[1]])
+    }
+    fn le_u32(at: &[u8]) -> u32 {
+        u32::from_le_bytes([at[0], at[1], at[2], at[3]])
+    }
+    fn le_u64(at: &[u8]) -> u64 {
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&at[..8]);
+        u64::from_le_bytes(raw)
+    }
+    let mut cursor = 0usize;
+    let mut take = |width: usize| -> &[u8] {
+        let end = cursor + width;
+        assert!(
+            end <= bytes.len(),
+            "canonical frame truncated: wanted {width} bytes at {cursor}, has {}",
+            bytes.len() - cursor
+        );
+        let slice = &bytes[cursor..end];
+        cursor = end;
+        slice
+    };
+    let tag_length = le_u32(take(4)) as usize;
+    let domain_tag = std::str::from_utf8(take(tag_length)).expect("domain tag is UTF-8");
+    let field_count = le_u32(take(4)) as usize;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        let tag = le_u16(take(2));
+        let payload_length = le_u64(take(8)) as usize;
+        fields.push(RecoveredField {
+            tag,
+            payload: take(payload_length),
+        });
+    }
+    assert_eq!(
+        cursor,
+        bytes.len(),
+        "canonical frame carries trailing bytes"
+    );
+    (domain_tag, fields)
 }
 
 /// The descriptor-schema epoch every fixture mints under.
@@ -136,11 +194,11 @@ fn release_id(family: &str, version: &str, admitted: &[u32]) -> ReleaseId {
     ReleaseId::from_coordinates(&coordinates, &schema_epoch())
 }
 
-/// VC01 — accepted unit lineage survives edits while the revision/content
-/// keys move. The three versions keep `script` and `template` units equal;
+/// Accepted unit lineage survives edits while the revision/content keys
+/// move. The three versions keep `script` and `template` units equal;
 /// every version fact and byte change moves exactly its own key.
 #[test]
-fn vc01_lineage_survives_edits_while_version_keys_move() {
+fn lineage_survives_edits_while_version_keys_move() {
     let source = SourceId::from_canonical(&SourceFile("editor:/ws/a/App.vue"));
     let versions: [(&str, &[u8]); 3] = [
         ("v1", b"<script>export const a = 1</script>"),
@@ -198,13 +256,12 @@ fn vc01_lineage_survives_edits_while_version_keys_move() {
     );
 }
 
-/// VC02 — Vue 2.6 and Vue 3 coexist with no cache collision: one carrier
-/// for the identical bytes, distinct releases and profiles, and semantic
-/// cache keys that differ on profile alone (a family-wide key would
-/// collide here). Vue 2.6 is a fixture value; no Vue 2 vertical is
-/// admitted.
+/// Vue 2.6 and Vue 3 coexist with no cache collision: one carrier for the
+/// identical bytes, distinct releases and profiles, and semantic cache
+/// keys that differ on profile alone (a family-wide key would collide
+/// here). Vue 2.6 is a fixture value; no Vue 2 vertical is admitted.
 #[test]
-fn vc02_vue_majors_coexist_without_collision() {
+fn vue_majors_coexist_without_collision() {
     let carrier = CarrierProfileId::from_carrier("vue-sfc", &schema_epoch());
     let carrier_again = CarrierProfileId::from_carrier("vue-sfc", &schema_epoch());
     assert_eq!(carrier, carrier_again, "same carrier inputs, same carrier");
@@ -253,14 +310,14 @@ fn vc02_vue_majors_coexist_without_collision() {
     );
 }
 
-/// VC03 — one TSX byte stream carries mutually exclusive React 19 and
-/// Solid 2 claims: one carrier and one region in every case, two distinct
-/// profile identities and two distinct attachments on that one region,
-/// grouped by the shared `(SourceUnitId, RegionId)` claim key. The typed
-/// ambiguous outcome and the pragma narrowing rule are COX0's and FWA1's;
+/// One TSX byte stream carries mutually exclusive React 19 and Solid 2
+/// claims: one carrier and one region in every case, two distinct profile
+/// identities and two distinct attachments on that one region, grouped by
+/// the shared `(SourceUnitId, RegionId)` claim key. The typed ambiguous
+/// outcome and the pragma narrowing rule belong to the ambiguity owner;
 /// the identity half is what this pins.
 #[test]
-fn vc03_exclusive_claims_share_one_region() {
+fn exclusive_claims_share_one_region() {
     let carrier = CarrierProfileId::from_carrier("tsx", &schema_epoch());
     let react = release_id("react", "19.0.0", &[19u32]);
     let solid = release_id("solid-js", "2.11.6", &[2u32]);
@@ -294,9 +351,9 @@ fn vc03_exclusive_claims_share_one_region() {
         react_attachment, solid_attachment,
         "two active claims are two attachments, never one"
     );
-    // R10: competing claims are grouped by the profile-independent region
-    // they share — both attachments address the same (unit, region) pair,
-    // so ambiguity is decided over that key, not by attachment equality.
+    // Competing claims are grouped by the profile-independent region they
+    // share — both attachments address the same (unit, region) pair, so
+    // ambiguity is decided over that key, not by attachment equality.
     let _grouping_key = (&unit, &region);
     // The `@jsxImportSource solid-js` pragma narrows that one file to the
     // Solid claim; narrowing selects among these same identities and mints
@@ -305,12 +362,12 @@ fn vc03_exclusive_claims_share_one_region() {
     let _competing_claims = [&react_profile, &solid_profile];
 }
 
-/// VC04 — Solid 1 cannot produce a Solid 2 identity: the 1.x row fails
-/// admission with the typed `unsupported-version` rejection, so no
-/// `ReleaseId` (and no `FrameworkProfileId` over it) can be minted from
-/// it. Activation reporting is FWA1's.
+/// Solid 1 cannot produce a Solid 2 identity: the 1.x row fails admission
+/// with the typed unsupported-version rejection, so no `ReleaseId` (and no
+/// `FrameworkProfileId` over it) can be minted from it. Activation
+/// reporting belongs to the activation owner.
 #[test]
-fn vc04_solid_one_cannot_mint_solid_two() {
+fn solid_one_cannot_mint_solid_two() {
     let solid_two_only = [2u32];
     let resolved = ReleaseCoordinates::decode("solid-js", &["1.8.0"], &solid_two_only);
     assert_eq!(resolved, Err(ReleaseDescriptorError::UnsupportedVersion));
@@ -333,11 +390,11 @@ fn vc04_solid_one_cannot_mint_solid_two() {
     );
 }
 
-/// VC05 — older htmx majors cannot activate htmx 4: under the htmx-4-only
-/// line a 1.x row is rejected; under a line that admits the older major,
-/// that major gets its own release and profile, never htmx 4's.
+/// Older htmx majors cannot activate htmx 4: under the htmx-4-only line a
+/// 1.x row is rejected; under a line that admits the older major, that
+/// major gets its own release and profile, never htmx 4's.
 #[test]
-fn vc05_older_htmx_majors_do_not_activate_htmx_four() {
+fn older_htmx_majors_do_not_activate_htmx_four() {
     let htmx_four_only = [4u32];
     assert_eq!(
         ReleaseCoordinates::decode("htmx.org", &["1.9.12"], &htmx_four_only),
@@ -364,12 +421,12 @@ fn vc05_older_htmx_majors_do_not_activate_htmx_four() {
     );
 }
 
-/// VC06 / VID0T-AC2 — floating tags, ranges, bare family strings, untagged
-/// ids, a missing major and versions arrays all fail canonical decoding
-/// with a typed error; only exact spellings admitted by the family's line
-/// decode. A decoder never defaults the major.
+/// Floating tags, ranges, bare family strings, untagged ids, a missing
+/// major and versions arrays all fail canonical decoding with a typed
+/// error; only exact spellings admitted by the family's line decode. A
+/// decoder never defaults the major.
 #[test]
-fn vc06_floating_and_untagged_releases_fail_decoding() {
+fn floating_and_untagged_releases_fail_decoding() {
     let admitted = [2u32, 3];
     let rejected: &[(&str, &[&str], ReleaseDescriptorError)] = &[
         ("vue", &["latest"], ReleaseDescriptorError::FloatingTag),
@@ -408,34 +465,97 @@ fn vc06_floating_and_untagged_releases_fail_decoding() {
     );
 }
 
-/// VC08 / VID0T-AC4 — source keys serialize and round-trip exactly, collide
-/// safely, and keep backend/process identity outside the key.
+/// Source keys serialize and round-trip exactly, collide safely, and keep
+/// backend/process identity outside the key.
 #[test]
-fn vc08_source_keys_round_trip_collide_safely_and_exclude_backends() {
+fn source_keys_round_trip_collide_safely_and_exclude_backends() {
     let source = SourceId::from_canonical(&SourceFile("editor:/ws/a/App.vue"));
     let unit = SourceUnitId::from_lineage(&source, "script");
     let revision = SourceRevision::from_canonical(&VersionFact(2));
     let content = ContentId::from_content_bytes(b"<script>export const a = 1</script>");
     let map = MapRevision::from_canonical(&MapConstruction(4));
 
-    // Exact round-trip: independent composition over equal members is
-    // byte- and digest-identical, for both key shapes.
     let text_key = SourceTextKey {
         unit: &unit,
         revision: &revision,
         content: &content,
     };
-    assert_eq!(text_key.canonical_bytes(), text_key.canonical_bytes());
-    assert_eq!(
-        CanonicalDigest::of_bytes(&text_key.canonical_bytes()),
-        CanonicalDigest::of_bytes(&text_key.canonical_bytes())
-    );
     let map_key = SourceMapKey {
         unit: &unit,
         revision: &revision,
         map: &map,
     };
-    assert_eq!(map_key.canonical_bytes(), map_key.canonical_bytes());
+
+    // Exact round-trip, text shape: the serialized frame decodes back into
+    // exactly its three members — each recovered payload is the member's
+    // own canonical bytes, under its own field tag — and re-encoding the
+    // recovered fields reproduces the serialized bytes.
+    let text_bytes = text_key.canonical_bytes();
+    let (text_tag, text_fields) = decode_canonical_frame(&text_bytes);
+    assert_eq!(text_tag, <SourceTextKey as CanonicalEncode>::DOMAIN_TAG);
+    let text_expected: [(u16, &[u8]); 3] = [
+        (1, unit.canonical_bytes()),
+        (2, revision.canonical_bytes()),
+        (3, content.canonical_bytes()),
+    ];
+    assert_eq!(text_fields.len(), text_expected.len());
+    for (field, (tag, payload)) in text_fields.iter().zip(text_expected) {
+        assert_eq!(field.tag, tag, "recovered field keeps its schema tag");
+        assert_eq!(
+            field.payload, payload,
+            "the recovered member is the member's own canonical bytes"
+        );
+    }
+    let mut text_rebuilt = CanonicalEncoder::new(<SourceTextKey as CanonicalEncode>::DOMAIN_TAG);
+    for field in &text_fields {
+        text_rebuilt.field_bytes(field.tag, field.payload);
+    }
+    assert_eq!(
+        &text_rebuilt.finish()[..],
+        &text_bytes[..],
+        "re-encoding the recovered fields reproduces the serialized bytes"
+    );
+
+    // Exact round-trip, map shape: same reconstruction over its own third
+    // member.
+    let map_bytes = map_key.canonical_bytes();
+    let (map_tag, map_fields) = decode_canonical_frame(&map_bytes);
+    assert_eq!(map_tag, <SourceMapKey as CanonicalEncode>::DOMAIN_TAG);
+    let map_expected: [(u16, &[u8]); 3] = [
+        (1, unit.canonical_bytes()),
+        (2, revision.canonical_bytes()),
+        (3, map.canonical_bytes()),
+    ];
+    assert_eq!(map_fields.len(), map_expected.len());
+    for (field, (tag, payload)) in map_fields.iter().zip(map_expected) {
+        assert_eq!(field.tag, tag, "recovered field keeps its schema tag");
+        assert_eq!(
+            field.payload, payload,
+            "the recovered member is the member's own canonical bytes"
+        );
+    }
+    let mut map_rebuilt = CanonicalEncoder::new(<SourceMapKey as CanonicalEncode>::DOMAIN_TAG);
+    for field in &map_fields {
+        map_rebuilt.field_bytes(field.tag, field.payload);
+    }
+    assert_eq!(
+        &map_rebuilt.finish()[..],
+        &map_bytes[..],
+        "re-encoding the recovered fields reproduces the serialized bytes"
+    );
+
+    // Independent composition over equal members is byte- and
+    // digest-identical, for both key shapes.
+    let text_key_again = SourceTextKey {
+        unit: &unit,
+        revision: &revision,
+        content: &content,
+    };
+    assert_eq!(text_key_again.canonical_bytes(), text_bytes);
+    assert_eq!(
+        CanonicalDigest::of_bytes(&text_key_again.canonical_bytes()),
+        CanonicalDigest::of_bytes(&text_bytes)
+    );
 
     // One member moves, the key moves — including the map member, which is
     // a different key shape's discriminator, never a text-key field.
@@ -468,8 +588,8 @@ fn vc08_source_keys_round_trip_collide_safely_and_exclude_backends() {
     }
     assert_ne!(map_key.canonical_bytes(), moved_map.canonical_bytes());
 
-    // R13 — two tuples whose concatenated payloads coincide still encode
-    // and digest differently: length delimitation is the collision safety.
+    // Two tuples whose concatenated payloads coincide still encode and
+    // digest differently: length delimitation is the collision safety.
     let fused_a = RawTriple(b"ab", b"c", b"x").canonical_bytes();
     let fused_b = RawTriple(b"a", b"bc", b"x").canonical_bytes();
     assert_ne!(fused_a, fused_b);
@@ -478,11 +598,10 @@ fn vc08_source_keys_round_trip_collide_safely_and_exclude_backends() {
         CanonicalDigest::of_bytes(&fused_b)
     );
 
-    // R14 — backend and process facts vary; the source key bytes do not.
-    // The composition takes only the three ratified members, so every
-    // backend epoch, provider epoch or session handle the process may
-    // hold lives outside the key: the bytes are a function of the members
-    // alone.
+    // Backend and process facts vary; the source key bytes do not. The
+    // composition takes only the three ratified members, so every backend
+    // epoch, provider epoch or session handle the process may hold lives
+    // outside the key: the bytes are a function of the members alone.
     let before = text_key.canonical_bytes();
     let backend_state = (EngineRevision(7), ProviderEpoch(3));
     let other_backend_state = (EngineRevision(8), ProviderEpoch(4));
@@ -494,12 +613,12 @@ fn vc08_source_keys_round_trip_collide_safely_and_exclude_backends() {
     );
 }
 
-/// VC11 (VID0T half) — a release change moves exactly its dependent
-/// identities: the release, framework profile and attachment change; the
-/// carrier, source unit and region stay equal. The profile-qualified
-/// capability half is COX0's and the catalog half CPF1's.
+/// A release change moves exactly its dependent identities: the release,
+/// framework profile and attachment change; the carrier, source unit and
+/// region stay equal. The profile-qualified capability half and the
+/// catalog half belong to the types that own them.
 #[test]
-fn vc11_release_change_moves_exactly_dependent_identities() {
+fn release_change_moves_exactly_dependent_identities() {
     let source = SourceId::from_canonical(&SourceFile("editor:/ws/a/Comp.vue"));
     let unit = SourceUnitId::from_lineage(&source, "template");
     let region = RegionId::from_region_role(&unit, "root");
@@ -536,9 +655,8 @@ fn vc11_release_change_moves_exactly_dependent_identities() {
     );
 }
 
-/// VID0T-AC2/AC3 support — the descriptor-schema epoch is deterministic,
-/// and bumping it re-mints every profile identity derived under it
-/// (`R02` through `I11`) while equal epochs never do.
+/// The descriptor-schema epoch is deterministic, and bumping it re-mints
+/// every profile identity derived under it while equal epochs never do.
 #[test]
 fn schema_epoch_bump_moves_exactly_profile_identities() {
     let epoch_one = ProfileSchemaEpoch::for_schema_family("successor-test.descriptor", 1);
@@ -595,9 +713,9 @@ fn schema_epoch_bump_moves_exactly_profile_identities() {
     }
 }
 
-/// VID0T-AC1 support — the configured-project identity is deterministic in
-/// the canonical configuration identity and blind to the neighbouring
-/// configuration revision.
+/// The configured-project identity is deterministic in the canonical
+/// configuration identity and blind to the neighbouring configuration
+/// revision.
 #[test]
 fn configured_project_identity_ignores_configuration_revision() {
     let configuration = ConfigurationIdentity("file://ws/a/tsconfig.json", "digest-of-bytes");

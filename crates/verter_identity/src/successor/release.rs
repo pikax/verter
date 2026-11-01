@@ -1,17 +1,19 @@
-//! Exact-release law (VID0 `I04`, `R04`–`R07`, `R11`): release
+//! Exact-release law (`docs/arch/kernel/identities.md`): release
 //! coordinates decode from one manifest row or fail with a typed error,
-//! and [`ReleaseId`] mints only from decoded coordinates.
+//! and [`ReleaseId`] mints only from decoded coordinates — the type has no
+//! `from_canonical`, so no floating, ranged, untagged or unadmitted
+//! spelling can reach it.
 
 use crate::canonical::Canonical;
 use crate::encoding::{CanonicalEncode, CanonicalEncoder};
 
 use super::ProfileSchemaEpoch;
 
-digest_identity!(
-    /// Exact semantic-release identity (VID0 `I04`): one exact release,
-    /// minted from admitted [`ReleaseCoordinates`] and the
-    /// descriptor-schema epoch. Never a range, a versions array, a
-    /// floating tag or an implied major.
+sealed_digest_identity!(
+    /// Exact semantic-release identity: one exact release, minted from
+    /// admitted [`ReleaseCoordinates`] and the descriptor-schema epoch.
+    /// Never a range, a versions array, a floating tag or an implied
+    /// major.
     ReleaseId
 );
 
@@ -19,9 +21,10 @@ impl ReleaseId {
     const DOMAIN_TAG: &'static str = "verter.identity.successor.release.v1";
 
     /// Mint from exact, already-admitted coordinates and the
-    /// descriptor-schema epoch. The coordinates carry the family's
-    /// admitted line, so a lock change re-mints the release identities it
-    /// admits (`I04`).
+    /// descriptor-schema epoch — the only construction path, so an
+    /// identity without its schema epoch cannot be minted. The coordinates
+    /// carry the family's admitted line, so a lock change re-mints the
+    /// release identities it admits.
     pub fn from_coordinates(coordinates: &ReleaseCoordinates, schema: &ProfileSchemaEpoch) -> Self {
         let mut encoder = CanonicalEncoder::new(Self::DOMAIN_TAG);
         encoder.field_bytes(1, coordinates.canonical_digest().as_bytes());
@@ -33,29 +36,29 @@ impl ReleaseId {
 /// Typed rejection of an inexact release descriptor row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseDescriptorError {
-    /// `R04`: the row carries two releases or a versions array — a
-    /// structural failure, never two identities.
+    /// The row carries two releases or a versions array — a structural
+    /// failure, never two identities.
     VersionsArray,
-    /// `R07`: `latest`, `next`, `canary` or another floating tag.
+    /// `latest`, `next`, `canary` or another floating tag.
     FloatingTag,
-    /// `R07`: a range or wildcard comparator.
+    /// A range or wildcard comparator.
     Range,
-    /// `R07`: a bare family string — the row names no release.
+    /// A bare family string — the row names no release.
     UntaggedFamily,
-    /// `R06`: the row's release is absent or is not an exact
+    /// The row's release is absent or is not an exact
     /// `major[.minor[.patch]]`, so there is no exact major to mint from —
     /// an implicit default major is never coerced.
     MissingMajor,
-    /// `R06`/`R11`: the resolved major is outside the family's admitted
-    /// line; it is never coerced into an admitted release.
+    /// The resolved major is outside the family's admitted line; it is
+    /// never coerced into an admitted release.
     UnsupportedVersion,
 }
 
-/// Exact, admitted release coordinates (VID0 `I04`): family key, exact
-/// version, and the admitted line the family's stage-0 lock pinned when it
-/// admitted them. Fields are private and coordinates arise only through
-/// [`Self::decode`], so no floating, ranged, untagged or unadmitted
-/// spelling can reach a [`ReleaseId`].
+/// Exact, admitted release coordinates: family key, exact version, and the
+/// admitted line the family's stage-0 lock pinned when it admitted them.
+/// Fields are private and coordinates arise only through [`Self::decode`],
+/// so no floating, ranged, untagged or unadmitted spelling can reach a
+/// [`ReleaseId`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseCoordinates {
     family: String,
@@ -68,9 +71,9 @@ pub struct ReleaseCoordinates {
 impl ReleaseCoordinates {
     /// Decode one manifest row: the family key, the release strings the
     /// row carries, and the exact majors the family's stage-0 lock
-    /// admits. One row names one release (`R04`); a floating tag, range,
-    /// bare family string, absent major (`R06`, `R07`) or unadmitted
-    /// major (`R11`) is a typed error, never a coerced identity.
+    /// admits. One row names one release; a floating tag, range, bare
+    /// family string, absent major or unadmitted major is a typed error,
+    /// never a coerced identity.
     pub fn decode(
         family: &str,
         releases: &[&str],
