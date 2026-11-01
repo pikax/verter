@@ -1,0 +1,1094 @@
+{
+  "mode": "closure",
+  "target": "L4",
+  "candidate": "candidate-synthetic",
+  "owners": [
+    {
+      "slug": "H0",
+      "classification": "historical",
+      "outcome": "Historical baseline",
+      "soleFinalOwner": "H0"
+    },
+    {
+      "slug": "B-BRIDGE",
+      "classification": "required",
+      "outcome": "Outcome of B-BRIDGE",
+      "soleFinalOwner": "B-BRIDGE",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "S-ENG",
+      "classification": "required",
+      "outcome": "Outcome of S-ENG",
+      "soleFinalOwner": "S-ENG",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": [
+        {
+          "route": "old store route",
+          "disposition": "deleted"
+        }
+      ],
+      "outcomeIds": ["proposal-01"],
+      "evidenceRefs": ["ev-canonical"]
+    },
+    {
+      "slug": "S-OBS",
+      "classification": "required",
+      "outcome": "Outcome of S-OBS",
+      "soleFinalOwner": "S-OBS",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": [
+        {
+          "route": "capture route",
+          "disposition": "surviving",
+          "survivingOwner": "S-OBS"
+        }
+      ]
+    },
+    {
+      "slug": "CP-STRUCT",
+      "classification": "required",
+      "outcome": "Outcome of CP-STRUCT",
+      "soleFinalOwner": "CP-STRUCT",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "L4-A",
+      "classification": "required",
+      "outcome": "Outcome of L4-A",
+      "soleFinalOwner": "L4-A",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "P-COND",
+      "classification": "required",
+      "outcome": "Outcome of P-COND",
+      "soleFinalOwner": "P-COND",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": [],
+      "outcomeIds": ["proposal-02"]
+    },
+    {
+      "slug": "P-PERF",
+      "classification": "required",
+      "outcome": "Outcome of P-PERF",
+      "soleFinalOwner": "P-PERF",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "CP-SEM",
+      "classification": "required",
+      "outcome": "Outcome of CP-SEM",
+      "soleFinalOwner": "CP-SEM",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "K-8",
+      "classification": "required",
+      "outcome": "Outcome of K-8",
+      "soleFinalOwner": "K-8",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": [],
+      "outcomeIds": ["direction-no-computation-cap"]
+    },
+    {
+      "slug": "V9",
+      "classification": "optional",
+      "outcome": "Not selected"
+    },
+    {
+      "slug": "ECRV8",
+      "classification": "required",
+      "outcome": "Outcome of ECRV8",
+      "soleFinalOwner": "ECRV8",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "ECRX2",
+      "classification": "required",
+      "outcome": "Outcome of ECRX2",
+      "soleFinalOwner": "ECRX2",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "REL3",
+      "classification": "required",
+      "outcome": "Outcome of REL3",
+      "soleFinalOwner": "REL3",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "L4-V",
+      "classification": "required",
+      "outcome": "Outcome of L4-V",
+      "soleFinalOwner": "L4-V",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    },
+    {
+      "slug": "L4",
+      "classification": "required",
+      "outcome": "Outcome of L4",
+      "soleFinalOwner": "L4",
+      "consumers": ["synthetic-consumer"],
+      "displacedRoutes": []
+    }
+  ],
+  "trainReviews": [
+    {
+      "train": "rev11.lock",
+      "candidate": "candidate-synthetic",
+      "checkpoints": [],
+      "findings": []
+    },
+    {
+      "train": "compiler.compiler-bridge",
+      "candidate": "candidate-synthetic",
+      "checkpoints": [],
+      "findings": []
+    },
+    {
+      "train": "rev11.structure",
+      "candidate": "candidate-synthetic",
+      "checkpoints": ["CP-STRUCT"],
+      "findings": [
+        {
+          "id": "structure-1",
+          "severity": "P1",
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "train": "rev11.finalization",
+      "candidate": "candidate-synthetic",
+      "terminal": true,
+      "checkpoints": [],
+      "findings": []
+    },
+    {
+      "train": "rev11.semantic-closure",
+      "candidate": "candidate-synthetic",
+      "independent": true,
+      "checkpoints": ["CP-SEM"],
+      "findings": [
+        {
+          "id": "semantic-1",
+          "severity": "P2",
+          "status": "rejected"
+        }
+      ]
+    },
+    {
+      "train": "rev11.signature-kernel",
+      "candidate": "candidate-synthetic",
+      "independent": true,
+      "checkpoints": [],
+      "findings": []
+    },
+    {
+      "train": "conformance.external-corrections",
+      "candidate": "candidate-synthetic",
+      "checkpoints": [],
+      "findings": []
+    },
+    {
+      "train": "governance.release-control",
+      "candidate": "candidate-synthetic",
+      "checkpoints": [],
+      "findings": []
+    }
+  ],
+  "capabilities": [
+    {
+      "surface": "vue-compile",
+      "stabilityClass": "stable",
+      "typedResult": "complete",
+      "consumer": "@verter/unplugin",
+      "executedVerification": "ev-canonical",
+      "cases": []
+    },
+    {
+      "surface": "svelte-compile",
+      "stabilityClass": "stable",
+      "typedResult": "complete",
+      "consumer": "@verter/unplugin",
+      "executedVerification": "ev-svelte",
+      "cases": [
+        {
+          "case": "svelte-vapor-output",
+          "typedResult": "unsupported",
+          "limitation": "no Vapor output for Svelte sources"
+        }
+      ]
+    },
+    {
+      "surface": "host-lint",
+      "stabilityClass": "preview",
+      "typedResult": "partial",
+      "limitation": "rule subset",
+      "consumer": "language server",
+      "executedVerification": "ev-provider",
+      "cases": []
+    },
+    {
+      "surface": "lsp-edit-loop",
+      "stabilityClass": "experimental-unranked",
+      "typedResult": "partial",
+      "limitation": "not ranked",
+      "consumer": "language server",
+      "executedVerification": "ev-provider",
+      "cases": []
+    }
+  ],
+  "metrics": [
+    {
+      "row": "wall/vue-compile",
+      "evidenceRun": "skr-perf0-structural",
+      "worker": {
+        "id": "worker-benchmark",
+        "tags": ["bench-m3"]
+      },
+      "outcomes": {
+        "normal": "pass"
+      },
+      "result": "pass"
+    },
+    {
+      "row": "work/limits-calibration",
+      "evidenceRun": "skr-limits-calibration",
+      "worker": {
+        "id": "worker-benchmark",
+        "tags": ["bench-m3"]
+      },
+      "outcomes": {
+        "normal": "pass"
+      },
+      "result": "pass"
+    },
+    {
+      "row": "work/limits-confirm",
+      "evidenceRun": "skr-limits-confirm",
+      "worker": {
+        "id": "worker-benchmark",
+        "tags": ["bench-m3"]
+      },
+      "outcomes": {
+        "normal": "pass"
+      },
+      "result": "pass"
+    },
+    {
+      "row": "rss/soak",
+      "evidenceRun": "rev11-l1-soak",
+      "worker": {
+        "id": "worker-benchmark",
+        "tags": ["bench-m3"]
+      },
+      "outcomes": {
+        "normal": "pass",
+        "pressure": "pass"
+      },
+      "result": "pass"
+    },
+    {
+      "row": "wall/final",
+      "evidenceRun": "rev11-l2-final",
+      "worker": {
+        "id": "worker-benchmark",
+        "tags": ["bench-m3"]
+      },
+      "outcomes": {
+        "normal": "pass",
+        "pressure": "pass"
+      },
+      "result": "pass"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev-canonical",
+      "owner": "S-ENG",
+      "lane": "canonical",
+      "command": "run canonical",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-shipped",
+      "owner": "S-OBS",
+      "lane": "shipped-cfg",
+      "command": "run shipped-cfg",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-compiler",
+      "owner": "B-BRIDGE",
+      "lane": "compiler",
+      "command": "run compiler",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-compile-contract",
+      "owner": "CP-STRUCT",
+      "lane": "compile-contract",
+      "command": "run compile-contract",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-protocol",
+      "owner": "L4-A",
+      "lane": "protocol",
+      "command": "run protocol",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-specialized",
+      "owner": "P-COND",
+      "lane": "specialized-workload",
+      "command": "run specialized-workload",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-specialized-rerun",
+      "owner": "P-PERF",
+      "lane": "specialized-workload",
+      "command": "run specialized-workload",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-corpus",
+      "owner": "CP-SEM",
+      "lane": "signature-corpus",
+      "command": "run signature-corpus",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-determinism",
+      "owner": "K-8",
+      "lane": "determinism",
+      "command": "run determinism",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-component-meta",
+      "owner": "ECRV8",
+      "lane": "native",
+      "command": "run native",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-capability-isolation",
+      "owner": "ECRX2",
+      "lane": "typescript",
+      "command": "run typescript",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-clean-room",
+      "owner": "REL3",
+      "lane": "provider",
+      "command": "run provider",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-native",
+      "owner": "L4-V",
+      "lane": "native",
+      "command": "run native",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-typescript",
+      "owner": "L4-V",
+      "lane": "typescript",
+      "command": "run typescript",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-provider",
+      "owner": "L4-V",
+      "lane": "provider",
+      "command": "run provider",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-wasm",
+      "owner": "L4-V",
+      "lane": "wasm",
+      "command": "run wasm",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-svelte",
+      "owner": "L4-V",
+      "lane": "svelte",
+      "command": "run svelte",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-map-encoding",
+      "owner": "L4-V",
+      "lane": "map-encoding",
+      "command": "run map-encoding",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-terminal",
+      "owner": "L4",
+      "lane": "canonical",
+      "command": "run canonical",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "ci",
+        "owner": "ci-lane"
+      }
+    },
+    {
+      "id": "ev-skr-perf0-structural",
+      "owner": "P-PERF",
+      "lane": "performance",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "local-execution",
+        "owner": "benchmark-worker"
+      },
+      "evidenceRun": "skr-perf0-structural"
+    },
+    {
+      "id": "ev-skr-limits-calibration",
+      "owner": "P-PERF",
+      "lane": "performance",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "local-execution",
+        "owner": "benchmark-worker"
+      },
+      "evidenceRun": "skr-limits-calibration"
+    },
+    {
+      "id": "ev-skr-limits-confirm",
+      "owner": "P-PERF",
+      "lane": "performance",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "local-execution",
+        "owner": "benchmark-worker"
+      },
+      "evidenceRun": "skr-limits-confirm"
+    },
+    {
+      "id": "ev-rev11-l1-soak",
+      "owner": "P-PERF",
+      "lane": "performance",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "local-execution",
+        "owner": "benchmark-worker"
+      },
+      "evidenceRun": "rev11-l1-soak"
+    },
+    {
+      "id": "ev-rev11-l2-final",
+      "owner": "P-PERF",
+      "lane": "performance",
+      "candidate": "candidate-synthetic",
+      "prerequisites": [
+        {
+          "name": "fresh build",
+          "matched": true
+        }
+      ],
+      "terminalSummary": {
+        "complete": true,
+        "selected": 10,
+        "executed": 10,
+        "unexpectedSkips": 0,
+        "passed": true
+      },
+      "executor": {
+        "kind": "local-execution",
+        "owner": "benchmark-worker"
+      },
+      "evidenceRun": "rev11-l2-final"
+    }
+  ],
+  "inventories": {
+    "engine": {
+      "relocations": [
+        {
+          "from": "crates/old_owner/src/store.rs",
+          "to": "crates/new_owner/src/store.rs"
+        }
+      ],
+      "testMapping": {
+        "discoveredBefore": 2,
+        "discoveredAfter": 2,
+        "normalizedIdentical": true,
+        "rows": [
+          {
+            "old": "old_owner::store::keeps_entries",
+            "new": "new_owner::store::keeps_entries"
+          },
+          {
+            "old": "old_owner::store::evicts_entries",
+            "new": "new_owner::store::evicts_entries"
+          }
+        ]
+      },
+      "guards": [
+        {
+          "family": "dependency-family",
+          "kind": "dependency",
+          "path": "crates/policy_gate/tests/cases/dependency.rs",
+          "executedTests": 3,
+          "plantedFixture": "planted-dependency",
+          "plantedRejected": true
+        },
+        {
+          "family": "feature-family",
+          "kind": "feature",
+          "path": "crates/policy_gate/tests/cases/feature.rs",
+          "executedTests": 3,
+          "plantedFixture": "planted-feature",
+          "plantedRejected": true
+        },
+        {
+          "family": "capability-family",
+          "kind": "capability",
+          "path": "crates/policy_gate/tests/cases/capability.rs",
+          "executedTests": 3,
+          "plantedFixture": "planted-capability",
+          "plantedRejected": true
+        }
+      ],
+      "formatInventories": [
+        {
+          "id": "ARH0",
+          "updated": true
+        },
+        {
+          "id": "ARH1",
+          "updated": true
+        },
+        {
+          "id": "ARH2",
+          "updated": true
+        },
+        {
+          "id": "ARH5",
+          "updated": true
+        },
+        {
+          "id": "ARH7",
+          "updated": true
+        }
+      ],
+      "futureCharterSurfaces": [
+        {
+          "surface": "crates/new_owner/src/store.rs",
+          "owner": "P-COND"
+        }
+      ]
+    },
+    "observe": {
+      "files": [
+        {
+          "owner": "S-OBS",
+          "path": "crates/observed/observe-inventory/S-OBS.md",
+          "rows": [
+            {
+              "item": "retained entries accessor",
+              "productionConsumer": "host retention snapshot",
+              "classification": "REQUIRED-lifetime",
+              "lifetime": "derived from live occupancy",
+              "ownerModule": "src/store.rs",
+              "gate": "always"
+            },
+            {
+              "item": "per-site timers",
+              "productionConsumer": "none",
+              "classification": "OPTIONAL",
+              "lifetime": "measurement window",
+              "ownerModule": "src/timers.rs",
+              "gate": "cfg(feature = \"semantic-observe\")"
+            }
+          ]
+        }
+      ],
+      "counts": [
+        {
+          "name": "retained-entries",
+          "accessor": "Store::len",
+          "availableWithCaptureOff": true
+        },
+        {
+          "name": "live-leases",
+          "accessor": "Leases::len",
+          "availableWithCaptureOff": true
+        }
+      ],
+      "offVersusStripped": "ev-rev11-l2-final"
+    },
+    "reuse": {
+      "admissions": [
+        {
+          "id": "complete-fact",
+          "class": "CompleteFact",
+          "result": "Complete",
+          "reusedAs": "complete"
+        },
+        {
+          "id": "certified",
+          "class": "CertifiedDivergence",
+          "result": "Complete",
+          "reusedAs": "complete"
+        },
+        {
+          "id": "operation-refusal",
+          "class": "OperationRefusal",
+          "result": "Refused",
+          "reusedAs": "refusal",
+          "profileScoped": true
+        },
+        {
+          "id": "root-refusal",
+          "class": "IsolatedRootLedgerRefusal",
+          "result": "Refused",
+          "reusedAs": "refusal",
+          "profileScoped": true,
+          "isolatedRoot": true,
+          "contextKeyed": true
+        },
+        {
+          "id": "cancelled",
+          "class": "Never",
+          "result": "Unavailable",
+          "reusedAs": "none"
+        }
+      ],
+      "negativeCacheTests": [
+        {
+          "dimension": "profile",
+          "test": "negative_cache_profile",
+          "executedTests": 2,
+          "passed": true
+        },
+        {
+          "dimension": "context",
+          "test": "negative_cache_context",
+          "executedTests": 2,
+          "passed": true
+        },
+        {
+          "dimension": "edit",
+          "test": "negative_cache_edit",
+          "executedTests": 2,
+          "passed": true
+        },
+        {
+          "dimension": "lifetime",
+          "test": "negative_cache_lifetime",
+          "executedTests": 2,
+          "passed": true
+        }
+      ],
+      "perFactTransportExact": true,
+      "unownedGraphEscapes": 0
+    }
+  },
+  "exceptions": [
+    {
+      "id": "exception-1",
+      "kind": "deviation",
+      "subject": "synthetic deviation",
+      "disposition": "accepted",
+      "rationale": "Ratified."
+    },
+    {
+      "id": "exception-2",
+      "kind": "mismatch",
+      "subject": "synthetic mismatch",
+      "disposition": "fixed",
+      "rationale": "Repaired by its owner."
+    }
+  ]
+}
