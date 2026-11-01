@@ -96,7 +96,7 @@ or snapshot reads and serialize as decimal-string `"0"` in captured records.
 Without capture, audited entries report `Unavailable` and construct no captured
 payload or placeholder metrics. `family_map_lock_acquisitions`
 is produced only when the default-off `semantic-observe` feature is compiled
-in (see [`docs/arch/semantic-observe.md`](../arch/semantic-observe.md)); a
+in (see [`docs/arch/semantic-observe.md`](https://github.com/pikax/verter/blob/main/docs/arch/semantic-observe.md)); a
 default build reports capture as unavailable. `dep_signature_intern_hits`
 independently measures allocations avoided by the content-hash bucketed
 `Weak`-reference interner; it is not a subset of request-tracer merge events.
