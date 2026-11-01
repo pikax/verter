@@ -1,5 +1,9 @@
 [
   {
+    "glob": ".github/patches/libfaketime-const.patch",
+    "reason": "Read only by the separate perturbation.yml workflow, which triggers on this exact patch; no ci.yml job reads it."
+  },
+  {
     "glob": "docs/**",
     "reason": "Prose. A page a lane reads (the audit footprint, the generated typeinfo counts, the signature-kernel page and evidence, docs/package.json) is owned by that lane's filter."
   },
