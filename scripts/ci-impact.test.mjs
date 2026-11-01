@@ -322,6 +322,10 @@ test("CLI contract validation inputs select the script lane without a full fallb
     assert.equal(impact.everything, false, file);
     assert.equal(gates.js, "true", file);
   }
+  // The contract test also reads the release workflows it inventories.
+  for (const file of [".github/workflows/release.yml", ".github/workflows/release-ide.yml"]) {
+    assert.equal(select([file]).gates.js, "true", file);
+  }
 });
 
 test("an exclusion removes only what the filter's own includes matched", () => {

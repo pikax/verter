@@ -36,9 +36,17 @@
         "packages/verter/package.json",
         "packages/verter/bin",
         "packages/binary-launcher",
-        "packages/verter-lsp"
+        "packages/verter-lsp",
+        "crates/verter_relay_shim"
       ],
       "acceptance": "CLI5-AC1"
+    },
+    {
+      "id": "CLI6",
+      "path": ["CLI0", "CLI1", "CLI2", "CLI5", "CLI6"],
+      "targets": ["packages/verter/bin"],
+      "acceptance": "CLI6-AC1",
+      "status": "ruled-awaiting-controller-node"
     },
     {
       "id": "CLIC0",
@@ -179,27 +187,54 @@
     },
     {
       "id": "tsc-wrapper",
-      "owner": "CLITS0",
-      "kind": "route"
+      "owner": "CLI6",
+      "kind": "route",
+      "converter": "CLI5"
     },
     {
       "id": "lsp-wrapper",
-      "owner": "CLI5",
-      "kind": "route"
+      "owner": "CLI6",
+      "kind": "route",
+      "converter": "CLI5"
     },
     {
       "id": "mcp-wrapper",
-      "owner": "CLI4",
-      "kind": "route"
+      "owner": "CLI6",
+      "kind": "route",
+      "converter": "CLI5"
     },
     {
       "id": "native-mcp-alias",
-      "owner": "CLI4",
-      "kind": "route"
+      "owner": "CLI6",
+      "kind": "route",
+      "converter": "CLI5"
     },
     {
       "kind": "route",
       "id": "native-mcp-shipped",
+      "owner": "CLI6",
+      "converter": "CLI5"
+    },
+    {
+      "kind": "route",
+      "id": "native-tsc-shipped",
+      "owner": "CLI6",
+      "converter": "CLI5"
+    },
+    {
+      "kind": "route",
+      "id": "native-lsp-shipped",
+      "owner": "CLI6",
+      "converter": "CLI5"
+    },
+    {
+      "kind": "route",
+      "id": "native-tsc-checker",
+      "owner": "CLI5"
+    },
+    {
+      "kind": "retained",
+      "id": "native-relay-shim",
       "owner": "CLI5"
     },
     {
@@ -218,7 +253,7 @@
       "kind": "route"
     },
     {
-      "id": "watch-and-wrapper-retirement",
+      "id": "watch-and-wrapper-conversion",
       "owner": "CLI5",
       "kind": "consumer"
     },

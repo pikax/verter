@@ -12,7 +12,7 @@ Publish `@verter/cli` from `packages/verter`, with the single `verter` bin.
 The private workspace root remains named `verter`; it is never published and
 must never be used as an application dependency. Workspace filters and release
 selection use `@verter/cli` explicitly. Existing platform binary packages remain
-implementation dependencies until the packaging owner proves their retirement.
+implementation dependencies until the retirement owner proves their removal.
 
 The sole application owner is `ApplicationServices` in `packages/verter/src/app`.
 It captures one workspace/configuration and service invocation per request.
@@ -108,43 +108,58 @@ Current routes inspected: binary-launcher `runLauncherCli` inherits stdio;
 `verter-lsp` exports `serverBinaryPath`/`serverBinaryCandidates` and its bin delegates
 to that shim; `verter-tsc/bin/run.js` has its own platform resolution and invokes
 `verter-tsc`; `verter-mcp` uses the shared launcher; native
-`verter-mcp-server` calls `verter_mcp::run::run`, as does `verter-mcp`.
+`verter-mcp-server` calls `verter_mcp::run::run`, as does `verter-mcp`; native
+`verter-tsc` runs its own checker; native `verter-lsp` hosts the LSP service.
 Editors and agent hosts may resolve native paths directly and are not forced
 through a Node per-message proxy. Keep those resolution APIs until their
 receiving packaging owner provides parity.
 
 CLI1 rejects command-local semantic engines, non-atomic multi-file writes and
 untagged offset inputs at the application boundary. This does not claim today's
-launchers contain analyzers or transactions. CLITS0 retires the separate tsc
-launcher logic on its compatible adapter cutover; CLI4 owns MCP/native alias
-routing; CLI5 owns LSP and package/bin retirement. These assignments partition
-physical routes; the shared application owner remains singular.
+launchers contain analyzers or transactions. The one shipped command-local
+checker is native `verter-tsc` (`crates/verter_tsc/src/checker.rs` and
+`api_check.rs`): row `native-tsc-checker` binds it to CLI5-AC1, because
+converting that entry to a thin wrapper removes the checker from the route.
+CLITS0 supplies the certified `tsc` adapter and CLI4 the `lsp` and `mcp`
+adapters with protocol parity. These assignments partition physical routes; the
+shared application owner remains singular.
 
-The distributed `verter-mcp` executable (`crates/verter_mcp/src/main.rs`, built
-and uploaded by the release workflow) is distinct from the
-`verter-mcp-server` development entry and the npm wrapper. The
-`native-mcp-shipped` row binds its distribution cutover to CLI5-AC1's native
-platform packaging and wrapper conversion, with `packages/verter/bin` as the
-receiving executable. CLI4 supplies the `mcp` adapter and protocol parity;
-CLI5 converts the public distributed name to that same implementation for the
-compatibility release. The Rust service implementation remains internal service
-code, not an independently distributed application authority after retirement.
-Final wrapper deletion is distinct from this packaging cutover.
+Every release-built native entry has a row. Release workflow builds are
+discovered by the validator, so a new shipped binary without a row fails.
+`verter-tsc`, `verter-lsp` and `verter-mcp` are public distributed executables,
+distinct from their npm wrappers and from the `verter-mcp-server` development
+entry. Lapce and Zed launch native `verter-lsp` directly. The crates behind them
+stay as internal service code, not independently distributed application
+authorities after retirement. `verter-relay-shim`, built beside `verter-lsp`,
+is classified `retained`: a non-public relay the VS Code launch path stages as
+its `tsgo`, carried in CLI5-AC1's platform package matrix, with no command
+surface to displace.
+
+Retirement has two owners, in order. CLI5 converts each row carrying
+`converter: CLI5` to a thin wrapper over the same implementation, with
+`packages/verter/bin` as the receiving executable, and records the first unified
+release version with its telemetry and deprecation receipt. CLI5 deletes no
+wrapper. CLI6 ("CLI compatibility wrapper retirement"), the node after CLI5 that
+the operator ruled for this purpose on 2026-11-01, owns removal or structural
+rejection under CLI6-AC1: for each such row, after the named published-release
+receipt and zero-consumer/generated-reference proof, it records the next
+release's deletion receipt with the wrapper path removed or structurally
+rejected. The owner row's `status: ruled-awaiting-controller-node` records that
+the controller has not created CLI6 yet; CLI0-AC1 requires an existing node, so
+this contract cannot complete until the node exists and that field is removed.
 
 Compatibility lasts exactly one published unified-CLI release: old executable
 names delegate to the corresponding command, preserve compatible args/exits and
 protocol streams, and warn on stderr only when protocol-safe. No semantic dual
-run or indefinite alias. CLI5 records the first unified release version and the
-next release's deletion receipt with each wrapper path removed or structurally
-rejected. CLITS0 and CLI4 supply their route parity/deletion evidence to CLI5;
-the package terminal cannot silently keep a wrapper because its owner is late.
-Native development/test entry points that remain must be explicitly classified
-as non-public service entries, not a second application authority.
+run or indefinite alias. CLITS0 and CLI4 supply their route parity evidence to
+CLI5, and CLI5 supplies its receipt to CLI6; a late owner cannot silently keep a
+wrapper. Native development/test entry points that remain must be explicitly
+classified as non-public service entries, not a second application authority.
 
 ## Verification and rationale
 
-CLI0-AC1 uses the inventory schema and its omission/conflict/unknown/pathless
-negative cases. CLI0-AC2 uses existing binary-launcher CLI tests for argument,
+CLI0-AC1 uses the inventory schema, its omission/conflict/unknown/pathless
+negative cases, and release-workflow discovery of native entries. CLI0-AC2 uses existing binary-launcher CLI tests for argument,
 exit, stdout, stderr, self-spawn and inherited-protocol behavior. Future service
 adapters must prove shared-envelope preservation rather than treating this
 contract as evidence they already do. CLI0-AC3 is not applicable: no incremental,
@@ -191,4 +206,5 @@ reinterpret protocol configuration as file targets.
 | Transactional writes and distinct read/emit command effects | correctness | Partial multi-file writes or an aggregate check unexpectedly emitting | No unified application transaction or aggregate command ships today |
 | Root selection, argv forwarding, self-spawn rejection and protocol-only stdout | security | Untrusted target shell interpretation, recursive spawning or corrupted protocol frames | Existing guards cover launcher spawning; new application adapters must preserve them |
 | One-release wrapper retirement | process | Aliases becoming permanent competing application entry points | Current release wiring validates today's packages, not the future removal release |
+| Release-built native entries discovered from the release workflows | correctness | A shipped binary with no disposition, which this inventory missed for three native entries | The schema population only detects rows removed from it, not an entry never added |
 | Startup/no-work and watch work-count evidence | performance | Duplicate semantic work or retained watch candidates after adapter introduction | No unified shell/watch implementation exists to measure in this docs-only lock |
