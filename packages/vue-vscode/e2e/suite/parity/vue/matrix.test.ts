@@ -7,6 +7,8 @@ import { registerMatrixSuite } from "../../../lib/registerMatrix";
 registerMatrixSuite({
   title: `Vue feature matrix`,
   fixture: "vue-parity",
-  entry: "src/App.vue",
+  // App imports the whole parity corpus. Certify the first case locally;
+  // registerMatrixSuite separately awaits the complete workspace frontier.
+  entry: "src/matrix/Directives.vue",
   cases: VUE_MATRIX_CASES,
 });
