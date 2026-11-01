@@ -128,12 +128,16 @@ pub(crate) fn put_option_field<O: FrameOut>(out: &mut O, tag: u16, value: Option
 }
 
 /// One digest-set field record, canonicalized by the shared set policy.
-pub(crate) fn put_digest_set_field<O: FrameOut>(
-    out: &mut O,
-    tag: u16,
-    elements: &[CanonicalDigest],
-) {
-    let count = distinct_digest_count(elements);
+///
+/// `elements` is a re-iterable digest source: it is traversed once to count
+/// the distinct elements for the record's length and then once per distinct
+/// element to select it, and is never collected anywhere.
+pub(crate) fn put_digest_set_field<O, I>(out: &mut O, tag: u16, elements: I)
+where
+    O: FrameOut,
+    I: Iterator<Item = CanonicalDigest> + Clone,
+{
+    let count = distinct_digest_count(elements.clone());
     put_field_header(out, tag, set_payload_len(count, DIGEST_BYTES));
     put_element_count(out, count);
     visit_sorted_distinct_digests(elements, &mut |element| {
@@ -189,20 +193,25 @@ impl HeaderLayout {
 ///
 /// This is the set canonicalization policy — sorted, then
 /// deduplicated — shared by every encoding path. Fixed-size elements
-/// make it expressible without scratch storage: each round selects the
-/// least element greater than the last visited one, so repeats are
-/// skipped and order is canonical in `O(elements × distinct)` with no
-/// allocation. The measuring pass and the writing pass both count and
-/// emit through this one routine, so they cannot disagree on which
-/// elements a set contributes.
-fn visit_sorted_distinct_digests<F>(elements: &[CanonicalDigest], visit: &mut F)
+/// and a re-iterable source make it expressible without scratch storage:
+/// each round re-traverses the source and selects the least element
+/// greater than the last visited one, so repeats are skipped and order
+/// is canonical in `O(elements × distinct)` with no allocation. The
+/// source may be any `Clone` iterator of digests — a contiguous slice
+/// through `.iter().copied()`, or a slice of retained identities projected
+/// through their digest accessors — so a caller never copies its elements
+/// into a digest slice first. The measuring pass and the writing pass
+/// both count and emit through this one routine, so they cannot disagree
+/// on which elements a set contributes.
+fn visit_sorted_distinct_digests<I, F>(elements: I, visit: &mut F)
 where
+    I: Iterator<Item = CanonicalDigest> + Clone,
     F: FnMut(&CanonicalDigest),
 {
-    let mut last: Option<&CanonicalDigest> = None;
+    let mut last: Option<CanonicalDigest> = None;
     loop {
-        let mut next: Option<&CanonicalDigest> = None;
-        for element in elements {
+        let mut next: Option<CanonicalDigest> = None;
+        for element in elements.clone() {
             if let Some(seen) = last {
                 if element.as_bytes() <= seen.as_bytes() {
                     continue;
@@ -216,7 +225,7 @@ where
         }
         match next {
             Some(element) => {
-                visit(element);
+                visit(&element);
                 last = Some(element);
             }
             None => return,
@@ -228,7 +237,10 @@ where
 ///
 /// Both the measuring pass and the writing pass count a set through this
 /// one routine, so their element counts cannot disagree.
-pub(crate) fn distinct_digest_count(elements: &[CanonicalDigest]) -> usize {
+pub(crate) fn distinct_digest_count<I>(elements: I) -> usize
+where
+    I: Iterator<Item = CanonicalDigest> + Clone,
+{
     let mut count = 0;
     visit_sorted_distinct_digests(elements, &mut |_| count += 1);
     count
@@ -250,11 +262,13 @@ mod tests {
     fn sorted_distinct_visits_are_ascending_and_deduplicated() {
         let empty: [CanonicalDigest; 0] = [];
         let mut visited: Vec<u8> = Vec::new();
-        visit_sorted_distinct_digests(&empty, &mut |element| visited.push(element.as_bytes()[0]));
+        visit_sorted_distinct_digests(empty.iter().copied(), &mut |element| {
+            visited.push(element.as_bytes()[0])
+        });
         assert!(visited.is_empty());
 
         let elements = [digest(5), digest(1), digest(5), digest(9), digest(1)];
-        visit_sorted_distinct_digests(&elements, &mut |element| {
+        visit_sorted_distinct_digests(elements.iter().copied(), &mut |element| {
             visited.push(element.as_bytes()[0])
         });
         let mut expected: Vec<u8> = elements.iter().map(|d| d.as_bytes()[0]).collect();

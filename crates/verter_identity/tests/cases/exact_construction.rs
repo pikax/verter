@@ -12,11 +12,12 @@
 //!    domain separation, field order, set permutations/repeats and
 //!    absent-versus-present options, plus a hand-assembled golden layout.
 //! 2. **Bounded work** — constructing a retained payload from prepared
-//!    borrowed inputs costs exactly one allocating call (`alloc`,
+//!    borrowed inputs, a set of retained keys projected through their
+//!    digests included, costs exactly one allocating call (`alloc`,
 //!    `alloc_zeroed` or `realloc`) and exactly one canonical-byte hash,
-//!    with a barrier-coordinated sibling proving the counters are scoped
-//!    to the measured thread, and a discrimination companion proving the
-//!    counters observe added work.
+//!    with a barrier-fenced sibling construction landing inside the window
+//!    proving the counters are scoped to the measured thread, and a
+//!    discrimination companion proving the counters observe added work.
 //! 3. **Identity semantics** — equality, ordering, clone sharing and
 //!    `digest_identity!` newtype construction through the same payload.
 //!
@@ -58,7 +59,7 @@ impl ExactCanonicalEncode for StageLike<'_> {
         sink.field_digest(2, self.predecessor);
         sink.field_option(3, self.options);
         sink.field_raw(4, self.raw);
-        sink.field_digest_set(5, self.digests);
+        sink.field_digest_set(5, self.digests.iter().copied());
     }
 }
 
@@ -83,6 +84,46 @@ fn populated_stage<'a>(digests: &'a [CanonicalDigest]) -> StageLike<'a> {
         raw: &[1, 2, 3, 4],
         digests,
     }
+}
+
+// A keyed-set source: a `digest_identity!` newtype whose retained digest a
+// composition projects into a set field without copying it anywhere first.
+digest_identity!(SourceProbeKey);
+
+/// A neutral composition shaped like a semantic-stage identity: a set of
+/// predecessor keys projected through their retained digests (field 1), a
+/// profile digest, optional option bytes, a `u32` epoch, and a contiguous
+/// digest set such as an admission basis (field 5) — every input borrowed,
+/// nothing re-collected before or during construction.
+struct StageComposition<'a> {
+    source_units: &'a [SourceProbeKey],
+    profile: &'a CanonicalDigest,
+    options: Option<&'a [u8]>,
+    semantic_epoch: u32,
+    admitted: &'a [CanonicalDigest],
+}
+
+impl ExactCanonicalEncode for StageComposition<'_> {
+    const DOMAIN_TAG: &'static str = "exact-test.stage-composition.v1";
+
+    fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
+        sink.field_digest_set(1, self.source_units.iter().map(SourceProbeKey::digest));
+        sink.field_digest(2, self.profile);
+        sink.field_option(3, self.options);
+        sink.field_u32(4, self.semantic_epoch);
+        sink.field_digest_set(5, self.admitted.iter().copied());
+    }
+}
+
+/// Prepared source-unit keys — two distinct identities and a repeat of the
+/// first — built before any measured window, so a composition over them
+/// reads retained digests rather than hashing anything.
+fn source_unit_keys() -> [SourceProbeKey; 3] {
+    let first_digests = [seeded_digest(41)];
+    let second_digests = [seeded_digest(40)];
+    let first = SourceProbeKey::from_exact(&populated_stage(&first_digests));
+    let second = SourceProbeKey::from_exact(&populated_stage(&second_digests));
+    [first.clone(), second, first]
 }
 
 mod wire_parity {
@@ -214,7 +255,7 @@ mod wire_parity {
                 sink.field_u32(1, inner.epoch);
                 sink.field_digest(2, inner.predecessor);
                 sink.field_option(3, inner.options);
-                sink.field_digest_set(5, inner.digests);
+                sink.field_digest_set(5, inner.digests.iter().copied());
             }
         }
 
@@ -277,7 +318,7 @@ mod wire_parity {
         let mut streaming = CanonicalEncoder::new("set-layout-test");
         streaming.field_sorted_set(1, digests.iter().map(|digest| digest.as_bytes()));
         let mut exact = CanonicalEncoder::new("set-layout-test");
-        exact.field_digest_set(1, &digests);
+        exact.field_digest_set(1, digests.iter().copied());
 
         assert_eq!(streaming.finish(), exact.finish());
     }
@@ -454,52 +495,45 @@ mod newtype_integration {
 }
 
 /// A neutral consumer composing a stage-shaped identity end to end from
-/// borrowed inputs only: predecessors arrive as digests, option bytes as
-/// borrowed slices, and the admission set as a borrowed digest slice. No
-/// compiler vocabulary is needed to use the construction path.
+/// borrowed inputs only: predecessor keys as a borrowed slice of identity
+/// newtypes projected through their digests, a profile digest, option bytes
+/// as a borrowed slice, and the admission set as a borrowed digest slice. No
+/// compiler vocabulary is needed to use the construction path, and no input
+/// is re-collected into encoding scratch on the way in.
 mod neutral_consumer {
     use super::*;
 
-    struct DemandBasis<'a> {
-        semantic_epoch: u32,
-        profile: &'a CanonicalDigest,
-        options: Option<&'a [u8]>,
-        admitted: &'a [CanonicalDigest],
-    }
-
-    impl ExactCanonicalEncode for DemandBasis<'_> {
-        const DOMAIN_TAG: &'static str = "consumer-test.demand-basis.v1";
-
-        fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
-            sink.field_u32(1, self.semantic_epoch);
-            sink.field_digest(2, self.profile);
-            sink.field_option(3, self.options);
-            sink.field_digest_set(4, self.admitted);
-        }
-    }
-
     #[test]
     fn composes_a_retained_identity_from_borrowed_fields() {
+        let keys = source_unit_keys();
         let profile = seeded_digest(11);
         let admitted = [seeded_digest(21), seeded_digest(20), seeded_digest(21)];
-        let basis = DemandBasis {
-            semantic_epoch: 4,
+        let composition = StageComposition {
+            source_units: &keys,
             profile: &profile,
             options: Some(b"strict"),
+            semantic_epoch: 4,
             admitted: &admitted,
         };
 
-        let payload = Canonical::from_exact(&basis);
-        assert_eq!(payload.bytes(), Canonical::from_encodable(&basis).bytes());
+        let payload = Canonical::from_exact(&composition);
         assert_eq!(
-            payload.bytes().len(),
-            4 + "consumer-test.demand-basis.v1".len()
-                + 4
-                + 14
-                + 42
-                + (10 + 1 + 6)
-                + (10 + 8 + 2 * 40)
+            payload.bytes(),
+            Canonical::from_encodable(&composition).bytes()
         );
+
+        // The projected key set encodes exactly as the general set grammar
+        // over the keys' digests — two distinct keys from three, sorted —
+        // and the contiguous digest set likewise, so a consumer may supply
+        // either shape and mint one identity.
+        let mut expected = CanonicalEncoder::new("exact-test.stage-composition.v1");
+        expected
+            .field_sorted_set(1, keys.iter().map(|key| *key.digest().as_bytes()))
+            .field_bytes(2, profile.as_bytes())
+            .field_option(3, Some(b"strict"))
+            .field_u32(4, 4)
+            .field_sorted_set(5, admitted.iter().map(|digest| *digest.as_bytes()));
+        assert_eq!(payload.bytes(), &expected.finish()[..]);
     }
 }
 
@@ -510,31 +544,21 @@ mod construction_oracle {
     //!
     //! The counting allocator is thread-local, so the window is the
     //! measured thread's work only; the hash counter is equally
-    //! thread-scoped. A barrier-coordinated sibling hammers the same
-    //! construction on another thread during the window to prove sibling
-    //! activity cannot enter the counts, and a discrimination companion
-    //! adds one deliberate scratch allocation and one deliberate extra
-    //! hash through the same window shape to prove a zero (or one) the
-    //! oracle reports is a measured number, not a dead counter.
+    //! thread-scoped. A barrier-fenced sibling performs the same
+    //! construction on another thread strictly inside the window to prove
+    //! sibling activity cannot enter the counts, and a discrimination
+    //! companion adds one deliberate scratch allocation and one deliberate
+    //! extra hash through the same window shape to prove a zero (or one)
+    //! the oracle reports is a measured number, not a dead counter.
 
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
     use std::hint::black_box;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
 
     use verter_identity::encoding::{canonical_hash_calls, reset_canonical_hash_calls};
 
     use super::*;
-
-    /// Stops the sibling when dropped, so it cannot outlive a failing window.
-    struct StopOnDrop(Arc<AtomicBool>);
-
-    impl Drop for StopOnDrop {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
 
     thread_local! {
         /// Allocating calls (`alloc`/`alloc_zeroed`/`realloc`) on this
@@ -640,6 +664,38 @@ mod construction_oracle {
         assert_eq!(payload.bytes(), Canonical::from_encodable(&stage).bytes());
     }
 
+    /// The consumer's keyed-set shape: predecessor keys projected through
+    /// their retained digests, nothing re-collected. The keys are prepared
+    /// before the window, so their digests are reads, not hashes, and the
+    /// composition over them stays within the bound.
+    #[test]
+    fn keyed_set_projection_constructs_in_one_allocation_and_one_hash() {
+        let keys = source_unit_keys();
+        let profile = seeded_digest(11);
+        let admitted = [seeded_digest(21), seeded_digest(20)];
+        let composition = StageComposition {
+            source_units: &keys,
+            profile: &profile,
+            options: Some(b"strict"),
+            semantic_epoch: 4,
+            admitted: &admitted,
+        };
+
+        let (payload, allocs, hashes) = measured(|| Canonical::from_exact(&composition));
+        assert_eq!(
+            allocs, 1,
+            "a composition over projected keys made {allocs} allocating calls"
+        );
+        assert_eq!(
+            hashes, 1,
+            "a composition over projected keys made {hashes} canonical-byte hashes"
+        );
+        assert_eq!(
+            payload.bytes(),
+            Canonical::from_encodable(&composition).bytes()
+        );
+    }
+
     #[test]
     fn cloning_the_constructed_payload_allocates_nothing() {
         let digests = [seeded_digest(3), seeded_digest(2)];
@@ -652,39 +708,61 @@ mod construction_oracle {
         assert!(Arc::ptr_eq(payload.shared_bytes(), clone.shared_bytes()));
     }
 
-    /// A sibling thread constructing identities throughout the measured
-    /// window must not move either counter: the oracle is scoped to the
-    /// measured thread's execution, coordinated by barriers rather than
-    /// sleeps.
+    /// A sibling thread's construction landing inside the measured window
+    /// must not move either counter: the oracle is scoped to the measured
+    /// thread's execution. The window is fenced by barriers rather than
+    /// sleeps — the sibling constructs strictly between the window opening
+    /// and the window closing — so the interval between the counter reset
+    /// and the counter reads contains one sibling allocation and one
+    /// sibling hash on every run, and a process-global counter fails here
+    /// deterministically rather than when scheduling happens to overlap.
+    /// Every assertion runs after both threads have left the window and
+    /// the sibling has been joined, so a failing assertion leaves no
+    /// sibling running.
     #[test]
-    fn sibling_construction_stays_outside_the_measured_window() {
-        let start = Arc::new(Barrier::new(2));
-        let finished = Arc::new(AtomicBool::new(false));
-        let sibling_start = Arc::clone(&start);
-        let sibling_finished = Arc::clone(&finished);
+    fn sibling_construction_inside_the_window_stays_out_of_the_counters() {
+        // One barrier, three rendezvous. The first, before the window, lets
+        // any lazy initialisation of the barrier's primitives happen outside
+        // the measurement; the next two fence the window.
+        let fence = Arc::new(Barrier::new(2));
+        let sibling_fence = Arc::clone(&fence);
         let sibling = std::thread::spawn(move || {
             let sibling_digests = [seeded_digest(30), seeded_digest(29)];
             let sibling_stage = populated_stage(&sibling_digests);
-            sibling_start.wait();
-            while !sibling_finished.load(Ordering::Relaxed) {
-                black_box(Canonical::from_exact(&sibling_stage));
-            }
+            sibling_fence.wait();
+            sibling_fence.wait();
+            let built = black_box(Canonical::from_exact(&sibling_stage));
+            sibling_fence.wait();
+            built
         });
 
         let digests = [seeded_digest(12), seeded_digest(11)];
         let stage = populated_stage(&digests);
-        start.wait();
-        let stop = StopOnDrop(finished);
-        let (payload, allocs, hashes) = measured(|| Canonical::from_exact(&stage));
-        drop(stop);
-        sibling.join().expect("sibling thread");
+        fence.wait();
+        let (payload, allocs, hashes) = measured(|| {
+            // Window open: the sibling constructs from here on.
+            fence.wait();
+            let payload = Canonical::from_exact(&stage);
+            // The sibling's construction has completed before this returns.
+            fence.wait();
+            payload
+        });
+        let sibling_payload = sibling.join().expect("sibling thread");
 
         assert_eq!(
             allocs, 1,
-            "window counted {allocs} allocating calls with a sibling constructing concurrently"
+            "window counted {allocs} allocating calls with a sibling construction inside it"
         );
-        assert_eq!(hashes, 1, "window counted {hashes} canonical-byte hashes with a sibling constructing concurrently");
+        assert_eq!(
+            hashes, 1,
+            "window counted {hashes} canonical-byte hashes with a sibling construction inside it"
+        );
         assert_eq!(payload.bytes(), Canonical::from_encodable(&stage).bytes());
+        assert_ne!(
+            sibling_payload.bytes(),
+            payload.bytes(),
+            "the sibling built its own identity inside the window"
+        );
     }
 
     /// Discrimination companion: through the same window shape, one

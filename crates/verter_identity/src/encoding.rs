@@ -59,24 +59,32 @@ impl CanonicalEncoder {
         self
     }
 
-    /// A fixed-width `u64` field, little-endian.
+    /// A fixed-width `u64` field, little-endian — the
+    /// [`CanonicalFieldSink`] scalar encoding, chainable.
     pub fn field_u64(&mut self, tag: u16, value: u64) -> &mut Self {
-        self.field_bytes(tag, &value.to_le_bytes())
+        <Self as CanonicalFieldSink>::field_u64(self, tag, value);
+        self
     }
 
-    /// A fixed-width `u32` field, little-endian.
+    /// A fixed-width `u32` field, little-endian — the
+    /// [`CanonicalFieldSink`] scalar encoding, chainable.
     pub fn field_u32(&mut self, tag: u16, value: u32) -> &mut Self {
-        self.field_bytes(tag, &value.to_le_bytes())
+        <Self as CanonicalFieldSink>::field_u32(self, tag, value);
+        self
     }
 
-    /// Boolean as `0`/`1`, never the text `"true"`/`"false"`.
+    /// Boolean as `0`/`1`, never the text `"true"`/`"false"` — the
+    /// [`CanonicalFieldSink`] scalar encoding, chainable.
     pub fn field_bool(&mut self, tag: u16, value: bool) -> &mut Self {
-        self.field_bytes(tag, &[u8::from(value)])
+        <Self as CanonicalFieldSink>::field_bool(self, tag, value);
+        self
     }
 
-    /// UTF-8 string, exact bytes, no Unicode normalization.
+    /// UTF-8 string, exact bytes, no Unicode normalization — the
+    /// [`CanonicalFieldSink`] scalar encoding, chainable.
     pub fn field_str(&mut self, tag: u16, value: &str) -> &mut Self {
-        self.field_bytes(tag, value.as_bytes())
+        <Self as CanonicalFieldSink>::field_str(self, tag, value);
+        self
     }
 
     /// Optional field: one-byte presence (`0`/`1`) plus payload when
@@ -195,7 +203,8 @@ impl CanonicalEncoder {
 /// The streaming encoder is one of the field sinks over a descriptor's
 /// single field description: the [`CanonicalEncode`] implementation every
 /// [`ExactCanonicalEncode`](crate::exact::ExactCanonicalEncode) descriptor
-/// receives drives its `exact_fields` through these methods.
+/// receives drives its `exact_fields` through these methods, and the
+/// encoder's own inherent scalar methods are these scalar encodings.
 impl CanonicalFieldSink for CanonicalEncoder {
     fn field_raw(&mut self, tag: u16, bytes: &[u8]) {
         Self::field_bytes(self, tag, bytes);
@@ -205,8 +214,12 @@ impl CanonicalFieldSink for CanonicalEncoder {
         Self::field_option(self, tag, value);
     }
 
-    fn field_digest_set(&mut self, tag: u16, elements: &[CanonicalDigest]) {
-        framing::put_digest_set_field(&mut self.body, tag, elements);
+    fn field_digest_set<I>(&mut self, tag: u16, elements: I)
+    where
+        I: IntoIterator<Item = CanonicalDigest>,
+        I::IntoIter: Clone,
+    {
+        framing::put_digest_set_field(&mut self.body, tag, elements.into_iter());
         self.field_count += 1;
     }
 }

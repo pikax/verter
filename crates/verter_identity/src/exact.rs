@@ -27,15 +27,22 @@
 //!   4. one hash over the finished bytes
 //! ```
 //!
-//! Digest sets cost `O(elements × distinct)` comparisons per pass: they
-//! canonicalize without scratch storage, so only prepared, bounded sets belong
-//! on this path. Descriptors outside this contract keep the general streaming
-//! API, whose `field_sorted_set` sorts through temporary storage.
+//! A digest set is supplied as a re-iterable source of digests — any `Clone`
+//! iterator, so a contiguous `&[CanonicalDigest]` through `.iter().copied()`
+//! or a borrowed slice of retained identity newtypes projected through their
+//! `digest()` accessors — and is never collected into a digest slice first:
+//! that copy would be the hidden encoding scratch this path exists to
+//! remove. Digest sets cost `O(elements × distinct)` comparisons per pass
+//! because they canonicalize without scratch storage, so only prepared,
+//! bounded sets belong on this path. Descriptors outside this contract keep
+//! the general streaming API, whose `field_sorted_set` sorts through
+//! temporary storage.
 //!
 //! # Example
 //!
 //! A stage-shaped descriptor with the field kinds composition identities
-//! use — a `u32` compatibility epoch, digest and raw-byte fields,
+//! use — a set of retained predecessor keys projected through their
+//! digests, a `u32` compatibility epoch, digest and raw-byte fields,
 //! optional option bytes, and an unordered, possibly repeated digest
 //! set — all borrowed:
 //!
@@ -45,7 +52,11 @@
 //! use verter_identity::encoding::{CanonicalDigest, CanonicalEncode};
 //! use verter_identity::exact::{CanonicalFieldSink, ExactCanonicalEncode};
 //!
+//! digest_identity!(SourceKey);
+//! digest_identity!(StageKey);
+//!
 //! struct StageDescriptor<'a> {
+//!     sources: &'a [SourceKey],
 //!     epoch: u32,
 //!     predecessor: &'a CanonicalDigest,
 //!     options: Option<&'a [u8]>,
@@ -57,19 +68,36 @@
 //!     const DOMAIN_TAG: &'static str = "example.stage.v1";
 //!
 //!     fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
-//!         sink.field_u32(1, self.epoch);
-//!         sink.field_digest(2, self.predecessor);
-//!         sink.field_option(3, self.options);
-//!         sink.field_raw(4, self.payload);
-//!         sink.field_digest_set(5, self.demand);
+//!         // Retained keys projected through their digests: nothing is
+//!         // collected into a digest slice first.
+//!         sink.field_digest_set(1, self.sources.iter().map(SourceKey::digest));
+//!         sink.field_u32(2, self.epoch);
+//!         sink.field_digest(3, self.predecessor);
+//!         sink.field_option(4, self.options);
+//!         sink.field_raw(5, self.payload);
+//!         sink.field_digest_set(6, self.demand.iter().copied());
 //!     }
 //! }
 //!
-//! digest_identity!(StageKey);
+//! struct Source(&'static str);
 //!
+//! impl ExactCanonicalEncode for Source {
+//!     const DOMAIN_TAG: &'static str = "example.source.v1";
+//!
+//!     fn exact_fields<S: CanonicalFieldSink>(&self, sink: &mut S) {
+//!         sink.field_str(1, self.0);
+//!     }
+//! }
+//!
+//! let sources = [
+//!     SourceKey::from_exact(&Source("b")),
+//!     SourceKey::from_exact(&Source("a")),
+//!     SourceKey::from_exact(&Source("b")),
+//! ];
 //! let digest = CanonicalDigest::of_bytes(b"predecessor");
 //! let demand = [CanonicalDigest::of_bytes(b"b"), CanonicalDigest::of_bytes(b"a")];
 //! let descriptor = StageDescriptor {
+//!     sources: &sources,
 //!     epoch: 3,
 //!     predecessor: &digest,
 //!     options: Some(b"strict"),
@@ -95,12 +123,16 @@
 //!
 //! The bound is deterministic work evidence, and a consumer can prove it over
 //! its own real construction without a second encoder. Enable this crate's
-//! `test-support` feature, run the construction between
+//! `test-support` feature for the consumer's test targets only — a
+//! `[dev-dependencies]` entry on this crate with `features = ["test-support"]`,
+//! the way this crate's own tests enable it, so production builds carry none
+//! of the instrumentation — then run the construction between
 //! `encoding::reset_canonical_hash_calls` and `encoding::canonical_hash_calls`,
 //! and count `alloc`, `alloc_zeroed` and `realloc` over the same window with a
 //! thread-local counting `#[global_allocator]` in the test binary. Both counters
 //! are scoped to the measuring thread, so sibling tests cannot enter them. This
-//! crate's `tests/cases/exact_construction.rs` is the reference oracle.
+//! crate's `tests/cases/exact_construction.rs` is the reference oracle,
+//! including the barrier-fenced sibling that proves the scoping.
 
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use crate::framing;
@@ -109,8 +141,10 @@ use crate::framing;
 ///
 /// Descriptors describe schema fields only; framing (tags, lengths, header,
 /// set canonicalization) belongs to the sinks. The required methods are the
-/// three payload shapes; the defaulted ones route through [`Self::field_raw`]
-/// so they share the same framing.
+/// three framed payload shapes. The defaulted scalar methods route through
+/// [`Self::field_raw`] and are the one place scalar payload bytes are
+/// defined: the streaming [`CanonicalEncoder`]'s inherent scalar methods
+/// delegate to them, so no second scalar encoding exists.
 pub trait CanonicalFieldSink {
     /// A raw byte field, exact bytes, no transformation.
     fn field_raw(&mut self, tag: u16, bytes: &[u8]);
@@ -121,7 +155,16 @@ pub trait CanonicalFieldSink {
 
     /// Digest set: unordered, possibly repeated, fixed-size elements;
     /// encoded sorted and deduplicated by the shared set policy.
-    fn field_digest_set(&mut self, tag: u16, elements: &[CanonicalDigest]);
+    ///
+    /// `elements` is any re-iterable digest source — a contiguous slice
+    /// through `.iter().copied()`, or a borrowed slice of retained identity
+    /// newtypes projected through their `digest()` accessors. It is
+    /// re-traversed by the set policy and never collected, so no caller
+    /// prepares a digest slice to use it.
+    fn field_digest_set<I>(&mut self, tag: u16, elements: I)
+    where
+        I: IntoIterator<Item = CanonicalDigest>,
+        I::IntoIter: Clone;
 
     /// A fixed-width `u32` field, little-endian (compatibility epochs).
     fn field_u32(&mut self, tag: u16, value: u32) {
@@ -214,8 +257,12 @@ impl CanonicalFieldSink for SizingSink {
         self.record_payload(framing::option_payload_len(value));
     }
 
-    fn field_digest_set(&mut self, _tag: u16, elements: &[CanonicalDigest]) {
-        let count = framing::distinct_digest_count(elements);
+    fn field_digest_set<I>(&mut self, _tag: u16, elements: I)
+    where
+        I: IntoIterator<Item = CanonicalDigest>,
+        I::IntoIter: Clone,
+    {
+        let count = framing::distinct_digest_count(elements.into_iter());
         self.record_payload(framing::set_payload_len(count, framing::DIGEST_BYTES));
     }
 }
@@ -261,8 +308,12 @@ impl CanonicalFieldSink for WriterSink<'_> {
         self.field_count += 1;
     }
 
-    fn field_digest_set(&mut self, tag: u16, elements: &[CanonicalDigest]) {
-        framing::put_digest_set_field(&mut self.out, tag, elements);
+    fn field_digest_set<I>(&mut self, tag: u16, elements: I)
+    where
+        I: IntoIterator<Item = CanonicalDigest>,
+        I::IntoIter: Clone,
+    {
+        framing::put_digest_set_field(&mut self.out, tag, elements.into_iter());
         self.field_count += 1;
     }
 }
@@ -288,7 +339,7 @@ mod tests {
         sizer.field_option(3, None);
         sizer.field_option(4, Some(b"ab"));
         sizer.field_raw(5, b"raw");
-        sizer.field_digest_set(6, &digests);
+        sizer.field_digest_set(6, digests.iter().copied());
         sizer.field_u64(7, 300);
         sizer.field_bool(8, true);
         sizer.field_str(9, "s");
@@ -300,12 +351,56 @@ mod tests {
         writer.field_option(3, None);
         writer.field_option(4, Some(b"ab"));
         writer.field_raw(5, b"raw");
-        writer.field_digest_set(6, &digests);
+        writer.field_digest_set(6, digests.iter().copied());
         writer.field_u64(7, 300);
         writer.field_bool(8, true);
         writer.field_str(9, "s");
 
         assert_eq!(writer.written(), sizer.body_len());
         assert_eq!(writer.field_count(), sizer.field_count());
+    }
+
+    /// Scalar payload bytes are defined once, by the sink's scalar methods,
+    /// and are public wire contract: fixed-width little-endian integers, a
+    /// one-byte `0`/`1` boolean, and exact UTF-8 for strings. The streaming
+    /// encoder's inherent scalar methods delegate here, so this pins both
+    /// paths.
+    #[test]
+    fn scalar_payloads_are_little_endian_fixed_width_or_exact_utf8() {
+        let describe = |sink: &mut dyn FnMut(u16, &[u8])| {
+            // Each scalar as the record it must frame to.
+            sink(1, &0x0403_0201u32.to_le_bytes());
+            sink(2, &0x0807_0605_0403_0201u64.to_le_bytes());
+            sink(3, &[1]);
+            sink(4, &[0]);
+            sink(5, "é".as_bytes());
+        };
+        let mut expected = Vec::new();
+        describe(&mut |tag, payload| {
+            expected.extend_from_slice(&tag.to_le_bytes());
+            expected.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            expected.extend_from_slice(payload);
+        });
+
+        let mut sizer = SizingSink::new();
+        sizer.field_u32(1, 0x0403_0201);
+        sizer.field_u64(2, 0x0807_0605_0403_0201);
+        sizer.field_bool(3, true);
+        sizer.field_bool(4, false);
+        sizer.field_str(5, "é");
+        let mut buffer = vec![0u8; sizer.body_len()];
+        {
+            let mut writer = WriterSink::new(framing::SliceOut::new(&mut buffer));
+            writer.field_u32(1, 0x0403_0201);
+            writer.field_u64(2, 0x0807_0605_0403_0201);
+            writer.field_bool(3, true);
+            writer.field_bool(4, false);
+            writer.field_str(5, "é");
+            assert_eq!(writer.written(), expected.len());
+        }
+        assert_eq!(
+            buffer, expected,
+            "payload bytes: [1,2,3,4], [1..=8], [1], [0], UTF-8"
+        );
     }
 }
