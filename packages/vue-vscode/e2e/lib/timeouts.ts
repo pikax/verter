@@ -382,9 +382,11 @@ export const POLL_SEQUENCES = {
     members: ["restartEntryDiagnostics", "restartTypeProviderSync"],
     parentTimeoutMs: 90_000,
     reason:
-      "a suite that asserts workspace-wide state restarts the language server, waits for the NEW " +
-      "server to certify its entry document, then for its level-2 announcement — in series " +
-      "under the hook's declared 90s deadline",
+      "a suite that asserts workspace-wide state restarts the language server, then waits for " +
+      "the NEW server's level-2 announcement and workspace inventory before certifying its " +
+      "entry document — the inventory settle comes first so the store-fill scan a restart " +
+      "re-arms cannot park the entry's first publication behind it — in series under the " +
+      "hook's declared 90s deadline",
   },
   restartedWorkspaceReferences: {
     members: ["restartTypeProviderSync"],
