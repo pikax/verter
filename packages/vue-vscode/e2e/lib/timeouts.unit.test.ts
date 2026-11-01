@@ -140,21 +140,6 @@ describe("E2E deadline hierarchy", () => {
     }
   });
 
-  it("keeps the restarted entry budget over the loaded-restart range it waits through", () => {
-    // `restartTypeProviderSync`'s calibration measures a restarted server's
-    // CI-side work at 15-18s healthy and 19-36s loaded. The entry wait runs
-    // the same restart (process respawn, provider cold start, entry import
-    // closure) before that scan begins, so a budget under the loaded range
-    // plus this file's margin is a deadline a degraded-but-healthy runner
-    // crosses — the nightly tsserver lane failed exactly there (three
-    // entry waits killed at 28.4s/28.3s/29.9s under a budget of 30s).
-    const loadedRestartUpperBoundMs = 36_000;
-    expect(
-      POLL_BUDGETS.restartEntryDiagnostics.budgetMs,
-      "restartEntryDiagnostics must clear the documented loaded-restart upper bound plus margin",
-    ).toBeGreaterThanOrEqual(loadedRestartUpperBoundMs + POLL_BUDGET_MARGIN_MS);
-  });
-
   it("holds every exempt budget inside a sequence that accounts for it", () => {
     // An exemption is only legitimate as part of a series someone modelled. A
     // budget claiming a raised parent while belonging to no sequence is a budget

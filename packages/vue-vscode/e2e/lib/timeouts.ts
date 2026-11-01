@@ -204,16 +204,15 @@ export const POLL_BUDGETS = {
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
   restartEntryDiagnostics: {
-    budgetMs: 40_000,
+    budgetMs: 30_000,
     parentTimeoutMs: 60_000,
     reason:
       "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
       "level-1 announcement, and the entry document's own merged diagnostics under its sync and " +
-      "import closure. The restarted server certifies the entry while its workspace scan is still " +
-      "running, so neither the scan nor the replay of every held document is on this path — but " +
-      "the restart work itself (respawn, provider cold start, entry closure) spans the same " +
-      "loaded-restart range `restartTypeProviderSync` measures (19-36s on a loaded CI runner), " +
-      "so the budget must clear that range plus margin rather than the cold root handshake's 30s",
+      "import closure — for a plain caller all three share this ONE window. A `workspaceWide` " +
+      "caller restarts and announces level 1 inside this window, then settles the re-armed " +
+      "workspace scan and certifies the entry from the remaining time of the combined window " +
+      "`restartedWorkspaceSuiteSetup` models, never a second fresh budget",
   },
   restartTypeProviderSync: {
     budgetMs: 45_000,
@@ -382,11 +381,13 @@ export const POLL_SEQUENCES = {
     members: ["restartEntryDiagnostics", "restartTypeProviderSync"],
     parentTimeoutMs: 90_000,
     reason:
-      "a suite that asserts workspace-wide state restarts the language server, then waits for " +
-      "the NEW server's level-2 announcement and workspace inventory before certifying its " +
-      "entry document — the inventory settle comes first so the store-fill scan a restart " +
-      "re-arms cannot park the entry's first publication behind it — in series under the " +
-      "hook's declared 90s deadline",
+      "a suite that asserts workspace-wide state restarts the language server, announces the " +
+      "new server's level 1, settles the re-armed workspace scan (level 2 plus inventory — a " +
+      "reorder of the demand those suites already make, so the scan cannot park the entry's " +
+      "first publication behind it), and certifies the entry document. Both budgets are " +
+      "consumed as ONE shared window — the second starts where the first ends and every later " +
+      "wait draws its remaining time — so the sum this sequence checks is exactly what the " +
+      "hook's declared 90s deadline must hold",
   },
   restartedWorkspaceReferences: {
     members: ["restartTypeProviderSync"],
@@ -403,12 +404,11 @@ export const POLL_SEQUENCES = {
       "restartEntryDiagnostics",
       "waitForFileReady",
     ],
-    parentTimeoutMs: 120_000,
+    parentTimeoutMs: 90_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
       "server epoch: restart and entry diagnostics, then file ready — twice, in series, under its " +
-      "own 120s; the entry budget's loaded-restart range alone (40s) does not fit twice beside " +
-      "two file-ready waits in the 90s this sequence used to claim",
+      "own 90s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],

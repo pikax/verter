@@ -169,28 +169,39 @@ export async function restartParityReady(
     // demands the inventory anyway, so demanding it here only reorders work it
     // already owed; once the scan settles, the entry's dependency receipts mint
     // and its certification completes immediately.
-    await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
-    await awaitWorkspaceInventory();
+    //
+    // Every wait from here on draws from ONE shared window — the entry budget's
+    // deadline plus the sync budget — so the sequence consumed is exactly the
+    // sum `restartedWorkspaceSuiteSetup` models (30s + 45s under its 90s hook),
+    // never a fresh budget per wait: level 2, the inventory settle and the
+    // entry certification all bound the same remaining time, and a slow phase
+    // leaves less for the next instead of opening a new deadline.
+    const settleDeadline = deadline + pollBudget("restartTypeProviderSync");
+    const settleRemaining = () => Math.max(settleDeadline - Date.now(), 1_000);
+    await ensureTypeProviderSynced({ syncBudgetMs: settleRemaining() });
+    await awaitWorkspaceInventory(settleRemaining());
+    await waitForDiagnosticsSettled(doc.uri, { timeoutMs: settleRemaining() });
+    return doc;
   }
-  // A fresh budget, not `remaining()`: the inventory settle above legitimately
-  // spends most of the restart window's wall time, and the entry certification
-  // itself — provider cold start, entry import closure, merged diagnostics —
-  // still needs the full `restartEntryDiagnostics` range after it.
-  await waitForDiagnosticsSettled(doc.uri, { timeoutMs: pollBudget("restartEntryDiagnostics") });
+  await waitForDiagnosticsSettled(doc.uri, { timeoutMs: remaining() });
   return doc;
 }
 
 /**
  * Demand the complete workspace inventory and wait until the server stops
  * answering it as pending. Level 2 of the readiness ladder does not imply it:
- * the scan starts on this demand.
+ * the scan starts on this demand. A caller inside a shared settle window
+ * passes that window's remaining time so this wait bounds the sequence it
+ * belongs to instead of opening a fresh budget.
  */
-export async function awaitWorkspaceInventory(): Promise<void> {
+export async function awaitWorkspaceInventory(
+  timeoutMs: number = pollBudget("restartTypeProviderSync"),
+): Promise<void> {
   await pollUntilWithin(
     "workspace inventory built",
     async () => vscode.commands.executeCommand<boolean>("verter._workspaceInventoryReady"),
     (ready) => ready === true,
-    pollBudget("restartTypeProviderSync"),
+    timeoutMs,
   );
 }
 
