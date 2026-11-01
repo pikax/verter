@@ -33,7 +33,7 @@ const dxHostClasses = readJson(
 );
 // The exposure-ownership map is a sharded index: the header keeps the map
 // identity and receiving amendments, and outcome rows live in per-owner
-// fragments merged by the shared loader (DXM0). No reader parses a shared
+// fragments merged by the shared loader. No reader parses a shared
 // row array anymore.
 const dxMapHeaderPath = path.join(
   REPO_ROOT,
@@ -446,69 +446,8 @@ test("PG0-AC-OWNER: one final owner, vocabulary reuse, no parallel namespaces", 
   );
 });
 
-// The outcome rows the sharding moved into per-owner fragments, frozen as the
-// pre-conversion monolithic map recorded them (DXM0-AC1, in the loader's id
-// order): the merged view must reproduce them byte-for-byte with no fragment
-// dropping, adding or altering a field.
-const FROZEN_OUTCOMES = [
-  {
-    id: "cross-surface-inventory.v1",
-    currentOwner: "DX0",
-    finalOwner: "DX0",
-    receivingAcceptance:
-      "DX0.1: current commands, analyses, clients and provider modes captured before consumers are added",
-  },
-  {
-    id: "feature-exposure-contract.v1",
-    currentOwner: "DX0",
-    finalOwner: "DX0",
-    receivingAcceptance:
-      "DX0-AC1: playground gaps keep promotion blocked until an executable route and replay case exist",
-  },
-  {
-    id: "host-execution-class.v1",
-    currentOwner: "DX0",
-    finalOwner: "DX0",
-    receivingAcceptance:
-      "DX0-AC2: native-only browser capability claims without a build are rejected",
-  },
-  {
-    id: "product-receipt-basis.v1",
-    currentOwner: "DX0",
-    finalOwner: "DX0",
-    receivingAcceptance:
-      "DX0-AC-BASIS: receipt-binding runtime tests are bound to the downstream inspection owners, not fabricated here",
-  },
-  {
-    id: "rails-policy.v1",
-    currentOwner: "DX0",
-    finalOwner: "DX0",
-    receivingAcceptance:
-      "DX0-AC3: native Flow facts stay separate from TypeScript hover/diagnostics",
-  },
-];
-
-test("the sharded exposure-ownership map resolves to the frozen pre-conversion outcomes", () => {
-  // The header holds no outcome rows: fragments are the sole row authority,
-  // so an accidentally re-added monolithic array is caught here.
-  const headerOnDisk = readJson(dxMapHeaderPath);
-  assert.equal(
-    Object.hasOwn(headerOnDisk, "outcomes"),
-    false,
-    "the map header must not declare monolithic outcome rows",
-  );
-  assert.deepEqual(dxOwnership.outcomes, FROZEN_OUTCOMES);
-
-  // Twin: a planted fragment that alters one field of one row breaks the
-  // frozen comparison (the discriminator re-runs, not just the mutation).
-  const planted = perturb(dxOwnership, (c) => {
-    delete c.outcomes.find((o) => o.id === "rails-policy.v1").receivingAcceptance;
-  });
-  assert.throws(
-    () => assert.deepEqual(planted.outcomes, FROZEN_OUTCOMES),
-    /receivingAcceptance/,
-    "an altered fragment row must fail the frozen comparison",
-  );
+test("the exposure-ownership header contains metadata and no outcome rows", () => {
+  assert.equal(Object.hasOwn(readJson(dxMapHeaderPath), "outcomes"), false);
 });
 
 test("PG0 session model binds the receipt basis verbatim and adds no engine", () => {

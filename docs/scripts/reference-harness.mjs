@@ -14,7 +14,11 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
-import { loadShardedIndex, ShardedIndexError } from "../../scripts/lib/sharded-index.mjs";
+import {
+  compareIds,
+  loadShardedIndex,
+  ShardedIndexError,
+} from "../../scripts/lib/sharded-index.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
@@ -340,13 +344,20 @@ function existsAbs(absPath, overlays, repoRoot) {
 function isFileAbs(absPath, overlays, repoRoot) {
   const rel = posixRel(repoRoot, absPath);
   if (overlays && Object.prototype.hasOwnProperty.call(overlays, rel)) return overlays[rel] != null;
-  return existsSync(absPath) && statSync(absPath).isFile();
+  try {
+    return statSync(absPath).isFile();
+  } catch (cause) {
+    if (cause.code === "ENOENT" || cause.code === "ENOTDIR") return false;
+    throw cause;
+  }
 }
 
 function listNames(absDir, overlays, repoRoot) {
   const names = new Set();
-  if (existsSync(absDir) && statSync(absDir).isDirectory()) {
+  try {
     for (const name of readdirSync(absDir)) names.add(name);
+  } catch (cause) {
+    if (cause.code !== "ENOENT") throw cause;
   }
   const relDir = posixRel(repoRoot, absDir);
   const prefix = relDir ? `${relDir}/` : "";
@@ -616,17 +627,17 @@ function shardFailure(collection, error) {
  * recipe topics from `<home>/recipes/` and journeys from
  * `<home>/journeys/<id>.json`. The merged view keeps today's six-field shape;
  * `sdkGuides`/`recipes` stay absent when the header declares no index and no
- * node registered a topic. Loader failures are returned as harness error
- * items — never a silently shrunken collection.
+ * node registered a topic. On failure, returns a null manifest plus typed
+ * harness errors; dependent validation must not consume an incomplete view.
  */
 export function resolveExampleManifest(examplesRoot, options = {}) {
   const io = options.io;
   const readBytes = io?.read ?? defaultRead;
   const manifestPath = options.manifestPath ?? join(examplesRoot, "manifest.json");
   const failures = [];
-  const manifest = {};
+  let manifest;
   try {
-    Object.assign(manifest, JSON.parse(readBytes(manifestPath)));
+    manifest = JSON.parse(readBytes(manifestPath));
   } catch (cause) {
     failures.push(
       err("manifest-fragment-invalid", "example home manifest header is not valid JSON", {
@@ -634,10 +645,33 @@ export function resolveExampleManifest(examplesRoot, options = {}) {
         detail: String(cause?.message ?? cause),
       }),
     );
-    manifest.examples = [];
-    manifest.journeys = [];
-    return { manifest, failures };
+    return { manifest: null, failures };
   }
+  if (manifest == null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    return {
+      manifest: null,
+      failures: [
+        err("manifest-header-invalid", "manifest header must be an object", { key: "manifest" }),
+      ],
+    };
+  }
+  for (const [key, owner, property] of [
+    ["examples", manifest, "examples"],
+    ["journeys", manifest, "journeys"],
+    ["sdkGuides.topics", manifest.sdkGuides, "topics"],
+    ["recipes.topics", manifest.recipes, "topics"],
+  ]) {
+    if (owner != null && Object.hasOwn(owner, property)) {
+      failures.push(
+        err(
+          "manifest-header-invalid",
+          `manifest header must not contain rows at ${key}; register fragments instead`,
+          { key },
+        ),
+      );
+    }
+  }
+  if (failures.length > 0) return { manifest: null, failures };
   const load = (collection, dir, entry) => {
     try {
       return loadShardedIndex(dir, manifestPath, { io, ...(entry ? { entry } : {}) }).rows;
@@ -658,7 +692,7 @@ export function resolveExampleManifest(examplesRoot, options = {}) {
   if (manifest.recipes != null || recipeTopics.length > 0) {
     manifest.recipes = { ...manifest.recipes, topics: recipeTopics };
   }
-  return { manifest, failures };
+  return { manifest: failures.length > 0 ? null : manifest, failures };
 }
 
 export async function validate(options = {}) {
@@ -800,6 +834,12 @@ export async function validate(options = {}) {
     io: shardIo,
   });
   for (const item of manifestFailures) fail(item);
+  if (manifest == null) {
+    receipt.completenessState = "failed";
+    receipt.errors = errors;
+    receipt.sourceRevisions.digest = sourceDigest(digestEntries);
+    return receipt;
+  }
   if (!Array.isArray(manifest.examples) || manifest.examples.length === 0) {
     fail(err("empty-examples", "public example home declares no examples"));
   }
@@ -825,7 +865,7 @@ export async function validate(options = {}) {
     if (signal?.aborted) {
       receipt.completenessState = "cancelled";
       receipt.errors = [...errors, err("cancelled", "validation aborted during example discovery")];
-      receipt.examples = exampleRows.sort((a, b) => a.id.localeCompare(b.id));
+      receipt.examples = exampleRows.sort((a, b) => compareIds(a.id, b.id));
       receipt.sourceRevisions.digest = sourceDigest(digestEntries);
       return receipt;
     }
@@ -985,7 +1025,7 @@ export async function validate(options = {}) {
     });
   }
 
-  exampleRows.sort((a, b) => a.id.localeCompare(b.id));
+  exampleRows.sort((a, b) => compareIds(a.id, b.id));
   receipt.examples = exampleRows;
 
   for (const name of listNames(examplesRoot, overlays, repoRoot)) {
@@ -1083,7 +1123,7 @@ export async function validate(options = {}) {
     }
 
     const orderedTopics = [...declaredTopics].sort((a, b) =>
-      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+      compareIds(String(a?.id ?? ""), String(b?.id ?? "")),
     );
     for (const topic of orderedTopics) {
       const id = typeof topic?.id === "string" ? topic.id : null;
@@ -1289,7 +1329,7 @@ export async function validate(options = {}) {
     }
 
     const orderedRecipeTopics = [...declaredTopics].sort((a, b) =>
-      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+      compareIds(String(a?.id ?? ""), String(b?.id ?? "")),
     );
     for (const topic of orderedRecipeTopics) {
       const id = typeof topic?.id === "string" ? topic.id : null;
@@ -1602,7 +1642,7 @@ export async function validate(options = {}) {
       ok: journeyOk,
     });
   }
-  journeyRows.sort((a, b) => a.id.localeCompare(b.id));
+  journeyRows.sort((a, b) => compareIds(a.id, b.id));
 
   if (options.runJourneys === true) {
     const timeoutMs = options.journeyStepTimeoutMs ?? JOURNEY_STEP_TIMEOUT_MS;
@@ -1883,10 +1923,10 @@ export async function validate(options = {}) {
 
 export function canonicalizeReceipt(receipt) {
   const clone = JSON.parse(JSON.stringify(receipt));
-  clone.examples?.sort((a, b) => a.id.localeCompare(b.id));
-  clone.sdkGuides?.topics?.sort((a, b) => a.id.localeCompare(b.id));
-  clone.recipes?.topics?.sort((a, b) => a.id.localeCompare(b.id));
-  clone.journeys?.sort((a, b) => a.id.localeCompare(b.id));
+  clone.examples?.sort((a, b) => compareIds(a.id, b.id));
+  clone.sdkGuides?.topics?.sort((a, b) => compareIds(a.id, b.id));
+  clone.recipes?.topics?.sort((a, b) => compareIds(a.id, b.id));
+  clone.journeys?.sort((a, b) => compareIds(a.id, b.id));
   clone.contributorDocs?.pages?.sort((a, b) => String(a.id).localeCompare(String(b.id)));
   clone.contributorDocs?.taughtInterfaces?.sort((a, b) =>
     `${a.capability}:${a.path}:${a.symbol}:${a.taughtIn}`.localeCompare(

@@ -40,7 +40,7 @@ const writeHeader = (root, header) => {
 
 test("flat fragments merge in id order with the header passed through", () => {
   const { root, fragments } = makeCase();
-  writeFileSync(join(fragments, "zeta.json"), JSON.stringify({ id: "zeta", n: 1 }));
+  writeFileSync(join(fragments, "Zeta.json"), JSON.stringify({ id: "Zeta", n: 1 }));
   writeFileSync(join(fragments, "alpha.json"), JSON.stringify({ id: "alpha", n: 2 }));
   writeFileSync(join(fragments, "mid.json"), JSON.stringify({ id: "mid", n: 3 }));
   const { header, rows } = loadShardedIndex(
@@ -50,11 +50,11 @@ test("flat fragments merge in id order with the header passed through", () => {
   assert.deepEqual(header, { id: "map.v1", schema: 1 });
   assert.deepEqual(
     rows.map((row) => row.id),
-    ["alpha", "mid", "zeta"],
+    ["Zeta", "alpha", "mid"],
   );
   assert.deepEqual(
     rows.map((row) => row.n),
-    [2, 3, 1],
+    [1, 2, 3],
   );
 });
 
@@ -187,6 +187,38 @@ test("a missing fragment directory is an absent collection, not an error", () =>
   const { root } = makeCase();
   const { rows } = loadShardedIndex(join(root, "journeys"), writeHeader(root, {}));
   assert.deepEqual(rows, []);
+});
+
+test("directory listing errors fail explicitly instead of erasing rows", () => {
+  const { root } = makeCase();
+  const header = writeHeader(root, {});
+  const notDirectory = join(root, "not-a-directory");
+  writeFileSync(notDirectory, "file");
+  const denied = Object.assign(new Error("access denied"), { code: "EACCES" });
+  for (const [dir, options, code] of [
+    [notDirectory, {}, "ENOTDIR"],
+    [
+      root,
+      {
+        io: {
+          read: () => "{}",
+          list: () => {
+            throw denied;
+          },
+        },
+      },
+      "EACCES",
+    ],
+  ]) {
+    assert.throws(
+      () => loadShardedIndex(dir, header, options),
+      (error) =>
+        error instanceof ShardedIndexError &&
+        error.code === "directory-unreadable" &&
+        error.dir === dir &&
+        error.cause.code === code,
+    );
+  }
 });
 
 test("each load lists its directory exactly once", () => {

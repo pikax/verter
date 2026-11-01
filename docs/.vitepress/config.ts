@@ -1,13 +1,20 @@
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
+import { readdirSync, readFileSync } from "node:fs";
 
 // Sidebar sections load from per-section fragments (sidebar/<section>.json):
 // a docs node registers its pages by adding its own fragment instead of
 // editing this file.
-import apiSidebar from "./sidebar/api.json";
-import contributingSidebar from "./sidebar/contributing.json";
-import editorSidebar from "./sidebar/editor.json";
-import guideSidebar from "./sidebar/guide.json";
+const sidebarDir = new URL("./sidebar/", import.meta.url);
+const sidebar = Object.fromEntries(
+  readdirSync(sidebarDir)
+    .sort()
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => [
+      `/${name.slice(0, -5)}/`,
+      JSON.parse(readFileSync(new URL(name, sidebarDir), "utf8")),
+    ]),
+);
 
 export default withMermaid(
   defineConfig({
@@ -44,12 +51,7 @@ export default withMermaid(
         },
       ],
 
-      sidebar: {
-        "/guide/": guideSidebar,
-        "/api/": apiSidebar,
-        "/editor/": editorSidebar,
-        "/contributing/": contributingSidebar,
-      },
+      sidebar,
 
       socialLinks: [{ icon: "github", link: "https://github.com/pikax/verter" }],
 

@@ -18,7 +18,7 @@
  * row carries a string `id` (the pre-sharding row schemas are unchanged).
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Typed loader failure: `code` names the class, extras carry the fragment. */
@@ -31,6 +31,9 @@ export class ShardedIndexError extends Error {
   }
 }
 
+/** Locale-independent ordering shared by resolved indexes and their receipts. */
+export const compareIds = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 const defaultIo = {
   /**
    * Fragment file paths directly under `dir` for the given layout. A missing
@@ -41,14 +44,22 @@ const defaultIo = {
     let names;
     try {
       names = readdirSync(dir).sort();
-    } catch {
-      return [];
+    } catch (cause) {
+      if (cause.code === "ENOENT") return [];
+      throw cause;
     }
     const fragments = [];
     for (const name of names) {
       if (entry == null && !name.endsWith(".json")) continue;
       const path = entry == null ? join(dir, name) : join(dir, name, entry);
-      if (existsSync(path) && statSync(path).isFile()) fragments.push(path);
+      try {
+        if (statSync(path).isFile()) fragments.push(path);
+      } catch (cause) {
+        // A nested entry is optional; regular files in the parent are not
+        // example directories. Permission and I/O failures remain errors.
+        if (cause.code === "ENOENT" || (entry != null && cause.code === "ENOTDIR")) continue;
+        throw cause;
+      }
     }
     return fragments;
   },
@@ -61,7 +72,8 @@ const defaultIo = {
  * Loads one sharded index: the header JSON at `headerPath` plus every
  * fragment in `dir`. Returns `{ header, rows }` with `rows` sorted by id
  * (code-unit order, locale-independent). Throws ShardedIndexError with code
- * `header-invalid`, `fragment-invalid` or `duplicate-id` on a corrupt index.
+ * `header-invalid`, `directory-unreadable`, `fragment-invalid` or `duplicate-id`
+ * on a corrupt or unreadable index.
  *
  * `options.io` (`{ list(dir, entry), read(path) }`) overrides filesystem
  * access so overlay-driven callers resolve the same merged view.
@@ -109,7 +121,16 @@ export function loadShardedIndex(dir, headerPath, options = {}) {
   };
   // One listing per load: the fragment set is decided here and each fragment
   // file is read exactly once.
-  for (const fragment of io.list(dir, entry)) {
+  let fragments;
+  try {
+    fragments = io.list(dir, entry);
+  } catch (cause) {
+    throw new ShardedIndexError("directory-unreadable", `cannot list index directory: ${dir}`, {
+      dir,
+      cause,
+    });
+  }
+  for (const fragment of fragments) {
     let parsed;
     try {
       parsed = JSON.parse(io.read(fragment));
@@ -125,6 +146,6 @@ export function loadShardedIndex(dir, headerPath, options = {}) {
       addRow(parsed, fragment);
     }
   }
-  rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  rows.sort((a, b) => compareIds(a.id, b.id));
   return { header, rows };
 }

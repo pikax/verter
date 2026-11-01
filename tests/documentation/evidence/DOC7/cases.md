@@ -10,13 +10,16 @@ Commands (run on the candidate; do not treat this file as an execution transcrip
 - `pnpm --filter docs check`
 
 Deletion population this node: empty. The SDK guide structure home, the
-`sdkGuides` manifest section and the SDK documentation gate are additive;
+resolved `sdkGuides` collection and the SDK documentation gate are additive;
 no previous SDK/extension guide route existed to displace. Shipped editor
 pages under `docs/editor` remain the official-extension truth.
 
 AC1: the DOC1 harness stays the sole owning interface. The guide model is
-declared in `examples/reference/manifest.json` (`sdkGuides`) and validated
-only through `validate()`; the docs package check invokes the same script.
+resolved from `examples/reference/manifest.json` (`sdkGuides.index`) and
+`examples/reference/sdk-guides/<id>.json` topic fragments, validated only
+through `validate()`. The supplying producer updates its topic fragment
+and registers examples in `<id>/example.json`; the metadata header stays
+unchanged. The docs package check invokes the same script.
 
 AC2: a supplied slot bound to a static JSON-only sample fails with
 `static-sdk-example`; a supplied example without a shipped command or

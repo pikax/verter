@@ -122,7 +122,7 @@ test("a home with no journey fragments records zero journey rows and stays legal
   // monolithic array).
   const receipt = await validate(
     opts({
-      overlays: { [journeyFragment("cli-version-smoke")]: null },
+      overlays: Object.fromEntries(journeys.map((journey) => [journeyFragment(journey.id), null])),
     }),
   );
   assert.equal(receipt.completenessState, "complete");
