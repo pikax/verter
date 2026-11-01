@@ -1654,8 +1654,8 @@ fn origins_are_exact_authored_bytes_past_non_ascii_text_and_explicit_when_absent
     let [RecordOrigin::Authored(anchor)] = style_origin.as_slice() else {
         panic!("expected one authored origin, got {style_origin:?}");
     };
-    let start = usize::try_from(anchor.range.start.get()).unwrap();
-    let end = usize::try_from(anchor.range.end.get()).unwrap();
+    let start = usize::try_from(anchor.range.start().get()).unwrap();
+    let end = usize::try_from(anchor.range.end().get()).unwrap();
     assert_eq!(&source[start..end], "--brand");
     assert_eq!(
         anchor.content,

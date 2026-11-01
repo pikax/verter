@@ -20,20 +20,17 @@
 //! - Checked arithmetic refuses instead of saturating, wrapping or clamping:
 //!   every failure is a typed [`CoordError`]. Nothing snaps to the nearest
 //!   character or token.
-//! - A conversion runs against the exact content snapshot the position indexes
-//!   (`R03`); requester encodings (UTF-16/UTF-32 code units, line/column
-//!   forms) enter and leave only through the checked converters here, which
-//!   the boundary owners call. No converted mirror of a document is cached
-//!   (`R05`).
-//! - The line/column converters speak the TypeScript-wire form already owned
-//!   by [`crate::Utf16LineIndex`] (1-based line, 1-based UTF-16 column, the
-//!   `getLineStarts` terminator set). They are that form's exact-or-refused
-//!   counterpart: [`crate::Utf16LineIndex`] applies the wire's clamps, these
-//!   refuse. Another wire's base or terminator set converts in its own
-//!   adapter, through byte offsets (`R10`).
-//! - The ASCII fast path inside the unit converters is a differential
-//!   optimisation, never an assumption (`R07`): generated surfaces carry
-//!   authored non-ASCII identifiers and literals.
+//! - Requester encodings (UTF-16/UTF-32 code units, line/column forms) are
+//!   not converted here. The boundary owners (the language-intelligence and
+//!   framework adapters) own each wire's base, terminator set and exact
+//!   content snapshot (`R03`, `R10`) and convert through byte offsets; this
+//!   module is the byte-domain core they convert into and out of. The
+//!   exact-or-refused converters that model that contract live in a
+//!   test-support file, not in the production API. No converted mirror of a
+//!   document is cached (`R05`).
+//! - A fast path inside any converter is a differential optimisation, never
+//!   an assumption (`R07`): generated surfaces carry authored non-ASCII
+//!   identifiers and literals.
 //!
 //! # Domain mixing is a compile error
 //!
@@ -52,59 +49,33 @@
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset, SourceByteOffset};
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
 //!
-//! let source = SourceByteOffset::new(1);
-//! let generated = GeneratedByteOffset::new(2);
-//! let _ = source + generated; // no Add between domains
+//! let _ = SourceByteOffset::new(1) + GeneratedByteOffset::new(2); // no Add between domains
 //! ```
 //!
 //! ```compile_fail
 //! use verter_span::{GeneratedByteOffset, SourceByteOffset};
 //!
-//! let source = SourceByteOffset::new(1);
-//! let generated = GeneratedByteOffset::new(2);
-//! let _ = source < generated; // no cross-domain comparison
+//! let _ = GeneratedByteOffset::new(1) + SourceByteOffset::new(2); // nor in the other direction
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
 //!
-//! fn embedded_extent(embedded: EmbeddedByteOffset) -> u32 {
-//!     embedded.get()
-//! }
-//! // A source offset is not an embedded offset; there is no `From` either way.
-//! embedded_extent(SourceByteOffset::new(1));
-//! ```
-//!
-//! And no implicit conversion from a raw integer exists — only the explicit
-//! constructors accept one:
-//!
-//! ```compile_fail
-//! use verter_span::SourceByteOffset;
-//!
-//! let _: SourceByteOffset = 7u32.into(); // no From<u32>
+//! let _ = SourceByteOffset::new(5) - GeneratedByteOffset::new(1); // no Sub between domains
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::SourceByteOffset;
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
 //!
-//! let _ = SourceByteOffset::new(1) + 1u32; // no Add<u32>
+//! let _ = SourceByteOffset::new(1) < GeneratedByteOffset::new(2); // no ordering across domains
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
 //!
-//! let _ = SourceByteOffset::new(1) + EmbeddedByteOffset::new(2); // no Add between any two domains
-//! ```
-//!
-//! ```compile_fail
-//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
-//!
-//! let generated = GeneratedByteOffset::new(2);
-//! let embedded = EmbeddedByteOffset::new(3);
-//! let _ = generated < embedded; // no ordering across domains
-//! let _ = generated == embedded; // no equality across domains
+//! let _ = SourceByteOffset::new(1) == GeneratedByteOffset::new(2); // no equality across domains
 //! ```
 //!
 //! ```compile_fail
@@ -114,40 +85,283 @@
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::{GeneratedByteRange, SourceByteOffset, SourceByteRange};
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
 //!
-//! fn generated(range: GeneratedByteRange) {}
-//! generated(SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1)));
-//! // a source range is not a generated range
+//! let _ = SourceByteOffset::new(1) + EmbeddedByteOffset::new(2); // no Add between domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _ = EmbeddedByteOffset::new(1) + SourceByteOffset::new(2); // nor in the other direction
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(5) - EmbeddedByteOffset::new(1); // no Sub between domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(1) < EmbeddedByteOffset::new(2); // no ordering across domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(1) == EmbeddedByteOffset::new(2); // no equality across domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(5).checked_sub(EmbeddedByteOffset::new(1)); // no cross-domain rebase
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _ = GeneratedByteOffset::new(1) + EmbeddedByteOffset::new(2); // no Add between domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _ = EmbeddedByteOffset::new(1) + GeneratedByteOffset::new(2); // nor in the other direction
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _ = GeneratedByteOffset::new(5) - EmbeddedByteOffset::new(1); // no Sub between domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _ = GeneratedByteOffset::new(1) < EmbeddedByteOffset::new(2); // no ordering across domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _ = GeneratedByteOffset::new(1) == EmbeddedByteOffset::new(2); // no equality across domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _ = GeneratedByteOffset::new(5).checked_sub(EmbeddedByteOffset::new(1)); // no cross-domain rebase
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
+//!
+//! fn expects(_: GeneratedByteOffset) {}
+//! expects(SourceByteOffset::new(1)); // source offset is not a generated offset
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! fn expects(_: EmbeddedByteOffset) {}
+//! expects(SourceByteOffset::new(1)); // source offset is not a embedded offset
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
+//!
+//! fn expects(_: SourceByteOffset) {}
+//! expects(GeneratedByteOffset::new(1)); // generated offset is not a source offset
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! fn expects(_: EmbeddedByteOffset) {}
+//! expects(GeneratedByteOffset::new(1)); // generated offset is not a embedded offset
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! fn expects(_: SourceByteOffset) {}
+//! expects(EmbeddedByteOffset::new(1)); // embedded offset is not a source offset
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! fn expects(_: GeneratedByteOffset) {}
+//! expects(EmbeddedByteOffset::new(1)); // embedded offset is not a generated offset
 //! ```
 //!
 //! ```compile_fail
 //! use verter_span::{GeneratedByteRange, SourceByteOffset, SourceByteRange};
 //!
-//! let _: GeneratedByteRange =
-//!     SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1)).into();
-//! // no From between range domains either
+//! fn expects(_: GeneratedByteRange) {}
+//! expects(SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1))); // source range is not a generated range
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::SourceByteOffset;
+//! use verter_span::{GeneratedByteRange, SourceByteOffset, SourceByteRange};
 //!
-//! let raw: u32 = *SourceByteOffset::new(1); // no Deref to the raw integer
+//! let _: GeneratedByteRange = SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1)).into(); // no From between range domains
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::SourceByteOffset;
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
+//!
+//! let _: GeneratedByteOffset = SourceByteOffset::new(1).into(); // no From between offset domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteRange, SourceByteOffset, SourceByteRange};
+//!
+//! fn expects(_: EmbeddedByteRange) {}
+//! expects(SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1))); // source range is not a embedded range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteRange, SourceByteOffset, SourceByteRange};
+//!
+//! let _: EmbeddedByteRange = SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1)).into(); // no From between range domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _: EmbeddedByteOffset = SourceByteOffset::new(1).into(); // no From between offset domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteOffset, GeneratedByteRange, SourceByteRange};
+//!
+//! fn expects(_: SourceByteRange) {}
+//! expects(GeneratedByteRange::new(GeneratedByteOffset::new(0), GeneratedByteOffset::new(1))); // generated range is not a source range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteOffset, GeneratedByteRange, SourceByteRange};
+//!
+//! let _: SourceByteRange = GeneratedByteRange::new(GeneratedByteOffset::new(0), GeneratedByteOffset::new(1)).into(); // no From between range domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
+//!
+//! let _: SourceByteOffset = GeneratedByteOffset::new(1).into(); // no From between offset domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteRange, GeneratedByteOffset, GeneratedByteRange};
+//!
+//! fn expects(_: EmbeddedByteRange) {}
+//! expects(GeneratedByteRange::new(GeneratedByteOffset::new(0), GeneratedByteOffset::new(1))); // generated range is not a embedded range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteRange, GeneratedByteOffset, GeneratedByteRange};
+//!
+//! let _: EmbeddedByteRange = GeneratedByteRange::new(GeneratedByteOffset::new(0), GeneratedByteOffset::new(1)).into(); // no From between range domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _: EmbeddedByteOffset = GeneratedByteOffset::new(1).into(); // no From between offset domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, EmbeddedByteRange, SourceByteRange};
+//!
+//! fn expects(_: SourceByteRange) {}
+//! expects(EmbeddedByteRange::new(EmbeddedByteOffset::new(0), EmbeddedByteOffset::new(1))); // embedded range is not a source range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, EmbeddedByteRange, SourceByteRange};
+//!
+//! let _: SourceByteRange = EmbeddedByteRange::new(EmbeddedByteOffset::new(0), EmbeddedByteOffset::new(1)).into(); // no From between range domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _: SourceByteOffset = EmbeddedByteOffset::new(1).into(); // no From between offset domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, EmbeddedByteRange, GeneratedByteRange};
+//!
+//! fn expects(_: GeneratedByteRange) {}
+//! expects(EmbeddedByteRange::new(EmbeddedByteOffset::new(0), EmbeddedByteOffset::new(1))); // embedded range is not a generated range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, EmbeddedByteRange, GeneratedByteRange};
+//!
+//! let _: GeneratedByteRange = EmbeddedByteRange::new(EmbeddedByteOffset::new(0), EmbeddedByteOffset::new(1)).into(); // no From between range domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let _: GeneratedByteOffset = EmbeddedByteOffset::new(1).into(); // no From between offset domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset};
+//!
+//! let _: SourceByteOffset = 7u32.into(); // no From<u32>
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset};
 //!
 //! let _: SourceByteOffset = 7usize.into(); // no From<usize>
 //! ```
 //!
 //! ```compile_fail
-//! use verter_span::SourceByteOffset;
+//! use verter_span::{SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(1) + 1u32; // no Add<u32>
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset};
 //!
 //! let _ = SourceByteOffset::new(1) + 1usize; // no Add<usize>
 //! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset};
+//!
+//! let _: u32 = *SourceByteOffset::new(1); // no Deref to the raw integer
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset, SourceByteRange};
+//!
+//! let mut range = SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(3));
+//! range.start = SourceByteOffset::new(5); // endpoints are not assignable: no inverted range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset, SourceByteRange};
+//!
+//! let mut range = SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(3));
+//! range.end = SourceByteOffset::new(0); // nor the end
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{SourceByteOffset, SourceByteRange};
+//!
+//! let _ = SourceByteRange { start: SourceByteOffset::new(5), end: SourceByteOffset::new(3) }; // no struct literal
+//! ```
 
-use crate::utf16_line_index::LineCol;
 use std::fmt;
 
 /// The typed failure vocabulary of the checked coordinate API (the case
@@ -183,31 +397,6 @@ impl fmt::Display for CoordError {
 }
 
 impl std::error::Error for CoordError {}
-
-/// Narrow a byte position (or any counted extent) to the coordinate width,
-/// refusing — never truncating — past `u32::MAX` (`R06`: exact or refused).
-/// The checked converters mint no coordinate they cannot name; the counters
-/// they narrow are kept in `u64`, where a realizable content's totals
-/// cannot wrap, so this is the only narrowing step.
-#[inline]
-const fn in_u32(count: u64) -> Result<u32, CoordError> {
-    if count > u32::MAX as u64 {
-        Err(CoordError::Overflow)
-    } else {
-        Ok(count as u32)
-    }
-}
-
-/// Build the 1-based wire form from the `u64` counters a converter walked,
-/// refusing a line or column the `u32` wire form cannot carry
-/// ([`CoordError::Overflow`]).
-#[inline]
-fn wire_line_col(line: u64, into_line_units: u64) -> Result<LineCol, CoordError> {
-    Ok(LineCol {
-        line: in_u32(line)?,
-        col: in_u32(into_line_units.checked_add(1).ok_or(CoordError::Overflow)?)?,
-    })
-}
 
 /// Defines one coordinate domain: a `#[repr(transparent)]` byte-offset newtype
 /// plus its `#[repr(C)]` half-open range, with the same checked surface for
@@ -280,224 +469,19 @@ macro_rules! coord_domain {
                 }
                 Ok(self)
             }
-
-            /// Checked ingress from a requester UTF-16 code-unit offset
-            /// (`R03`: against the exact content snapshot). A unit offset
-            /// inside a surrogate pair is [`CoordError::NotCharBoundary`];
-            /// past the content's unit length is
-            /// [`CoordError::InvalidBoundary`]; an extent past the `u32`
-            /// coordinate width is [`CoordError::Overflow`].
-            pub fn from_utf16(content: &str, units: u32) -> Result<Self, CoordError> {
-                if content.is_ascii() {
-                    return if units as usize <= content.len() {
-                        // ASCII bytes are one UTF-16 unit each, so the unit
-                        // offset IS the byte offset: no narrowing happens.
-                        Ok(Self(units))
-                    } else {
-                        Err(CoordError::InvalidBoundary)
-                    };
-                }
-                let mut seen = 0u64;
-                for (byte, ch) in content.char_indices() {
-                    if seen == units as u64 {
-                        return in_u32(byte as u64).map(Self);
-                    }
-                    let boundary = seen + ch.len_utf16() as u64;
-                    if (units as u64) < boundary {
-                        // Strictly inside this scalar's UTF-16 units — the
-                        // second unit of a surrogate pair.
-                        return Err(CoordError::NotCharBoundary);
-                    }
-                    seen = boundary;
-                }
-                if seen == units as u64 {
-                    return in_u32(content.len() as u64).map(Self);
-                }
-                Err(CoordError::InvalidBoundary)
-            }
-
-            /// Checked egress to a UTF-16 code-unit offset, after validating
-            /// this offset against the same content snapshot. A unit count
-            /// past the `u32` coordinate width is
-            /// [`CoordError::Overflow`].
-            pub fn to_utf16(self, content: &str) -> Result<u32, CoordError> {
-                self.validate(content)?;
-                if content.is_ascii() {
-                    return Ok(self.0);
-                }
-                let mut units = 0u64;
-                for (byte, ch) in content.char_indices() {
-                    if byte == self.0 as usize {
-                        return in_u32(units);
-                    }
-                    units += ch.len_utf16() as u64;
-                }
-                // validate() guarantees we only fall out at end-of-file.
-                in_u32(units)
-            }
-
-            /// Checked ingress from a requester UTF-32 scalar offset. Every
-            /// scalar count in extent is a scalar boundary, so only extent is
-            /// refused ([`CoordError::InvalidBoundary`]; an extent past the
-            /// `u32` coordinate width is [`CoordError::Overflow`]).
-            pub fn from_utf32(content: &str, scalars: u32) -> Result<Self, CoordError> {
-                if content.is_ascii() {
-                    return if scalars as usize <= content.len() {
-                        // ASCII bytes are one UTF-32 scalar each, so the
-                        // scalar offset IS the byte offset: no narrowing
-                        // happens.
-                        Ok(Self(scalars))
-                    } else {
-                        Err(CoordError::InvalidBoundary)
-                    };
-                }
-                let mut seen = 0u64;
-                for (byte, _) in content.char_indices() {
-                    if seen == scalars as u64 {
-                        return in_u32(byte as u64).map(Self);
-                    }
-                    seen += 1;
-                }
-                if seen == scalars as u64 {
-                    return in_u32(content.len() as u64).map(Self);
-                }
-                Err(CoordError::InvalidBoundary)
-            }
-
-            /// Checked egress to a UTF-32 scalar offset, after validating
-            /// this offset against the same content snapshot. A scalar count
-            /// past the `u32` coordinate width is
-            /// [`CoordError::Overflow`].
-            pub fn to_utf32(self, content: &str) -> Result<u32, CoordError> {
-                self.validate(content)?;
-                if content.is_ascii() {
-                    return Ok(self.0);
-                }
-                let mut scalars = 0u64;
-                for (byte, _) in content.char_indices() {
-                    if byte == self.0 as usize {
-                        return in_u32(scalars);
-                    }
-                    scalars += 1;
-                }
-                in_u32(scalars)
-            }
-
-            /// Convert to the TypeScript-wire line/column form ([`LineCol`]:
-            /// 1-based line, 1-based UTF-16 column, the `getLineStarts`
-            /// terminator set — `\n`, a lone `\r`, U+2028, U+2029, and `\r\n`
-            /// as ONE terminator). Exact or refused: a byte offset between the
-            /// `\r` and the `\n` of a CRLF pair lies inside a two-byte
-            /// terminator and has no line/column position
-            /// ([`CoordError::InvalidBoundary`]).
-            pub fn line_col(self, content: &str) -> Result<LineCol, CoordError> {
-                self.validate(content)?;
-                let mut line = 1u64;
-                let mut line_start_u16 = 0u64;
-                let mut u16_idx = 0u64;
-                let mut chars = content.char_indices().peekable();
-                while let Some((byte, ch)) = chars.next() {
-                    if byte == self.0 as usize {
-                        return wire_line_col(line, u16_idx - line_start_u16);
-                    }
-                    let mut units = ch.len_utf16() as u64;
-                    let is_terminator = match ch {
-                        '\n' | '\u{2028}' | '\u{2029}' => true,
-                        '\r' => {
-                            if chars.peek().map(|&(_, c)| c) == Some('\n') {
-                                if self.0 as usize == byte + 1 {
-                                    // Between the two bytes of a CRLF pair:
-                                    // no line/column position exists there.
-                                    return Err(CoordError::InvalidBoundary);
-                                }
-                                let _ = chars.next();
-                                units += 1;
-                            }
-                            true
-                        }
-                        _ => false,
-                    };
-                    u16_idx += units;
-                    if is_terminator {
-                        line += 1;
-                        line_start_u16 = u16_idx;
-                    }
-                }
-                // validate() guarantees we only reach here at end-of-file.
-                wire_line_col(line, u16_idx - line_start_u16)
-            }
-
-            /// Checked ingress from the TypeScript-wire line/column form
-            /// ([`LineCol`]). Exact or refused: a line past the content's
-            /// line count, a column more than one unit past the line's units
-            /// (one unit past is the line's end boundary), or a column inside
-            /// a surrogate pair ([`CoordError::NotCharBoundary`]) is a typed
-            /// error — a column past the line end is never clamped to it. A
-            /// byte position past the `u32` coordinate width is
-            /// [`CoordError::Overflow`].
-            pub fn from_line_col(content: &str, pos: LineCol) -> Result<Self, CoordError> {
-                if pos.line == 0 || pos.col == 0 {
-                    // The form is 1-based; a 0 in either field names no
-                    // position.
-                    return Err(CoordError::InvalidBoundary);
-                }
-                let want_units = pos.col as u64 - 1;
-                let mut line = 1u64;
-                let mut line_start_u16 = 0u64;
-                let mut u16_idx = 0u64;
-                let mut chars = content.char_indices().peekable();
-                while let Some((byte, ch)) = chars.next() {
-                    if line == pos.line as u64 {
-                        let into_line = u16_idx - line_start_u16;
-                        let ch_units = ch.len_utf16() as u64;
-                        if into_line == want_units {
-                            return in_u32(byte as u64).map(Self);
-                        }
-                        if want_units < into_line + ch_units {
-                            // Strictly inside this scalar's UTF-16 units.
-                            return Err(CoordError::NotCharBoundary);
-                        }
-                    }
-                    let mut units = ch.len_utf16() as u64;
-                    let is_terminator = match ch {
-                        '\n' | '\u{2028}' | '\u{2029}' => true,
-                        '\r' => {
-                            if chars.peek().map(|&(_, c)| c) == Some('\n') {
-                                let _ = chars.next();
-                                units += 1;
-                            }
-                            true
-                        }
-                        _ => false,
-                    };
-                    u16_idx += units;
-                    if is_terminator {
-                        line += 1;
-                        line_start_u16 = u16_idx;
-                    }
-                }
-                if line == pos.line as u64 && u16_idx - line_start_u16 == want_units {
-                    // End-of-file (or a content-final line's end).
-                    return in_u32(content.len() as u64).map(Self);
-                }
-                Err(CoordError::InvalidBoundary)
-            }
         }
 
         $(#[$range_doc])*
         /// An inverted range (`end < start`) is not constructible: the
         /// ordered invariant is enforced at construction, so no method has
-        /// to normalise one. The struct is `#[non_exhaustive]` so no other
-        /// crate can bypass the constructors with a struct literal; the
-        /// fields stay readable at their historical paths.
+        /// to normalise one. The endpoints are private, so no safe code can
+        /// assemble a range or write one endpoint past the other; they are
+        /// read through [`Self::start`] and [`Self::end`].
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[non_exhaustive]
         #[repr(C)]
         pub struct $range {
-            /// Inclusive start, in this domain's bytes.
-            pub start: $offset,
-            /// Exclusive end, in this domain's bytes.
-            pub end: $offset,
+            start: $offset,
+            end: $offset,
         }
 
         impl $range {
@@ -528,10 +512,22 @@ macro_rules! coord_domain {
                 Ok(Self { start, end })
             }
 
+            /// Inclusive start, in this domain's bytes.
+            #[inline]
+            pub const fn start(&self) -> $offset {
+                self.start
+            }
+
+            /// Exclusive end, in this domain's bytes.
+            #[inline]
+            pub const fn end(&self) -> $offset {
+                self.end
+            }
+
             /// Length in this domain's bytes. Total for every constructible
-            /// range: `new` and `checked_new` refuse inversion, and no other
-            /// crate can assemble the struct by literal, so the subtraction
-            /// never saturates or wraps.
+            /// range: `new` and `checked_new` refuse inversion, and the
+            /// endpoints are private, so the subtraction never saturates or
+            /// wraps.
             #[inline]
             pub const fn len(&self) -> u32 {
                 self.end.0 - self.start.0
@@ -594,6 +590,9 @@ coord_domain! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct GeneratedByteLen(pub u32);
+
+#[cfg(test)]
+mod encoding_support;
 
 #[cfg(test)]
 #[path = "coord_tests.rs"]
