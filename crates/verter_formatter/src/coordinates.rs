@@ -229,3 +229,10 @@ utf8_byte_domain! {
     /// Half-open `[start, end)` byte range in the rendered formatter output.
     FormattedByteRange,
 }
+
+impl FormattedByteRange {
+    /// Internal minting path for the renderer's final UTF-8 sink.
+    pub(crate) fn for_emitted(source: &str, start: u32, end: u32) -> Result<Self, CoordinateError> {
+        Self::for_source(source, FormattedByteOffset(start), FormattedByteOffset(end))
+    }
+}

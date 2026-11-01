@@ -10,7 +10,6 @@ description = "Typed byte coordinate domains and provenance identity for the Ver
 keywords = ["vue", "compiler", "formatter"]
 categories = ["compilers"]
 
-# Deliberately dependency-free. With no `[dependencies]` at all the
-# foundation cannot parse, render, format or serialize a request; later
-# formatter work in this crate adds only what its own module needs.
+# Width tables only; no parser, semantic, host or routing dependencies.
 [dependencies]
+regex = "=1.13.1"

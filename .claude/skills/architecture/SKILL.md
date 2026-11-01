@@ -232,3 +232,45 @@ verter_session (conversion layer)
     v
 Consumers (LSP, build, linter) query snapshots + ProjectIndex
 ```
+
+## Document rendering substrate
+
+`verter_formatter::doc::Doc<FormatProvenanceId>` is a flat postorder arena.
+Attach each node once; foreign handles and reused subtrees are builder errors.
+Group and line handles identify groups and breaks within that document. Conditional
+content uses the nearest group's mode; the root is broken. A flat parent flattens
+nested groups; a broken parent lets each nested group decide independently.
+Hard lines and literal newlines force enclosing groups broken. A group measures
+its own complete flat body and pending suffix queue against the current column.
+
+`render::render` consumes only the arena, root and normalized `RenderOptions`.
+It precomputes tab-sensitive flat widths once, then emits with an explicit heap
+stack. Work is at most three node visits per arena node (including group choices
+and suffix flushing); work-stack entries are bounded by the node inventory.
+Indent adds columns; align uses the current column plus its offset. Indentation
+is emitted lazily, so empty lines and EOF do not acquire trailing padding. Tabs
+use configured stops. Line endings are already resolved LF/CRLF/CR; auto detection
+and final-newline syntax policy belong to the caller. Literal bytes stay exact.
+
+Suffixes are atomic single-line text, queued FIFO and flushed before explicit or
+literal newlines and EOF. They participate in flat width decisions. Every
+source-backed segment uses the unchanged `Provenanced<RenderedSegment>` binding;
+generated segments carry no invented authored range. Formatted ranges are minted
+only against the emitted UTF-8 sink. This is no position-map or edit policy.
+
+Width semantics use pinned string-width 4.2.3, emoji-regex 8.0.0, ansi-regex 5.0.1
+and is-fullwidth-code-point 3.0.0 data, matching the formatter lock. Regenerate
+patterns and independent width examples with
+`node crates/verter_formatter/tests/generate-width-data.cjs`; licenses travel
+with vendored tables. The only production dependency is the pinned Rust regex
+engine, with no parser, semantic, host, or protocol dependency. Focused proof:
+`cargo nextest run -p verter_formatter`. The nightly profile exercises the same
+deep/wide invariants at full scale; gate tests check deterministic growth and a
+small native stack without timing assertions.
+
+| Mechanism | concern | prevents | notCoveredBecause |
+| --- | --- | --- | --- |
+| Single-attachment arena and heap traversal | performance | Deep trees can overflow the native stack; shared subtrees can expand exponentially. Both are reachable through adversarial document construction. | The coordinate foundation and existing route tests do not construct documents. |
+| Composed tab-sensitive widths and cached emission measures | performance | Repeated group searches revisit a nested subtree quadratically; treating a tab as constant width chooses the wrong layout at nonzero columns. | Compilation cannot observe work growth or rendered width decisions. |
+| Pinned width data and independent boundary fixtures | correctness | General Unicode width tables differ from the locked Prettier behavior for combining marks, emoji and ANSI. | Existing formatter fixtures declare the policy but do not execute this renderer. |
+| Provenanced segments and checked sink ranges | correctness | Dropping a source binding or mixing byte domains breaks downstream joins even when output bytes look correct. | Text-output assertions cannot detect provenance loss; a planted binding drop must fail the segment oracle. |
