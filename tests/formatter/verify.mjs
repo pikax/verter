@@ -319,7 +319,23 @@ export function validateFormatterLock(lock) {
   check(
     requiredCalibration.every((key) => key in (p.calibration ?? {})) &&
       p.calibration?.iterations === 10000000 &&
-      p.calibration?.reference_ns === 25000000,
+      p.calibration?.reference_ns === 25000000 &&
+      p.calibration?.seed === 305419896 &&
+      p.calibration?.rotate_left_bits === 13 &&
+      p.calibration?.xor_constant === 2654435769 &&
+      p.calibration?.add_constant === 2135587861 &&
+      p.calibration?.warmup_samples === 5 &&
+      p.calibration?.measured_samples === 20 &&
+      same(p.calibration?.operation_schedule, [
+        "rotate-left-u64",
+        "xor-u64",
+        "wrapping-add-u64",
+        "black-box-final-value",
+      ]) &&
+      same(p.calibration?.sample_order, ["baseline", "candidate", "candidate", "baseline"]) &&
+      ["pseudocode", "reported_statistic", "normalized_ms", "measurement_policy"].every((key) =>
+        nonempty(p.calibration?.[key]),
+      ),
     "incomplete calibration",
   );
   check(
@@ -473,7 +489,31 @@ export function validateFormatterLock(lock) {
   for (const s of lifecycle?.sources ?? [])
     check(fixtureIds.has(s.fixture_id), `missing lifecycle fixture ${s.fixture_id}`);
   const lifecycleIds = new Set(lifecycle?.sources?.map((s) => s.fixture_id));
-  const queries = assetJson(fixtures.get("range-cursor")?.path)?.queries;
+  const workload = assetJson(fixtures.get("range-cursor")?.path);
+  const queries = workload?.queries;
+  // Workload geometry has one medium result basis. Miniature controls are
+  // separate and must never override that basis on an individual query.
+  check(workload?.source_fixture_id === "medium", "range/cursor query basis must be medium");
+  check(
+    same(workload?.prepared_result_edits, [
+      { start: 40, end: 40, text: " " },
+      { start: 42, end: 43, text: "" },
+      { start: 40385, end: 40386, text: "1" },
+    ]),
+    "range/cursor query basis edits",
+  );
+  for (const q of queries ?? [])
+    check(
+      !("source_path" in q) &&
+        !("formatted_path" in q) &&
+        !("source_fixture_id" in q) &&
+        Number.isInteger(q.start) &&
+        Number.isInteger(q.end) &&
+        q.start >= 0 &&
+        q.end >= q.start &&
+        q.end <= fixtures.get("medium")?.authored_utf8_bytes,
+      `range/cursor query basis ${q.ordinal}`,
+    );
   check(
     queries?.length === 1000 && queries.every((q, i) => q.ordinal === i + 1),
     "range/cursor 1000-query population",

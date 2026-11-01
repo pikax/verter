@@ -80,8 +80,12 @@ medium, 1 MiB/40-block large, incremental, 1,000 range/cursor/map queries, and
 128 distinct medium project sources. Long churn uses those exact sources and
 payloads. Revisions, profile/config/policy identities, edits/reverts, cancellation
 observation and expected admission are explicit per action. Cancellation publishes a fresh source revision to force a render miss before its observation hook. An edit-revert pair links its two ordinals and gives each request one incremental allowance; the pair shares the stated combined ceiling. Runtime generation
-from a seed is forbidden. The range/cursor population also names inserted,
-deleted, replaced and retained boundary controls. Open/close, provider transitions,
+from a seed is forbidden. The range/cursor workload uses one medium authored basis and one prepared result,
+defined by its ordered `prepared_result_edits` in authored byte coordinates.
+All 1,000 queries address that result, including inserted, deleted, replaced,
+retained, Unicode, CRLF and EOF boundaries. Miniature `geometry_controls` are
+separate semantic controls and do not count toward the workload. Query-local
+source/result overrides are rejected. Open/close, provider transitions,
 and disabled/unsupported/unopened/masked requests have the declared zero-work
 pipeline obligations, without suppressing the allowed envelope/cache bookkeeping.
 
@@ -127,6 +131,8 @@ the lock, rather than rewriting goldens after a mismatch.
 | --- | --- | --- | --- |
 | Catalog/asset validation and finite dimension declarations | correctness | Missing or duplicated compatibility outcomes, corrupt fixtures or incomplete calibration/churn can silently change the successor contract during manual edits. | Existing formatter tests cover only whitespace gaps and have no catalog/fixture completeness checks. |
 | Churn identity and pair-budget validation | correctness | A cancelled request can otherwise hit a just-warmed identity without observing rendering, or a revert can incorrectly receive the whole pair allowance in addition to the edit allowance; both were observed during lock validation. | Asset hashes and field-presence checks do not prove cache-miss preconditions or allocation-budget composition, and no native formatter exists yet to exercise them. |
+| Query basis and calibration value validation | correctness | Mixed source identities and empty operation/sample schedules previously passed validation and made the locked workload unusable. | Fixture digests and key presence detect neither cross-query identity changes nor empty calibration dimensions. |
+| Validated manifest reuse in corpus parameter tests | performance | Reloading the complete immutable lock for every corpus caused a measured 99-second test. | CI checks correctness but does not remove redundant fixture materialization; every corpus still exercises summary parameter validation, with CLI integration and rejection controls retained. |
 | Route inventory join | correctness | A missing or conflicting sole cutover owner can leave a live route on the displaced formatter. | Current route behavior tests do not express future deletion/mutation ownership. |
 | Parameterized evidence registration | correctness | Reusing a different candidate/corpus's performance claim is plausible when multiple consumers run the same named manifest. | The semantic/soak runner has neither formatter corpus identities nor required candidate parameters. |
 | Fixture-local Git attributes and formatter exclusion | correctness | Repository LF normalization would corrupt intentional CRLF bytes and their content digests on staging/checkout; automatic formatting would rewrite captured inputs and goldens. | Hash validation detects the damage afterward; the repository-wide LF and formatting policies otherwise rewrite these bytes. |

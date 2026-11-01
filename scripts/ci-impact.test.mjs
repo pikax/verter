@@ -1005,3 +1005,12 @@ test("unreadable selection data breaks no importer: every lane runs and the audi
     }
   }
 });
+
+test("formatter catalog changes reach validation in the configured CI script lane", () => {
+  const { hits } = matchPathFilters(["catalogs/formatter-performance-v1.toml"]);
+  assert.equal(hits.scripts, true);
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(
+    pkg.scripts["test:scripts:ci"].includes("node --test scripts/benchmark/evidence-run.test.mjs"),
+  );
+});
