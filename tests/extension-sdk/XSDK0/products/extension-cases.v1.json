@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "executionState": "specified-not-executed",
+  "qualificationOwner": "XSDK10",
+  "cases": [
+    {
+      "id": "N01",
+      "producer": "XSDK1",
+      "control": "new namespace/carrier accepted with no duplicate target",
+      "counterexample": "guest asks to replace a registered parser or identity minter",
+      "required": "typed rejection; core owner unchanged",
+      "conditions": ["E03", "E04"]
+    },
+    {
+      "id": "N02",
+      "producer": "XSDK2",
+      "control": "well-typed metadata facts retain provenance",
+      "counterexample": "metadata includes authoritative type/resolver/cache-validity override",
+      "required": "reject authority override; never publish as semantic answer",
+      "conditions": ["E04"]
+    },
+    {
+      "id": "N03",
+      "producer": "XSDK8",
+      "control": "revision-matched reversible plan with explicit grant",
+      "counterexample": "raw write, stale revision, missing authored reverse map or self-granted execution",
+      "required": "no writes; typed transaction refusal",
+      "conditions": ["E07"]
+    },
+    {
+      "id": "N04",
+      "producer": "XSDK1",
+      "control": "same valid candidates under permuted discovery",
+      "counterexample": "duplicate T09/target key; or missing/duplicate T06 relation",
+      "required": "same canonical result; duplicates reject, missing relation ambiguous; no first/last winner",
+      "conditions": ["E03"]
+    },
+    {
+      "id": "N05",
+      "producer": "XSDK1",
+      "control": "exact known tuple with granted required capability",
+      "counterexample": "range/floating version, unknown schema/kind/target or denied required capability",
+      "required": "reject without execution; optional denied capability reported disabled",
+      "conditions": ["E01", "E02"]
+    },
+    {
+      "id": "N06",
+      "producer": "XSDK3",
+      "control": "qualified native guest with bounded mediated input",
+      "counterexample": "filesystem/network/process escape, fuel/memory exhaustion or cancellation",
+      "required": "denied capability, bounded typed refusal and resource teardown; subprocess alone insufficient",
+      "conditions": ["E05"]
+    },
+    {
+      "id": "N07",
+      "producer": "XSDK4",
+      "control": "qualified browser guest with explicit inputs",
+      "counterexample": "ambient origin, workspace or network access attempt",
+      "required": "no ambient access; bounded refusal/teardown; ordinary worker not proof",
+      "conditions": ["E05"]
+    },
+    {
+      "id": "N08",
+      "producer": "XSDK5",
+      "control": "selected fresh and incremental answers agree",
+      "counterexample": "edit/revert, version/config change or removal while guest reply is delayed",
+      "required": "stale reply discarded; dependent results invalidated; unaffected controls retained",
+      "conditions": ["E06"]
+    },
+    {
+      "id": "N09",
+      "producer": "XSDK5",
+      "control": "completed selected result published once",
+      "counterexample": "cancelled/partial/malformed reply or unselected contribution",
+      "required": "no complete publication/cache warm; unselected execution count zero; teardown releases retention",
+      "conditions": ["E06"]
+    },
+    {
+      "id": "N10",
+      "producer": "XSDK7",
+      "control": "inspected local exact package installed and rolled back",
+      "counterexample": "digest mismatch, incompatible upgrade or permission expansion without grant",
+      "required": "reject before snapshot replacement; existing session unaffected; removal yields new snapshot",
+      "conditions": ["E01", "E02", "E03", "E08"]
+    },
+    {
+      "id": "N11",
+      "producer": "XSDK6",
+      "control": "validated HTML/CSS/component data enrich canonical results",
+      "counterexample": "malformed schema, out-of-bounds spans or unrelated target",
+      "required": "reject payload, preserve unaffected results; no private completion engine",
+      "conditions": ["E04"]
+    },
+    {
+      "id": "N12",
+      "producer": "XSDK9",
+      "control": "native/browser runnable data, embedding and action examples",
+      "counterexample": "example advertises unsupported host or permissions",
+      "required": "DOC1 execution and VIM/DX evidence prevent unsupported claim; terminal checks completed artifacts",
+      "conditions": ["E08"]
+    }
+  ],
+  "existingEvidence": [
+    "crates/verter_session/tests/cases/compile-fail/semantic_capability_row_struct_literal_forge.rs",
+    "crates/verter_session/tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs"
+  ],
+  "evidenceLimit": "Existing compile-fail fixtures protect core capability construction, not future guest isolation/ingress; producers execute these cases and XSDK10 qualifies both hosts."
+}

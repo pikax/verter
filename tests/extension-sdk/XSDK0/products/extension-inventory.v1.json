@@ -1,0 +1,491 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "static-proof",
+  "runtimeSupportClaim": false,
+  "authority": "Versioned contribution ingress and isolated execution only; core retains all semantic authority",
+  "imports": [
+    "CAT0 T01-T09, CR01-CR14, XK01-XK09",
+    "VID0 I01-I12, R01-R16",
+    "PUB0 envelopes",
+    "WDX0 evidence classes"
+  ],
+  "currentProductionManifestConsumers": [],
+  "consumers": [
+    {
+      "id": "C01",
+      "path": "crates/verter_session/src/extensions/manifest/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK1",
+      "disposition": "T09 manifest admission; new immutable catalog"
+    },
+    {
+      "id": "C02",
+      "path": "crates/verter_session/src/extensions/ingress/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK2",
+      "disposition": "Typed facts validated before canonical owner ingress"
+    },
+    {
+      "id": "C03",
+      "path": "crates/verter_session/src/extensions/lifecycle/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK5",
+      "disposition": "Core demand, cancellation, validity and publication"
+    },
+    {
+      "id": "C04",
+      "path": "crates/verter_session/src/extensions/data_contributions/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK6",
+      "disposition": "Facts augment HTML/CSS/component owners"
+    },
+    {
+      "id": "C05",
+      "path": "crates/verter_session/src/extensions/install/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK7",
+      "disposition": "Local inspect/install/upgrade/rollback/removal"
+    },
+    {
+      "id": "C06",
+      "path": "crates/verter_session/src/extensions/operations/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK8",
+      "disposition": "Canonical authored transactions only"
+    },
+    {
+      "id": "C07",
+      "path": "crates/verter_compiler/src/framework_common/catalog.rs",
+      "current": "ImmutableCapabilityCatalog::try_from_rows",
+      "owner": "CPF1",
+      "disposition": "Retain static typed catalog; XSDK1 supplies validated T09 rows under CAT0"
+    },
+    {
+      "id": "C08",
+      "path": "crates/verter_session/src/framework/registry.rs",
+      "current": "FrameworkAdapterRegistry",
+      "owner": "CPF1",
+      "disposition": "Retain static first-party registration; no mandatory SDK dependency"
+    },
+    {
+      "id": "C09",
+      "path": "crates/verter_session/src/semantic_capability.rs",
+      "current": "CertifiedTypeEngineBinding",
+      "owner": "verter_session",
+      "disposition": "Retain certified core semantic authority; guests do not implement it"
+    },
+    {
+      "id": "C10",
+      "path": "crates/verter_identity/src/profile.rs",
+      "current": "ExecutionPolicy",
+      "owner": "verter_identity",
+      "disposition": "Retain core policy/identity separation; no guest identity minting"
+    },
+    {
+      "id": "C11",
+      "path": "packages/browser-host/src/worker.js",
+      "current": "existing browser worker",
+      "owner": "XSDK4",
+      "disposition": "Reuse BWH5 lifecycle; add mediated guest host, never treat worker as sandbox"
+    },
+    {
+      "id": "C12",
+      "path": "crates/verter_lsp/src/features/edit_transaction.rs",
+      "current": "reserved transaction module",
+      "owner": "LSO8",
+      "disposition": "Core transaction implementation remains LSO8; XSDK8 consumes it"
+    }
+  ],
+  "futureConsumers": [
+    {
+      "owner": "XSDK3",
+      "path": "crates/verter_extension_host",
+      "disposition": "native guest host; absent at candidate"
+    },
+    {
+      "owner": "XSDK9",
+      "path": "packages/extension-sdk; examples/reference",
+      "disposition": "SDK authoring and three reference contribution classes"
+    },
+    {
+      "owner": "XSDK10",
+      "path": "tests/extension-sdk",
+      "disposition": "real host isolation/determinism qualification"
+    },
+    {
+      "owner": "XSDK11",
+      "path": "docs; examples/reference",
+      "disposition": "publish exact supported matrix using VIM1, DX1G and DOC1"
+    }
+  ],
+  "sources": [
+    {
+      "path": "Cargo.toml",
+      "version": "0.0.1-beta.7",
+      "meaning": "workspace package version, not an SDK protocol or guest compatibility claim"
+    },
+    {
+      "path": "packages/browser-host/package.json",
+      "version": "0.0.1-beta.1",
+      "meaning": "private browser host package, not a qualified executable guest host"
+    },
+    {
+      "path": "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "version": 1,
+      "meaning": "imported catalog contract; contribution kinds are not support claims"
+    },
+    {
+      "path": "crates/verter_session/src/extensions",
+      "version": null,
+      "meaning": "reserved modules; no published SDK/manifest/protocol release"
+    },
+    {
+      "path": "crates/verter_extension_host",
+      "version": null,
+      "meaning": "absent; engine and guest format exact releases must be selected and qualified by XSDK3"
+    },
+    {
+      "path": "packages/extension-sdk",
+      "version": null,
+      "meaning": "absent; XSDK9 authors public SDK against implemented exact protocols"
+    }
+  ],
+  "compatibilityTuple": [
+    "manifest schema exact version",
+    "SDK protocol exact version",
+    "extension namespace and exact version",
+    "content digest and source",
+    "target canonical profiles and exact ReleaseId where applicable",
+    "host build identity",
+    "guest format and engine exact release for executable mode",
+    "configuration digest",
+    "permission grants"
+  ],
+  "capabilityMatrix": [
+    {
+      "id": "XK01",
+      "kind": "carrier",
+      "table": "T01",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK02",
+      "kind": "semantic profile",
+      "table": "T03",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK03",
+      "kind": "project profile",
+      "table": "T04",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK04",
+      "kind": "embedded language",
+      "table": "T05",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK05",
+      "kind": "capability",
+      "table": "T07",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK06",
+      "kind": "rule or action",
+      "table": "T08",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5", "XSDK8"]
+        }
+      }
+    },
+    {
+      "id": "XK07",
+      "kind": "tool operation",
+      "table": "T09",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5", "XSDK8"]
+        }
+      }
+    },
+    {
+      "id": "XK08",
+      "kind": "metadata facts",
+      "table": "T09",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK6"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK6"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5", "XSDK6"]
+        }
+      }
+    },
+    {
+      "id": "XK09",
+      "kind": "interoperability",
+      "table": "T06",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "mediated typed output only; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    }
+  ],
+  "hostMatrix": [
+    {
+      "host": "native",
+      "mode": "declarative",
+      "state": "required-unimplemented",
+      "producer": "XSDK1",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config; executable mode additionally guest engine/format, grants, isolation and teardown"
+    },
+    {
+      "host": "native",
+      "mode": "data-only",
+      "state": "required-unimplemented",
+      "producer": "XSDK6",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config; executable mode additionally guest engine/format, grants, isolation and teardown"
+    },
+    {
+      "host": "native",
+      "mode": "isolated-executable",
+      "state": "required-unimplemented",
+      "producer": "XSDK3",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config; executable mode additionally guest engine/format, grants, isolation and teardown"
+    },
+    {
+      "host": "browser",
+      "mode": "declarative",
+      "state": "required-unimplemented",
+      "producer": "XSDK1",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config; executable mode additionally guest engine/format, grants, isolation and teardown"
+    },
+    {
+      "host": "browser",
+      "mode": "data-only",
+      "state": "required-unimplemented",
+      "producer": "XSDK6",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config; executable mode additionally guest engine/format, grants, isolation and teardown"
+    },
+    {
+      "host": "browser",
+      "mode": "isolated-executable",
+      "state": "required-unimplemented",
+      "producer": "XSDK4",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config; executable mode additionally guest engine/format, grants, isolation and teardown"
+    }
+  ],
+  "neverReplaceable": [
+    "carrier parse and recovery of a registered carrier",
+    "source, carrier, profile, attachment and catalog identities",
+    "type semantics and the one type-resolution engine",
+    "module resolution and project membership",
+    "cache validity and publication",
+    "edit-transaction authority"
+  ],
+  "deletions": [],
+  "deletionRationale": "Additive reserved boundary, no current production SDK manifest reader or dynamic guest route. Existing static registries and editor/provider adapters keep their owners.",
+  "migrationOwner": "Each producer inventories and retires any displaced route on its candidate; XSDK10 verifies and XSDK11 checks public delivery.",
+  "conditions": [
+    "E01: One exact manifest and target release tuple",
+    "E02: Exact host compatibility and explicit required/optional grants",
+    "E03: Deterministic conflict rejection and immutable snapshot replacement",
+    "E04: Typed fact validation without semantic authority replacement",
+    "E05: Explicit trust, mediated capabilities and qualified bounded isolation",
+    "E06: Demand-selected execution with live-basis checks and teardown",
+    "E07: Canonical authored transactions with preconditions and execution grants",
+    "E08: Local inspectable delivery and real host/profile/example evidence"
+  ],
+  "conditionJustifications": [
+    {
+      "condition": "E01: One exact manifest and target release tuple",
+      "concern": "correctness",
+      "prevents": "Incompatible releases admitted through underspecified package metadata; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Static first-party providers do not negotiate external manifest versions"
+    },
+    {
+      "condition": "E02: Exact host compatibility and explicit required/optional grants",
+      "concern": "correctness",
+      "prevents": "Unknown protocols or denied required capabilities executing by fallback; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "No current SDK admission implementation exercises this boundary"
+    },
+    {
+      "condition": "E03: Deterministic conflict rejection and immutable snapshot replacement",
+      "concern": "correctness",
+      "prevents": "Discovery order selects duplicate owners or mutates live registration; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Catalog invariants need enforcement at the new external ingress"
+    },
+    {
+      "condition": "E04: Typed fact validation without semantic authority replacement",
+      "concern": "correctness",
+      "prevents": "Untrusted metadata impersonates a type/resolver answer; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "First-party fact producers are not untrusted payload validators"
+    },
+    {
+      "condition": "E05: Explicit trust, mediated capabilities and qualified bounded isolation",
+      "concern": "security",
+      "prevents": "Ordinary guest code inherits ambient filesystem, network or origin access; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Worker and subprocess lifecycle alone do not enforce a guest sandbox"
+    },
+    {
+      "condition": "E06: Demand-selected execution with live-basis checks and teardown",
+      "concern": "correctness",
+      "prevents": "Delayed guest replies publish after edits, upgrades or cancellation; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Core validity cannot observe undeclared extension dependencies"
+    },
+    {
+      "condition": "E07: Canonical authored transactions with preconditions and execution grants",
+      "concern": "correctness",
+      "prevents": "Guest edits write stale or unmappable generated coordinates; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Existing transaction checks only protect proposals that enter their owner"
+    },
+    {
+      "condition": "E08: Local inspectable delivery and real host/profile/example evidence",
+      "concern": "process",
+      "prevents": "Contract or upstream capability is published as implemented support; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Generic CI success cannot qualify missing SDK host cells or examples"
+    }
+  ]
+}
