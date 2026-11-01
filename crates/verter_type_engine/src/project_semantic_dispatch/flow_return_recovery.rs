@@ -22,6 +22,13 @@ use crate::semantic_query::{
     SemanticNodeData, SemanticNodeId,
 };
 
+/// A nested function's span, and the name and span of each plain parameter of
+/// it with neither an annotation nor a default.
+struct NestedFunctionFacts {
+    span: verter_span::Span,
+    untyped_parameters: Vec<(Arc<str>, verter_span::Span)>,
+}
+
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// Whether a member walk's `read` found nothing: no answer, or the typed
     /// miss.
@@ -342,10 +349,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         for entry in entries {
             if let SliceObjectEntry::Member(member) = entry {
                 if let SliceExpr::NestedFunctionValue { function, .. } = &member.value {
-                    let Some((_, parameters)) = self.nested_function_facts(function) else {
+                    let Some(facts) = self.nested_function_facts(function) else {
                         continue;
                     };
-                    for (name, span) in parameters {
+                    for (name, span) in facts.untyped_parameters {
                         self.record_checker_diagnostic(CheckerDiagnosticOccurrence::new(
                             span.start,
                             span.end,
@@ -375,9 +382,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             let SliceExpr::NestedFunctionValue { function, .. } = &member.value else {
                 continue;
             };
-            let Some((body, _)) = self.nested_function_facts(function) else {
+            let Some(facts) = self.nested_function_facts(function) else {
                 continue;
             };
+            let body = facts.span;
             let name = member.spans.name;
             self.checker_diagnostics.retain(|diagnostic| {
                 !(diagnostic.code() == CheckerDiagnosticCode::PropertyDoesNotExist
@@ -389,12 +397,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         }
     }
 
-    /// The span of the nested function `function`, and the name and span of
-    /// each plain parameter of it with neither an annotation nor a default.
+    /// What the reports of the literal holding the nested `function` read.
     fn nested_function_facts(
         &mut self,
         function: &verter_session_query::function_program::FunctionProgramKey,
-    ) -> Option<(verter_span::Span, Vec<(Arc<str>, verter_span::Span)>)> {
+    ) -> Option<NestedFunctionFacts> {
         use verter_session_query::function_program::FunctionBindingKind;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -410,7 +417,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let site = self.dispatch.flow_slice_demand_site(&key).ok()?;
         let index = site.source_demand.function_program_index();
         let entry = index.get(function)?.entry();
-        let parameters = entry
+        let untyped_parameters = entry
             .params()
             .iter()
             .filter(|param| !param.has_ts_annotation && !param.has_initializer && !param.rest)
@@ -422,7 +429,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 Some((Arc::clone(name), binding.span))
             })
             .collect();
-        Some((entry.span(), parameters))
+        Some(NestedFunctionFacts {
+            span: entry.span(),
+            untyped_parameters,
+        })
     }
 
     /// The checker's error type for a circular return.
