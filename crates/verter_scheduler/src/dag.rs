@@ -630,8 +630,8 @@ impl std::fmt::Debug for FileWaiterState {
 /// Number of priority lanes — one per [`Priority`] tier.
 const PRIORITY_LANE_COUNT: usize = 4;
 /// Number of resource-class shards within each priority lane — one
-/// per [`ResourceClass`] (`Cpu`, `Io`).
-const CLASS_COUNT: usize = 2;
+/// per [`ResourceClass`] (`Cpu`, `Io`, `Producer`).
+const CLASS_COUNT: usize = 3;
 
 /// Per-lane weights for smooth weighted credit, indexed by
 /// [`Priority`] ordinal (`Critical`=0 .. `Maintenance`=3).
@@ -665,22 +665,23 @@ fn priority_for_lane(index: usize) -> Priority {
     }
 }
 
-/// [`ResourceClass`] → class-shard index (`Cpu`=0, `Io`=1).
+/// [`ResourceClass`] → class-shard index (`Cpu`=0, `Io`=1, `Producer`=2).
 #[inline]
 fn class_index(class: ResourceClass) -> usize {
     match class {
         ResourceClass::Cpu => 0,
         ResourceClass::Io => 1,
+        ResourceClass::Producer => 2,
     }
 }
 
 /// Class-shard index → [`ResourceClass`].
 #[inline]
 fn class_for_index(index: usize) -> ResourceClass {
-    if index == 0 {
-        ResourceClass::Cpu
-    } else {
-        ResourceClass::Io
+    match index {
+        0 => ResourceClass::Cpu,
+        1 => ResourceClass::Io,
+        _ => ResourceClass::Producer,
     }
 }
 
@@ -692,7 +693,7 @@ fn class_for_index(index: usize) -> ResourceClass {
 /// There is exactly ONE of these per scheduler.
 ///
 /// Readiness representation: dispatch-ready tokens live in
-/// [`Self::ready_lanes`], a fixed `4 × 2` matrix of FIFO token sets
+/// [`Self::ready_lanes`], a fixed `4 × 3` matrix of FIFO token sets
 /// indexed by `(Priority, ResourceClass)`. Selection is O(lanes),
 /// never a scan of [`Self::nodes`]. Anti-starvation is smooth
 /// weighted selection-count credit ([`Self::credit`]) across the four
@@ -865,6 +866,9 @@ pub struct SchedulerDag {
     cpu_counter: Arc<AtomicU64>,
     /// In-flight I/O-bound permits. Capped at `budget.io`.
     io_counter: Arc<AtomicU64>,
+    /// In-flight CacheNode producers; a ledger apart from `cpu_counter` so a
+    /// blocked producer never holds a permit a stage needs.
+    producer_counter: Arc<AtomicU64>,
     /// Per-class admission budget.
     budget: DagCapacityBudget,
     /// Cumulative count of [`WorkNodeIdentity::CacheNode`] identities that
@@ -1217,6 +1221,7 @@ impl SchedulerDag {
             progress_waker: None,
             cpu_counter: Arc::new(AtomicU64::new(0)),
             io_counter: Arc::new(AtomicU64::new(0)),
+            producer_counter: Arc::new(AtomicU64::new(0)),
             budget,
             #[cfg(test)]
             cache_node_completed: 0,
@@ -1477,10 +1482,12 @@ impl SchedulerDag {
         }
     }
 
-    /// Current in-flight permit count across both pools (diagnostic),
+    /// Current in-flight permit count across all classes (diagnostic),
     /// derived from the per-class counters that own admission.
     pub fn in_flight_permits(&self) -> u64 {
-        self.in_flight_cpu_permits() + self.in_flight_io_permits()
+        self.in_flight_cpu_permits()
+            + self.in_flight_io_permits()
+            + self.in_flight_producer_permits()
     }
 
     /// Current in-flight CPU permits (diagnostic).
@@ -1491,6 +1498,11 @@ impl SchedulerDag {
     /// Current in-flight I/O permits (diagnostic).
     pub fn in_flight_io_permits(&self) -> u64 {
         self.io_counter.load(Ordering::Acquire)
+    }
+
+    /// Current in-flight CacheNode producer permits (diagnostic).
+    pub fn in_flight_producer_permits(&self) -> u64 {
+        self.producer_counter.load(Ordering::Acquire)
     }
 
     /// Cumulative cache-node terminal-outcome split (diagnostic).
@@ -1752,6 +1764,7 @@ impl SchedulerDag {
         let (counter, cap) = match class {
             ResourceClass::Cpu => (&self.cpu_counter, self.budget.cpu as u64),
             ResourceClass::Io => (&self.io_counter, self.budget.io as u64),
+            ResourceClass::Producer => (&self.producer_counter, self.budget.cpu as u64),
         };
         // Optimistic increment-then-rollback to avoid a CAS loop.
         let prev = counter.fetch_add(1, Ordering::AcqRel);
@@ -1781,9 +1794,8 @@ impl SchedulerDag {
     /// own job resumes. The loan releases through the same
     /// single-release contract as a normal reservation.
     ///
-    /// Both `Cpu` and `Io` classes are loanable. A CPU worker
-    /// loans a CPU permit to inline-execute a CPU dep; an
-    /// I/O worker loans an I/O permit to inline-execute an I/O
+    /// Every class is loanable. A CPU worker loans a CPU or producer
+    /// permit to inline-execute a CPU dep; an I/O worker loans an I/O permit to inline-execute an I/O
     /// dep (a Source-stage load). The caller's
     /// [`next_ready_for_pump`] only routes a loan when the
     /// `caller_kind` matches the class — IoWorker × Cpu is NOT
@@ -1793,6 +1805,7 @@ impl SchedulerDag {
         let counter = match class {
             ResourceClass::Cpu => &self.cpu_counter,
             ResourceClass::Io => &self.io_counter,
+            ResourceClass::Producer => &self.producer_counter,
         };
         counter.fetch_add(1, Ordering::AcqRel);
         Some(DagCapacityReservation {
@@ -2645,23 +2658,23 @@ impl SchedulerDag {
         // parked matching worker can still over-admit its own saturated
         // class to inline-run a transitive dep.
 
-        // The class this caller may over-admit when parked. Matches
-        // the legacy loan matrix exactly: Cpu for CpuWorker|Inline, Io
-        // for IoWorker, and only when the caller is actually parked
-        // (active_path non-empty).
-        let loan_class = if active_path.is_empty() {
-            None
-        } else {
-            match caller_kind {
-                crate::caller_kind::CallerKind::CpuWorker
-                | crate::caller_kind::CallerKind::Inline => Some(ResourceClass::Cpu),
-                crate::caller_kind::CallerKind::IoWorker => Some(ResourceClass::Io),
-                _ => None,
-            }
+        // Whether this caller may over-admit `class` when parked: Cpu and
+        // Producer for CpuWorker|Inline, Io for IoWorker, and only when the
+        // caller is actually parked (active_path non-empty).
+        let may_loan = |class: ResourceClass| {
+            !active_path.is_empty()
+                && match caller_kind {
+                    crate::caller_kind::CallerKind::CpuWorker
+                    | crate::caller_kind::CallerKind::Inline => {
+                        matches!(class, ResourceClass::Cpu | ResourceClass::Producer)
+                    }
+                    crate::caller_kind::CallerKind::IoWorker => class == ResourceClass::Io,
+                    _ => false,
+                }
         };
 
         // Caller-class preference for the inline-execute path: a
-        // CpuWorker floats its CPU shard ahead of the IO shard WITHIN a
+        // CpuWorker floats its CPU shard ahead of the others WITHIN a
         // chosen lane (and symmetrically for IoWorker). Priority still
         // dominates across lanes — preference never inverts priority.
         let preferred_class = match caller_kind {
@@ -2746,11 +2759,8 @@ impl SchedulerDag {
             // the caller's class preference when that shard has a
             // candidate; otherwise take whichever shard does.
             let class_order: [usize; CLASS_COUNT] = match preferred_class {
-                Some(pref) => {
-                    let p = class_index(pref);
-                    [p, 1 - p]
-                }
-                None => [0, 1],
+                Some(ResourceClass::Io) => [1, 0, 2],
+                _ => [0, 1, 2],
             };
             let mut picked: Option<(SubmissionToken, ResourceClass)> = None;
             for &ci in &class_order {
@@ -2766,7 +2776,7 @@ impl SchedulerDag {
             // BEFORE treating saturation as a skip (deadlock avoidance).
             let reservation = match self.try_reserve_for_class(class) {
                 Some(r) => Some(r),
-                None if loan_class == Some(class) => self.loan_capacity_for_class(class),
+                None if may_loan(class) => self.loan_capacity_for_class(class),
                 None => None,
             };
             let Some(reservation) = reservation else {
@@ -2879,6 +2889,7 @@ impl SchedulerDag {
         self.reset_epoch.fetch_add(1, Ordering::AcqRel);
         self.cpu_counter = Arc::new(AtomicU64::new(0));
         self.io_counter = Arc::new(AtomicU64::new(0));
+        self.producer_counter = Arc::new(AtomicU64::new(0));
     }
 
     // ─────────────────────────────────────────────────────────────────

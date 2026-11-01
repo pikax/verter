@@ -46,7 +46,10 @@ exit, retained-handle recovery, startup, and same-driver reset/restart.
 `ScopedCacheNodeHandoff<T>`. Admission/result waits yield; dispatch transfers
 exactly one `ScopedCacheNodeProducer<T>` for the external driver to run before
 resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
-the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
+the same state, on the CPU pool's producer workers. Producers never share a
+worker with a stage: a producer may block on a dependency, a flight or a host
+lock whose holder is waiting for a stage, and stages block on none of those, so
+a queued stage always reaches a worker. Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
 Aggregate cancellation uses that same rail, including last-owner teardown,
 token probes and DAG cancellation; its latch changes immediately but callbacks

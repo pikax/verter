@@ -1357,14 +1357,38 @@ impl VerterHost {
         }
     }
 
-    /// Classify only changed injected members. Every contributor is made
-    /// IndexedReady before population lookup; ordinary scripts remain pending
-    /// until that lookup. The cursor is scoped to the attached workspace.
+    /// Classify changed injected members and make every contributor among
+    /// them IndexedReady before population lookup. Ordinary scripts remain
+    /// pending until that lookup.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
-        // Upsert already owns admission when it reaches this cursor. Match
-        // that order for standalone ingestion, whose loads also integrate
-        // under admission, so neither path can wait on the other's lock.
-        let _admission = self.block_content.admission_fence.lock();
+        {
+            let _admission = self.block_content.admission_fence.lock();
+            self.classify_injected_ambient_roots(except);
+        }
+        self.settle_injected_ambient_roots();
+    }
+
+    /// Make every classified contributor IndexedReady.
+    ///
+    /// Contributor loads publish under admission and may join a load another
+    /// thread already started, so this runs with admission released: holding
+    /// it here would leave that load's owner unable to finish.
+    pub(crate) fn settle_injected_ambient_roots(&self) {
+        let index = self
+            .project_type_store()
+            .indexed()
+            .global_contributor_index();
+        for (member, source) in index.unsettled_ambient() {
+            self.ingest_ambient_contributor(&member, &source);
+            index.settle_ambient(&member, &source);
+        }
+    }
+
+    /// Advance the ingestion cursor over changed injected members, recording
+    /// the contributors [`Self::settle_injected_ambient_roots`] owes. The
+    /// caller holds admission, which orders this before the cursor against
+    /// upsert. The cursor is scoped to the attached workspace.
+    pub(crate) fn classify_injected_ambient_roots(&self, except: Option<&str>) {
         let index = self
             .project_type_store()
             .indexed()
@@ -1431,7 +1455,7 @@ impl VerterHost {
                 self.resolver.runtime.evict_canonical(&member);
             }
             if is_ambient_declaration_canonical(&member) {
-                self.ingest_ambient_contributor(&member, source.as_ref());
+                index.note_unsettled_ambient(&member, Arc::clone(&source));
             } else if crate::global_contributors::source_has_ambient_contribution(source.as_ref())
                 || crate::global_contributors::source_may_have_file_scope_global_contribution(
                     source.as_ref(),

@@ -218,6 +218,7 @@ impl UpsertBatchTxn {
         );
         let mut outcomes =
             Self::map_states(host, prepared, states, false, UpsertResultDemand::Full);
+        host.settle_injected_ambient_roots();
         host.materialize_upsert_carrier_routes(&mut outcomes);
         outcomes
     }
@@ -418,6 +419,7 @@ impl VerterHost {
         // Derived work can join an index producer whose source integration
         // needs the admission fence. Source and workspace publication above
         // are complete before any such dependency is awaited.
+        self.settle_injected_ambient_roots();
         self.materialize_upsert_carrier_routes(&mut outcomes);
         if !changed.is_empty() {
             self.ingest_changed_program_files(changed);
@@ -1151,7 +1153,7 @@ impl VerterHost {
                 .global_contributor_index()
                 .note_pending_overlay_ambient(canonical_id.as_ref());
         }
-        self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
+        self.classify_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
         verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
             &observation,
@@ -1193,7 +1195,7 @@ impl VerterHost {
             .map(|commit| (commit.canonical_id, commit.parsed_edges))
             .collect::<Vec<_>>();
         self.ws().record_parsed_edges_many(&records);
-        self.ingest_injected_ambient_roots(None);
+        self.classify_injected_ambient_roots(None);
         records
             .into_iter()
             .map(|(canonical, _)| canonical)

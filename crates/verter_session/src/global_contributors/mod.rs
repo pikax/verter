@@ -748,6 +748,11 @@ pub struct GlobalContributorIndex {
     /// Drained from contribution collection, not from upsert, so fence
     /// flights stay cold.
     pending_overlay_ambient: parking_lot::Mutex<FxHashSet<Arc<str>>>,
+    /// Ambient contributors a snapshot pass classified, by canonical, with
+    /// the source that classified them. An entry stays until a load made its
+    /// contributor IndexedReady, so a reader that finds the cursor current
+    /// still joins that work instead of reading past it.
+    unsettled_ambient: parking_lot::Mutex<FxHashMap<Arc<str>, Arc<str>>>,
     /// Last fully classified workspace snapshot revision; also serializes ingestion.
     ingested_snapshot_revision: parking_lot::Mutex<Option<u64>>,
     #[cfg(test)]
@@ -786,6 +791,7 @@ impl GlobalContributorIndex {
             mutate: parking_lot::Mutex::new(()),
             revision: AtomicU64::new(0),
             pending_overlay_ambient: parking_lot::Mutex::new(FxHashSet::default()),
+            unsettled_ambient: parking_lot::Mutex::new(FxHashMap::default()),
             ingested_snapshot_revision: parking_lot::Mutex::new(None),
             #[cfg(test)]
             publish_sorted_entries: AtomicU64::new(0),
@@ -903,12 +909,39 @@ impl GlobalContributorIndex {
         self.pending_overlay_ambient.lock().drain().collect()
     }
 
-    /// Whether a contributor recorded at upsert still waits for
-    /// contribution collection: until it is ingested, the published
-    /// population cannot speak for any name it may declare.
+    pub(crate) fn note_unsettled_ambient(&self, canonical: &str, source: Arc<str>) {
+        self.unsettled_ambient
+            .lock()
+            .insert(Arc::from(canonical), source);
+    }
+
+    #[must_use]
+    pub(crate) fn unsettled_ambient(&self) -> Vec<(Arc<str>, Arc<str>)> {
+        self.unsettled_ambient
+            .lock()
+            .iter()
+            .map(|(canonical, source)| (Arc::clone(canonical), Arc::clone(source)))
+            .collect()
+    }
+
+    /// Settle `canonical` unless a later pass reclassified it from other
+    /// bytes while its load ran.
+    pub(crate) fn settle_ambient(&self, canonical: &str, source: &Arc<str>) {
+        let mut unsettled = self.unsettled_ambient.lock();
+        if unsettled
+            .get(canonical)
+            .is_some_and(|current| Arc::ptr_eq(current, source))
+        {
+            unsettled.remove(canonical);
+        }
+    }
+
+    /// Whether a contributor still waits for contribution collection: until
+    /// it is ingested, the published population cannot speak for any name it
+    /// may declare.
     #[must_use]
     pub fn has_pending_overlay_ambient(&self) -> bool {
-        !self.pending_overlay_ambient.lock().is_empty()
+        !self.pending_overlay_ambient.lock().is_empty() || !self.unsettled_ambient.lock().is_empty()
     }
 
     pub fn clear(&self) {
@@ -919,6 +952,7 @@ impl GlobalContributorIndex {
         let _guard = self.publish.lock();
         self.records.clear();
         self.pending_overlay_ambient.lock().clear();
+        self.unsettled_ambient.lock().clear();
         self.grouped.lock().clear();
         *self.snapshot.write() = Arc::new(GlobalContributorPopulation::new(
             0,

@@ -822,8 +822,8 @@ impl Scheduler {
         let source_loader = Arc::clone(&self.source_loader);
 
         // Cache-node work has no file node and routes straight to the
-        // executor's cache-materialisation hook. It is CPU-class work
-        // (`WorkKind::CacheNode`), so it is spawned onto the CPU pool where
+        // executor's cache-materialisation hook. It is producer-class work
+        // (`WorkKind::CacheNode`), spawned onto the CPU pool where
         // the single dispatch entry `dispatch_ready_job_to_executor` runs it
         // and releases the dispatched node's parked reservation. There is no
         // file-stage routing for it (no node lookup, no generation guard).
