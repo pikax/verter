@@ -8,11 +8,14 @@
 //! reuse of the compiler's generated-output coordinates: an authored position
 //! can never stand in for a formatted one, in either direction.
 //!
-//! Raw integer construction is internal to the formatter: the public boundary
-//! hands coordinates over already typed and checked, so no public API takes a
-//! bare integer where a coordinate is meant.
+//! Raw integer construction is internal to the formatter: the only public
+//! way an offset enters the world is [`AuthoredFormatByteOffset::for_source`]
+//! (or its formatted twin), which checks the byte index against the exact
+//! source text it claims to index. Every other boundary hands coordinates
+//! over already typed and checked, so no public API takes a bare integer
+//! where a coordinate is meant.
 //!
-//! ```compile_fail
+//! ```compile_fail,E0308
 //! use verter_formatter::coordinates::{
 //!     AuthoredFormatByteOffset, FormattedByteOffset,
 //! };
@@ -26,14 +29,14 @@
 //! authored_only(formatted_offset());
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0308
 //! use verter_formatter::coordinates::AuthoredFormatByteOffset;
 //! fn authored_only(_offset: AuthoredFormatByteOffset) {}
 //! // A bare integer cannot stand in for a domain offset.
 //! authored_only(0);
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0308
 //! use verter_formatter::coordinates::{AuthoredFormatByteRange, FormattedByteOffset};
 //! fn formatted_offset() -> FormattedByteOffset {
 //!     unreachable!()
@@ -42,7 +45,7 @@
 //! let _ = AuthoredFormatByteRange::new(formatted_offset(), formatted_offset());
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0599
 //! use verter_formatter::coordinates::FormattedByteOffset;
 //! // Raw integer construction is not part of the public coordinate boundary.
 //! let _ = FormattedByteOffset::from_raw(0);
@@ -103,17 +106,39 @@ macro_rules! utf8_byte_domain {
 
         impl $offset {
             /// Construction from a raw byte value: a test-fixture seam, not a
-            /// public entry point. No public API takes an integer where a
-            /// coordinate is meant — offsets cross the public boundary only
-            /// as already-typed values bound to their exact source text, and
-            /// the formatter modules that fill this crate will mint them
-            /// through their own internal checked paths. There is no
-            /// `From<u32>` and no conversion into any other coordinate
-            /// domain.
+            /// production entry point. Production code mints offsets through
+            /// [`Self::for_source`], which checks the index against the exact
+            /// source text. There is no `From<u32>` and no conversion into
+            /// any other coordinate domain.
             #[cfg(test)]
             #[inline]
             pub(crate) const fn from_raw(value: u32) -> Self {
                 Self(value)
+            }
+
+            /// Checked construction against one exact source text: rejects
+            /// offsets past the end of the source, offsets inside a
+            /// multi-byte UTF-8 sequence and sources longer than the offset
+            /// domain can address. This is the minting boundary — the only
+            /// public constructor — so a coordinate never exists unattached
+            /// to the text that validates it.
+            pub fn for_source(source: &str, offset: usize) -> Result<Self, CoordinateError> {
+                let source_len = source.len();
+                if source_len > u32::MAX as usize {
+                    return Err(CoordinateError::SourceTooLarge { source_len });
+                }
+                if offset > source_len {
+                    return Err(CoordinateError::OutOfBounds {
+                        offset: offset as u32,
+                        source_len,
+                    });
+                }
+                if !source.is_char_boundary(offset) {
+                    return Err(CoordinateError::NotCharBoundary {
+                        offset: offset as u32,
+                    });
+                }
+                Ok(Self(offset as u32))
             }
 
             /// The raw UTF-8 byte value.

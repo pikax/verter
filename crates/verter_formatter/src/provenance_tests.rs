@@ -1,5 +1,7 @@
 //! Identity and carrier tests for the provenance contract.
 
+use std::hash::{Hash, Hasher};
+
 use crate::coordinates::{AuthoredFormatByteOffset, AuthoredFormatByteRange};
 use crate::provenance::{AuthoredProvenance, FormatProvenanceTable, ProvenanceError, Provenanced};
 
@@ -7,6 +9,21 @@ use crate::provenance::{AuthoredProvenance, FormatProvenanceTable, ProvenanceErr
 /// text revision, unequal across revisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Revision(u64);
+
+/// A lawful revision identity whose `Hash` encoding is coarser than its
+/// equality: equal revisions still hash equally (the only `Hash` contract),
+/// but so do `7` and `263`. An identity space keyed on the hash encoding
+/// would join them; the minting scope must be the revision value itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LowByteHashedRevision(u64);
+
+impl Hash for LowByteHashedRevision {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        u8::try_from(self.0 & 0xff)
+            .expect("low byte fits")
+            .hash(state);
+    }
+}
 
 fn span(start: u32, end: u32) -> AuthoredFormatByteRange {
     AuthoredFormatByteRange::new(
@@ -123,8 +140,12 @@ fn producer_and_consumer_segments_join_through_the_shared_definitions() {
 
     // The carrier keeps value and binding together through transformation.
     let preserves_provenance = segments.iter().all(|segment| {
-        let provenance = *segment.provenance();
-        *segment.map(|segment| segment.text.len()).provenance() == provenance
+        let provenance = segment.provenance().clone();
+        segment
+            .clone()
+            .map(|segment| segment.text.len())
+            .provenance()
+            == &provenance
     });
     assert!(preserves_provenance);
 }
@@ -154,9 +175,9 @@ fn duplicate_identity_with_a_different_range_is_rejected() {
     let id = table.bind_authored(bound);
 
     assert_eq!(
-        table.declare(id, span(0, 5)),
+        table.declare(id.clone(), span(0, 5)),
         Err(ProvenanceError::DuplicateConflictingBinding {
-            id,
+            id: id.clone(),
             existing: bound,
             requested: span(0, 5),
         })
@@ -174,11 +195,13 @@ fn unknown_identities_are_rejected() {
 
     let foreign = rich_segments[2].provenance().id();
     assert_eq!(
-        small.resolve(foreign),
-        Err(ProvenanceError::UnknownId { id: foreign })
+        small.resolve(foreign.clone()),
+        Err(ProvenanceError::UnknownId {
+            id: foreign.clone()
+        })
     );
     assert_eq!(
-        small.declare(foreign, span(9, 12)),
+        small.declare(foreign.clone(), span(9, 12)),
         Err(ProvenanceError::UnknownId { id: foreign })
     );
     // The join stops at the first identity the reconstruction never minted.
@@ -196,7 +219,7 @@ fn mismatched_bindings_are_rejected() {
         .next()
         .expect("the view bound at least one span")
         .id();
-    let forged = AuthoredProvenance::new(id, span(1, 4));
+    let forged = AuthoredProvenance::new(id.clone(), span(1, 4));
 
     assert_eq!(
         table.validate(&Revision(7), &forged),
@@ -248,7 +271,7 @@ fn stale_provenance_is_rejected_under_the_current_table_revision() {
 
     assert_ne!(old_table.source_revision(), current_table.source_revision());
 
-    let stale = *old_segments[0].provenance();
+    let stale = old_segments[0].provenance().clone();
     let current = current_table
         .iter()
         .next()
@@ -279,5 +302,78 @@ fn stale_provenance_is_rejected_under_the_current_table_revision() {
     assert_eq!(
         current_table.declare(stale.id(), stale.range()),
         Err(ProvenanceError::UnknownId { id: stale.id() })
+    );
+}
+
+#[test]
+fn revisions_sharing_a_hash_encoding_never_share_an_identity_space() {
+    // `LowByteHashedRevision(7)` and `LowByteHashedRevision(263)` are unequal
+    // revisions with identical `Hash` encodings — a lawful pair no hash-derived
+    // scope can separate. The minting scope is the revision value compared by
+    // equality, so the stale binding is still rejected even when the caller
+    // presents the destination's own revision and every ordinal and range
+    // coincides.
+    let mut old_table = FormatProvenanceTable::new(LowByteHashedRevision(7));
+    let stale = AuthoredProvenance::new(old_table.bind_authored(span(0, 4)), span(0, 4));
+    let mut current_table = FormatProvenanceTable::new(LowByteHashedRevision(263));
+    let current_id = current_table.bind_authored(span(0, 4));
+
+    assert_ne!(old_table.source_revision(), current_table.source_revision());
+    assert_ne!(stale.id(), current_id);
+    assert_eq!(
+        current_table.validate(current_table.source_revision(), &stale),
+        Err(ProvenanceError::RevisionMismatch)
+    );
+    assert_eq!(
+        current_table.resolve(stale.id()),
+        Err(ProvenanceError::UnknownId { id: stale.id() })
+    );
+    assert_eq!(
+        current_table.declare(stale.id(), stale.range()),
+        Err(ProvenanceError::UnknownId { id: stale.id() })
+    );
+
+    // The coarse hash never weakens the positive direction either: two tables
+    // for the same revision reconstruct the same identities.
+    let mut replay = FormatProvenanceTable::new(LowByteHashedRevision(7));
+    let replay_id = replay.bind_authored(span(0, 4));
+    assert_eq!(stale.id(), replay_id);
+    replay
+        .declare(stale.id(), stale.range())
+        .expect("a same-revision re-declaration of the same binding holds");
+}
+
+#[test]
+fn revision_scopes_are_type_bearing() {
+    // Two distinct revision newtypes with identical derived `Hash` encodings
+    // (same inner byte pattern) must not share an identity space either: the
+    // scope remembers which revision type minted it, so a `DocumentVersion`
+    // identity never resolves, re-declares or validates in an
+    // `ExternalRegionRevision` table minting the same ordinals.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct DocumentVersion(u64);
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct ExternalRegionRevision(u64);
+
+    let mut document_table = FormatProvenanceTable::new(DocumentVersion(7));
+    let document_id = document_table.bind_authored(span(0, 4));
+    let mut region_table = FormatProvenanceTable::new(ExternalRegionRevision(7));
+    let region_id = region_table.bind_authored(span(0, 4));
+
+    assert_ne!(document_id, region_id);
+    let foreign = AuthoredProvenance::new(document_id.clone(), span(0, 4));
+    assert_eq!(
+        region_table.validate(region_table.source_revision(), &foreign),
+        Err(ProvenanceError::RevisionMismatch)
+    );
+    assert_eq!(
+        region_table.resolve(document_id.clone()),
+        Err(ProvenanceError::UnknownId {
+            id: document_id.clone()
+        })
+    );
+    assert_eq!(
+        region_table.declare(document_id.clone(), span(0, 4)),
+        Err(ProvenanceError::UnknownId { id: document_id })
     );
 }

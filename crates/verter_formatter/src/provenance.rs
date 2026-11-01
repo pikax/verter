@@ -8,14 +8,14 @@
 //! join) share exactly these definitions — no bare integer and no separately
 //! declared token can stand in for the identity:
 //!
-//! ```compile_fail
+//! ```compile_fail,E0308
 //! use verter_formatter::provenance::FormatProvenanceId;
 //! fn consumer(_id: FormatProvenanceId) {}
 //! // A bare integer cannot stand in for a provenance identity.
 //! consumer(0);
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0308
 //! use verter_formatter::provenance::FormatProvenanceId;
 //! struct OtherToken(u32);
 //! fn consumer(_id: FormatProvenanceId) {}
@@ -29,11 +29,44 @@
 //! provenance cannot join a newer revision even when every ordinal and range
 //! coincides and the caller presents the destination's own revision.
 
-use std::collections::hash_map::DefaultHasher;
+use std::any::Any;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use crate::coordinates::AuthoredFormatByteRange;
+
+/// The minting-revision scope, compared exactly: the revision value itself,
+/// type-erased so [`FormatProvenanceId`] stays non-generic.
+///
+/// Equality is the revision's own `Eq` over its own concrete type — never a
+/// `Hash` encoding, which lawful implementations may share between unequal
+/// revisions — so two scopes are equal exactly when the same revision type
+/// holds two equal revision values.
+trait ErasedRevision {
+    fn as_any(&self) -> &dyn Any;
+    fn eq_erased(&self, other: &dyn ErasedRevision) -> bool;
+}
+
+/// The one [`ErasedRevision`] storage: the caller's revision value, shared by
+/// the minting table and every identity it mints.
+#[derive(Clone)]
+struct RevisionScope<R> {
+    revision: R,
+}
+
+impl<R: Eq + 'static> ErasedRevision for RevisionScope<R> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn eq_erased(&self, other: &dyn ErasedRevision) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<RevisionScope<R>>()
+            .is_some_and(|other| self.revision == other.revision)
+    }
+}
 
 /// Opaque identity of one source-backed authored unit, valid only inside the
 /// [`FormatProvenanceTable`] — one source revision — that minted it.
@@ -42,20 +75,49 @@ use crate::coordinates::AuthoredFormatByteRange;
 /// two tables for the same source revision minting the same view order
 /// produce equal identities, while identities minted under different
 /// revisions never compare equal, resolve, or validate against each other,
-/// however their ordinals and ranges coincide.
+/// however their ordinals and ranges coincide — and however their revisions'
+/// `Hash` encodings coincide, because the scope is the revision value
+/// compared by `Eq`, not a hash of it.
 ///
 /// There is no public constructor: identities enter circulation exclusively
 /// through [`FormatProvenanceTable::bind_authored`], so their assignment is
 /// deterministic for a given authored view order and reconstruction assigns
 /// the same identities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone)]
 pub struct FormatProvenanceId {
-    revision_scope: u128,
+    scope: Rc<dyn ErasedRevision>,
     ordinal: u32,
 }
 
+impl PartialEq for FormatProvenanceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.ordinal == other.ordinal && self.scope.eq_erased(&*other.scope)
+    }
+}
+
+impl Eq for FormatProvenanceId {}
+
+/// Equal identities always share an ordinal; the minting scope may differ,
+/// which a hash is allowed to collapse. The ordinal alone is therefore a
+/// lawful — and the only observable — hash input.
+impl Hash for FormatProvenanceId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ordinal.hash(state);
+    }
+}
+
+/// Prints the ordinal only: the minting scope is the caller's revision value,
+/// held for comparison and never serialized, printed or otherwise exposed.
+impl fmt::Debug for FormatProvenanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FormatProvenanceId")
+            .field("ordinal", &self.ordinal)
+            .finish()
+    }
+}
+
 /// The binding of one provenance identity to exactly one authored byte range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthoredProvenance {
     id: FormatProvenanceId,
     range: AuthoredFormatByteRange,
@@ -72,8 +134,8 @@ impl AuthoredProvenance {
 
     /// The bound identity.
     #[inline]
-    pub const fn id(&self) -> FormatProvenanceId {
-        self.id
+    pub fn id(&self) -> FormatProvenanceId {
+        self.id.clone()
     }
 
     /// The bound authored byte range.
@@ -85,7 +147,7 @@ impl AuthoredProvenance {
 
 /// A value carried together with its authored provenance — the sole carrier
 /// shape for authored-view nodes and rendered segments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Provenanced<T> {
     value: T,
     provenance: AuthoredProvenance,
@@ -132,63 +194,54 @@ impl<T> Provenanced<T> {
 ///
 /// `R` is the caller's stable source-revision identity for the authored text
 /// (a content hash, version counter or equivalent), not a formatter-global
-/// identifier. Reconstructing the same authored view revision — binding the
-/// same ranges in the same order — assigns the same identities
-/// deterministically; a table for a different revision is a different identity
-/// space, and validating against a mismatched revision is rejected.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// identifier. It carries its own exact equality (`Eq`) and a `'static`
+/// concrete type, because the minting scope is the revision value itself —
+/// never a `Hash` encoding of it, which lawful revisions may share. The
+/// `'static` and `Eq` bounds are what make an identity space exactly
+/// revision-scoped: a table for another revision — or another revision type
+/// — never accepts this table's identities, however ordinals, ranges or hash
+/// encodings coincide. Reconstructing the same authored view revision —
+/// binding the same ranges in the same order — assigns the same identities
+/// deterministically.
+#[derive(Clone)]
 pub struct FormatProvenanceTable<R> {
-    source_revision: R,
-    /// Scope every identity minted here carries, so a foreign identity can
-    /// never be interpreted in this table's numbering space. Derived from
-    /// `source_revision` once; equal revisions derive equal scopes.
-    revision_scope: u128,
+    /// The revision every identity minted here carries, shared with each
+    /// minted identity so a foreign identity can never be interpreted in this
+    /// table's numbering space — compared by the revision's own `Eq` over its
+    /// own concrete type, never by a `Hash` encoding.
+    revision_scope: Rc<RevisionScope<R>>,
     entries: Vec<AuthoredFormatByteRange>,
 }
 
-/// The revision scope one source revision mints all its identities under:
-/// two domain-separated SipHash passes over the revision's [`Hash`]
-/// encoding, widened to 128 bits.
-///
-/// Equal revisions always derive the equal scopes that deterministic
-/// same-revision reconstruction relies on; distinct revisions would need a
-/// 128-bit hash collision to share one. This is a process-local
-/// discriminator between identity spaces — never a canonical form, never
-/// serialized, never exposed.
-fn revision_scope_of<R: Hash>(revision: &R) -> u128 {
-    let mut low = DefaultHasher::new();
-    let mut high = DefaultHasher::new();
-    0u8.hash(&mut low);
-    1u8.hash(&mut high);
-    revision.hash(&mut low);
-    revision.hash(&mut high);
-    ((high.finish() as u128) << 64) | (low.finish() as u128)
-}
-
-impl<R: Hash> FormatProvenanceTable<R> {
+impl<R: Eq + 'static> FormatProvenanceTable<R> {
     /// An empty table for exactly `source_revision`.
     #[inline]
     pub fn new(source_revision: R) -> Self {
         Self {
-            revision_scope: revision_scope_of(&source_revision),
-            source_revision,
+            revision_scope: Rc::new(RevisionScope {
+                revision: source_revision,
+            }),
             entries: Vec::new(),
         }
     }
-}
 
-impl<R> FormatProvenanceTable<R> {
     /// The source revision this table mints and validates identities for.
     #[inline]
     pub fn source_revision(&self) -> &R {
-        &self.source_revision
+        &self.revision_scope.revision
+    }
+
+    /// The scope this table mints under, as the erased form identities
+    /// carry it.
+    fn scope(&self) -> &dyn ErasedRevision {
+        &*self.revision_scope
     }
 
     /// The binding `id` addresses in this table, or `None` when the identity
     /// was minted under another revision's scope or past this table's end:
     /// either way this table never minted it.
-    fn entry_for(&self, id: FormatProvenanceId) -> Option<&AuthoredFormatByteRange> {
-        if id.revision_scope != self.revision_scope {
+    fn entry_for(&self, id: &FormatProvenanceId) -> Option<&AuthoredFormatByteRange> {
+        if !id.scope.eq_erased(self.scope()) {
             return None;
         }
         self.entries.get(id.ordinal as usize)
@@ -202,7 +255,7 @@ impl<R> FormatProvenanceTable<R> {
             .expect("provenance table exceeds the u32 identity space");
         self.entries.push(range);
         FormatProvenanceId {
-            revision_scope: self.revision_scope,
+            scope: self.revision_scope.clone(),
             ordinal,
         }
     }
@@ -218,7 +271,7 @@ impl<R> FormatProvenanceTable<R> {
         id: FormatProvenanceId,
         range: AuthoredFormatByteRange,
     ) -> Result<(), ProvenanceError> {
-        match self.entry_for(id) {
+        match self.entry_for(&id) {
             Some(existing) if *existing == range => Ok(()),
             Some(existing) => Err(ProvenanceError::DuplicateConflictingBinding {
                 id,
@@ -235,7 +288,7 @@ impl<R> FormatProvenanceTable<R> {
         &self,
         id: FormatProvenanceId,
     ) -> Result<AuthoredFormatByteRange, ProvenanceError> {
-        self.entry_for(id)
+        self.entry_for(&id)
             .copied()
             .ok_or(ProvenanceError::UnknownId { id })
     }
@@ -245,7 +298,7 @@ impl<R> FormatProvenanceTable<R> {
         self.entries.iter().enumerate().map(|(ordinal, range)| {
             AuthoredProvenance::new(
                 FormatProvenanceId {
-                    revision_scope: self.revision_scope,
+                    scope: self.revision_scope.clone(),
                     ordinal: ordinal as u32,
                 },
                 *range,
@@ -264,9 +317,7 @@ impl<R> FormatProvenanceTable<R> {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
-}
 
-impl<R: PartialEq> FormatProvenanceTable<R> {
     /// Validates a provenance binding for use with this table: the caller's
     /// source revision must equal this table's revision, the identity must
     /// have been minted here — under this table's own revision scope, not
@@ -279,30 +330,55 @@ impl<R: PartialEq> FormatProvenanceTable<R> {
         source_revision: &R,
         provenance: &AuthoredProvenance,
     ) -> Result<(), ProvenanceError> {
-        if &self.source_revision != source_revision {
+        if self.source_revision() != source_revision {
             return Err(ProvenanceError::RevisionMismatch);
         }
-        if provenance.id.revision_scope != self.revision_scope {
+        if !provenance.id.scope.eq_erased(self.scope()) {
             // The claimed basis is this table's revision, but the identity
             // was minted under another: a stale binding never joins the
             // current revision, however its ordinal and range align.
             return Err(ProvenanceError::RevisionMismatch);
         }
-        match self.entry_for(provenance.id) {
+        match self.entry_for(&provenance.id) {
             Some(existing) if *existing == provenance.range => Ok(()),
             Some(existing) => Err(ProvenanceError::MismatchedBinding {
-                id: provenance.id,
+                id: provenance.id.clone(),
                 table_binding: *existing,
                 provenance_range: provenance.range,
             }),
-            None => Err(ProvenanceError::UnknownId { id: provenance.id }),
+            None => Err(ProvenanceError::UnknownId {
+                id: provenance.id.clone(),
+            }),
         }
+    }
+}
+
+/// The scope is the revision itself, so comparing revision and entries
+/// compares the scopes too.
+impl<R: PartialEq> PartialEq for FormatProvenanceTable<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision_scope.revision == other.revision_scope.revision
+            && self.entries == other.entries
+    }
+}
+
+impl<R: Eq> Eq for FormatProvenanceTable<R> {}
+
+/// The shared scope is the same value as `source_revision` and never printed
+/// per identity; the identity's own [`fmt::Debug for FormatProvenanceId`]
+/// keeps the ordinal as everything a user-facing message needs.
+impl<R: fmt::Debug> fmt::Debug for FormatProvenanceTable<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FormatProvenanceTable")
+            .field("source_revision", &self.revision_scope.revision)
+            .field("entries", &self.entries)
+            .finish()
     }
 }
 
 /// A provenance identity failure: duplicate or mismatched bindings, unknown
 /// identities, or a join across source revisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvenanceError {
     /// A known identity was re-declared or presented with a different range
     /// than the one it is bound to.
@@ -336,7 +412,7 @@ pub enum ProvenanceError {
 
 impl fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             ProvenanceError::DuplicateConflictingBinding { id, .. } => write!(
                 f,
                 "provenance identity {id:?} is already bound to a different authored range"
