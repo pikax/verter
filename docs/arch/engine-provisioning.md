@@ -268,3 +268,14 @@ execution, bundle and secret mutations are specified in the case table for
 those production-capable owners. No runtime pass, soak or performance claim is
 made by this decision. The future warm 100-request control checks work/growth,
 with timing/allocation/RSS advisory under the measurement rule.
+
+Contract verification uses `pnpm --filter docs check`, changed-file
+`pnpm exec oxfmt --check`, and
+`pnpm exec vitest run packages/vue-vscode/src/package.spec.ts`.
+Bounded catalog inspection checks JSON parsing, unique source/boundary/case
+identities, source-order table agreement, case-to-rule references, complete
+acceptance coverage, current source paths and exact receiving-owner acceptance
+bindings. Relative documentation links must resolve. These checks establish
+contract consistency and the existing packaging prohibition; they do not
+execute future acquisition, selection or activation behavior.
+Tama owns DAG validation; there is no repository roadmap validator to run.
