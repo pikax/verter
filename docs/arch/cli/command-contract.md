@@ -120,6 +120,17 @@ launcher logic on its compatible adapter cutover; CLI4 owns MCP/native alias
 routing; CLI5 owns LSP and package/bin retirement. These assignments partition
 physical routes; the shared application owner remains singular.
 
+The distributed `verter-mcp` executable (`crates/verter_mcp/src/main.rs`, built
+and uploaded by the release workflow) is distinct from the
+`verter-mcp-server` development entry and the npm wrapper. The
+`native-mcp-shipped` row binds its distribution cutover to CLI5-AC1's native
+platform packaging and wrapper conversion, with `packages/verter/bin` as the
+receiving executable. CLI4 supplies the `mcp` adapter and protocol parity;
+CLI5 converts the public distributed name to that same implementation for the
+compatibility release. The Rust service implementation remains internal service
+code, not an independently distributed application authority after retirement.
+Final wrapper deletion is distinct from this packaging cutover.
+
 Compatibility lasts exactly one published unified-CLI release: old executable
 names delegate to the corresponding command, preserve compatible args/exits and
 protocol streams, and warn on stderr only when protocol-safe. No semantic dual

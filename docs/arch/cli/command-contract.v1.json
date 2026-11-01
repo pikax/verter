@@ -252,6 +252,13 @@
     },
     {
       "kind": "route",
+      "id": "native-mcp-shipped",
+      "owner": "CLI5",
+      "source": "crates/verter_mcp/src/main.rs",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "route",
       "id": "command-local-semantic-engine",
       "owner": "CLI1",
       "source": "packages/verter-tsc/bin/run.js (launcher resolution only); reject new command-local analysis",

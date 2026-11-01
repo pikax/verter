@@ -26,3 +26,14 @@ test("ownership rejects omissions, unknown/pathless owners and conflicting assig
     assert.throws(() => validate(candidate));
   }
 });
+
+// The release workflow ships this executable separately from verter-mcp-server.
+test("shipped native MCP entry has a cutover owner and cannot leave the population", () => {
+  const route = contract.inventory.find((row) => row.id === "native-mcp-shipped");
+  assert.equal(route?.source, "crates/verter_mcp/src/main.rs");
+  assert.equal(route.owner, "CLI5");
+  assert.equal(route.successor, "packages/verter/bin");
+  const candidate = structuredClone(contract);
+  candidate.inventory = candidate.inventory.filter((row) => row.id !== route.id);
+  assert.throws(() => validate(candidate), /incomplete or conflicting inventory/);
+});

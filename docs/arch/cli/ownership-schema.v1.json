@@ -198,6 +198,11 @@
       "kind": "route"
     },
     {
+      "kind": "route",
+      "id": "native-mcp-shipped",
+      "owner": "CLI5"
+    },
+    {
       "id": "command-local-semantic-engine",
       "owner": "CLI1",
       "kind": "route"
