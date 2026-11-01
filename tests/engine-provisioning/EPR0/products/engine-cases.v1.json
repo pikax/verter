@@ -1,0 +1,278 @@
+{
+  "id": "engine-cases.v1",
+  "schema": 1,
+  "contractNode": "EPR0",
+  "companionInventory": "engine-policy.v1.json",
+  "cases": [
+    {
+      "id": "C01",
+      "name": "Closed acquisition does zero work",
+      "input": "Forbidden, ManualOnly, missing/invalid project opt-in, enterprise DenyNetwork; each with an explicit install request",
+      "required": "Forbidden/NeedInputs as applicable, zero DNS/socket/metadata/download/extraction/install calls; ordinary resolution also zero network even with Allowed",
+      "forbidden": "Calling a downloader, registry or package manager during resolution or denied acquisition",
+      "rules": ["authorization", "network", "enterprise", "work"],
+      "executableOwner": "EPR2",
+      "receivingAcceptance": "EPR2-AC-WORK",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C02",
+      "name": "Explicit opted-in acquisition",
+      "input": "Authorized project requests exact compatible platform artifact from approved HTTPS npm origin; enterprise permits online",
+      "required": "Outcome phase acquire, state Acquired, with an acquisition receipt of exact origin/version/platform/integrity/installed evidence; capability stays Unavailable, no selection, execution or availability inferred",
+      "forbidden": "First-use/background download/update, executing package scripts, marking capability Available, or reporting the success through a refusal or failure state",
+      "rules": ["authorization", "network", "trust", "capability"],
+      "executableOwner": "EPR2",
+      "receivingAcceptance": "EPR2-AC-CONTRACT",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C03",
+      "name": "Origin, TLS and extraction substitution",
+      "input": "Alter approved package/origin, redirect to unapproved host/plain HTTP, disable TLS, drop SHA-512, mutate tarball, add parent/link/device entry",
+      "required": "TrustFailure/IntegrityFailure before exposure; path-safe bounded extraction never escapes private root; only owned temporary data cleaned",
+      "forbidden": "Unapproved mirror inferred from npmrc, TLS bypass, unchecked script execution or partial READY",
+      "rules": ["trust", "network", "enterprise"],
+      "executableOwner": "EPR2",
+      "receivingAcceptance": "EPR2-AC-CONTRACT",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C04",
+      "name": "Forbidden source and alias cannot bypass policy",
+      "input": "Bundle/cache source denied; env/PATH points at same canonical artifact; permute source enumeration",
+      "required": "Forbidden origin constraints retained for aliases, disabled adapters have zero scan/hash/probe work; no selected receipt",
+      "forbidden": "Renaming the candidate provenance to EnvironmentManual to bypass forbidden source",
+      "rules": ["authorization", "source-order", "bundling", "work"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-SOURCES",
+      "existingEvidence": [
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::dedup_with_an_earlier_tier_keeps_bundled_provenance"
+      ],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C05",
+      "name": "Deterministic order and project isolation",
+      "input": "All authorized local tiers populated; reorder enumerator arrival; change captured source order; use sibling project and equivalent pnpm versions; explicit --tsgo-bin rejected while lower tier could pass",
+      "required": "Exact policy order and structural tie-breakers select the same artifact under enumeration permutations; changed order changes policy basis; no sibling engine borrowing; exact manual/CLI choice rejects without lower-tier fallback; a successful selection reports Selected with its receipt and capability Unavailable",
+      "forbidden": "Directory read/hash-map order, ambient CWD or an SDK setting changing permissions",
+      "rules": ["source-order", "lifecycle"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-COMPARATOR",
+      "existingEvidence": [
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::enumeration_walks_tiers_in_order",
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::foreign_platform_packages_are_never_enumerated",
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::duplicate_candidates_are_enumerated_once"
+      ],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C06",
+      "name": "No unverified executable or trust fallback",
+      "input": "Unapproved local origin, wrong digest/closure, cache symlink/reparse/owner/permissions/READY, revoked root, corrupt bundle and a valid lower candidate",
+      "required": "No version/capability probe or execution before nonexecuting trust/compatibility/integrity passes; typed terminal Trust/Integrity failure preserves candidate",
+      "forbidden": "Existence or --version accepted as trust; corrupt candidate becomes NotFound or fallback success",
+      "rules": ["trust", "capability"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-CANDIDATES",
+      "existingEvidence": [
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::a_cache_binary_with_a_symlinked_component_escaping_the_root_is_rejected",
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::a_world_writable_cache_root_skips_the_tier_with_a_note",
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::invalid_bundled_sidecar_is_a_product_integrity_error"
+      ],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C07",
+      "name": "Exact version and capability policy",
+      "input": "Exact pin outside range/revoked, nightly, supported beta/rc, wrong platform/ABI, tsserver native family, missing default libraries",
+      "required": "Distinct Incompatible/TrustFailure; only compatible permitted versions admitted; exact dependency pins remain authoritative; current library/family restrictions retained",
+      "forbidden": "Selecting registry latest, coercing version or trusting wrong platform; explicit family request silently switching engines",
+      "rules": ["trust", "source-order", "lifecycle"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-CANDIDATES",
+      "existingEvidence": [
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs::cache_enumeration_uses_the_production_policy",
+        "crates/verter_type_runtime/src/discovery.rs::resolve_tsserver (bounded implementation inspection only)"
+      ],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C08",
+      "name": "Outcomes preserve absence, rejection and activation failure",
+      "input": "Serialize every catalog outcome, each phase, redacted provenance and completeness; successful acquire/resolve/select stages; missing input vs empty search vs rejected candidate vs child handshake failure",
+      "required": "Distinct reason/state/actionability survives protocol roundtrip; Acquired, Resolved and Selected carry their own stage receipt while capability stays Unavailable; Available only with current selection+activation receipts; unrelated native capabilities preserved",
+      "forbidden": "Generic off/no-provider success, Available from installed/acquired/provisional candidate, or a successful stage reported as a refusal state",
+      "rules": ["capability", "enterprise"],
+      "executableOwner": "EPR5",
+      "receivingAcceptance": "EPR5-AC-CAPABILITY",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C09",
+      "name": "Offline, proxies and secrets",
+      "input": "Offline missing/present local artifact; DenyNetwork after opt-in; explicit proxy auth/custom CA fails; sentinel secret appears in runtime inputs",
+      "required": "Offline/Forbidden typed; zero DNS/socket/install on forbidden/offline requests; local verified sources still work; no credential/source leakage into logs/public DTOs/receipts/cache identity",
+      "forbidden": "Direct-network retry, origin fallback, secret-derived digest or raw URL in diagnostic",
+      "rules": ["enterprise", "authorization", "network"],
+      "executableOwner": "EPR2",
+      "receivingAcceptance": "EPR2-AC-CONTRACT",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C10",
+      "name": "Policy change and incremental equivalence",
+      "input": "Resolve under one snapshot, change source order/origin/trust/revocation/host basis; compare warm and fresh; cancel or return partial/NeedInputs",
+      "required": "Affected receipts reject; incremental equals fresh; incomplete/cancelled/stale data never warm-admits; unchanged valid facts may reuse",
+      "forbidden": "Warm success after denial/revocation or reuse across projects/hosts",
+      "rules": ["lifecycle", "source-order", "capability"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-INCREMENTAL",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C11",
+      "name": "Activation race and rollback",
+      "input": "Replace bytes after selection, cancel/change policy during handshake, crash replacement, request PreviousVerified or Disabled rollback",
+      "required": "Revalidate before spawn; no mixed/stale ProviderEpoch publication; rollback only to current authorized compatible verified receipt; no implicit acquisition; teardown owned processes",
+      "forbidden": "Activating substituted bytes, revoked rollback or stale capability after epoch change",
+      "rules": ["trust", "lifecycle", "capability"],
+      "executableOwner": "EPR5",
+      "receivingAcceptance": "EPR5-AC-ATOMIC",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C12",
+      "name": "No bundled distribution",
+      "input": "Inject external-engine/tsgo bytes through source override, stale bin entry or unauthorized package family/platform",
+      "required": "Closed package matrix and runtime source reject bundle; existing shim whitelist retained; absent/disabled bundle does zero filesystem work",
+      "forbidden": "Weakening whitelist or treating layout/pin prose as release permission",
+      "rules": ["bundling", "trust", "work"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-SOURCES",
+      "existingEvidence": [
+        "packages/vue-vscode/src/package.spec.ts::only ever names the Verter shim, never tsgo",
+        "packages/vue-vscode/src/package.spec.ts::stages the target-specific release binary and never any tsgo file",
+        "packages/vue-vscode/src/package.spec.ts::rejects a tsgo-shaped VERTER_RELAY_SHIM_BINARY source (the CI seam)",
+        "packages/vue-vscode/src/package.spec.ts::removes a stale tsgo artifact from bin/ before packaging"
+      ],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C13",
+      "name": "Single final owner and complete source transfer",
+      "input": "Plant an independent selector/spawn route, including a CLI/API provisional start or raw-path connect and a raw-path relay launch, or omit a displaced route/owner/receiving acceptance from the catalog",
+      "required": "Duplicate production selection rejected by EPR4 ownership/route guard; activation bypass across R07, R10 and R11 rejected by EPR5; contract inventory rejects omission/conflicting or non-production owner before cutover",
+      "forbidden": "Docs-only owner assigned runtime deletion or a production compatibility bypass remaining after cutover",
+      "rules": ["authorization", "source-order", "capability"],
+      "executableOwner": "EPR4",
+      "receivingAcceptance": "EPR4-AC-SOLE",
+      "additionalAcceptances": ["EPR5-AC-SOLE"],
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C14",
+      "name": "Browser, companion and remote permissions",
+      "input": "Browser-local native request; explicitly selected native companion; remote host without execute or upload permission; cross-host receipt reuse",
+      "required": "Browser-native Unsupported; exact permitted host/platform/endpoint required; no silent remote execution/source upload; current host receipt cannot alias another",
+      "forbidden": "Shared-core conformance claimed as a certified UI or project acquisition opt-in used as remote permission",
+      "rules": ["hosts", "trust", "lifecycle"],
+      "executableOwner": "EPR5",
+      "receivingAcceptance": "EPR5-AC-CONTRACT",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    },
+    {
+      "id": "C15",
+      "name": "Bounded warm and disabled work",
+      "input": "Warm 100 identical current requests; disable each source; repeat explicit install for an existing valid entry; close/swap provider epochs",
+      "required": "Equivalent answers, bounded retained growth, no repeated unrequested provider/FS/network/installation work; separate acquisition/resolution/activation counters",
+      "forbidden": "Hidden warm downloader, duplicate validation, whole-workspace work or retained stale epochs",
+      "rules": ["work", "lifecycle"],
+      "executableOwner": "EPR6",
+      "receivingAcceptance": "EPR6-AC-WORK",
+      "existingEvidence": [],
+      "evidenceLimit": "Specification vector; listed existing coverage characterizes only its named legacy invariant, not the future policy boundary. No new runtime test or mutation is executed here."
+    }
+  ],
+  "acceptanceCoverage": [
+    {
+      "acceptance": ["EPR0-AC1", "EPR0-AC-POLICY", "EPR0-AC-LEGACY"],
+      "contractEvidence": "Policy sources, external requirements, displacedRoutes R01-R11, retainedInvariants and sourceDisposition; all production routes bind a later capable owner and receiving acceptance",
+      "cases": ["C01", "C03", "C04", "C05", "C12", "C13"],
+      "runtimeOwners": ["EPR2", "EPR4", "EPR5"]
+    },
+    {
+      "acceptance": ["EPR0-AC2", "EPR0-AC-CONTRACT", "EPR0-AC-OUTCOMES"],
+      "contractEvidence": "Exact named boundaries, per-requirement order, phase/state distinctions including stage success before activation, host policy and secret law",
+      "cases": ["C02", "C05", "C07", "C08", "C09", "C14"],
+      "runtimeOwners": ["EPR2", "EPR4", "EPR5"]
+    },
+    {
+      "acceptance": ["EPR0-AC-ZERO-NETWORK"],
+      "contractEvidence": "Forbidden/ManualOnly/enterprise/offline vectors retain zero automatic network and install work; ordinary resolution network-free even with opt-in",
+      "cases": ["C01", "C02", "C09"],
+      "runtimeOwners": ["EPR2", "EPR4", "EPR6"]
+    },
+    {
+      "acceptance": ["EPR0-AC-SOLE"],
+      "contractEvidence": "Full displaced-route inventory plus planted duplicate selection/activation vectors; production guards are receiving work, not a claimed current pass",
+      "cases": ["C06", "C12", "C13"],
+      "runtimeOwners": ["EPR4", "EPR5", "EPR6"]
+    },
+    {
+      "acceptance": ["EPR0-AC3", "EPR0-AC-INCREMENTAL"],
+      "contractEvidence": "Runtime execution not applicable to zero-production decision; invalidation/publication vectors preserved for receiving tests",
+      "cases": ["C10", "C11"],
+      "runtimeOwners": ["EPR4", "EPR5"]
+    },
+    {
+      "acceptance": ["EPR0-AC4", "EPR0-AC-WORK"],
+      "contractEvidence": "No hot-path/runtime work changes; bounded snapshot/disabled/warm contract counters specified, no soak/timing claim here",
+      "cases": ["C01", "C04", "C15"],
+      "runtimeOwners": ["EPR2", "EPR4", "EPR5", "EPR6"]
+    }
+  ],
+  "receivingProofs": [
+    {
+      "owner": "EPR1",
+      "acceptance": "EPR1-AC-SOLE",
+      "obligation": "Contract inventory/schema validator rejects unclassified source, duplicate/conflicting source owner, missing source atom, unknown owner, missing receiving acceptance and documentation-only owner assigned production work; transfers this catalog without duplicating authority"
+    },
+    {
+      "owner": "EPR2",
+      "acceptance": "EPR2-AC-CONTRACT",
+      "obligation": "Explicit authorization, dependency/security review, approved origins/TLS/integrity, no scripts, safe extraction and atomic install; denied/offline zero-work, proxy/secret tests"
+    },
+    {
+      "owner": "EPR4",
+      "acceptance": "EPR4-AC-SOLE",
+      "obligation": "Delete/reject R01-R06 and R09 independent selection/probe/bypass authority, enforce source policy and pre-execution validation; supply the selection receipt R10 and R11 consume; planted duplicate source/route and bundle alias controls"
+    },
+    {
+      "owner": "EPR4",
+      "acceptance": "EPR4-AC-NO-NETWORK",
+      "obligation": "Resolution has no acquisition/network effect capability, regardless of project opt-in; EPR2 is explicit command only"
+    },
+    {
+      "owner": "EPR5",
+      "acceptance": "EPR5-AC-SOLE",
+      "obligation": "Delete/reject R07 independent activation, R10 CLI/API provisional and raw-path activation, R11 relay raw-path execution and R08 coarse capability inference; prove exact policy/selection/handshake/ProviderEpoch publication, redaction, cancellation and teardown"
+    },
+    {
+      "owner": "EPR6",
+      "acceptance": "EPR6-AC-HONEST",
+      "obligation": "Opened/unopened source x platform x host matrix, installed-byte supply-chain proof, zero-work, route closure, truthful status and client promotion boundaries"
+    }
+  ],
+  "reviewAdmission": "These are existing frozen-charter obligations translated into concrete vectors, not optional speculative hardening. Each rule justification is in the companion policy conditionJustifications."
+}

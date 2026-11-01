@@ -1,0 +1,921 @@
+{
+  "id": "engine-policy.v1",
+  "schema": 1,
+  "contractNode": "EPR0",
+  "finalOwner": "One immutable project/profile/host EngineProvisioningPolicy; EPR4 selection/validation and EPR5 activation consume it",
+  "describesHead": {
+    "landingTitle": "feat(session): reserve module homes for the lint, css, a11y, formatter, (#1059)",
+    "date": "2026-11-01"
+  },
+  "companionCaseTable": "engine-cases.v1.json",
+  "authorization": {
+    "ruling": "epr0-network-bundling",
+    "answered": "2026-11-01",
+    "choice": "Automatic acquisition with explicit opt-in per project",
+    "defaultAcquisition": "ManualOnly",
+    "managedAcquisition": "Allowed only for explicit project user/admin opt-in AND explicit install/update request; enterprise denial/offline win",
+    "bundling": "Forbidden for all package families and platforms",
+    "runtimeImplementation": false
+  },
+  "conditions": [
+    "Enterprise denial intersects explicit user/admin project opt-in; ordinary resolution never acquires, and workspace/env data cannot grant execution.",
+    "Source visibility, selection and execution are separate; all permitted lists are explicit, deterministically ordered and epoch-bearing; forbidden adapters do zero work.",
+    "Verify exact origin, execution closure, integrity, compatibility, trust and revocation before any probe/execute; trust/integrity failures never become absence.",
+    "Only explicit opted-in requests reach approved HTTPS origin/package scopes; mandatory TLS, integrity, bounded redirect/extraction, no scripts or unrelated telemetry.",
+    "Offline/deny-network override opt-in; proxy/custom roots are explicit approved inputs and secrets stay runtime-only and redacted.",
+    "Policy/revocation/host changes supersede work; complete facts revalidate before reuse/publication; rollback revalidates the prior known-good receipt.",
+    "Distinct phase/state/reason/completeness and ordered provenance; Available requires selection and active handshake receipts.",
+    "Browser-local native execution is Unsupported; companions/remotes require exact host trust plus explicit execution/source-transfer permission.",
+    "All external-engine shipping channels are closed; retain no-tsgo guards until separate exact release authorization.",
+    "Pure bounded snapshot policy evaluation does no I/O; disabled/ordinary resolution never installs or networks; counters separate acquisition, validation, selection and activation."
+  ],
+  "conditionJustifications": [
+    {
+      "id": "authorization",
+      "condition": "Enterprise denial intersects explicit user/admin project opt-in; ordinary resolution never acquires, and workspace/env data cannot grant execution.",
+      "concern": "security",
+      "prevents": "Untrusted project settings or a discovered path causing unintended execution/network access; plausible on first project open.",
+      "notCoveredBecause": "Existing discovery tests check tiers, not captured policy authorization or enterprise denial."
+    },
+    {
+      "id": "source-order",
+      "condition": "Source visibility, selection and execution are separate; all permitted lists are explicit, deterministically ordered and epoch-bearing; forbidden adapters do zero work.",
+      "concern": "correctness",
+      "prevents": "Ambient enumeration or aliases selecting a different/forbidden toolchain; existing routes already have several orders.",
+      "notCoveredBecause": "Current tier tests do not cover policy reorder, canonical aliases across forbidden classes or shared host identities."
+    },
+    {
+      "id": "trust",
+      "condition": "Verify exact origin, execution closure, integrity, compatibility, trust and revocation before any probe/execute; trust/integrity failures never become absence.",
+      "concern": "security",
+      "prevents": "Executing a replaced/unverified binary or hiding tampering by fallback; plausible for PATH, cache and SDK candidates.",
+      "notCoveredBecause": "Version/protocol probing executes candidate code and cannot establish pre-execution trust."
+    },
+    {
+      "id": "network",
+      "condition": "Only explicit opted-in requests reach approved HTTPS origin/package scopes; mandatory TLS, integrity, bounded redirect/extraction, no scripts or unrelated telemetry.",
+      "concern": "security",
+      "prevents": "Unapproved download, origin substitution or archive escape; plausible with hostile metadata.",
+      "notCoveredBecause": "No current managed writer exists; packaging/local discovery guards do not exercise acquisition."
+    },
+    {
+      "id": "enterprise",
+      "condition": "Offline/deny-network override opt-in; proxy/custom roots are explicit approved inputs and secrets stay runtime-only and redacted.",
+      "concern": "security",
+      "prevents": "DNS/socket leakage offline or proxy credential disclosure; plausible if reused generic downloader defaults.",
+      "notCoveredBecause": "Local source tests have no downloader, proxy authentication or public redaction boundary."
+    },
+    {
+      "id": "lifecycle",
+      "condition": "Policy/revocation/host changes supersede work; complete facts revalidate before reuse/publication; rollback revalidates the prior known-good receipt.",
+      "concern": "correctness",
+      "prevents": "Publishing a stale provider or reusing a revoked artifact after permission changes; plausible under concurrent acquisition/activation.",
+      "notCoveredBecause": "Existing ProviderHub epochs do not capture the proposed provisioning policy basis."
+    },
+    {
+      "id": "capability",
+      "condition": "Distinct phase/state/reason/completeness and ordered provenance; Available requires selection and active handshake receipts.",
+      "concern": "correctness",
+      "prevents": "An installed file, failed activation or missing provider being reported available; plausible with current coarse status adapters.",
+      "notCoveredBecause": "Package and discovery tests cannot establish current per-operation provider availability."
+    },
+    {
+      "id": "hosts",
+      "condition": "Browser-local native execution is Unsupported; companions/remotes require exact host trust plus explicit execution/source-transfer permission.",
+      "concern": "security",
+      "prevents": "Native spawn or silent source upload from a browser request; plausible if host fallback is implicit.",
+      "notCoveredBecause": "Desktop engine tests cannot certify browser or remote permission boundaries."
+    },
+    {
+      "id": "bundling",
+      "condition": "All external-engine shipping channels are closed; retain no-tsgo guards until separate exact release authorization.",
+      "concern": "security",
+      "prevents": "Accidentally shipping engine bytes through existing sidecar support; current resolver still recognizes sidecars.",
+      "notCoveredBecause": "VSIX guards cover that artifact only; other package families and runtime selection need explicit closed-channel treatment."
+    },
+    {
+      "id": "work",
+      "condition": "Pure bounded snapshot policy evaluation does no I/O; disabled/ordinary resolution never installs or networks; counters separate acquisition, validation, selection and activation.",
+      "concern": "performance",
+      "prevents": "Repeated registry/provider/FS work hidden in warm resolution; plausible when acquisition is wired into discovery.",
+      "notCoveredBecause": "No current cross-authority work accounting covers the new source policy."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "EngineProvisioningPolicy",
+      "fields": [
+        "schemaVersion",
+        "policyEpoch",
+        "projectId",
+        "profileId",
+        "executionHostId",
+        "sourcePolicies",
+        "ordersByRequirement",
+        "update",
+        "offline",
+        "proxy",
+        "rollback",
+        "trustRootIds",
+        "revocationGeneration",
+        "compatibilityPolicyId",
+        "authorizationProvenance"
+      ],
+      "owner": "EPR1 contract / EPR4 consumer"
+    },
+    {
+      "name": "EngineSourceKind",
+      "variants": [
+        "EnvironmentManual",
+        "ProjectLocal",
+        "EditorShared",
+        "SystemPath",
+        "ManagedCache",
+        "ManagedDownload",
+        "Bundled"
+      ],
+      "owner": "EPR1 contract / EPR4 source adapters"
+    },
+    {
+      "name": "EngineSourcePolicy",
+      "fields": [
+        "sourceKind",
+        "discoverPermission",
+        "selectPermission",
+        "executePermission",
+        "acquisitionPermission",
+        "originIds",
+        "trustRootIds",
+        "fallbackLaw"
+      ],
+      "owner": "EPR4"
+    },
+    {
+      "name": "EngineAcquisitionPermission",
+      "variants": ["Forbidden", "ManualOnly", "Allowed"],
+      "owner": "EPR2 acquisition / EPR4 source gate"
+    },
+    {
+      "name": "EngineUpdatePolicy",
+      "variants": ["ExplicitOnly"],
+      "fields": ["exactPinOrSupportedChannel", "compatibilityPolicyId", "revocationGeneration"],
+      "owner": "EPR2 update command / EPR4 evaluator"
+    },
+    {
+      "name": "EngineOfflinePolicy",
+      "variants": ["OnlineAllowed", "Offline", "DenyNetwork"],
+      "owner": "EPR2 / EPR4"
+    },
+    {
+      "name": "EngineProxyPolicy",
+      "fields": [
+        "approvedProxyEndpointId",
+        "noProxyRules",
+        "approvedCustomRootIds",
+        "runtimeCredentialReferences"
+      ],
+      "owner": "EPR2"
+    },
+    {
+      "name": "EngineRollbackPolicy",
+      "variants": ["PreviousVerified", "Disabled"],
+      "owner": "EPR5"
+    },
+    {
+      "name": "EngineNeed",
+      "fields": [
+        "projectId",
+        "profileId",
+        "engineFamily",
+        "requiredCapability",
+        "authoredRequestId",
+        "snapshotId",
+        "executionHostId"
+      ],
+      "owner": "EPR4"
+    },
+    {
+      "name": "EngineRequirement",
+      "fields": [
+        "need",
+        "platformAbi",
+        "exactPinOrCompatibilityPolicy",
+        "protocolFeatures",
+        "orderedSources",
+        "deadline",
+        "cancellationContext"
+      ],
+      "owner": "EPR4"
+    },
+    {
+      "name": "TrustedEngineOrigin",
+      "fields": [
+        "originId",
+        "exactHttpsOriginOrApprovedLocalOrigin",
+        "packageScope",
+        "trustRootIds",
+        "authorizationProvenance"
+      ],
+      "owner": "EPR1 contract / EPR4 validator"
+    },
+    {
+      "name": "EngineTrustRootId",
+      "fields": ["rootSetIdentity", "rootSetRevision", "policyEpoch"],
+      "owner": "EPR1 contract / EPR4 validator"
+    },
+    {
+      "name": "EngineProvisioningOutcome",
+      "fields": [
+        "phase",
+        "state",
+        "typedReason",
+        "need",
+        "requirement",
+        "policyIdentity",
+        "completeness",
+        "orderedRejections",
+        "redactedProvenance",
+        "receipts",
+        "remediation"
+      ],
+      "owner": "EPR4/EPR5 under PUB0 envelope",
+      "phases": ["acquire", "resolve", "select", "activate"]
+    },
+    {
+      "name": "EngineCapabilityState",
+      "fields": [
+        "operation",
+        "availability",
+        "selectionReceipt",
+        "activationReceipt",
+        "providerEpoch",
+        "policyIdentity",
+        "reason"
+      ],
+      "owner": "EPR5 under PUB0/COX0"
+    }
+  ],
+  "sources": [
+    {
+      "kind": "EnvironmentManual",
+      "acquisitionPermission": "ManualOnly",
+      "visibility": "Explicit SDK/path or user-supplied artifact; not a permission grant",
+      "selection": "Allowed only by captured project/profile/host source policy after validation",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Local approval receipt for exact origin/bytes/closure",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-SOURCES",
+      "acquisitionOwner": "External user/admin/editor installation; Verter does not acquire here",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Allowed only under explicit captured source authorization; no execution"
+    },
+    {
+      "kind": "ProjectLocal",
+      "acquisitionPermission": "ManualOnly",
+      "visibility": "Owning project ancestor chain; flat/pnpm/nested/shim; extension mode project only",
+      "selection": "Allowed only by captured project/profile/host source policy after validation",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Trusted package install closure, exact artifact and dependency evidence",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CANDIDATES",
+      "acquisitionOwner": "External user/admin/editor installation; Verter does not acquire here",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Allowed only under explicit captured source authorization; no execution"
+    },
+    {
+      "kind": "EditorShared",
+      "acquisitionPermission": "Forbidden",
+      "visibility": "Explicit editor-owned topology with exact project/endpoint attestation",
+      "selection": "Allowed only by captured project/profile/host source policy after validation",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Trusted editor owner, engine evidence and current project handshake",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CANDIDATES",
+      "acquisitionOwner": "External user/admin/editor installation; Verter does not acquire here",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Allowed only under explicit captured source authorization; no execution"
+    },
+    {
+      "kind": "SystemPath",
+      "acquisitionPermission": "ManualOnly",
+      "visibility": "Captured PATH/platform order, or explicitly authorized global tsserver adapter",
+      "selection": "Allowed only by captured project/profile/host source policy after validation",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Local admin/user origin+digest approval; PATH membership is insufficient",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CANDIDATES",
+      "acquisitionOwner": "External user/admin/editor installation; Verter does not acquire here",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Allowed only under explicit captured source authorization; no execution"
+    },
+    {
+      "kind": "ManagedCache",
+      "acquisitionPermission": "Forbidden",
+      "visibility": "Consume verified immutable complete entries only; no repair/download",
+      "selection": "Allowed only by captured project/profile/host source policy after validation",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Current normalized receipt, ownership/permissions/no-follow/READY verification",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CANDIDATES",
+      "acquisitionOwner": "External user/admin/editor installation; Verter does not acquire here",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Allowed only under explicit captured source authorization; no execution"
+    },
+    {
+      "kind": "ManagedDownload",
+      "acquisitionPermission": "Allowed",
+      "visibility": "Closed by default; explicit project opt-in plus install/update request and no enterprise/offline denial",
+      "selection": "Never a resolution source; verified installed output enters ManagedCache",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Approved HTTPS scoped origin and exact metadata/integrity evidence",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-NO-NETWORK",
+      "acquisitionOwner": "EPR2 (EPR2-AC-CONTRACT)",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Forbidden during resolution"
+    },
+    {
+      "kind": "Bundled",
+      "acquisitionPermission": "Forbidden",
+      "visibility": "No authorized shipping family/platform; no adapter/scan/hash when closed",
+      "selection": "Forbidden",
+      "execution": "Separate current policy permission and EPR5 activation receipt required",
+      "trust": "Separate release authorization required; none granted",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-SOURCES",
+      "acquisitionOwner": "No shipping owner authorized; EPR3 unopened",
+      "activationOwner": "EPR5 (EPR5-AC-REVALIDATE)",
+      "discoveryPermission": "Forbidden during resolution"
+    }
+  ],
+  "orders": [
+    {
+      "requirement": "tsgo LSP/API",
+      "sources": ["EnvironmentManual", "SystemPath", "ProjectLocal", "ManagedCache"],
+      "closed": ["ManagedDownload", "Bundled"]
+    },
+    {
+      "requirement": "managed tsserver",
+      "sources": ["ProjectLocal", "EnvironmentManual", "SystemPath"],
+      "closed": ["ManagedCache", "ManagedDownload", "Bundled"]
+    },
+    {
+      "requirement": "editor tsgo rendezvous",
+      "sources": ["EnvironmentManual", "ProjectLocal"],
+      "closed": ["ManagedCache", "ManagedDownload", "Bundled", "SystemPath"]
+    },
+    {
+      "requirement": "editor-owned provider",
+      "sources": ["EditorShared"],
+      "closed": ["All filesystem/acquisition sources"]
+    },
+    {
+      "requirement": "extension TypeScript",
+      "sources": ["ProjectLocal"],
+      "closed": ["All other sources"]
+    }
+  ],
+  "originPolicy": {
+    "initialHttpsOrigins": ["https://registry.npmjs.org"],
+    "exactPackages": [
+      "typescript",
+      "@typescript/typescript-darwin-arm64",
+      "@typescript/typescript-darwin-x64",
+      "@typescript/typescript-linux-arm64",
+      "@typescript/typescript-linux-x64",
+      "@typescript/typescript-win32-arm64",
+      "@typescript/typescript-win32-x64"
+    ],
+    "trustRoots": [
+      "System TLS CA root set identified by revision",
+      "Explicit admin-approved enterprise CA root set identified by revision"
+    ],
+    "integrity": "Authenticated registry metadata with exact version/platform tarball SHA-512; installed-file digests bind extraction to that tarball",
+    "signatures": "Required iff captured source policy requires them; exact accepted signer/root identities and revocation checked; never silently downgrade",
+    "enterpriseMirror": "Separate explicit approved origin/package/root entry; npm config alone grants nothing",
+    "localTrust": "Explicit user/admin-approved origin, exact bytes and execution closure receipt; existence/version probe not proof",
+    "redirect": "Bounded by EPR2 dependency/security review; every target revalidated against exact approved HTTPS origin/package scope",
+    "tlsBypass": "Forbidden"
+  },
+  "lifecycle": {
+    "schemaMigration": "Unsupported unknown schema; explicit migration produces new snapshot",
+    "pinPrecedence": "Revocation/compatibility and source permission > exact requested pin > greatest compatible permitted channel version",
+    "update": "ExplicitOnly; no background work",
+    "rollback": "PreviousVerified revalidates one prior receipt without acquisition, or Disabled",
+    "policyChange": "Cancel/supersede in-flight work; invalidate affected resolution/selection/activation facts; current epoch publication check",
+    "warmAdmission": "Complete and fact-valid only; never Cancelled/stale/partial/NeedInputs",
+    "secrets": "Runtime-only references; no values or secret-derived digests in policy/receipts/logs/public DTOs"
+  },
+  "outcomes": [
+    {
+      "state": "Acquired",
+      "phase": "acquire",
+      "meaning": "Explicit acquisition completed with its verified acquisition receipt; establishes no selection, execution permission or availability",
+      "remediation": "None for this stage; later stages stay separate requests",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR2",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR2"],
+      "receivingAcceptance": "EPR2-AC-CONTRACT"
+    },
+    {
+      "state": "Resolved",
+      "phase": "resolve",
+      "meaning": "Authorized candidates validated with their resolution receipts; establishes no selection or running provider",
+      "remediation": "None for this stage; later stages stay separate requests",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Selected",
+      "phase": "select",
+      "meaning": "One exact candidate chosen with its selection receipt and complete rejection provenance; establishes no activation",
+      "remediation": "None for this stage; later stages stay separate requests",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Available",
+      "phase": "activate",
+      "meaning": "Requested engine capability has current selection AND active handshake receipts",
+      "remediation": "None",
+      "capability": "Available",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-CONTRACT"
+    },
+    {
+      "state": "NeedInputs",
+      "meaning": "Required policy, trust evidence, prepared input or valid rollback receipt missing",
+      "remediation": "User/admin supplies named input",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Forbidden",
+      "meaning": "Source/execute/acquisition denied, including enterprise DenyNetwork",
+      "remediation": "Admin may revise policy; no silent retry",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Offline",
+      "meaning": "Explicit acquisition needs bytes unavailable under Offline policy",
+      "remediation": "Supply verified local bytes or explicitly leave offline",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR2",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR2"],
+      "receivingAcceptance": "EPR2-AC-CONTRACT"
+    },
+    {
+      "state": "NotFound",
+      "meaning": "Authorized complete local search found no candidate, with no hidden rejection",
+      "remediation": "Install manually or issue separately opted-in acquisition",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Incompatible",
+      "meaning": "Candidate rejected for version/platform/ABI/protocol/features",
+      "remediation": "Choose a permitted compatible artifact",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "IntegrityFailure",
+      "meaning": "Digest/manifest/installed-byte mismatch or missing required integrity",
+      "remediation": "Repair managed artifact explicitly; do not execute or fall back",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "TrustFailure",
+      "meaning": "Origin/root/signer/ownership/permission/path/revocation failure",
+      "remediation": "Admin reviews trust or revocation; do not execute or fall back",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "state": "Cancelled",
+      "meaning": "Request cancelled or superseded by policy/project/host epoch",
+      "remediation": "New explicit request under current basis",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-CONTRACT"
+    },
+    {
+      "state": "OperationalFailure",
+      "meaning": "I/O, proxy/auth, timeout, process exit or handshake failure",
+      "remediation": "Redacted stage-specific repair; no alternate-origin fallback",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-CONTRACT"
+    },
+    {
+      "state": "Unsupported",
+      "meaning": "Unknown schema/required field/capability or unsupported host/platform, including browser-native request",
+      "remediation": "Use a supported schema/host/capability with explicit permission",
+      "capability": "Unavailable for the requested engine operation; unrelated native operations unchanged",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CONTRACT"
+    }
+  ],
+  "hostPolicy": {
+    "browserLocal": "Browser-compatible artifacts only; native requirement Unsupported, no spawn or automatic companion fallback",
+    "localNative": "Explicit trusted companion identity and execute permission",
+    "remoteWorkspace": "Explicit host identity, trust, execute and source-transfer permission; no silent upload",
+    "promotion": "DX1 descriptor plus executable/replay evidence required; shared-core conformance does not certify client UI"
+  },
+  "displacedRoutes": [
+    {
+      "id": "R01",
+      "paths": ["crates/verter_tsgo_api/src/toolchain/discovery.rs"],
+      "symbols": [
+        "ResolutionRequest::for_environment",
+        "enumerate_candidates",
+        "resolve",
+        "resolve_provisional",
+        "Provenance"
+      ],
+      "current": "Environment/PATH/project/cache/bundle first-working discovery; validation executes candidate probes",
+      "disposition": "Replace implicit ordering, unauthorized cache/bundle routes and fail-through authority with captured source policy and common pre-execution validator",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC1"
+    },
+    {
+      "id": "R02",
+      "paths": ["crates/verter_tsgo_api/src/toolchain/validation.rs"],
+      "symbols": ["ProcessValidator", "Capability", "ValidatedCandidate"],
+      "current": "Version/capability probe validator",
+      "disposition": "Retain probes only after EPR4 origin/integrity/trust checks; one normalized validator, no second candidate authority",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-CANDIDATES"
+    },
+    {
+      "id": "R03",
+      "paths": ["crates/verter_type_runtime/src/discovery.rs"],
+      "symbols": [
+        "resolve_tsserver",
+        "TsserverSource",
+        "ResolvedTsserver",
+        "find_node",
+        "global_tsserver_candidate",
+        "detect_shell_path"
+      ],
+      "current": "ProjectLocal -> ConfiguredTsdk -> Global, canonicalized install/default-lib validation; skipped rejections travel with winner; the Global tier and Node lookup run npm root -g and a login shell",
+      "disposition": "Replace independent tier selection with authorized adapters; retain distinct serving-tier/version and library requirements",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC1"
+    },
+    {
+      "id": "R04",
+      "paths": ["packages/vue-vscode/src/sharedTsgoLaunch.ts"],
+      "symbols": ["nativePreviewTsdkCandidates", "discoverNativePreviewTsgo", "planSharedTsgo"],
+      "current": "Environment, ordered SDKs, workspace platform package rendezvous",
+      "disposition": "Replace SDK/environment candidate authority with shared captured policy; retain editor ownership and shim recursion exclusion",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC1"
+    },
+    {
+      "id": "R05",
+      "paths": [
+        "packages/vue-vscode/src/extensionTsService.ts",
+        "packages/vue-vscode/src/extensionTsServiceRegistry.ts"
+      ],
+      "symbols": ["workspaceNodeModulesChain", "ExtensionTsService"],
+      "current": "Project-only TypeScript execution; forbids global/NODE_PATH and native family for in-process JS service",
+      "disposition": "Replace independent trust/selection authority with EPR4 receipt consumption; preserve project-only source and family restrictions",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC1"
+    },
+    {
+      "id": "R06",
+      "paths": [
+        "crates/verter_tsc/src/checker.rs",
+        "crates/verter_lsp/src/main.rs",
+        "crates/verter_lsp/src/tsserver/project_router.rs"
+      ],
+      "symbols": [
+        "resolve_tsserver",
+        "ResolutionRequest::for_environment",
+        "engine_request",
+        "probe_managed_engine",
+        "choose_managed_engine",
+        "resolve_tsgo_engine"
+      ],
+      "current": "CLI/LSP engine admission and per-project routing consume existing resolvers; explicit --tsgo-bin disables every lower tier",
+      "disposition": "Remove bypasses and independently reconstructed selection; require EPR4 selection receipt",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-SOLE"
+    },
+    {
+      "id": "R07",
+      "paths": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/editorTsserverBootstrap.ts",
+        "crates/verter_lsp/src/tsgo/mod.rs",
+        "crates/verter_type_runtime/src/provider_hub/mod.rs",
+        "crates/verter_lsp/src/main.rs",
+        "crates/verter_lsp/src/type_provider/lazy_managed.rs",
+        "crates/verter_lsp/src/tsgo/resilient.rs",
+        "crates/verter_lsp/src/tsserver/project_router.rs",
+        "crates/verter_lsp/src/tsserver/resilient.rs",
+        "crates/verter_type_runtime/src/tsgo/ipc.rs",
+        "crates/verter_type_runtime/src/tsgo/owned.rs",
+        "crates/verter_type_runtime/src/tsserver/ipc.rs",
+        "crates/verter_tsgo_api/src/attach.rs"
+      ],
+      "symbols": [
+        "establishSharedTsgo",
+        "ProviderHub",
+        "EngineStart",
+        "LazyManagedTypeProvider",
+        "establish_owned",
+        "try_spawn_tsgo_with_request",
+        "TsgoTypeProvider::spawn_with_crash_signal",
+        "TsgoOwnedProvider::attach",
+        "TsserverTypeProvider::spawn",
+        "SpawnOwnTsgoLsp",
+        "spawn_own_lsp_connection"
+      ],
+      "current": "Independent editor attachment, managed spawn and hub publication/lifecycle decisions",
+      "disposition": "Replace provisioning activation authority with EPR5 current selection/handshake/ProviderEpoch; preserve transport/process ownership",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC1"
+    },
+    {
+      "id": "R08",
+      "paths": ["crates/verter_lsp/src/protocol_types.rs", "crates/verter_lsp/src/lib.rs"],
+      "symbols": ["TypeProviderKind", "TypeProviderTopology"],
+      "current": "Family/topology/status reports lack proposed provisioning phase/state receipts",
+      "disposition": "Replace coarse provisioning availability inference with typed EPR5 truth under PUB0/COX0; retain distinct native inspection authority",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-CAPABILITY"
+    },
+    {
+      "id": "R09",
+      "paths": [
+        "crates/verter_tsgo_api/src/toolchain/bundle.rs",
+        "crates/verter_tsgo_api/src/toolchain/platform.rs",
+        "crates/verter_tsgo_api/src/toolchain/policy.rs"
+      ],
+      "symbols": ["bundled_tsgo_path", "PLATFORM_MANIFEST", "TYPESCRIPT_PIN"],
+      "current": "Sidecar layout/offline floor and cache-writer prose implies shipping/acquisition; package guards forbid tsgo",
+      "disposition": "Retain shared platform/support policy inputs; remove unconditional shipping/download authority claims and block bundle adapter until separate authorization",
+      "owner": "EPR4",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4"],
+      "receivingAcceptance": "EPR4-AC-SOURCES"
+    },
+    {
+      "id": "R10",
+      "paths": [
+        "crates/verter_tsgo_api/src/client.rs",
+        "crates/verter_tsc/src/api_check.rs",
+        "crates/verter_tsc/src/checker.rs"
+      ],
+      "symbols": [
+        "PreparedEngine::start",
+        "PreparedEngine::run",
+        "SpawnedEngine::spawn_holding_stderr",
+        "TsgoClient::connect",
+        "TsgoClient::connect_spawned",
+        "SessionEngine",
+        "invoke_checker_bounded"
+      ],
+      "current": "CLI/API activation: PreparedEngine resolves provisionally, spawns and accepts from a background cross-check; TsgoClient::connect probes and spawns a raw path; the declaration stage runs its resolved checker binary",
+      "disposition": "Replace provisional and raw-path activation authority with EPR5 activation of a revalidated EPR4 selection receipt; preserve the wire gate, transport actor and bounded process ownership",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-SOLE",
+      "selectionRoute": "R06",
+      "additionalAcceptances": ["EPR4-AC-SOLE", "EPR5-AC-REVALIDATE"]
+    },
+    {
+      "id": "R11",
+      "paths": ["crates/verter_relay_shim/src/main.rs"],
+      "symbols": [
+        "ShimArgs",
+        "parse_args_from_with_env",
+        "REAL_TSGO_ENV",
+        "passthrough",
+        "run_relay"
+      ],
+      "current": "Shipped relay shim takes a raw engine path from --real-tsgo or its environment and executes it directly, in passthrough probes and the --lsp relay",
+      "disposition": "Replace raw-path execution authority with EPR5 activation of a revalidated EPR4 selection receipt before either spawn; preserve relay transport, OS containment and faithful exit ownership",
+      "owner": "EPR5",
+      "productionCapable": true,
+      "successorPath": ["EPR0", "EPR1", "EPR4", "EPR5"],
+      "receivingAcceptance": "EPR5-AC-SOLE",
+      "selectionRoute": "R04",
+      "additionalAcceptances": ["EPR4-AC1", "EPR5-AC-REVALIDATE"]
+    }
+  ],
+  "retainedInvariants": [
+    {
+      "paths": [
+        "packages/vue-vscode/package.mjs",
+        "packages/vue-vscode/stage-bin.mjs",
+        "packages/vue-vscode/src/package.spec.ts"
+      ],
+      "symbols": ["stageShimBinary"],
+      "law": "Only Verter shim ships; external engine/tsgo bytes remain forbidden; final bin whitelist enforced",
+      "futureOwner": "EPR3 only after separate exact shipping authorization; otherwise retain unchanged",
+      "acceptance": "EPR3-AC1"
+    },
+    {
+      "paths": [
+        "crates/verter_tsgo_api/src/toolchain/policy.rs",
+        "crates/verter_tsgo_api/src/toolchain/platform.rs",
+        "crates/verter_type_runtime/src/discovery.rs"
+      ],
+      "law": "Retain shared real dependency pins, supported release ranges, platform mapping and tsserver serving-tier distinctions",
+      "futureOwner": "EPR4",
+      "acceptance": "EPR4-AC-CANDIDATES"
+    }
+  ],
+  "sourceDisposition": [
+    {
+      "population": "Orphan blocked download/bundle architecture docs",
+      "members": [],
+      "basis": "Captured tracked docs and shared architecture references have no such files; no source deletion fabricated",
+      "target": "Network/bundle/trust/update clauses consolidated in docs/arch/engine-provisioning.md"
+    },
+    {
+      "population": "Surviving download/cache/bundle tier prose and runtime routes",
+      "members": ["R01", "R09"],
+      "target": "sources, originPolicy, lifecycle and displacedRoutes; EPR4 removes implicit runtime authority"
+    },
+    {
+      "population": "Packaging prohibition",
+      "members": [
+        "packages/vue-vscode/package.mjs",
+        "packages/vue-vscode/stage-bin.mjs",
+        "packages/vue-vscode/src/package.spec.ts"
+      ],
+      "target": "retainedInvariants; EPR3 closed"
+    },
+    {
+      "population": "CF-H03 host input authority",
+      "members": [
+        "verter.typeProvider",
+        "verter.typescript.tsdk",
+        "verter.lspBinaryPath",
+        "VERTER_TSGO_BIN",
+        "HOME/PATH Node probes"
+      ],
+      "target": "Captured host inputs to sole policy; EPR4 consumes, not an extra CFG0 layer; verter.lspBinaryPath locates the Verter host, not an external engine trust grant"
+    }
+  ],
+  "externalRequirements": [
+    {
+      "id": "maintainer_managed_engine_acquisition",
+      "status": "authorized",
+      "authority": "epr0-network-bundling, 2026-11-01",
+      "conditions": "Explicit per-project opt-in and request; no ordinary-resolution network, background updates or execution grant",
+      "consumer": "EPR2",
+      "dependencyPath": ["EPR0", "EPR1", "EPR4", "EPR2"]
+    },
+    {
+      "id": "maintainer_bundled_engine_distribution",
+      "status": "unauthorized",
+      "authority": "epr0-network-bundling, 2026-11-01",
+      "conditions": "Separate release artifact/platform/license/SBOM/provenance/update/rollback authorization required",
+      "consumer": "EPR3",
+      "openedPlatforms": []
+    }
+  ],
+  "work": {
+    "policyEvaluation": "Bounded captured data only, no filesystem/network/allocation after snapshot construction",
+    "disabled": "Zero source adapter, scan, hash, DNS/socket, install or execute work",
+    "resolution": "No acquisition/update; counters for discovery/FS/validation/candidate retention; EPR4-AC-WORK",
+    "acquisition": "metadata requests, bytes, verification, extraction entries, files, install/cleanup attempts; EPR2-AC-WORK",
+    "activation": "spawn, handshake, retained epochs and teardown; EPR5-AC-WORK",
+    "warmControl": "100 identical requests after warmup; exact equivalent answers/work and bounded retained growth; EPR6-AC-PERF",
+    "measurement": "Same-worker baseline comparisons when needed; timing/allocation/RSS advisory; no runtime change or benchmark claim here"
+  },
+  "proofBoundary": "Contract data and bounded inspection only. Runtime enforcement, negative controls, fresh/warm and work proofs are mapped to receiving production owners in companion cases; not claimed executed by EPR0.",
+  "exactManualSelection": "An exact CLI/manual engine path restricts the source set to that candidate; rejection is a hard typed error, no lower-tier or family fallback",
+  "currentOwner": "Shared tsgo first-working resolver, tsserver tier resolver, editor SDK/project selectors, lazy managed/provider hub activation, CLI/API engine preparation, relay shim execution, coarse status and no-tsgo packaging guards",
+  "stageProducers": {
+    "acquire": "EPR2",
+    "resolve": "EPR4",
+    "select": "EPR4",
+    "activate": "EPR5",
+    "law": "Each producer preserves phase-specific typed evidence. A successful stage reports its own state (Acquired, Resolved, Selected) and receipt with capability Unavailable; every other state except Available carries the phase that produced it. Available is activate-only, and EPR5 alone publishes active engine availability. The outcomes receiving owner names the shared projection or representative behavioral boundary, not permission for other phases to erase the state."
+  },
+  "consumers": [
+    {
+      "id": "configuration",
+      "input": "CF-H03 captured host settings plus authorized user/admin project opt-in; not a base CFG0 layer",
+      "consumer": "EPR4",
+      "acceptance": "EPR4-AC-CONTRACT"
+    },
+    {
+      "id": "cli-lsp-editor",
+      "input": "EngineNeed/EngineRequirement and policy snapshot; selection receipts",
+      "consumer": "EPR4",
+      "acceptance": "EPR4-AC-SOLE"
+    },
+    {
+      "id": "provider-hub",
+      "input": "Current selected artifact with validated policy/host basis",
+      "consumer": "EPR5",
+      "acceptance": "EPR5-AC-REVALIDATE"
+    },
+    {
+      "id": "cli-api-relay-activation",
+      "input": "Current EPR4 selection receipt with validated policy/host basis, for CLI/API and relay launches",
+      "consumer": "EPR5",
+      "acceptance": "EPR5-AC-REVALIDATE"
+    },
+    {
+      "id": "public-participation",
+      "input": "EngineProvisioningOutcome and EngineCapabilityState, preserving PUB0/COX0 meaning",
+      "consumer": "EPR5",
+      "acceptance": "EPR5-AC-CAPABILITY"
+    },
+    {
+      "id": "release-packaging",
+      "input": "Forbidden bundle policy; no-tsgo whitelist remains unchanged",
+      "consumer": "EPR6",
+      "acceptance": "EPR6-AC-HONEST"
+    },
+    {
+      "id": "browser-companion-remote",
+      "input": "Explicit host/platform/trust/execute/source-transfer permission; DX1 exposure descriptor",
+      "consumer": "EPR5",
+      "acceptance": "EPR5-AC-CONTRACT"
+    }
+  ],
+  "nonProductionCallers": [
+    {
+      "paths": ["crates/verter_dx_baseline/src/provider.rs"],
+      "symbols": ["resolve_tsserver_with"],
+      "law": "Unpublished measurement harness over the resolver and provider APIs; not a production route, follows those APIs through R01, R03 and R07"
+    }
+  ]
+}

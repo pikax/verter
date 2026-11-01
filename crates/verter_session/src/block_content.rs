@@ -28,9 +28,11 @@ use crate::VerterHost;
 /// admitted artifacts live in [`BlockContentState`].
 pub(crate) struct BlockContentHostLane {
     pub(crate) state: Shared<BlockContentState>,
-    // Ingress may synchronously load another ambient contributor. Keep that
-    // nested integration in the same publication turn while excluding writers
-    // on other threads.
+    // Ingress evicts replaced contributors through paths that take this fence
+    // again. Keep that nested work in the same publication turn while excluding
+    // writers on other threads. Never hold it across an index claim: a file's
+    // flight loads its source under this fence, so a holder following that
+    // flight is never released.
     pub(crate) admission_fence: parking_lot::ReentrantMutex<()>,
     pub(crate) correlation_counter: std::sync::atomic::AtomicU64,
     /// Test-only seam fired after validation and before publication for

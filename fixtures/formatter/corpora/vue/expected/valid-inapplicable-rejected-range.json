@@ -1,0 +1,26 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/valid-inapplicable-rejected.txt",
+  "normalized_options": {
+    "vueIndentScriptAndStyle": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      227
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    227
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/valid-inapplicable-rejected.txt",
+    "edits": []
+  },
+  "divergence": null
+}

@@ -1,0 +1,7 @@
+{
+  "id": "wide-auto",
+  "values": {
+    "printWidth": 120,
+    "endOfLine": "auto"
+  }
+}
