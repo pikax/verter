@@ -4,8 +4,9 @@
 //! resolves a symbol, decides a framework relationship, establishes project
 //! membership or certifies reachability: those answers stay with the producer
 //! named by each row's provenance, and consumers validate candidates through
-//! that owner before returning semantic answers or authored edits. See
-//! `docs/arch/kernel/idx0d-contributions.md` for the contract.
+//! that owner before returning semantic answers or authored edits. The
+//! contract is the atomic semantic contributions decision in
+//! `docs/arch/kernel/`.
 //!
 //! The module has one write path. A producer seals a complete enumeration
 //! into a [`CompletePartition`] (a partial or cancelled walk has no such
