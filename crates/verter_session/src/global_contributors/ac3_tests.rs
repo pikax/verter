@@ -239,14 +239,15 @@ fn contributor_ingestion_waits_for_its_index_producer_outside_admission() {
                 match route {
                     Route::Standalone => host.ingest_injected_ambient_roots(None),
                     Route::Upsert => {
-                        host.upsert(UpsertRequest {
-                            canonical_id: Some("/consumer.ts".to_owned()),
-                            input_id: "/consumer.ts".to_owned(),
-                            source: Arc::from("export const consumer = 1;\n"),
-                            file_language: FileLanguage::script_ts(),
-                            aliases: Vec::new(),
-                        })
-                        .expect("consumer upsert");
+                        let _ = host
+                            .upsert(UpsertRequest {
+                                canonical_id: Some("/consumer.ts".to_owned()),
+                                input_id: "/consumer.ts".to_owned(),
+                                source: Arc::from("export const consumer = 1;\n"),
+                                file_language: FileLanguage::script_ts(),
+                                aliases: Vec::new(),
+                            })
+                            .expect("consumer upsert");
                     }
                 }
                 let _ = done_tx.send(());
