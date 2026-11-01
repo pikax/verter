@@ -75,6 +75,29 @@ mod style_syntax;
 pub mod template;
 pub mod type_eval_build;
 
+// Reserved homes for planned fact-family modules. Each module below is
+// declaration-only: its doc line names the node that fills it, and fact
+// nodes write inside their own reserved module only. They are `pub(crate)`
+// for consumers elsewhere in the crate: a contribution under
+// `framework_facts` descends from `analysis` and could name its family home
+// even if it were private, so the qualifier serves modules outside
+// `analysis` (query surfaces, analyzers) that otherwise could not.
+pub(crate) mod composed_page;
+pub(crate) mod context;
+pub(crate) mod effects;
+pub(crate) mod forwarding;
+pub(crate) mod html_fragments;
+pub(crate) mod hydration;
+pub(crate) mod json_module;
+#[cfg(test)]
+#[path = "json_module_tests.rs"]
+pub(crate) mod json_module_tests;
+pub(crate) mod linkage;
+pub(crate) mod render_tree;
+pub(crate) mod template_dialects;
+pub(crate) mod transport;
+pub(crate) mod value_flow;
+
 #[cfg(test)]
 #[path = "type_expr_tests.rs"]
 mod type_expr_tests;
