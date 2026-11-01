@@ -1585,11 +1585,31 @@ fn stylesheet_scopes_stay_producer_facts_across_vue_and_svelte() {
         "<template><div /></template>\n<style scoped>\n.same { color: red; }\n</style>\n<style module>\n.same { color: red; }\n</style>\n<style>\n.same { color: red; }\n</style>",
         FileLanguage::vue(),
     );
+    upsert_file(
+        &host,
+        "/src/B.svelte",
+        "<div class=\"same\">b</div>
+<style>
+.same { color: red; }
+</style>",
+        FileLanguage::svelte(),
+    );
     let demand = IndexDemand::of([IndexDemandPartition::StyleSelectors]);
     let (page, _) = host.workspace_index_candidates(&demand, css_keys("same"), WIDE, &never());
+    let locators: BTreeSet<&str> = page
+        .candidates
+        .iter()
+        .map(|candidate| candidate.contribution.basis.locator.as_ref())
+        .collect();
+    assert_eq!(
+        locators,
+        ["/src/A.vue", "/src/B.svelte"].into_iter().collect(),
+        "both carriers answer through the one partition"
+    );
     let mut by_block: Vec<(u32, StyleScope)> = page
         .candidates
         .iter()
+        .filter(|candidate| candidate.contribution.basis.locator.as_ref() == "/src/A.vue")
         .filter_map(|candidate| match &candidate.record()?.row {
             IndexRow::Stylesheet(StylesheetRow {
                 surface: StyleSurface::Style { block },
