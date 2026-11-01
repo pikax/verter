@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Evidence runs: named, frozen semantic-benchmark invocations. A manifest
+// Evidence runs: named semantic, soak and formatter-contract invocations. A manifest
 // (scripts/benchmark/evidence-runs/<name>.json) fixes what runs and which
 // cells must come back; this runner validates it, drives semantic-perf.mjs
 // with the manifest's options, re-validates the result with the harness's
@@ -21,6 +21,10 @@ import { ARMS } from "./semantic-perf/analyze.mjs";
 import { harnessFingerprint, resolveTypeScript } from "./semantic-perf/provenance.mjs";
 import { scenariosForTier, selectScenarios, SETTINGS, TIERS } from "./semantic-perf/scenarios.mjs";
 import { allSessions } from "./semantic-perf/sessions.mjs";
+import {
+  buildFormatterSummary,
+  validateFormatterManifest,
+} from "../../tests/formatter/evidence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(HERE, "..", "..");
@@ -137,9 +141,14 @@ export function validateManifest(manifest, file) {
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
     return { problems: ["the manifest is not a JSON object"], run: null };
   if ("kind" in manifest)
-    return manifest.kind === "soak"
-      ? validateSoakManifest(manifest, file)
-      : { problems: [`unknown kind ${JSON.stringify(manifest.kind)}; kinds: soak`], run: null };
+    return manifest.kind === "formatter"
+      ? validateFormatterManifest(manifest, file)
+      : manifest.kind === "soak"
+        ? validateSoakManifest(manifest, file)
+        : {
+            problems: [`unknown kind ${JSON.stringify(manifest.kind)}; kinds: soak, formatter`],
+            run: null,
+          };
   for (const key of Object.keys(manifest))
     if (!REQUIRED_FIELDS.includes(key) && !OPTIONAL_FIELDS.includes(key))
       problems.push(`unknown field ${key}`);
@@ -1119,6 +1128,8 @@ export const USAGE = `usage: node scripts/benchmark/evidence-run.mjs --run <name
 
   --run <name>            the manifest scripts/benchmark/evidence-runs/<name>.json
   --dry-run               validate the manifest and write the summary skeleton; run nothing
+  --candidate <identity>  required review candidate identity for formatter evidence
+  --corpus <id>           required performance-catalog fixture id for formatter evidence
   --out <dir>             output directory (default: target/evidence-runs/<name>/<timestamp>)
   --worker <file>         the worker record the evidence job supplies: JSON { "id": "...", "tags": [...] };
                           without it the run is treated as not ${BENCH_TAG}
@@ -1135,6 +1146,8 @@ function parseArgs(argv) {
     worker: null,
     passThrough: [],
     manifestDir: MANIFEST_DIR,
+    candidate: null,
+    corpus: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -1148,6 +1161,12 @@ function parseArgs(argv) {
         break;
       case "--dry-run":
         opts.dryRun = true;
+        break;
+      case "--candidate":
+        opts.candidate = next();
+        break;
+      case "--corpus":
+        opts.corpus = next();
         break;
       case "--out":
         opts.out = resolve(next());
@@ -1187,12 +1206,16 @@ export async function main(argv, deps = {}) {
     return 0;
   }
   const loaded = loadManifest(opts.run, opts.manifestDir);
+  if (!loaded.run.formatter && (opts.candidate !== null || opts.corpus !== null))
+    throw Error("--candidate and --corpus are formatter-only parameters");
   const worker = readWorker(opts.worker);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = opts.out ?? join(ROOT, "target", "evidence-runs", loaded.manifest.name, stamp);
   mkdirSync(outDir, { recursive: true });
   let summary;
-  if (loaded.run.soak) {
+  if (loaded.run.formatter) {
+    summary = buildFormatterSummary(loaded, { ...opts, worker });
+  } else if (loaded.run.soak) {
     const runSoak = deps.runSoak ?? defaultSoakRunner;
     summary = opts.dryRun
       ? buildSoakSummary(loaded, { dryRun: true, worker })

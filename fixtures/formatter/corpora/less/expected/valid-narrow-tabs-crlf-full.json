@@ -1,0 +1,23 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/less/expected/valid-narrow-tabs-crlf.txt",
+  "normalized_options": {
+    "printWidth": 24,
+    "tabWidth": 4,
+    "useTabs": true,
+    "endOfLine": "crlf"
+  },
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/less/expected/valid-narrow-tabs-crlf.txt",
+    "edits": []
+  },
+  "divergence": null
+}
