@@ -27,11 +27,11 @@ enforced evidence-first by the architecture-health lane
 (`node tests/architecture-health/ARH1/verify.mjs` in CI, on `ubuntu-latest`
 with the Node version pinned by `.nvmrc`):
 
-| Crate                | Rule                                                            | May import                                                                                             | Must not import                                              |
-| -------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `crates/verter_scheduler` | scheduler-runtime stays below every orchestration crate     | `verter_audit`, `verter_debug_assert`, `verter_language`, `verter_span`                                  | `verter_session`, `verter_compiler`, `verter_semantic`, `verter_lsp`, `verter_workspace`, `verter_parser`, `verter_type_expr` |
-| `crates/verter_semantic`  | the semantic core never depends upward on orchestration or transport | `verter_audit`, `verter_css_syntax`, `verter_debug_assert`, `verter_language`, `verter_macro_dto`, `verter_no_typeexpr`, `verter_parser`, `verter_span`, `verter_type_expr`, `verter_type_expr_oxc` | `verter_session`, `verter_scheduler`, `verter_compiler`, `verter_lsp`, `verter_workspace` |
-| `crates/verter_session`   | editor/transport/FFI crates are leaves; the session core never imports them | the analysis, compiler, scheduler, semantic, workspace and utility crates                                                               | `verter_lsp`, `verter_napi`, `verter_ffi`, `verter_wasm`       |
+| Crate                     | Rule                                                                        | May import                                                                                                                                                                                          | Must not import                                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `crates/verter_scheduler` | scheduler-runtime stays below every orchestration crate                     | `verter_audit`, `verter_debug_assert`, `verter_language`, `verter_span`                                                                                                                             | `verter_session`, `verter_compiler`, `verter_semantic`, `verter_lsp`, `verter_workspace`, `verter_parser`, `verter_type_expr` |
+| `crates/verter_semantic`  | the semantic core never depends upward on orchestration or transport        | `verter_audit`, `verter_css_syntax`, `verter_debug_assert`, `verter_language`, `verter_macro_dto`, `verter_no_typeexpr`, `verter_parser`, `verter_span`, `verter_type_expr`, `verter_type_expr_oxc` | `verter_session`, `verter_scheduler`, `verter_compiler`, `verter_lsp`, `verter_workspace`                                     |
+| `crates/verter_session`   | editor/transport/FFI crates are leaves; the session core never imports them | the analysis, compiler, scheduler, semantic, workspace and utility crates                                                                                                                           | `verter_lsp`, `verter_napi`, `verter_ffi`, `verter_wasm`                                                                      |
 
 The full crate-by-crate owner list (every `crates/` and `packages/` root plus
 the docs, tests and tooling estates) lives in the ARH0 responsibility map
@@ -79,12 +79,14 @@ subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
 `new_sync`, `new_sync_with_executor`, `new_sync_with_executor_and_task_registry`,
 `begin_scoped_cache_node`, `run_transferred_producer`, `execute_scoped_cache_node`,
 `begin_submit_request`, `submit_request`, `begin_submit_batch_atomic`,
+`begin_owned_request`, `enter_execution_scope`, `pump_owned_dependency`,
 `submit_batch_atomic`, `wait_batch`, `account_batch_submission`, `subscribe_progress`,
 `dispatch_for_pending_dependency`,
 `counters`, `dependency_occupancy`, `try_get_source`, `try_get_witnessed_source`,
 `try_get_source_for_witness`, `capture_source_root`, `source_directory`,
 `try_get_analysis`, `try_get_artifact`, `try_get_last_known_good`,
 `has_node`, `node_ids`, `reset`, `restart_driver`, `quiesce`,
+`stage_task_boundary`, `wait_stage_tasks_before`,
 `register_resolved_deps`, `config`, `commit_artifact`,
 `remove_artifact_not_newer_than`, `overlay`, `invalidate`, `remove`,
 `close_file`, `has_driver_thread`, `driver_loop_native`, `drive_one`,
@@ -158,13 +160,13 @@ truth: `tests/documentation/DOC0/products/generated-reference-plan.v1.json`;
 no second matrix). Engine and version pins stay in the ARH0 capability
 matrix linked above.
 
-| Hotspot | Catalog surfaces served |
-| ------- | ----------------------- |
-| `crates/verter_scheduler/src/scheduler.rs` (every retained fn/type above) | `vue.language_service.typing`, `vue.language_service.edit`, `svelte.language_service.typing`, `svelte.language_service.edit`, `vue.tsc.project_check`, `svelte.tsc.project_check`, `vue.managed.compile.raw`, `svelte.managed.compile.raw`, `vue.component_meta.scalar`, `svelte.component_meta.scalar`, `vue.host_lint`, `svelte.host_lint` |
-| `crates/verter_type_engine/src/semantic_query.rs` (every retained type/assoc item above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_type_engine/src/project_semantic_dispatch/build.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_semantic_source/src/flow_slice_content.rs` (every retained fn/type above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| Hotspot                                                                                               | Catalog surfaces served                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/verter_scheduler/src/scheduler.rs` (every retained fn/type above)                             | `vue.language_service.typing`, `vue.language_service.edit`, `svelte.language_service.typing`, `svelte.language_service.edit`, `vue.tsc.project_check`, `svelte.tsc.project_check`, `vue.managed.compile.raw`, `svelte.managed.compile.raw`, `vue.component_meta.scalar`, `svelte.component_meta.scalar`, `vue.host_lint`, `svelte.host_lint` |
+| `crates/verter_type_engine/src/semantic_query.rs` (every retained type/assoc item above)              | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check`                                                                                                                                                                                                                         |
+| `crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check`                                                                                                                                                                                                                         |
+| `crates/verter_type_engine/src/project_semantic_dispatch/build.rs` (pub(crate) module boundary)       | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check`                                                                                                                                                                                                                         |
+| `crates/verter_semantic_source/src/flow_slice_content.rs` (every retained fn/type above)              | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check`                                                                                                                                                                                                                         |
 
 The contributor-docs model joins that table to every retained fn/type/assoc
 item (and to the hotspot path itself when the retained list is empty). A
@@ -175,7 +177,7 @@ The importer, retained-surface and test-hook consumer populations are
 joined as sets against the live tree: every file that references a hotspot
 across crates is a declared importer, and every declared importer references
 it. Each hotspot's `importDirection.measurementBasis` records the measurement
-*method* (production import tree, `cfg(test)` stripped, use-statements and
+_method_ (production import tree, `cfg(test)` stripped, use-statements and
 inline paths). The original host/profile of that measurement is
 unrecorded in ARH1 contract products. File size, line counts and item counts
 are not architecture evidence; no verifier records or compares them, so

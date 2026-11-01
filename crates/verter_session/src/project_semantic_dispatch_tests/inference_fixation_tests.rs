@@ -7,7 +7,7 @@
 //! a type is read off TS2322 for `const s: never = x` with `declare const
 //! x: <probe>`, a call off `const s: never = <call>`.
 
-use super::differential_harness_tests::{Matrix, ALL};
+use super::differential_harness_tests::{Matrix, Read, ALL};
 
 const SOURCE: &str = r##"
 type MV<T> = T extends { a: infer U; b: (x: infer U) => void } ? U : 0;
@@ -186,5 +186,255 @@ fn a_rejected_alternative_leaves_no_candidate_behind() {
         ),
     ]);
     failures.extend(matrix.returns(&[("r1", "string")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A nested call reads only the fresh members of a mixed binding as widening.
+#[test]
+fn nested_call_argument_preserves_partial_widening_membership() {
+    let source = r##"
+declare function box<T>(value: T): { value: T };
+declare function nestedBox<T>(anchor: unknown, value: { value: T }): { value: { value: T } };
+export function mixed(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return box(value);
+}
+export function nested(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return nestedBox(value, { value: value });
+}
+export function pinned(flag: boolean) {
+    const value = flag ? "fixed" as const : 1 as const;
+    return box(value);
+}
+export function fresh() {
+    const value = "fresh";
+    return box(value);
+}
+"##;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("mixed", "{ value: string | 1; }"),
+        ("nested", "{ value: { value: string | 1; }; }"),
+        ("pinned", r#"{ value: "fixed" | 1; }"#),
+        ("fresh", "{ value: string; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Partial reads keep regular composite arms and enum member identity.
+#[test]
+fn partial_call_reads_preserve_composites_and_enums() {
+    let source = r##"
+declare function box<T>(value: T): { value: T };
+declare function nestedBox<T>(anchor: unknown, value: { value: T }): { value: { value: T } };
+enum E { A, B }
+export function composite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    return box(value);
+}
+export function nestedComposite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    return nestedBox(value, { value: value });
+}
+export function narrowedComposite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    if (typeof value === "string") return box({ v: "fixed" as const });
+    return box(value);
+}
+export function pinnedEnum(flag: boolean) {
+    const value = flag ? "fresh" : E.A as const;
+    return nestedBox(value, { value: value });
+}
+export function freshEnum(flag: boolean) {
+    const value = flag ? E.A : "fixed" as const;
+    return box(value);
+}
+export function nestedFreshEnum(flag: boolean) {
+    const value = flag ? E.A : "fixed" as const;
+    return nestedBox(value, { value: value });
+}
+"##;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("composite", r#"{ value: string | { v: "fixed"; }; }"#),
+        (
+            "nestedComposite",
+            r#"{ value: { value: string | { v: "fixed"; }; }; }"#,
+        ),
+        ("narrowedComposite", r#"{ value: { v: "fixed"; }; }"#),
+        ("pinnedEnum", "{ value: { value: string | E.A; }; }"),
+        ("freshEnum", r#"{ value: E | "fixed"; }"#),
+        ("nestedFreshEnum", r#"{ value: { value: E | "fixed"; }; }"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A whole Partial read gathered into a generic rest keeps its pinned
+/// members: the tuple element widens only the fresh ones.
+#[test]
+fn rest_tuple_arguments_preserve_partial_widening_membership() {
+    let source = r##"
+declare function tup<T extends unknown[]>(...xs: T): { value: T };
+declare function rtup<T extends readonly unknown[]>(...xs: T): { value: T };
+declare function vhead<T extends unknown[]>(a: string, ...xs: T): { value: T };
+declare function ctup<const T extends unknown[]>(...xs: T): { value: T };
+export function mixed(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return tup(value);
+}
+export function beside(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return tup(value, 2);
+}
+export function readonlyRest(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return rtup(value);
+}
+export function composite(flag: boolean) {
+    const value = flag ? "fresh" : { v: "fixed" as const };
+    return tup(value);
+}
+export function afterParameter(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return vhead("a", value);
+}
+export function constParameter(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return ctup(value);
+}
+export function propagated(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    const copy = value;
+    return tup(copy);
+}
+export function pinned(flag: boolean) {
+    const value = flag ? "a" as const : 1 as const;
+    return tup(value);
+}
+export function fresh() {
+    const value = "fresh";
+    return tup(value);
+}
+"##;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("mixed", "{ value: [string | 1]; }"),
+        ("beside", "{ value: [string | 1, number]; }"),
+        ("readonlyRest", "{ value: [string | 1]; }"),
+        ("composite", r#"{ value: [string | { v: "fixed"; }]; }"#),
+        ("afterParameter", "{ value: [string | 1]; }"),
+        ("constParameter", r#"{ value: ["fresh" | 1]; }"#),
+        ("propagated", "{ value: [string | 1]; }"),
+        ("pinned", r#"{ value: ["a" | 1]; }"#),
+        ("fresh", "{ value: [string]; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A conditional `const`'s arms are branches of the flow: a write in one
+/// arm reaches neither its sibling nor the initializer's value through it,
+/// and the join after the initializer holds both arms' states.
+#[test]
+fn conditional_const_arms_branch_the_flow_at_writes() {
+    let source = r##"
+declare function box<T>(value: T): { value: T };
+export function written(flag: boolean, y: number) {
+    let x: string | number = "s";
+    const v = flag ? (x = y) : x;
+    return v;
+}
+export function nestedArm(flag: boolean, y: number) {
+    let x: string | number = "s";
+    const v = flag ? (x = y) : flag ? x : x;
+    return v;
+}
+export function throughConst(flag: boolean, y: number) {
+    let x: string | number = "s";
+    const u = flag ? (x = y) : (0 as const);
+    const v = flag ? u : x;
+    return v;
+}
+export function parenthesized(flag: boolean, y: number) {
+    let x: string | number = "s";
+    const v = (flag ? (x = y) : x);
+    let l = v;
+    return l;
+}
+export function afterJoin(flag: boolean, y: number) {
+    let x: string | number = "s";
+    const v = flag ? (x = y) : x;
+    return x;
+}
+export function alternateWrite(flag: boolean) {
+    let x: string | number = "s";
+    const v = flag ? x : (x = 1);
+    return x;
+}
+export function freshWrite(flag: boolean) {
+    let x: string | number = "s";
+    const v = flag ? (x = 1) : x;
+    return v;
+}
+export function freshWriteRead(flag: boolean) {
+    let x: string | number = "s";
+    const v = flag ? (x = 1) : x;
+    return box(v);
+}
+export function returned(flag: boolean, y: number) {
+    let x: string | number = "s";
+    return flag ? (x = y) : x;
+}
+export function assigned(flag: boolean, y: number) {
+    let x: string | number = "s";
+    let w;
+    w = flag ? (x = y) : x;
+    return w;
+}
+export function nullArm(flag: boolean, y: string) {
+    let x: string | null = y;
+    const v = flag ? (x = null) : x;
+    return v;
+}
+"##;
+    let same = "string | number";
+    let matrix = Matrix::new(source);
+    let matrix = matrix.settings(&ALL);
+    let mut failures = matrix.nullness(&[
+        (Read::Return("written"), same, same),
+        (Read::Return("nestedArm"), same, same),
+        (Read::Return("throughConst"), same, same),
+        (Read::Return("parenthesized"), same, same),
+        (Read::Return("afterJoin"), same, same),
+        (Read::Return("alternateWrite"), same, same),
+        (Read::Return("freshWrite"), "string | 1", "string | 1"),
+        (
+            Read::Return("freshWriteRead"),
+            "{ value: string | number; }",
+            "{ value: string | number; }",
+        ),
+        (Read::Return("returned"), same, same),
+        (Read::Return("nullArm"), "string | null", "string"),
+    ]);
+    failures.extend(matrix.four(&[(Read::Return("assigned"), same, same, "any", "any")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A conditional `const` of one `unique symbol` declares `symbol`, as a
+/// direct `const` of it does.
+#[test]
+fn conditional_const_widens_a_lone_unique_symbol() {
+    let source = r##"
+declare function box<T>(value: T): { value: T };
+declare const u: unique symbol;
+export function lone(flag: boolean) {
+    const l = flag ? u : u;
+    return box(l);
+}
+export function read(flag: boolean) {
+    const l = flag ? u : u;
+    return l;
+}
+"##;
+    let failures = Matrix::new(source)
+        .settings(&ALL)
+        .returns(&[("lone", "{ value: symbol; }"), ("read", "symbol")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
