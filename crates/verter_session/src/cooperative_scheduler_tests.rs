@@ -1392,3 +1392,45 @@ fn a_contributor_stays_pending_until_it_is_indexed_outside_admission() {
         .has_pending_overlay_ambient());
     assert!(index.get_any("/pending.d.ts").is_some());
 }
+
+/// A fenced flight publishes nothing, so settling its contributor would leave
+/// the population vouching for a file it does not hold, and nothing re-notes
+/// an unchanged file. The contributor stays pending for the next lookup.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_contributor_whose_flight_is_fenced_stays_pending() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace.clone()));
+    workspace.inject_file(
+        "/globals.d.ts".into(),
+        Arc::from("declare const fenced: number;"),
+    );
+    let weak = Arc::downgrade(&host);
+    *host.materialize_seam_hook.lock() = Some(Arc::new(move || {
+        weak.upgrade()
+            .expect("fixture owns host")
+            .bump_store_view_epoch();
+    }));
+
+    register_ts_source(&host, "/entry.ts", "export const entry = 1;");
+
+    let index = host.project_type_store().indexed();
+    assert!(
+        index.get_any("/globals.d.ts").is_none(),
+        "the fenced flight published nothing"
+    );
+    assert!(
+        index
+            .global_contributor_index()
+            .has_pending_overlay_ambient(),
+        "an unindexed contributor stays pending"
+    );
+
+    *host.materialize_seam_hook.lock() = None;
+    host.ingest_program_ambient_roots();
+
+    assert!(index.get_any("/globals.d.ts").is_some());
+    assert!(!index
+        .global_contributor_index()
+        .has_pending_overlay_ambient());
+}
