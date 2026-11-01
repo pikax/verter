@@ -6199,6 +6199,13 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
         }],
     );
 
+    // The fixture opens both carriers. Pin the child before compiling, as the
+    // publication gateway requires for every open document.
+    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+    let child_pin = server
+        .documents
+        .snapshot_identity(&child_uri)
+        .expect("the child document is open");
     let profile = server.documents.tsx_profile.read().clone();
     let _ = server
         .documents
@@ -6208,9 +6215,14 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
         .documents
         .host()
         .get_ide(&child_id, &profile)
-        .expect("the closed child has an IDE projection for publication");
+        .expect("the child has an IDE projection for publication");
     let parked_child_admission = match server
-        .reconcile_carrier_via_gateway(&child_id, child_ide.is_jsx, Some(&child_ide), None)
+        .reconcile_carrier_via_gateway(
+            &child_id,
+            child_ide.is_jsx,
+            Some(&child_ide),
+            Some((&child_uri, &child_pin)),
+        )
         .await
     {
         crate::external_ts::CarrierSyncDecision::DirectOpen { pending, .. } => pending,
