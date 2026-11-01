@@ -96,8 +96,8 @@
     "reason": "Documentation products the local DOC verifiers and the docs deploy read."
   },
   {
-    "glob": "tests/engine-provisioning/EPR0/products/*.json",
-    "reason": "Provisioning contract data read by review and its receiving owners; no ci.yml job reads it."
+    "glob": "tests/engine-provisioning/evidence/EPR1/cases.md",
+    "reason": "Evidence index for review; no ci.yml job reads it."
   },
   {
     "glob": "tests/jetbrains-baseline/**",

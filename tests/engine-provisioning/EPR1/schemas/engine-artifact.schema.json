@@ -1,0 +1,1049 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "OpaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "OpaqueIdList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OpaqueId"
+      },
+      "uniqueItems": true
+    },
+    "EngineVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "EngineFlavor": {
+      "enum": ["native-tsgo", "node-tsserver", "wasm-single", "wasm-threaded", "js-worker"]
+    },
+    "EnginePlatform": {
+      "enum": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "wasm32-browser",
+        "js-browser"
+      ]
+    },
+    "EngineSourceKind": {
+      "enum": [
+        "EnvironmentManual",
+        "ProjectLocal",
+        "EditorShared",
+        "SystemPath",
+        "ManagedCache",
+        "ManagedDownload",
+        "Bundled",
+        "BrowserArtifact"
+      ]
+    },
+    "EngineTrustClass": {
+      "enum": [
+        "local-approval",
+        "package-closure",
+        "editor-attestation",
+        "registry-integrity",
+        "bundle-manifest",
+        "published-browser-manifest",
+        "development-browser-manifest"
+      ]
+    },
+    "EngineLocatorMutability": {
+      "enum": ["immutable-ready", "mutable"]
+    },
+    "EngineProvisioningPolicy": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "policyEpoch",
+        "projectId",
+        "profileId",
+        "executionHostId",
+        "sourcePolicies",
+        "ordersByRequirement",
+        "update",
+        "offline",
+        "proxy",
+        "rollback",
+        "trustRootIds",
+        "revocationGeneration",
+        "compatibilityPolicyId",
+        "authorizationProvenance"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "policyEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "projectId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "executionHostId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "sourcePolicies": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "ordersByRequirement": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "update": {
+          "enum": ["ExplicitOnly"]
+        },
+        "offline": {
+          "enum": ["OnlineAllowed", "Offline", "DenyNetwork"]
+        },
+        "proxy": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "rollback": {
+          "enum": ["PreviousVerified", "Disabled"]
+        },
+        "trustRootIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineTrustRootId"
+          }
+        },
+        "revocationGeneration": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compatibilityPolicyId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "authorizationProvenance": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "EngineArtifactId": {
+      "type": "object",
+      "required": [
+        "engine",
+        "version",
+        "flavor",
+        "platform",
+        "abi",
+        "protocol",
+        "build",
+        "origin",
+        "contentDigest"
+      ],
+      "properties": {
+        "engine": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "version": {
+          "$ref": "#/$defs/EngineVersion"
+        },
+        "flavor": {
+          "$ref": "#/$defs/EngineFlavor"
+        },
+        "platform": {
+          "$ref": "#/$defs/EnginePlatform"
+        },
+        "abi": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "protocol": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "build": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "origin": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "EngineTrustRootId": {
+      "type": "object",
+      "required": ["rootSetIdentity", "rootSetRevision", "policyEpoch"],
+      "properties": {
+        "rootSetIdentity": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "rootSetRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policyEpoch": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "TrustedEngineOrigin": {
+      "type": "object",
+      "required": [
+        "originId",
+        "exactHttpsOriginOrApprovedLocalOrigin",
+        "packageScope",
+        "trustRootIds",
+        "authorizationProvenance"
+      ],
+      "properties": {
+        "originId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "exactHttpsOriginOrApprovedLocalOrigin": {
+          "type": "string",
+          "pattern": "^(https://[a-z0-9.-]+|approved-local:[A-Za-z0-9._+-]+)$"
+        },
+        "packageScope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "trustRootIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineTrustRootId"
+          }
+        },
+        "authorizationProvenance": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "EngineOrigin": {
+      "type": "object",
+      "required": ["originId", "sourceKind", "trustClass", "authorizedChannel"],
+      "properties": {
+        "originId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "sourceKind": {
+          "$ref": "#/$defs/EngineSourceKind"
+        },
+        "trustClass": {
+          "$ref": "#/$defs/EngineTrustClass"
+        },
+        "authorizedChannel": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "EngineOriginReceipt": {
+      "type": "object",
+      "required": [
+        "receiptId",
+        "origin",
+        "locatorId",
+        "authorityReceiptId",
+        "trustRoot",
+        "closureManifestDigest"
+      ],
+      "properties": {
+        "receiptId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "origin": {
+          "$ref": "#/$defs/EngineOrigin"
+        },
+        "locatorId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "authorityReceiptId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "trustRoot": {
+          "$ref": "#/$defs/EngineTrustRootId"
+        },
+        "closureManifestDigest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "EngineClosureFile": {
+      "type": "object",
+      "required": ["path", "digest", "size", "role"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "role": {
+          "enum": [
+            "executable",
+            "interpreter",
+            "script",
+            "library",
+            "worker-js",
+            "worker-wasm",
+            "sidecar"
+          ]
+        }
+      }
+    },
+    "EngineIntegrityEvidence": {
+      "type": "object",
+      "required": ["algorithm", "closureManifestDigest", "files"],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "closureManifestDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineClosureFile"
+          }
+        },
+        "archiveIntegrity": {
+          "type": "string",
+          "pattern": "^sha512-[A-Za-z0-9+/]{86}==$"
+        }
+      }
+    },
+    "EngineSignature": {
+      "type": "object",
+      "required": ["manifestDigest", "scheme", "signerId", "trustRoot", "validityId"],
+      "properties": {
+        "manifestDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "scheme": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "signerId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "trustRoot": {
+          "$ref": "#/$defs/EngineTrustRootId"
+        },
+        "validityId": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "EngineSignatureEvidence": {
+      "type": "object",
+      "required": ["requirement", "signatures"],
+      "properties": {
+        "requirement": {
+          "enum": ["required", "not-required"]
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineSignature"
+          }
+        }
+      }
+    },
+    "EngineProvenanceEvidence": {
+      "type": "object",
+      "required": ["requirement", "references"],
+      "properties": {
+        "requirement": {
+          "enum": ["required", "not-required"]
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "referenceId", "subjectDigest"],
+            "properties": {
+              "kind": {
+                "enum": ["sbom", "license", "attestation"]
+              },
+              "referenceId": {
+                "$ref": "#/$defs/OpaqueId"
+              },
+              "subjectDigest": {
+                "$ref": "#/$defs/Digest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "EngineHostConstraints": {
+      "type": "object",
+      "required": ["host", "moduleFormat", "requiredHostFeatures"],
+      "properties": {
+        "host": {
+          "enum": ["native-process", "browser-worker"]
+        },
+        "moduleFormat": {
+          "enum": ["native", "node-commonjs", "esm", "wasm"]
+        },
+        "requiredHostFeatures": {
+          "type": "array",
+          "items": {
+            "enum": ["SharedArrayBuffer", "cross-origin-isolated"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "EngineCompatibilityDeclaration": {
+      "type": "object",
+      "required": ["protocol", "api", "commands", "features", "toolchainFamily", "hostConstraints"],
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "api": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "commands": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "features": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "toolchainFamily": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "hostConstraints": {
+          "$ref": "#/$defs/EngineHostConstraints"
+        }
+      }
+    },
+    "EngineArtifactDescriptor": {
+      "type": "object",
+      "required": [
+        "schema",
+        "id",
+        "originReceipts",
+        "locators",
+        "integrity",
+        "signature",
+        "provenance",
+        "declaration"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/EngineArtifactId"
+        },
+        "originReceipts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineOriginReceipt"
+          }
+        },
+        "locators": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["locatorId", "mutability"],
+            "properties": {
+              "locatorId": {
+                "$ref": "#/$defs/OpaqueId"
+              },
+              "mutability": {
+                "$ref": "#/$defs/EngineLocatorMutability"
+              }
+            }
+          }
+        },
+        "integrity": {
+          "$ref": "#/$defs/EngineIntegrityEvidence"
+        },
+        "signature": {
+          "$ref": "#/$defs/EngineSignatureEvidence"
+        },
+        "provenance": {
+          "$ref": "#/$defs/EngineProvenanceEvidence"
+        },
+        "declaration": {
+          "$ref": "#/$defs/EngineCompatibilityDeclaration"
+        }
+      }
+    },
+    "EngineCompatibilityRequirement": {
+      "type": "object",
+      "required": [
+        "requirementId",
+        "compatibilityPolicyId",
+        "engine",
+        "allowedFlavors",
+        "platform",
+        "versionFloor",
+        "versionCeilingExclusive",
+        "prereleaseChannels",
+        "protocol",
+        "api",
+        "commands",
+        "features",
+        "toolchainFamily",
+        "hostFeatures"
+      ],
+      "properties": {
+        "requirementId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "compatibilityPolicyId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "engine": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "allowedFlavors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineFlavor"
+          },
+          "uniqueItems": true
+        },
+        "platform": {
+          "$ref": "#/$defs/EnginePlatform"
+        },
+        "exactPin": {
+          "$ref": "#/$defs/EngineVersion"
+        },
+        "versionFloor": {
+          "$ref": "#/$defs/EngineVersion"
+        },
+        "versionCeilingExclusive": {
+          "$ref": "#/$defs/EngineVersion"
+        },
+        "prereleaseChannels": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "protocol": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "api": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "commands": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "features": {
+          "$ref": "#/$defs/OpaqueIdList"
+        },
+        "toolchainFamily": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "hostFeatures": {
+          "type": "array",
+          "items": {
+            "enum": ["SharedArrayBuffer", "cross-origin-isolated"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "EngineCompatibilityVerdict": {
+      "enum": [
+        "Compatible",
+        "TooOld",
+        "TooNew",
+        "Unsupported",
+        "WrongPlatform",
+        "WrongFlavor",
+        "UnsupportedProtocol",
+        "UnsupportedApi",
+        "MissingCommand",
+        "MissingFeature",
+        "ToolchainIncompatible",
+        "HostUnsupported",
+        "UnknownCompatibility"
+      ]
+    },
+    "EngineLocatorBasis": {
+      "type": "object",
+      "required": ["locatorId", "mutability", "statFingerprint"],
+      "properties": {
+        "locatorId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "mutability": {
+          "$ref": "#/$defs/EngineLocatorMutability"
+        },
+        "statFingerprint": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "EngineValidationReceipt": {
+      "type": "object",
+      "required": [
+        "schema",
+        "artifact",
+        "originReceipts",
+        "integrity",
+        "signature",
+        "provenance",
+        "requirementId",
+        "compatibilityPolicyId",
+        "compatibilityVerdict",
+        "project",
+        "profile",
+        "host",
+        "policyEpoch",
+        "trustEpoch",
+        "revocationEpoch",
+        "validationSchema",
+        "completion",
+        "observedBasis"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "artifact": {
+          "$ref": "#/$defs/EngineArtifactId"
+        },
+        "originReceipts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineOriginReceipt"
+          }
+        },
+        "integrity": {
+          "$ref": "#/$defs/EngineIntegrityEvidence"
+        },
+        "signature": {
+          "$ref": "#/$defs/EngineSignatureEvidence"
+        },
+        "provenance": {
+          "$ref": "#/$defs/EngineProvenanceEvidence"
+        },
+        "requirementId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "compatibilityPolicyId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "compatibilityVerdict": {
+          "const": "Compatible"
+        },
+        "project": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "profile": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "host": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "policyEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "trustEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revocationEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "validationSchema": {
+          "const": 1
+        },
+        "completion": {
+          "const": "Complete"
+        },
+        "observedBasis": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineLocatorBasis"
+          }
+        }
+      }
+    },
+    "EngineInstallLayout": {
+      "type": "object",
+      "required": ["layoutVersion", "rootClass", "platform", "artifactKey", "entries"],
+      "properties": {
+        "layoutVersion": {
+          "const": 1
+        },
+        "rootClass": {
+          "enum": ["managed-private-root", "installed-package"]
+        },
+        "platform": {
+          "$ref": "#/$defs/EnginePlatform"
+        },
+        "artifactKey": {
+          "$ref": "#/$defs/Digest"
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 4,
+          "items": {
+            "enum": ["manifest.json", "closure", "validation", "READY.json"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "EngineReadyMarker": {
+      "type": "object",
+      "required": ["schema", "artifact", "manifestDigest", "installGeneration"],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "artifact": {
+          "$ref": "#/$defs/EngineArtifactId"
+        },
+        "manifestDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "installGeneration": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "EngineCacheKey": {
+      "type": "object",
+      "required": [
+        "artifactKey",
+        "closureManifestDigest",
+        "originReceiptId",
+        "locatorStatIdentity",
+        "project",
+        "profile",
+        "host",
+        "requirementId",
+        "compatibilityPolicyId",
+        "validationSchema",
+        "policyEpoch",
+        "trustEpoch",
+        "revocationEpoch"
+      ],
+      "properties": {
+        "artifactKey": {
+          "$ref": "#/$defs/Digest"
+        },
+        "closureManifestDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "originReceiptId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "locatorStatIdentity": {
+          "$ref": "#/$defs/Digest"
+        },
+        "project": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "profile": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "host": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "requirementId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "compatibilityPolicyId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "validationSchema": {
+          "const": 1
+        },
+        "policyEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "trustEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revocationEpoch": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "EngineCacheEntry": {
+      "type": "object",
+      "required": ["key", "receipt", "mutability", "retainedBytes"],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/EngineCacheKey"
+        },
+        "receipt": {
+          "$ref": "#/$defs/EngineValidationReceipt"
+        },
+        "mutability": {
+          "$ref": "#/$defs/EngineLocatorMutability"
+        },
+        "retainedBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "EngineRejectionReason": {
+      "enum": [
+        "InvalidSchema",
+        "SourceForbidden",
+        "Revoked",
+        "RevocationDataUnavailable",
+        "OriginMismatch",
+        "ManifestIncomplete",
+        "IntegrityFailure",
+        "TrustFailure",
+        "SignatureFailure",
+        "ProvenanceIncomplete",
+        "DevelopmentForbidden",
+        "UnsafeLinkComponent",
+        "UnsafeOwner",
+        "UnsafePermissions",
+        "IncompleteEntry",
+        "CorruptEntry",
+        "TooOld",
+        "TooNew",
+        "Unsupported",
+        "WrongPlatform",
+        "WrongFlavor",
+        "UnsupportedProtocol",
+        "UnsupportedApi",
+        "MissingCommand",
+        "MissingFeature",
+        "ToolchainIncompatible",
+        "HostUnsupported",
+        "UnknownCompatibility"
+      ]
+    },
+    "EngineRejection": {
+      "type": "object",
+      "required": ["schema", "reason", "state", "source", "stage", "completion", "remediation"],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "reason": {
+          "$ref": "#/$defs/EngineRejectionReason"
+        },
+        "state": {
+          "enum": [
+            "Forbidden",
+            "Incompatible",
+            "IntegrityFailure",
+            "TrustFailure",
+            "OperationalFailure",
+            "Unsupported"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/EngineSourceKind"
+        },
+        "stage": {
+          "enum": ["validate", "select", "activate"]
+        },
+        "artifactKey": {
+          "$ref": "#/$defs/Digest"
+        },
+        "completion": {
+          "enum": ["Complete", "Partial", "Cancelled", "Stale"]
+        },
+        "remediation": {
+          "enum": [
+            "repair-input",
+            "refresh-trust",
+            "contact-admin",
+            "choose-compatible",
+            "choose-host"
+          ]
+        }
+      }
+    },
+    "EngineRevocation": {
+      "type": "object",
+      "required": ["entryId", "targetKind", "targetId", "reasonId", "issuerId", "revocationEpoch"],
+      "properties": {
+        "entryId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "targetKind": {
+          "enum": ["artifact", "origin", "signer", "trust-root"]
+        },
+        "targetId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "reasonId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "issuerId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "revocationEpoch": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "EnginePublicStatus": {
+      "type": "object",
+      "required": ["source", "state", "completion", "remediation"],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/EngineSourceKind"
+        },
+        "version": {
+          "$ref": "#/$defs/EngineVersion"
+        },
+        "state": {
+          "enum": [
+            "Selected",
+            "Forbidden",
+            "Incompatible",
+            "IntegrityFailure",
+            "TrustFailure",
+            "NeedInputs",
+            "Offline",
+            "NotFound",
+            "Cancelled",
+            "OperationalFailure",
+            "Unsupported"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/EngineRejectionReason"
+        },
+        "remediation": {
+          "enum": [
+            "none",
+            "repair-input",
+            "refresh-trust",
+            "contact-admin",
+            "choose-compatible",
+            "choose-host",
+            "supply-input",
+            "retry-online",
+            "retry-request",
+            "inspect-diagnostic"
+          ]
+        },
+        "artifactKey": {
+          "$ref": "#/$defs/Digest"
+        },
+        "receiptDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "completion": {
+          "enum": ["Complete", "Partial", "Cancelled", "Stale"]
+        }
+      }
+    },
+    "EngineValidationWorkCounters": {
+      "type": "object",
+      "required": [
+        "candidates",
+        "statOps",
+        "readOps",
+        "readBytes",
+        "hashOps",
+        "hashBytes",
+        "manifestOps",
+        "signatureChecks",
+        "cacheHits",
+        "invalidations",
+        "retainedBytes",
+        "retainedEntries",
+        "networkAttempts",
+        "processSpawns"
+      ],
+      "properties": {
+        "candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "statOps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readOps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hashOps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hashBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "manifestOps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signatureChecks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cacheHits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "invalidations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retainedBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retainedEntries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "networkAttempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "processSpawns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
