@@ -1833,25 +1833,26 @@ fn closing_the_host_releases_the_index() {
 }
 
 #[test]
-fn an_external_template_file_joins_the_population() {
+fn style_definitions_count_each_block_once_however_many_occurrences_it_holds() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_file(
         &host,
-        "/src/tpl.html",
-        "<div>template</div>",
-        FileLanguage::FrameworkTemplate {
-            adapter_id: verter_language::FrameworkAdapterId::vue(),
-            owner_hint: None,
-        },
-    );
-    upsert_file(
-        &host,
         "/src/A.vue",
-        &vue_source("--brand"),
+        "<template><div /></template>
+<style>
+:root { --x: 1; }
+.a { --x: 2; color: var(--x); background: var(--x); }
+</style>
+<style>
+.b { --x: 3; }
+</style>",
         FileLanguage::vue(),
     );
-    let answer = host.css_var_candidates("--brand", WIDE, &never());
-    assert_eq!(answer.page.status, EnumerationStatus::Complete);
-    let again = host.css_var_candidates("--brand", WIDE, &never());
-    assert_eq!(again.work, IndexReconcileWork::default());
+    let flow = host.css_var_flow("--x", None);
+    assert_eq!(
+        flow.style_definitions.len(),
+        2,
+        "one path per defining block"
+    );
+    assert_eq!(flow.style_var_usages.len(), 1, "one path per using block");
 }
