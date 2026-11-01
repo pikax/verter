@@ -574,8 +574,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         {
             return Some(RelationReport::StackOverflow);
         }
-        let (source, target) = self.print_relation_operands(source, target)?;
-        let head = if head.code == CheckerDiagnosticCode::TypeNotAssignable && source == target {
+        let operands = self.relation_operands(source, target)?;
+        let head = if head.code == CheckerDiagnosticCode::TypeNotAssignable && operands.same_name {
             CheckerDiagnostic {
                 code: CheckerDiagnosticCode::UnrelatedTypesWithSameName,
                 ..head
@@ -587,7 +587,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             span.0,
             span.1,
             head,
-            Box::new([source.into_boxed_str(), target.into_boxed_str()]),
+            Box::new([
+                operands.source.into_boxed_str(),
+                operands.target.into_boxed_str(),
+            ]),
             chain.into_boxed_slice(),
         )))
     }
@@ -710,11 +713,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return Some(Explained::Chain);
         }
         let depth = if own_line {
-            let (source, target) = self.print_relation_operands(source, target)?;
+            let operands = self.relation_operands(source, target)?;
+            let message = if operands.same_name {
+                CheckerDiagnosticCode::UnrelatedTypesWithSameName
+            } else {
+                CheckerDiagnosticCode::TypeNotAssignable
+            };
             push(
                 chain,
                 depth,
-                CheckerDiagnosticCode::TypeNotAssignable.format(&[source, target]),
+                message.format(&[operands.source, operands.target]),
             );
             depth.checked_add(1)?
         } else {
@@ -1042,10 +1050,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 source_view.as_ref()?;
                 let missing = self.missing_required_properties(source, target)?;
                 if !missing.is_empty() {
-                    let (source_printed, target_printed) = (
-                        self.print_diagnostic_type(source)?,
-                        self.print_diagnostic_type(target)?,
-                    );
+                    let (source_printed, target_printed) =
+                        self.relation_type_names(source, target)?;
                     let (code, arguments) = match missing.as_slice() {
                         [name] => (
                             CheckerDiagnosticCode::PropertyMissing,
