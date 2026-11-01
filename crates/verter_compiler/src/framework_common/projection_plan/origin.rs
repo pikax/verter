@@ -1494,23 +1494,14 @@ mod tests {
             content_offset: GeneratedByteLen(0),
         };
         let preserve = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(3),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
         };
         let r#move = EmitOp::MoveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(3),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
             at: SourceByteOffset(4),
         };
         let boundary = EmitOp::OverwriteSyntheticBoundary {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(1),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(1)),
             text: EmitText::Static("{"),
             anchor: None,
         };
@@ -1578,10 +1569,7 @@ mod tests {
     fn preserve_original_class_follows_mapping_after_adjacent_move() {
         let allocator = Allocator::default();
         let preserve_aa = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(2),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(2)),
         };
         let mut moved = CodeTransform::new("aabb", &allocator);
         moved.move_slice(2, 4, 0);
@@ -1607,10 +1595,7 @@ mod tests {
     fn preserve_original_class_follows_mapping_after_two_byte_swap() {
         let allocator = Allocator::default();
         let preserve_a = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(1),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(1)),
         };
         let mut moved = CodeTransform::new("AB", &allocator);
         moved.move_slice(1, 2, 0);
@@ -1650,10 +1635,7 @@ mod tests {
             "generated and carrier lengths differ"
         );
         let preserve_partial = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(3),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
         };
         assert_eq!(
             projected_class_for_emit_op(&preserve_partial, &rewritten),
@@ -1661,10 +1643,7 @@ mod tests {
             "partial rewritten overlap must not return the whole generated span"
         );
         let preserve_full = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(6),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(6)),
         };
         assert_eq!(
             projected_class_for_emit_op(&preserve_full, &rewritten),
@@ -1692,10 +1671,7 @@ mod tests {
             "equal lengths must not imply byte-to-byte rewritten correspondence"
         );
         let preserve_partial = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(3),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
         };
         assert_eq!(
             projected_class_for_emit_op(&preserve_partial, &rewritten),
@@ -1703,10 +1679,7 @@ mod tests {
             "equal-length rewritten partial must not invent generated [0,3) inside 😃"
         );
         let preserve_full = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(6),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(6)),
         };
         assert_eq!(
             projected_class_for_emit_op(&preserve_full, &rewritten),
@@ -2681,10 +2654,7 @@ mod tests {
         assert_eq!(ct.build_string(), "defXY");
 
         let r#move = EmitOp::MoveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(3),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
             at: SourceByteOffset(6),
         };
         assert_eq!(
@@ -2780,17 +2750,11 @@ mod tests {
         let mapping = MappingProduct::of(&ct);
 
         let r#move = EmitOp::MoveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(0),
-                end: SourceByteOffset(3),
-            },
+            source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
             at: SourceByteOffset(6),
         };
         let preserve = EmitOp::PreserveOriginal {
-            source: SourceByteRange {
-                start: SourceByteOffset(3),
-                end: SourceByteOffset(6),
-            },
+            source: SourceByteRange::new(SourceByteOffset(3), SourceByteOffset(6)),
         };
 
         assert_eq!(

@@ -46,7 +46,9 @@
 //! let start = SourceByteOffset::new(4);
 //! let end = start.checked_add(6).unwrap();
 //! assert!(start < end);
-//! assert_eq!(end.checked_sub(start), Ok(SourceByteOffset::new(6)));
+//! // The rebase answers a base-relative byte length — the same unit
+//! // `checked_add` takes — never an absolute offset of the domain.
+//! assert_eq!(end.checked_sub(start), Ok(6));
 //! ```
 //!
 //! ```compile_fail
@@ -89,6 +91,61 @@
 //!
 //! let _ = SourceByteOffset::new(1) + 1u32; // no Add<u32>
 //! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(1) + EmbeddedByteOffset::new(2); // no Add between any two domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{EmbeddedByteOffset, GeneratedByteOffset};
+//!
+//! let generated = GeneratedByteOffset::new(2);
+//! let embedded = EmbeddedByteOffset::new(3);
+//! let _ = generated < embedded; // no ordering across domains
+//! let _ = generated == embedded; // no equality across domains
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteOffset, SourceByteOffset};
+//!
+//! let _ = SourceByteOffset::new(5).checked_sub(GeneratedByteOffset::new(1)); // no cross-domain rebase
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteRange, SourceByteOffset, SourceByteRange};
+//!
+//! fn generated(range: GeneratedByteRange) {}
+//! generated(SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1)));
+//! // a source range is not a generated range
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::{GeneratedByteRange, SourceByteOffset, SourceByteRange};
+//!
+//! let _: GeneratedByteRange =
+//!     SourceByteRange::new(SourceByteOffset::new(0), SourceByteOffset::new(1)).into();
+//! // no From between range domains either
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::SourceByteOffset;
+//!
+//! let raw: u32 = *SourceByteOffset::new(1); // no Deref to the raw integer
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::SourceByteOffset;
+//!
+//! let _: SourceByteOffset = 7usize.into(); // no From<usize>
+//! ```
+//!
+//! ```compile_fail
+//! use verter_span::SourceByteOffset;
+//!
+//! let _ = SourceByteOffset::new(1) + 1usize; // no Add<usize>
+//! ```
 
 use crate::utf16_line_index::LineCol;
 use std::fmt;
@@ -126,6 +183,31 @@ impl fmt::Display for CoordError {
 }
 
 impl std::error::Error for CoordError {}
+
+/// Narrow a byte position (or any counted extent) to the coordinate width,
+/// refusing — never truncating — past `u32::MAX` (`R06`: exact or refused).
+/// The checked converters mint no coordinate they cannot name; the counters
+/// they narrow are kept in `u64`, where a realizable content's totals
+/// cannot wrap, so this is the only narrowing step.
+#[inline]
+const fn in_u32(count: u64) -> Result<u32, CoordError> {
+    if count > u32::MAX as u64 {
+        Err(CoordError::Overflow)
+    } else {
+        Ok(count as u32)
+    }
+}
+
+/// Build the 1-based wire form from the `u64` counters a converter walked,
+/// refusing a line or column the `u32` wire form cannot carry
+/// ([`CoordError::Overflow`]).
+#[inline]
+fn wire_line_col(line: u64, into_line_units: u64) -> Result<LineCol, CoordError> {
+    Ok(LineCol {
+        line: in_u32(line)?,
+        col: in_u32(into_line_units.checked_add(1).ok_or(CoordError::Overflow)?)?,
+    })
+}
 
 /// Defines one coordinate domain: a `#[repr(transparent)]` byte-offset newtype
 /// plus its `#[repr(C)]` half-open range, with the same checked surface for
@@ -169,15 +251,19 @@ macro_rules! coord_domain {
                     .ok_or(CoordError::Overflow)
             }
 
-            /// Rebase below `base`, where both offsets are of this one domain.
-            /// A base greater than the offset is [`CoordError::Overflow`] —
-            /// refused, never wrapped or saturated.
+            /// Rebase below `base`, where both offsets are of this one
+            /// domain. The answer is a base-relative byte length — the
+            /// same unit [`Self::checked_add`] takes — never an absolute
+            /// offset of this domain: `self - base` names no position in
+            /// the content, so minting it as one would let a relative
+            /// amount flow into absolute-position consumers
+            /// (`validate`, `line_col`, range construction) unchecked.
+            /// A base greater than the offset is
+            /// [`CoordError::Overflow`] — refused, never wrapped or
+            /// saturated.
             #[inline]
-            pub fn checked_sub(self, base: Self) -> Result<Self, CoordError> {
-                self.0
-                    .checked_sub(base.0)
-                    .map(Self)
-                    .ok_or(CoordError::Overflow)
+            pub fn checked_sub(self, base: Self) -> Result<u32, CoordError> {
+                self.0.checked_sub(base.0).ok_or(CoordError::Overflow)
             }
 
             /// Check this offset against the exact content snapshot it
@@ -199,91 +285,102 @@ macro_rules! coord_domain {
             /// (`R03`: against the exact content snapshot). A unit offset
             /// inside a surrogate pair is [`CoordError::NotCharBoundary`];
             /// past the content's unit length is
-            /// [`CoordError::InvalidBoundary`].
+            /// [`CoordError::InvalidBoundary`]; an extent past the `u32`
+            /// coordinate width is [`CoordError::Overflow`].
             pub fn from_utf16(content: &str, units: u32) -> Result<Self, CoordError> {
                 if content.is_ascii() {
                     return if units as usize <= content.len() {
+                        // ASCII bytes are one UTF-16 unit each, so the unit
+                        // offset IS the byte offset: no narrowing happens.
                         Ok(Self(units))
                     } else {
                         Err(CoordError::InvalidBoundary)
                     };
                 }
-                let mut seen = 0u32;
+                let mut seen = 0u64;
                 for (byte, ch) in content.char_indices() {
-                    if seen == units {
-                        return Ok(Self(byte as u32));
+                    if seen == units as u64 {
+                        return in_u32(byte as u64).map(Self);
                     }
-                    let ch_units = ch.len_utf16() as u32;
-                    if units < seen + ch_units {
+                    let boundary = seen + ch.len_utf16() as u64;
+                    if (units as u64) < boundary {
                         // Strictly inside this scalar's UTF-16 units — the
                         // second unit of a surrogate pair.
                         return Err(CoordError::NotCharBoundary);
                     }
-                    seen += ch_units;
+                    seen = boundary;
                 }
-                if seen == units {
-                    return Ok(Self(content.len() as u32));
+                if seen == units as u64 {
+                    return in_u32(content.len() as u64).map(Self);
                 }
                 Err(CoordError::InvalidBoundary)
             }
 
             /// Checked egress to a UTF-16 code-unit offset, after validating
-            /// this offset against the same content snapshot.
+            /// this offset against the same content snapshot. A unit count
+            /// past the `u32` coordinate width is
+            /// [`CoordError::Overflow`].
             pub fn to_utf16(self, content: &str) -> Result<u32, CoordError> {
                 self.validate(content)?;
                 if content.is_ascii() {
                     return Ok(self.0);
                 }
-                let mut units = 0u32;
+                let mut units = 0u64;
                 for (byte, ch) in content.char_indices() {
                     if byte == self.0 as usize {
-                        return Ok(units);
+                        return in_u32(units);
                     }
-                    units += ch.len_utf16() as u32;
+                    units += ch.len_utf16() as u64;
                 }
                 // validate() guarantees we only fall out at end-of-file.
-                Ok(units)
+                in_u32(units)
             }
 
             /// Checked ingress from a requester UTF-32 scalar offset. Every
             /// scalar count in extent is a scalar boundary, so only extent is
-            /// refused ([`CoordError::InvalidBoundary`]).
+            /// refused ([`CoordError::InvalidBoundary`]; an extent past the
+            /// `u32` coordinate width is [`CoordError::Overflow`]).
             pub fn from_utf32(content: &str, scalars: u32) -> Result<Self, CoordError> {
                 if content.is_ascii() {
                     return if scalars as usize <= content.len() {
+                        // ASCII bytes are one UTF-32 scalar each, so the
+                        // scalar offset IS the byte offset: no narrowing
+                        // happens.
                         Ok(Self(scalars))
                     } else {
                         Err(CoordError::InvalidBoundary)
                     };
                 }
-                let mut seen = 0u32;
+                let mut seen = 0u64;
                 for (byte, _) in content.char_indices() {
-                    if seen == scalars {
-                        return Ok(Self(byte as u32));
+                    if seen == scalars as u64 {
+                        return in_u32(byte as u64).map(Self);
                     }
                     seen += 1;
                 }
-                if seen == scalars {
-                    return Ok(Self(content.len() as u32));
+                if seen == scalars as u64 {
+                    return in_u32(content.len() as u64).map(Self);
                 }
                 Err(CoordError::InvalidBoundary)
             }
 
             /// Checked egress to a UTF-32 scalar offset, after validating
-            /// this offset against the same content snapshot.
+            /// this offset against the same content snapshot. A scalar count
+            /// past the `u32` coordinate width is
+            /// [`CoordError::Overflow`].
             pub fn to_utf32(self, content: &str) -> Result<u32, CoordError> {
                 self.validate(content)?;
                 if content.is_ascii() {
                     return Ok(self.0);
                 }
-                let mut scalars = 0u32;
+                let mut scalars = 0u64;
                 for (byte, _) in content.char_indices() {
                     if byte == self.0 as usize {
-                        return Ok(scalars);
+                        return in_u32(scalars);
                     }
                     scalars += 1;
                 }
-                Ok(scalars)
+                in_u32(scalars)
             }
 
             /// Convert to the TypeScript-wire line/column form ([`LineCol`]:
@@ -295,18 +392,15 @@ macro_rules! coord_domain {
             /// ([`CoordError::InvalidBoundary`]).
             pub fn line_col(self, content: &str) -> Result<LineCol, CoordError> {
                 self.validate(content)?;
-                let mut line = 1u32;
-                let mut line_start_u16 = 0u32;
-                let mut u16_idx = 0u32;
+                let mut line = 1u64;
+                let mut line_start_u16 = 0u64;
+                let mut u16_idx = 0u64;
                 let mut chars = content.char_indices().peekable();
                 while let Some((byte, ch)) = chars.next() {
                     if byte == self.0 as usize {
-                        return Ok(LineCol {
-                            line,
-                            col: u16_idx - line_start_u16 + 1,
-                        });
+                        return wire_line_col(line, u16_idx - line_start_u16);
                     }
-                    let mut units = ch.len_utf16() as u32;
+                    let mut units = ch.len_utf16() as u64;
                     let is_terminator = match ch {
                         '\n' | '\u{2028}' | '\u{2029}' => true,
                         '\r' => {
@@ -330,10 +424,7 @@ macro_rules! coord_domain {
                     }
                 }
                 // validate() guarantees we only reach here at end-of-file.
-                Ok(LineCol {
-                    line,
-                    col: u16_idx - line_start_u16 + 1,
-                })
+                wire_line_col(line, u16_idx - line_start_u16)
             }
 
             /// Checked ingress from the TypeScript-wire line/column form
@@ -341,31 +432,33 @@ macro_rules! coord_domain {
             /// line count, a column more than one unit past the line's units
             /// (one unit past is the line's end boundary), or a column inside
             /// a surrogate pair ([`CoordError::NotCharBoundary`]) is a typed
-            /// error — a column past the line end is never clamped to it.
+            /// error — a column past the line end is never clamped to it. A
+            /// byte position past the `u32` coordinate width is
+            /// [`CoordError::Overflow`].
             pub fn from_line_col(content: &str, pos: LineCol) -> Result<Self, CoordError> {
                 if pos.line == 0 || pos.col == 0 {
                     // The form is 1-based; a 0 in either field names no
                     // position.
                     return Err(CoordError::InvalidBoundary);
                 }
-                let want_units = pos.col - 1;
-                let mut line = 1u32;
-                let mut line_start_u16 = 0u32;
-                let mut u16_idx = 0u32;
+                let want_units = pos.col as u64 - 1;
+                let mut line = 1u64;
+                let mut line_start_u16 = 0u64;
+                let mut u16_idx = 0u64;
                 let mut chars = content.char_indices().peekable();
                 while let Some((byte, ch)) = chars.next() {
-                    if line == pos.line {
+                    if line == pos.line as u64 {
                         let into_line = u16_idx - line_start_u16;
-                        let ch_units = ch.len_utf16() as u32;
+                        let ch_units = ch.len_utf16() as u64;
                         if into_line == want_units {
-                            return Ok(Self(byte as u32));
+                            return in_u32(byte as u64).map(Self);
                         }
                         if want_units < into_line + ch_units {
                             // Strictly inside this scalar's UTF-16 units.
                             return Err(CoordError::NotCharBoundary);
                         }
                     }
-                    let mut units = ch.len_utf16() as u32;
+                    let mut units = ch.len_utf16() as u64;
                     let is_terminator = match ch {
                         '\n' | '\u{2028}' | '\u{2029}' => true,
                         '\r' => {
@@ -383,16 +476,22 @@ macro_rules! coord_domain {
                         line_start_u16 = u16_idx;
                     }
                 }
-                if line == pos.line && u16_idx - line_start_u16 == want_units {
+                if line == pos.line as u64 && u16_idx - line_start_u16 == want_units {
                     // End-of-file (or a content-final line's end).
-                    return Ok(Self(content.len() as u32));
+                    return in_u32(content.len() as u64).map(Self);
                 }
                 Err(CoordError::InvalidBoundary)
             }
         }
 
         $(#[$range_doc])*
+        /// An inverted range (`end < start`) is not constructible: the
+        /// ordered invariant is enforced at construction, so no method has
+        /// to normalise one. The struct is `#[non_exhaustive]` so no other
+        /// crate can bypass the constructors with a struct literal; the
+        /// fields stay readable at their historical paths.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[non_exhaustive]
         #[repr(C)]
         pub struct $range {
             /// Inclusive start, in this domain's bytes.
@@ -402,12 +501,20 @@ macro_rules! coord_domain {
         }
 
         impl $range {
-            /// Construct from already-ordered offsets (the infallible form
-            /// existing callers use for geometry they have already validated).
-            /// The range constructor that rejects an inverted range is
-            /// [`Self::checked_new`].
+            /// Construct from already-ordered offsets. An inverted range
+            /// (`end < start`) is refused loudly here — never swapped or
+            /// emptied; [`Self::checked_new`] is the form that answers the
+            /// refusal as a value.
+            ///
+            /// # Panics
+            ///
+            /// When `end < start`.
             #[inline]
             pub const fn new(start: $offset, end: $offset) -> Self {
+                assert!(
+                    start.0 <= end.0,
+                    "a byte range is ordered: end < start is refused, not normalised"
+                );
                 Self { start, end }
             }
 
@@ -422,16 +529,17 @@ macro_rules! coord_domain {
             }
 
             /// Length in this domain's bytes. Total for every constructible
-            /// range (an inverted one reports 0); the routes that must reject
-            /// inversion are [`Self::checked_new`] and [`Self::validate`].
+            /// range: `new` and `checked_new` refuse inversion, and no other
+            /// crate can assemble the struct by literal, so the subtraction
+            /// never saturates or wraps.
             #[inline]
-            pub fn len(&self) -> u32 {
-                self.end.0.saturating_sub(self.start.0)
+            pub const fn len(&self) -> u32 {
+                self.end.0 - self.start.0
             }
 
             #[inline]
-            pub fn is_empty(&self) -> bool {
-                self.start.0 >= self.end.0
+            pub const fn is_empty(&self) -> bool {
+                self.start.0 == self.end.0
             }
 
             /// Check both endpoints against the exact content snapshot:

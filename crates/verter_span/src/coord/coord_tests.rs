@@ -1,12 +1,18 @@
 //! Checked-coordinate tests for the successor coordinate domains.
 //!
-//! Rows K01–K28 of `tests/kernel/ENC0/products/case-table.v1.json` (ENC0's
-//! case table). K01–K03 (domain mixing) are `compile_fail` doctests on the
-//! module; the table-driven rows live here. Rows the table marks
-//! `boundaryOwner` (K15 lone-`\r` under the LSP wire, K16 U+2028/U+2029 under
-//! LSP versus TypeScript, K20 wire ingress, K25 lone surrogates from
-//! JavaScript, K27 the UTF-8-session conversion buffer) belong to the boundary
-//! owners' corpora, not here.
+//! The rows follow the coordinate constitution's case table
+//! (`docs/arch/kernel/coordinates.md`, "Case table"). Domain mixing
+//! (rows K01–K03) is pinned by the `compile_fail` doctests on the module;
+//! the table-driven rows live here and each one pins a refusal the
+//! constitution's law names: checked arithmetic never clamps or wraps
+//! (K04–K08), a position that is not a boundary of its domain is a typed
+//! error (K09–K12), line terminators and cross-encoding conversion are
+//! exact-or-refused (K13–K25), and the newtypes cost nothing over the
+//! existing width (K26, K28). Rows the constitution marks as the boundary
+//! owners' own corpora (the lone-`\r` and U+2028/U+2029 wire forms, wire
+//! ingress, lone surrogates arriving from a JavaScript string, the
+//! UTF-8-session conversion buffer) belong to the boundary owners, not
+//! here.
 
 use super::*;
 
@@ -37,7 +43,7 @@ fn checked_add_refuses_overflow_k04() {
 }
 
 #[test]
-fn checked_sub_refuses_underflow_k05() {
+fn checked_sub_refuses_underflow_and_answers_a_length_k05() {
     assert_eq!(
         SourceByteOffset(5).checked_sub(SourceByteOffset(6)),
         Err(CoordError::Overflow)
@@ -50,14 +56,19 @@ fn checked_sub_refuses_underflow_k05() {
         EmbeddedByteOffset(5).checked_sub(EmbeddedByteOffset(6)),
         Err(CoordError::Overflow)
     );
-    assert_eq!(
-        SourceByteOffset(6).checked_sub(SourceByteOffset(5)),
-        Ok(SourceByteOffset(1))
-    );
-    assert_eq!(
-        SourceByteOffset(5).checked_sub(SourceByteOffset(5)),
-        Ok(SourceByteOffset(0))
-    );
+    // The answer is the same base-relative length unit `checked_add`
+    // takes, never an absolute offset of the domain: a rebase result must
+    // not type-check as a position.
+    let length = SourceByteOffset(6)
+        .checked_sub(SourceByteOffset(5))
+        .unwrap();
+    assert_eq!(length, 1);
+    assert_eq!(SourceByteOffset(5).checked_sub(SourceByteOffset(5)), Ok(0));
+    let end = SourceByteOffset(2).checked_add(length).unwrap();
+    assert_eq!(end, SourceByteOffset(3));
+    // The unit composes: add takes what sub answered, and only add mints
+    // an offset.
+    let _position: SourceByteOffset = SourceByteOffset(2).checked_add(length).unwrap();
 }
 
 #[test]
@@ -77,6 +88,30 @@ fn inverted_range_is_refused_not_swapped_k06() {
     // The ordered form is fine and keeps its endpoints as given.
     let range = SourceByteRange::checked_new(SourceByteOffset(3), SourceByteOffset(5)).unwrap();
     assert_eq!((range.start.0, range.end.0), (3, 5));
+}
+
+/// The infallible constructor refuses inversion loudly too: an inverted
+/// range is never silently normalised to an empty one whose `len()` clamps
+/// to 0.
+#[test]
+#[should_panic(expected = "a byte range is ordered")]
+fn inverted_range_is_refused_by_the_infallible_constructor_k06() {
+    let _ = SourceByteRange::new(SourceByteOffset(5), SourceByteOffset(3));
+}
+
+/// Every length the range answers is a plain subtraction: an ordered range
+/// of length `n` answers exactly `n`, and the empty range answers 0 without
+/// any saturating fallback.
+#[test]
+fn range_len_is_plain_subtraction_on_ordered_ranges() {
+    assert_eq!(
+        SourceByteRange::new(SourceByteOffset(3), SourceByteOffset(5)).len(),
+        2
+    );
+    assert_eq!(
+        GeneratedByteRange::new(GeneratedByteOffset(0), GeneratedByteOffset(u32::MAX)).len(),
+        u32::MAX
+    );
 }
 
 #[test]
@@ -110,6 +145,54 @@ fn rebase_past_u32_width_refuses_k08() {
     let base = SourceByteOffset(u32::MAX - 3);
     assert_eq!(base.checked_add(4), Err(CoordError::Overflow));
     assert_eq!(base.checked_add(3), Ok(SourceByteOffset(u32::MAX)));
+}
+
+// ======================== coordinate-width narrowing ========================
+
+/// The converters mint no coordinate they cannot name: narrowing a byte
+/// position or counted extent to the coordinate width is exact-or-refused,
+/// never a truncation. Pinned at the narrowing boundary itself, which no
+/// realizable content fixture could reach.
+#[test]
+fn width_narrowing_refuses_instead_of_truncating() {
+    assert_eq!(in_u32(u32::MAX as u64), Ok(u32::MAX));
+    assert_eq!(in_u32(0), Ok(0));
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(
+        in_u32(u32::MAX as u64 + 1),
+        Err(CoordError::Overflow),
+        "2^32 byte positions do not truncate to offset 0"
+    );
+    // The wire line/column form narrows through the same refusal. Its col
+    // is 1-based, so u32::MAX units into the line is the last column that
+    // still fits; one more unit into the line overflows the wire form.
+    assert_eq!(wire_line_col(1, u32::MAX as u64 - 1).unwrap().col, u32::MAX);
+    assert_eq!(wire_line_col(1, u32::MAX as u64), Err(CoordError::Overflow));
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(
+        wire_line_col(u32::MAX as u64 + 1, 0),
+        Err(CoordError::Overflow)
+    );
+    assert_eq!(wire_line_col(2, 3).unwrap(), LineCol { line: 2, col: 4 });
+}
+
+/// Even a range assembled by literal inside this crate (the one route left,
+/// since the struct refuses literals from other crates) meets the typed
+/// refusal at the checking boundary: it is rejected, never emptied.
+#[test]
+fn a_literal_assembled_inverted_range_still_meets_the_typed_refusal() {
+    let inverted = SourceByteRange {
+        start: SourceByteOffset(5),
+        end: SourceByteOffset(3),
+    };
+    assert_eq!(
+        inverted.validate("0123456789"),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert!(
+        !inverted.is_empty(),
+        "an inverted range is not a valid empty range"
+    );
 }
 
 // ======================== K09–K12: boundaries ========================
