@@ -3299,29 +3299,25 @@ impl DeclBodyMemo {
             let source = program.source_str();
             let program = program.borrow_dependent();
             let addresses = addresses.get_or_init(|| {
-                let table = verter_semantic::analysis::MacroFieldAddressTable::build(
-                    program,
-                    source,
-                    owner_table.as_ref(),
-                );
                 counters
                     .macro_field_address_builds
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                #[cfg(feature = "semantic-observe")]
-                counters
-                    .macro_field_address_work
-                    .fetch_add(table.work(), std::sync::atomic::Ordering::Relaxed);
-                Arc::new(table)
+                Arc::new(verter_semantic::analysis::MacroFieldAddressTable::build(
+                    program,
+                    source,
+                    owner_table.as_ref(),
+                    &counters.macro_field_address_work,
+                ))
             });
             Some(
                 verter_semantic::analysis::lower_macro_field_payload_at_with_owners(
                     program,
                     source,
-                    owner_table.as_ref(),
                     addresses,
                     owner,
                     macro_index,
                     field_index,
+                    &counters.macro_field_address_work,
                 ),
             )
         });
