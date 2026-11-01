@@ -1,0 +1,18 @@
+[
+  {
+    "glob": "tests/extension-sdk/XSDK0/constitution.md",
+    "reason": "Extension contribution authority contract; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/extension-sdk/XSDK0/products/extension-cases.v1.json",
+    "reason": "Specified future extension runtime cases, not executable tests; no ci.yml job reads this contract data. Classify the producers' tests when they land."
+  },
+  {
+    "glob": "tests/extension-sdk/XSDK0/products/extension-inventory.v1.json",
+    "reason": "Extension consumer and capability inventory; no ci.yml job reads this contract data. Reclassify when an executable consumer lands."
+  },
+  {
+    "glob": "tests/extension-sdk/evidence/XSDK0/cases.md",
+    "reason": "Extension constitution review evidence map; no ci.yml job reads its contents."
+  }
+]

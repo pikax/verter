@@ -1,0 +1,698 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "static-proof",
+  "runtimeSupportClaim": false,
+  "authority": "Versioned contribution ingress and isolated execution only; core retains all semantic authority",
+  "imports": [
+    "CAT0 T01-T09, CR01-CR14, XK01-XK09",
+    "VID0 I01-I12, R01-R16",
+    "PUB0 envelopes",
+    "WDX0 evidence classes",
+    "LRA0 rule/action contract: docs/arch/kernel/rules-actions.md",
+    "VIM0 VM26 row ownership"
+  ],
+  "currentProductionManifestConsumers": [],
+  "consumerRoles": {
+    "sdk-boundary": "extension module that admits, validates, hosts or schedules contributions",
+    "host-transport": "existing host route an SDK host consumes without owning it",
+    "target-table-owner": "canonical row owner or current carrier that receives validated rows; a contribution never transfers its ownership (VIM0 VM26)",
+    "consumed-boundary": "core authority an SDK producer submits to",
+    "core-authority": "non-replaceable core authority no contribution reaches"
+  },
+  "consumers": [
+    {
+      "id": "C01",
+      "role": "sdk-boundary",
+      "path": "crates/verter_session/src/extensions/manifest/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK1",
+      "disposition": "T09 manifest admission; new immutable catalog"
+    },
+    {
+      "id": "C02",
+      "role": "sdk-boundary",
+      "path": "crates/verter_session/src/extensions/ingress/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK2",
+      "disposition": "Typed facts and rule/operation identities validated before canonical owner ingress"
+    },
+    {
+      "id": "C03",
+      "role": "sdk-boundary",
+      "path": "crates/verter_session/src/extensions/lifecycle/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK5",
+      "disposition": "Core demand, cancellation, validity and publication of guest computations; schedules no rule body"
+    },
+    {
+      "id": "C04",
+      "role": "sdk-boundary",
+      "path": "crates/verter_session/src/extensions/data_contributions/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK6",
+      "disposition": "XK08 HTML/CSS/component facts augment canonical owners; XSDK6 reconciles the exact completion receivers on its candidate"
+    },
+    {
+      "id": "C05",
+      "role": "sdk-boundary",
+      "path": "crates/verter_session/src/extensions/install/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK7",
+      "disposition": "Local inspect/install/upgrade/rollback/removal and permission review"
+    },
+    {
+      "id": "C06",
+      "role": "sdk-boundary",
+      "path": "crates/verter_session/src/extensions/operations/mod.rs",
+      "current": "placeholder, no API",
+      "owner": "XSDK8",
+      "disposition": "Action/migration proposals and tool operations through canonical authored transactions and typed queries only; never a rule executor"
+    },
+    {
+      "id": "C07",
+      "role": "target-table-owner",
+      "tables": ["T01", "T02"],
+      "path": "crates/verter_compiler/src/framework_common/catalog.rs",
+      "current": "ImmutableCapabilityCatalog::try_from_rows",
+      "owner": "CPF1",
+      "disposition": "Replaced by CatalogSnapshot T01/T02 rows; the container survives only as the type of a snapshot table (CAT-D03, D02). XSDK1 targets CatalogSnapshot T09, never this container."
+    },
+    {
+      "id": "C08",
+      "role": "target-table-owner",
+      "tables": ["T03"],
+      "path": "crates/verter_session/src/framework/registry.rs",
+      "current": "FrameworkAdapterRegistry",
+      "owner": "CPF1",
+      "disposition": "Hard-coded registrations become T03 rows and the agreement checks and capability-catalog composition are replaced by CPF1 (D06, CAT-D01, CAT-D02); the provider-gate index is replaced by COX0 (CAT-D06). XSDK1 targets CatalogSnapshot T09; first-party rows need no SDK dependency."
+    },
+    {
+      "id": "C09",
+      "role": "core-authority",
+      "path": "crates/verter_session/src/semantic_capability.rs",
+      "current": "CertifiedTypeEngineBinding",
+      "owner": "verter_session",
+      "disposition": "Retain certified core semantic authority; guests do not implement it"
+    },
+    {
+      "id": "C10",
+      "role": "core-authority",
+      "path": "crates/verter_identity/src/profile.rs",
+      "current": "ExecutionPolicy",
+      "owner": "verter_identity",
+      "disposition": "Retain core policy/identity separation; no guest identity minting"
+    },
+    {
+      "id": "C11",
+      "role": "host-transport",
+      "path": "packages/browser-host/src/worker.js",
+      "current": "one-shot probe worker; no lifecycle",
+      "owner": "BWH5",
+      "consumer": "XSDK4",
+      "disposition": "BWH5 owns worker transport and recovery; XSDK4 receives that lifecycle when it lands and adds a mediated guest host in packages/browser-host/src/extensions, never treating the worker as a sandbox"
+    },
+    {
+      "id": "C12",
+      "role": "consumed-boundary",
+      "path": "crates/verter_session/src/language_service/edits/mod.rs",
+      "current": "reserved home, no API",
+      "owner": "LSO8",
+      "consumer": "XSDK8",
+      "disposition": "Sole authored edit transaction engine; XSDK8 submits proposals here and never applies edits itself"
+    },
+    {
+      "id": "C13",
+      "role": "consumed-boundary",
+      "path": "crates/verter_lsp/src/workspace_edit/mod.rs",
+      "current": "reserved home, no API",
+      "owner": "LSO8",
+      "disposition": "Thin LSP WorkspaceEdit adapter of LSO8's engine; not an extension entry"
+    },
+    {
+      "id": "C14",
+      "role": "consumed-boundary",
+      "path": "crates/verter_lsp/src/features/edit_transaction.rs",
+      "current": "reserved home, no API",
+      "owner": "STP49",
+      "disposition": "SFC projection edit contribution into LSO8's engine; not an extension entry and not transaction authority"
+    },
+    {
+      "id": "C15",
+      "role": "target-table-owner",
+      "tables": ["T01"],
+      "path": "crates/verter_language/src/carrier_grammar.rs",
+      "current": "CarrierGrammarAuthority",
+      "owner": "CPF1",
+      "disposition": "Remains the validator of live grammars, fed by T01 rows (CAT-C01); an XK01 row supplies declared adapter facts and never a replacement parser or recovery policy"
+    },
+    {
+      "id": "C16",
+      "role": "target-table-owner",
+      "tables": ["T07"],
+      "path": "crates/verter_session/src/framework/project_capabilities.rs",
+      "current": "ProjectCapabilitySnapshot",
+      "owner": "FWA1",
+      "disposition": "Activation state over T03/T07 rows, not registration (CAT-C02); T07 rows stay COX0's. An XK05 row never sets activation."
+    },
+    {
+      "id": "C17",
+      "role": "target-table-owner",
+      "tables": ["T08"],
+      "path": "crates/verter_diagnostics/src/rules/mod.rs",
+      "current": "RuleRegistry::{new, register, for_carrier}",
+      "owner": "LNT3",
+      "disposition": "Replaced by immutable T08 rows under the LRA0 contract (CAT-C04, CAT-D05, CAT-O09). XK06 rows are validated data into that table; rule bodies run only as owned native implementations or through LNT2's trusted external path."
+    },
+    {
+      "id": "C18",
+      "role": "target-table-owner",
+      "tables": ["T09"],
+      "kinds": ["XK07"],
+      "path": "crates/verter_mcp/src/server.rs",
+      "current": "hand-written MCP tool server",
+      "owner": "AGM1",
+      "disposition": "The only MCP tool router; a contributed XK07 operation is exposed only through it over existing typed queries, never through a guest-owned router"
+    },
+    {
+      "id": "C19",
+      "role": "core-authority",
+      "kinds": ["XK08"],
+      "path": "crates/verter_semantic/src/analysis/html_intrinsics.rs",
+      "current": "HtmlIntrinsicCatalog (generated type shapes)",
+      "owner": "verter_semantic",
+      "disposition": "Retain the generated intrinsic type-shape catalog; XK08 metadata never becomes an intrinsic type shape (E04)"
+    }
+  ],
+  "targetTables": [
+    {
+      "table": "T01",
+      "kinds": ["XK01"],
+      "contractOwner": "CAT0",
+      "rowOwner": "CPF1",
+      "receivingRoutes": ["C07", "C15"]
+    },
+    {
+      "table": "T03",
+      "kinds": ["XK02"],
+      "contractOwner": "CAT0",
+      "rowOwner": "CPF1",
+      "receivingRoutes": ["C08"]
+    },
+    {
+      "table": "T04",
+      "kinds": ["XK03"],
+      "contractOwner": "PPR0",
+      "rowOwner": "PPR0T",
+      "receivingRoutes": [],
+      "currentState": "empty population at this candidate"
+    },
+    {
+      "table": "T05",
+      "kinds": ["XK04"],
+      "contractOwner": "EMB0",
+      "rowOwner": "EMB0I",
+      "receivingRoutes": [],
+      "currentState": "compiler-local block roles inside each carrier frontend; no row table yet"
+    },
+    {
+      "table": "T06",
+      "kinds": ["XK09"],
+      "contractOwner": "COX0D",
+      "rowOwner": "COX0",
+      "receivingRoutes": [],
+      "currentState": "empty population at this candidate"
+    },
+    {
+      "table": "T07",
+      "kinds": ["XK05"],
+      "contractOwner": "COX0D",
+      "rowOwner": "COX0",
+      "receivingRoutes": ["C16"]
+    },
+    {
+      "table": "T08",
+      "kinds": ["XK06"],
+      "contractOwner": "LRA0",
+      "rowOwner": "LNT3",
+      "receivingRoutes": ["C17"]
+    },
+    {
+      "table": "T09",
+      "kinds": ["XK07", "XK08"],
+      "contractOwner": "XSDK0",
+      "rowOwner": "XSDK1",
+      "receivingRoutes": ["C01", "C04", "C18"]
+    }
+  ],
+  "reconciliation": "Routes named here have one surviving owner. A producer that finds a further receiving route on its implementation candidate, such as the exact HTML/CSS completion receivers XSDK6 merges into, inventories it with its owner before mutation.",
+  "ruleExecution": {
+    "contract": "LRA0, docs/arch/kernel/rules-actions.md: 'Exact registration identity' and 'Applicability before work'",
+    "contributedRow": "T08 row data validated by XSDK2 against the LRA0 registration fields; never executable third-party rule code",
+    "guestComputedRow": "registration data admitted like a data-only row; computing a row confers no rule-body execution authority",
+    "bodyExecution": [
+      {
+        "disposition": "native or equivalent",
+        "owner": "first-party lint packs under LNT2 and LNT3",
+        "meaning": "owned, statically integrated implementation, including in the WASM build; never a loaded native library"
+      },
+      {
+        "disposition": "external",
+        "owner": "LNT2",
+        "meaning": "explicit trusted external-process execution, never a silent fallback; WASM and browser hosts report it unavailable"
+      }
+    ],
+    "singleAuthority": "one native/external authority per diagnostic concept and exact profile",
+    "isolatedGuest": "never evaluates a rule body on either host",
+    "registryCutover": "LNT3 (CAT-C04, CAT-D05, CAT-O09)",
+    "xk06IsolatedExecutable": "action and migration proposals only, mediated by XSDK8 into LSO8's authored edit transaction engine"
+  },
+  "futureConsumers": [
+    {
+      "owner": "XSDK3",
+      "path": "crates/verter_extension_host",
+      "disposition": "native guest host; absent at candidate"
+    },
+    {
+      "owner": "XSDK4",
+      "path": "packages/browser-host/src/extensions",
+      "disposition": "browser guest host over BWH5's worker lifecycle; absent at candidate"
+    },
+    {
+      "owner": "XSDK9",
+      "path": "packages/extension-sdk; examples/reference",
+      "disposition": "SDK authoring and three reference contribution classes"
+    },
+    {
+      "owner": "XSDK10",
+      "path": "tests/extension-sdk",
+      "disposition": "real host isolation/determinism qualification"
+    },
+    {
+      "owner": "XSDK11",
+      "path": "docs; examples/reference",
+      "disposition": "publish exact supported matrix using VIM1, DX1G and DOC1"
+    }
+  ],
+  "sources": [
+    {
+      "path": "Cargo.toml",
+      "version": "0.0.1-beta.7",
+      "meaning": "workspace package version, not an SDK protocol or guest compatibility claim"
+    },
+    {
+      "path": "packages/browser-host/package.json",
+      "version": "0.0.1-beta.1",
+      "meaning": "private browser host package, not a qualified executable guest host"
+    },
+    {
+      "path": "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "version": 1,
+      "meaning": "imported catalog contract; contribution kinds are not support claims"
+    },
+    {
+      "path": "docs/arch/kernel/rules-actions.md",
+      "version": null,
+      "meaning": "imported LRA0 rule/action contract; no rule SDK or guest rule execution"
+    },
+    {
+      "path": "crates/verter_session/src/extensions",
+      "version": null,
+      "meaning": "reserved modules; no published SDK/manifest/protocol release"
+    },
+    {
+      "path": "crates/verter_extension_host",
+      "version": null,
+      "meaning": "absent; engine and guest format exact releases must be selected and qualified by XSDK3"
+    },
+    {
+      "path": "packages/extension-sdk",
+      "version": null,
+      "meaning": "absent; XSDK9 authors public SDK against implemented exact protocols"
+    }
+  ],
+  "admissionInputs": [
+    "manifest schema exact version",
+    "SDK protocol exact version",
+    "extension namespace and exact version",
+    "source/license; content digest computed by core over the admitted manifest bytes",
+    "target canonical profiles and exact ReleaseId where applicable",
+    "dependencies as exact T09 keys (kind, namespace, exact version)",
+    "execution mode; guest format and engine exact release for executable mode",
+    "configuration schema"
+  ],
+  "coreMintedRowFields": {
+    "provenance": "data-manifest for declarative and data-only, isolated-guest for isolated-executable; official-static only for statically registered first-party rows, never from a manifest",
+    "contentDigest": "computed over the admitted manifest bytes; a manifest-supplied value is an expectation that must match exactly"
+  },
+  "hostCompatibilityCheck": "exact lookup against the host's published schema/protocol/build and guest-format/engine tuple; checked at admission and never part of snapshot identity (CAT0 CR06)",
+  "participationFacts": [
+    "effective configuration and its digest",
+    "permission grants and trust state, recorded by XSDK7 permission review under the typed execution permissions XSDK3 receives from XEC0 through XEC1",
+    "host-cell isolation availability",
+    "project activation of required T07 capabilities"
+  ],
+  "participationOwner": "DemandPlan (DEM0, COX0) per CAT0 CR11; participation facts never filter, rebuild or re-mint a snapshot",
+  "capabilityMatrix": [
+    {
+      "id": "XK01",
+      "kind": "carrier",
+      "table": "T01",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK02",
+      "kind": "semantic profile",
+      "table": "T03",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK03",
+      "kind": "project profile",
+      "table": "T04",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK04",
+      "kind": "embedded language",
+      "table": "T05",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK05",
+      "kind": "capability",
+      "table": "T07",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    },
+    {
+      "id": "XK06",
+      "kind": "rule or action",
+      "table": "T08",
+      "ruleExecution": "see ruleExecution: rule bodies run only as owned native implementations or through LNT2; no guest evaluates one",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated T08 row data and action descriptors only; never rule code",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated T08 row data and action descriptors only; never rule code",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "scope": "actions only",
+          "admission": "guest-computed T08 rows admitted as data; guest output is action/migration proposals through XSDK8 into LSO8's transaction engine; no guest rule-body evaluation",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5", "XSDK8"]
+        }
+      }
+    },
+    {
+      "id": "XK07",
+      "kind": "tool operation",
+      "table": "T09",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK8"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest output read through existing typed queries; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5", "XSDK8"]
+        }
+      }
+    },
+    {
+      "id": "XK08",
+      "kind": "metadata facts",
+      "table": "T09",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK6"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2", "XSDK6"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5", "XSDK6"]
+        }
+      }
+    },
+    {
+      "id": "XK09",
+      "kind": "interoperability",
+      "table": "T06",
+      "cells": {
+        "declarative": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "data-only": {
+          "state": "required-unimplemented",
+          "admission": "validated rows/facts only",
+          "owners": ["XSDK1", "XSDK2"]
+        },
+        "isolated-executable": {
+          "state": "required-unimplemented",
+          "admission": "guest-computed typed rows/facts admitted as data; no core callbacks",
+          "owners": ["XSDK1", "XSDK2", "XSDK3", "XSDK4", "XSDK5"]
+        }
+      }
+    }
+  ],
+  "capabilityMatrixNote": "Cells are host-independent; the host producer of each mode is in hostMatrix.",
+  "hostMatrix": [
+    {
+      "host": "native",
+      "mode": "declarative",
+      "state": "required-unimplemented",
+      "producer": "XSDK1",
+      "admissionAndIngress": ["XSDK1", "XSDK2"],
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config"
+    },
+    {
+      "host": "native",
+      "mode": "data-only",
+      "state": "required-unimplemented",
+      "producer": "XSDK2",
+      "admissionAndIngress": ["XSDK1", "XSDK2"],
+      "specialization": "XSDK6 for XK08 metadata only",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config"
+    },
+    {
+      "host": "native",
+      "mode": "isolated-executable",
+      "state": "required-unimplemented",
+      "producer": "XSDK3",
+      "admissionAndIngress": ["XSDK1", "XSDK2"],
+      "lifecycle": "XSDK5",
+      "ruleBodies": "never in the guest; owned native implementations or LNT2 trusted external execution",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config plus guest engine/format, grants, isolation and teardown"
+    },
+    {
+      "host": "browser",
+      "mode": "declarative",
+      "state": "required-unimplemented",
+      "producer": "XSDK1",
+      "admissionAndIngress": ["XSDK1", "XSDK2"],
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config"
+    },
+    {
+      "host": "browser",
+      "mode": "data-only",
+      "state": "required-unimplemented",
+      "producer": "XSDK4",
+      "admissionAndIngress": ["XSDK1", "XSDK2"],
+      "specialization": "XSDK6 for XK08 metadata only",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config"
+    },
+    {
+      "host": "browser",
+      "mode": "isolated-executable",
+      "state": "required-unimplemented",
+      "producer": "XSDK4",
+      "admissionAndIngress": ["XSDK1", "XSDK2"],
+      "lifecycle": "XSDK5",
+      "ruleBodies": "never in the guest; owned native implementations in the WASM build only; LNT2 external execution reported unavailable",
+      "qualification": "XSDK10",
+      "publication": "XSDK11",
+      "evidenceRequired": "exact host/build/profile/source/config plus guest engine/format, grants, isolation and teardown"
+    }
+  ],
+  "neverReplaceable": [
+    "carrier parse and recovery of a registered carrier",
+    "source, carrier, profile, attachment and catalog identities",
+    "type semantics and the one type-resolution engine",
+    "module resolution and project membership",
+    "cache validity and publication",
+    "edit-transaction authority",
+    "rule-body execution authority: owned native implementations or LNT2 trusted external execution"
+  ],
+  "deletions": [],
+  "deletionRationale": "Additive reserved boundary with no current production SDK manifest reader or dynamic guest route; XSDK0 deletes nothing. Displaced first-party routes keep their CAT0 cutover owners: CPF1 for the catalog container and hard-coded registrations (CAT-D01, CAT-D02, CAT-D03, D06), COX0 for the provider-gate index (CAT-D06) and LNT3 for RuleRegistry (CAT-D05). Editor/provider adapters keep their owners.",
+  "migrationOwner": "Each producer inventories and retires any displaced route on its candidate; XSDK10 verifies and XSDK11 checks public delivery.",
+  "conditions": [
+    "E01: One exact manifest, dependency and target release tuple with core-minted provenance and digest",
+    "E02: Exact admission compatibility; grants and host cells decide participation, not registration",
+    "E03: Deterministic conflict rejection and immutable snapshot replacement",
+    "E04: Typed fact and rule-row validation without semantic or rule-execution authority",
+    "E05: Explicit trust, mediated capabilities and qualified bounded isolation; no guest rule-body evaluation",
+    "E06: Demand-selected execution with live-basis checks and teardown",
+    "E07: Canonical authored transactions with preconditions and execution grants",
+    "E08: Local inspectable delivery and real host/profile/example evidence"
+  ],
+  "conditionJustifications": [
+    {
+      "condition": "E01: One exact manifest, dependency and target release tuple with core-minted provenance and digest",
+      "concern": "correctness",
+      "prevents": "Incompatible releases, unresolved dependencies or forged official-static provenance admitted through package metadata; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Static first-party providers do not negotiate external manifest versions or mint T09 provenance"
+    },
+    {
+      "condition": "E02: Exact admission compatibility; grants and host cells decide participation, not registration",
+      "concern": "correctness",
+      "prevents": "Unknown protocols executing by fallback, or grant state and process facilities changing snapshot membership and identity against CAT0 CR06/CR11; plausible on the first guest integration that checks grants.",
+      "notCoveredBecause": "No current SDK admission implementation exercises this boundary, and CAT0's catalog rules have no grant input to reject"
+    },
+    {
+      "condition": "E03: Deterministic conflict rejection and immutable snapshot replacement",
+      "concern": "correctness",
+      "prevents": "Discovery order selects duplicate owners or mutates live registration; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Catalog invariants need enforcement at the new external ingress"
+    },
+    {
+      "condition": "E04: Typed fact and rule-row validation without semantic or rule-execution authority",
+      "concern": "correctness",
+      "prevents": "Untrusted metadata impersonates a type/resolver answer, or a contributed rule row gains a second, unowned rule executor beside LRA0's native/LNT2 dispositions; plausible when XK06 is read as an executable rule cell.",
+      "notCoveredBecause": "First-party fact producers are not untrusted payload validators, and the rule-owner contract is CI-inert prose"
+    },
+    {
+      "condition": "E05: Explicit trust, mediated capabilities and qualified bounded isolation; no guest rule-body evaluation",
+      "concern": "security",
+      "prevents": "Ordinary guest code inherits ambient filesystem, network or origin access, or runs third-party rule bodies in a guest; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Worker and subprocess lifecycle alone do not enforce a guest sandbox or a rule-execution boundary"
+    },
+    {
+      "condition": "E06: Demand-selected execution with live-basis checks and teardown",
+      "concern": "correctness",
+      "prevents": "Delayed guest replies publish after edits, upgrades or cancellation; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Core validity cannot observe undeclared extension dependencies"
+    },
+    {
+      "condition": "E07: Canonical authored transactions with preconditions and execution grants",
+      "concern": "correctness",
+      "prevents": "Guest edits write stale or unmappable generated coordinates; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Existing transaction checks only protect proposals that enter their owner"
+    },
+    {
+      "condition": "E08: Local inspectable delivery and real host/profile/example evidence",
+      "concern": "process",
+      "prevents": "Contract or upstream capability is published as implemented support; plausible on the first unvalidated guest integration.",
+      "notCoveredBecause": "Generic CI success cannot qualify missing SDK host cells or examples"
+    }
+  ]
+}
