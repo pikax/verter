@@ -2022,6 +2022,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return DeclarationChain::Unknown;
         };
         let shallow = &indexed.shallow_state;
+        if !shallow
+            .headers
+            .namespace_member_is_exported(declaration.owner, &declaration.decl_name)
+        {
+            // `getAccessibleSymbolChain` stops at the innermost private
+            // member. Its containing namespaces cannot name it from here.
+            let end = declaration
+                .decl_name
+                .match_indices('.')
+                .map(|(dot, _)| dot)
+                .skip(1)
+                .chain([declaration.decl_name.len()])
+                .filter(|&end| {
+                    shallow.headers.namespace_private_members.contains(
+                        &verter_type_expr::DeclBindingKey::new(
+                            declaration.owner,
+                            &declaration.decl_name[..end],
+                        ),
+                    )
+                })
+                .last()
+                .expect("the visibility inventory names a private segment");
+            let start = declaration.decl_name[..end]
+                .rfind('.')
+                .map_or(0, |dot| dot + 1);
+            return DeclarationChain::NamespaceLocal {
+                name: declaration.decl_name[start..].to_owned(),
+            };
+        }
         if classify_shallow_module_kind(shallow) != FileModuleKind::Module {
             return DeclarationChain::Unqualified;
         }
@@ -2031,7 +2060,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         // `export =` makes the declaration the module itself, leaving only
         // the path below it to print.
-        if shallow.export_assignment_target() == Some(head) {
+        if declaration.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+            && shallow.export_assignment_target() == Some(head)
+        {
             let specifier = module_specifier(&declaration.canonical_id).to_owned();
             return match path {
                 Some(path) => DeclarationChain::Module {
@@ -2041,7 +2072,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 None => DeclarationChain::AssignedModule { specifier },
             };
         }
-        let exports_head = |target: &ExportTarget| matches!(target, ExportTarget::Local { symbol_name, .. } if symbol_name == head);
+        let exports_head = |target: &ExportTarget| matches!(target, ExportTarget::Local { owner, symbol_name } if *owner == declaration.owner && symbol_name == head);
         let export = if shallow.exports.get(head).is_some_and(exports_head) {
             head
         } else {
@@ -2309,6 +2340,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ),
                 SemanticNodeData::EnumLiteral(literal) => {
                     let declaration = DeclarationName {
+                        owner: literal.enum_decl.owner,
                         canonical_id: literal.enum_decl.canonical_id.clone(),
                         decl_name: literal.enum_decl.decl_name.clone(),
                     };

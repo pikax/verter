@@ -365,6 +365,7 @@ pub(crate) struct DisplayContext {
 /// A declaration a fully qualified message print names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DeclarationName {
+    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
     pub(crate) canonical_id: verter_type_expr::OwnedStr,
     pub(crate) decl_name: verter_type_expr::OwnedStr,
 }
@@ -375,6 +376,9 @@ pub(crate) enum DeclarationChain {
     /// No module contains it: a global, or a declaration its module does
     /// not export, prints its own name.
     Unqualified,
+    /// A namespace member below a private segment starts its symbol chain
+    /// at that segment, rather than at its containing module or namespace.
+    NamespaceLocal { name: String },
     /// `import("<specifier>").<name>`, `name` being the module export
     /// (and any namespace path below it).
     Module { specifier: String, name: String },
@@ -392,9 +396,12 @@ impl DeclarationChain {
     pub(crate) fn spelled(&self, decl_name: &str) -> Option<(String, usize)> {
         match self {
             Self::Unqualified => Some((decl_name.to_owned(), reference_length(decl_name))),
+            Self::NamespaceLocal { name } => {
+                Some((name.clone(), entity_name_length(name.split('.'))))
+            }
             Self::Module { specifier, name } => Some((
                 format!("import(\"{specifier}\").{name}"),
-                specifier.len() + 10 + entity_name_length(name.split('.')),
+                specifier.len() + 10 + name.split('.').map(|part| part.len() + 1).sum::<usize>(),
             )),
             Self::AssignedModule { specifier } => {
                 Some((format!("import(\"{specifier}\")"), specifier.len() + 10))
@@ -1043,12 +1050,7 @@ fn display_resolved_type_node(
         // A member prints as a reference through its enum (`E.A`), which the
         // node builder counts as the enum's.
         SemanticNodeData::EnumLiteral(literal) => {
-            let name = reference_name(
-                needs,
-                &literal.enum_decl.canonical_id,
-                &literal.enum_decl.decl_name,
-                visited,
-            );
+            let name = reference_name(needs, &literal.enum_decl, visited);
             if literal.is_sole() {
                 name
             } else {
@@ -1452,9 +1454,7 @@ fn display_resolved_type_node(
         // Lazy named references: render the NAME (§14.3 — a lazy ref carries no
         // materialised body, and display must not re-resolve, so `ExpandAliases`
         // is a no-op here). `QualifyNames` qualifies with the declaration origin.
-        SemanticNodeData::DeclRef { identity } => {
-            reference_name(needs, &identity.canonical_id, &identity.decl_name, visited)
-        }
+        SemanticNodeData::DeclRef { identity } => reference_name(needs, identity, visited),
         // A class expression renders by the name the checker prints for a
         // reference to it (`Mixin.(Anonymous class)`, `(Anonymous
         // class)<string>`) — like a lazy reference, its body is never
@@ -1511,7 +1511,7 @@ fn display_resolved_type_node(
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             let rendered = type_argument_list(store, args, needs, child_depth, visited);
-            let name = reference_name(needs, &base.canonical_id, &base.decl_name, visited);
+            let name = reference_name(needs, base, visited);
             if args.is_empty() {
                 name
             } else {
@@ -1967,7 +1967,7 @@ fn render_union_entries(
                 render_operand(store, *arm, needs, depth, visited, Prec::Union)
             }
             Some(crate::semantic_query::PrintedUnionArm::Enum(decl)) => {
-                reference_name(needs, &decl.canonical_id, &decl.decl_name, visited)
+                reference_name(needs, decl, visited)
             }
             None => {
                 visited.add_length(9);
@@ -2234,10 +2234,10 @@ fn back_ref_token(
     if checker_qualified(needs) {
         match data {
             SemanticNodeData::DeclRef { identity } => {
-                return reference_name(needs, &identity.canonical_id, &identity.decl_name, visited);
+                return reference_name(needs, identity, visited);
             }
             SemanticNodeData::InstantiationRef { base, .. } => {
-                return reference_name(needs, &base.canonical_id, &base.decl_name, visited);
+                return reference_name(needs, base, visited);
             }
             _ => {}
         }
@@ -2269,15 +2269,17 @@ fn checker_qualified(needs: DisplayNeeds) -> bool {
 /// print repeated.
 fn reference_name(
     needs: DisplayNeeds,
-    canonical_id: &verter_type_expr::OwnedStr,
-    decl_name: &verter_type_expr::OwnedStr,
+    identity: &super::DeclIdentity,
     visited: &mut DisplayContext,
 ) -> String {
+    let canonical_id = &identity.canonical_id;
+    let decl_name = &identity.decl_name;
     if !checker_qualified(needs) {
         visited.add_length(reference_length(decl_name));
         return qualified_name(needs, canonical_id, decl_name);
     }
     let declaration = DeclarationName {
+        owner: identity.owner,
         canonical_id: canonical_id.clone(),
         decl_name: decl_name.clone(),
     };

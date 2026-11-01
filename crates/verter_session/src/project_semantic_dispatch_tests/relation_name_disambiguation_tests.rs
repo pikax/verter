@@ -397,3 +397,156 @@ fn an_assigned_export_prints_as_its_module() {
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+/// Private namespace segments cannot be reached through their module's
+/// exports. These complete reports are the pinned checker's, including the
+/// suffix below a private nested namespace and a generalized private enum.
+#[test]
+fn private_namespace_operands_keep_their_accessible_suffix() {
+    let a = r#"export namespace NS {
+    interface Hidden { h: number }
+    namespace B { export interface Inner { h: number } }
+    enum E { X, Y }
+    export interface Holder { hidden: Hidden; inner: B.Inner; e: E }
+}"#;
+    let b = r#"export namespace NS {
+    interface Hidden { h: string }
+    namespace B { export interface Inner { h: string } }
+    export interface Holder { take(x: { q: Hidden }): void; takeInner(x: { q: B.Inner }): void }
+}"#;
+    let main = r#"import type { NS as A } from './a';
+import type { NS as B } from './b';
+declare const take: B.Holder['take'];
+export function hidden(a: A.Holder) { return take({ q: a.hidden }); }
+declare const takeInner: B.Holder['takeInner'];
+export function inner(a: A.Holder) { return takeInner({ q: a.inner }); }
+declare function f(x: string): void;
+export function en(a: A.Holder) { return f(a.e); }
+"#;
+    let expected = [
+        ("hidden", "(4,53): error TS2719: Type 'Hidden' is not assignable to type 'Hidden'. Two different types with this name exist, but they are unrelated.\n  Types of property 'h' are incompatible.\n    Type 'number' is not assignable to type 'string'."),
+        ("inner", "(6,57): error TS2719: Type 'B.Inner' is not assignable to type 'B.Inner'. Two different types with this name exist, but they are unrelated.\n  Types of property 'h' are incompatible.\n    Type 'number' is not assignable to type 'string'."),
+        ("en", "(8,44): error TS2345: Argument of type 'E' is not assignable to parameter of type 'string'."),
+    ];
+    let host = host_of(main, &[("a.ts", a), ("b.ts", b)]);
+    for pass in ["cold", "warm"] {
+        for (symbol, expected) in expected {
+            assert_eq!(
+                checker_report(&host, STRICT_ROOT, symbol, main).join("\n"),
+                expected,
+                "{pass} {symbol}"
+            );
+        }
+    }
+}
+
+/// The module qualifier counts each segment once. A trailing generic makes
+/// the one-byte boundary observable where a flat property list would not.
+#[test]
+fn module_qualified_operands_abbreviate_at_the_checker_boundary() {
+    // TypeScript 7.1.0-beta, with virtual files rooted at STRICT_ROOT:
+    // the trailing type argument first elides at 125 / 120 padding bytes.
+    for (name, left, right, boundary) in [
+        ("Foo", "A", "B", 125),
+        ("NS.Inner", "NA.Inner", "NB.Inner", 120),
+    ] {
+        for pad in [boundary - 1, boundary] {
+            let padding = "x".repeat(pad);
+            let main = format!(
+                "import type {{ Foo as A, NS as NA }} from './a';\n\
+                 import type {{ Foo as B, NS as NB }} from './b';\n\
+                 interface Wrap<T> {{ v: T }}\n\
+                 declare function f(x: {{ q: {{ pad: \"{padding}\"; v: {right}; tail: Wrap<string> }} }}): void;\n\
+                 export function g(a: {{ pad: \"{padding}\"; v: {left}; tail: Wrap<string> }}) {{ return f({{ q: a }}); }}\n"
+            );
+            let tail = if pad == boundary { "..." } else { "string" };
+            let operand = |module| {
+                format!("{{ pad: \"{padding}\"; v: import(\"{STRICT_ROOT}/{module}\").{name}; tail: Wrap<{tail}>; }}")
+            };
+            let column = main.lines().last().unwrap().rfind("q: a").unwrap() + 1;
+            let expected = format!(
+                "(5,{column}): error TS2322: Type '{}' is not assignable to type '{}'.\n  The types of 'v.p' are incompatible between these types.\n    Type 'number' is not assignable to type 'string'.",
+                operand("a"), operand("b")
+            );
+            let host = host_of(&main, &[("a.ts", A), ("b.ts", B)]);
+            for pass in ["cold", "warm"] {
+                assert_eq!(
+                    checker_report(&host, STRICT_ROOT, "g", &main).join("\n"),
+                    expected,
+                    "{pass} {name} padding={pad}"
+                );
+            }
+        }
+    }
+}
+
+/// A module export with the same spelling cannot qualify a setup-local
+/// declaration. Both owners must retain their own diagnostic symbol chain.
+#[test]
+fn diagnostic_chains_keep_the_declarations_lexical_owner() {
+    use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
+    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
+    use verter_type_expr::TopLevelOwnerId;
+    let host = host_of("", &[]);
+    let canonical = format!("{STRICT_ROOT}/Comp.vue");
+    let _ = host
+        .upsert(crate::types::UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.clone(),
+            source: Arc::from(
+                r#"<script lang="ts">
+export enum E { X, Y }
+declare function f(x: string): void;
+export function moduleG() { return f(E.X); }
+</script>
+<script setup lang="ts">
+enum E { X, Y }
+declare function f(x: string): void;
+function setupG() { return f(E.X); }
+</script>"#,
+            ),
+            file_language: crate::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    host.ensure_indexed_ready(&canonical)
+        .expect("the component is indexed");
+    for pass in ["cold", "warm"] {
+        for (owner, name) in [
+            (
+                TopLevelOwnerId::module(0),
+                format!("import(\"{canonical}\").E"),
+            ),
+            (TopLevelOwnerId::instance(0), "E".to_string()),
+        ] {
+            let identity = FlowFunctionReturnIdentity {
+                anchor: AuthoredAnchor {
+                    canonical_id: canonical.as_str().into(),
+                    owner,
+                    symbol: if owner == TopLevelOwnerId::module(0) {
+                        "moduleG"
+                    } else {
+                        "setupG"
+                    }
+                    .into(),
+                    space: LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            };
+            let carrier = host.get_flow_return_type_with_audit(
+                &identity,
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            );
+            let result = carrier
+                .as_result()
+                .unwrap_or_else(|e| panic!("{owner:?} body: {e:?}"));
+            let messages: Vec<_> = result
+                .checker_diagnostics()
+                .iter()
+                .map(|d| (d.code().code(), d.full_message()))
+                .collect();
+            assert_eq!(messages, [(2345, format!("Argument of type '{name}' is not assignable to parameter of type 'string'."))], "{pass} {owner:?}");
+        }
+    }
+}
