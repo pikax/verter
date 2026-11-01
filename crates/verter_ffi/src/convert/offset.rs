@@ -2,6 +2,7 @@
 //! translation between encodings used at the FFI boundary.
 
 use crate::types::*;
+use verter_span::CoordError;
 
 /// Source bytes visited by offset conversion on the current thread.
 ///
@@ -163,16 +164,30 @@ impl<'a> OffsetIndex<'a> {
     }
 }
 
-pub fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
-    let mut utf16_count = 0u32;
+/// Requester UTF-16 code-unit offset → UTF-8 byte offset, exact or refused.
+///
+/// `source` must be the exact content the requester's offset indexes. An
+/// offset inside a surrogate pair is [`CoordError::NotCharBoundary`]; one
+/// past the source's UTF-16 length is [`CoordError::InvalidBoundary`]; a
+/// byte position the `u32` coordinate cannot name is [`CoordError::Overflow`].
+/// Nothing snaps to the scalar start or clamps to end-of-file.
+pub fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> Result<u32, CoordError> {
+    let mut utf16_count = 0u64;
+    let target = u64::from(utf16_offset);
     for (byte_idx, ch) in source.char_indices() {
-        let next = utf16_count + ch.len_utf16() as u32;
-        if utf16_offset <= utf16_count || utf16_offset < next {
-            return byte_idx as u32;
+        if target == utf16_count {
+            return u32::try_from(byte_idx).map_err(|_| CoordError::Overflow);
+        }
+        let next = utf16_count + ch.len_utf16() as u64;
+        if target < next {
+            return Err(CoordError::NotCharBoundary);
         }
         utf16_count = next;
     }
-    source.len() as u32
+    if target == utf16_count {
+        return u32::try_from(source.len()).map_err(|_| CoordError::Overflow);
+    }
+    Err(CoordError::InvalidBoundary)
 }
 
 /// Convert a mandatory byte offset to UTF-16 when a source string is

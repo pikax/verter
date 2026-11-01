@@ -2173,22 +2173,34 @@ fn utf16_mid_char_4byte_surrogate_pair_clamps_to_char_start() {
     assert_eq!(byte_offset_to_utf16(source, 4), 2);
 }
 
-/// UTF-16 offsets inside a surrogate pair clamp to the scalar start.
+/// A requester UTF-16 offset converts exactly or is refused with a typed
+/// error: inside a surrogate pair is `NotCharBoundary`, past the end is
+/// `InvalidBoundary`. Nothing snaps to the scalar start or to end-of-file.
 #[test]
-fn utf16_to_byte_offset_clamps_inside_surrogate_pair() {
-    let _source = "a\u{1F600}b";
-    let source = "aðŸ˜€b";
-    let _ = source;
+fn utf16_to_byte_offset_is_exact_or_refused() {
+    use verter_span::CoordError;
     let source = "a\u{1F600}b";
-    assert_eq!(utf16_to_byte_offset(source, 0), 0);
-    assert_eq!(utf16_to_byte_offset(source, 1), 1);
+    assert_eq!(utf16_to_byte_offset(source, 0), Ok(0));
+    assert_eq!(utf16_to_byte_offset(source, 1), Ok(1));
     assert_eq!(
         utf16_to_byte_offset(source, 2),
-        1,
-        "offset inside the emoji surrogate pair should clamp to the emoji start"
+        Err(CoordError::NotCharBoundary),
+        "the second unit of the emoji surrogate pair is not a boundary"
     );
-    assert_eq!(utf16_to_byte_offset(source, 3), 5);
-    assert_eq!(utf16_to_byte_offset(source, 4), 6);
+    assert_eq!(utf16_to_byte_offset(source, 3), Ok(5));
+    assert_eq!(utf16_to_byte_offset(source, 4), Ok(6));
+    assert_eq!(
+        utf16_to_byte_offset(source, 5),
+        Err(CoordError::InvalidBoundary),
+        "past the end must not clamp to end-of-file"
+    );
+    assert_eq!(utf16_to_byte_offset("", 0), Ok(0));
+    assert_eq!(
+        utf16_to_byte_offset("", 1),
+        Err(CoordError::InvalidBoundary)
+    );
+    // BMP multi-byte scalars are one unit each; every unit offset is a boundary.
+    assert_eq!(utf16_to_byte_offset("\u{e9}x", 1), Ok(2));
 }
 
 /// Verify that ASCII text is a 1:1 mapping (byte offset == UTF-16 offset).

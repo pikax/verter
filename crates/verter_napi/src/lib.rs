@@ -3475,7 +3475,8 @@ impl NapiVerterHost {
     /// with UTF-16 spans.
     ///
     /// - `canonical_or_alias` — the file to get actions for.
-    /// - `offset` — UTF-16 cursor offset in the SFC source.
+    /// - `offset` — UTF-16 cursor offset in the SFC source. An offset inside a
+    ///   surrogate pair or past the end of the source is rejected, never snapped.
     #[napi(js_name = "getCodeActions")]
     pub fn get_code_actions(
         &self,
@@ -3489,7 +3490,7 @@ impl NapiVerterHost {
 
         let actions = match (analysis, source.as_deref()) {
             (Some(snapshot), Some(source)) => {
-                let byte_offset = utf16_to_byte_offset(source, offset);
+                let byte_offset = utf16_to_byte_offset(source, offset)?;
                 let script = build_script_snapshot(&snapshot);
                 let linter = Linter::with_registry(
                     verter_diagnostics::LintConfig::default(),
@@ -4253,9 +4254,15 @@ fn build_script_snapshot(
     }
 }
 
-/// Convert a UTF-16 offset to a UTF-8 byte offset.
-fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
-    verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset)
+/// Convert a requester UTF-16 offset to a UTF-8 byte offset, refusing an
+/// in-pair or past-end offset with an `InvalidArg` error.
+fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> Result<u32> {
+    verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset).map_err(|error| {
+        Error::new(
+            Status::InvalidArg,
+            format!("offset {utf16_offset} is not a UTF-16 boundary of the source: {error}"),
+        )
+    })
 }
 
 /// Monaco SymbolKind constants (subset used for document symbols).
