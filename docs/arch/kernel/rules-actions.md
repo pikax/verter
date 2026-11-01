@@ -8,8 +8,11 @@ scheduling and publication; vertical packs own exact-release semantics.
 
 This decision describes `docs(arch): define atomic contribution and candidate
 contracts (#879)`, 2026-10-13. The title and date are descriptive context.
-It follows the [docs-only rule](README.md): reviewed contract data only, with
-no production change, executable schema, test, validator or CI lane.
+It follows the [docs-only rule](README.md): reviewed contract data with no
+production change, executable schema, validator or CI lane. One data test,
+`tests/kernel/LRA0/rules-actions-inventory.test.mjs`, runs in the existing
+repository-script tests and pins the code-action route audit below; general
+ownership validation stays with UAP0.
 
 ## Imported authority and reviewed products
 
@@ -100,6 +103,26 @@ producers to consumers:
   authored intents replace semantic edit construction before LSP projection.
   ACT1's envelope migration and placeholder URI replacement cannot discharge
   the source/map transaction preconditions.
+- `handle_code_action_attempt` also calls `extract_component_action` directly
+  for `refactor.extract`, including requests whose `context.only` excludes
+  quickfixes. This extract-to-component consumer (`LRA-C15`) bypasses
+  ActionEngine and the native quickfix producers. It constructs its own
+  transport-native action inline, so ACT1 owns that action-model migration
+  (`LRA-D14`, `ACT1-AC1`). It also builds its replacement and import
+  `TextEdit`s, a `CreateFile` operation and an inline `WorkspaceEdit` from a
+  raw source slice, with no source or map revision in its signature. LSO8 owns
+  this distinct retirement (`LRA-D15`, `LSO8-AC1`). Later foreground binding
+  stamps the request's document version onto the finished edit, withholds
+  resource operations from clients without `documentChanges` and refuses a
+  create target that appeared before settlement. Those are request-validity
+  rules; they do not validate the basis the edits were built from. RFX3 separately
+  replaces the text-slice extraction body and discharges neither row.
+- The provider route is the remaining direct producer. For a quickfix request
+  the handler sends `TypeProvider::get_code_actions` results through
+  `merge_code_actions` (`LRA-C16`), which builds its action inline (`LRA-D16`,
+  ACT1) and its per-URI `TextEdit`s, `WorkspaceEdit` and preamble-import
+  re-anchor inline (`LRA-D17`, LSO8). Strict mapping and post-await surface
+  revalidation fail closed but do not supply a transaction basis.
 
 The finite consumer population is lint configuration, catalog/rule selection,
 analysis and TypeInfo, suppressions, diagnostic publication, action planning,
@@ -112,7 +135,12 @@ unused-import route to its inline action and edit builders. Completing only
 `LRA-D04`/`LRA-D05` or only retiring `make_insert_edit`/`make_replace_edit`
 leaves the macro route alive; completing the quickfix migrations
 `LRA-D10`/`LRA-D11` still leaves unused-import removal outside the cutover
-unless `LRA-D12`/`LRA-D13` are also discharged.
+unless `LRA-D12`/`LRA-D13` are also discharged, and extract-to-component and
+provider quickfixes outside it unless `LRA-D14`/`LRA-D15` and
+`LRA-D16`/`LRA-D17` are too. The inventory's `codeActionRouteAudit` lists all
+nine producers `handle_code_action_attempt` calls: the seven direct routes and
+the two ActionEngine bridge calls, `action_engine_fixes` and
+`action_engine_refactorings`.
 MCP scoring is included: its direct `Linter::new` call is a consumer even
 though it presents a score instead of individual diagnostics. Rule bodies,
 providers, compiler diagnostics and the component view remain with their
@@ -302,6 +330,13 @@ deletion belongs solely to LNT3, and shared action model migration to ACT1.
   the independent `source.organizeImports` route. ACT1 preserves their
   authored edits while LSO8 adds transaction validation; these existing
   controls do not certify the future alternative or transaction model.
+  Extract-to-component controls are the inline `extract_component.rs` tests,
+  the `versioned_workspace_edits` stdio cases and the `extract_action` cases in
+  `request_validity_tests/applicability_tests.rs`. They pin the offer, kind,
+  refusals, request version and resource-operation withholding, not the edit
+  bytes; ACT1 pins those before migrating. Provider quickfix controls are
+  `merge_code_actions_*` in `type_provider/merge/tests.rs` and
+  `real_provider_tests/code_action.rs`.
 - **LRA0-AC3:** runtime incremental comparisons are not applicable to this
   docs-only change: no cache, publication, scheduler, cancellation or source
   authority changes. The case table carries incremental/edit-revert and
@@ -311,8 +346,10 @@ deletion belongs solely to LNT3, and shared action model migration to ACT1.
   Applicability zero-work is a required work invariant for receiving owners;
   no new soak or benchmark is invented here.
 
-Behavioral TDD is not applicable to contract data alone. Existing rule/fix
-tests are cited as parity controls; missing successor proof is explicitly
+Behavioral TDD is not applicable to contract data alone. The route-audit data
+test fails without the `LRA-C15`, `LRA-D14` and `LRA-D15` rows; it reads only
+contract data, so it cannot see a producer added to the handler without an
+inventory change. Existing rule/fix tests are cited as parity controls; missing successor proof is explicitly
 assigned. Author checks validate configured documentation and formatting.
 Independent workflow review and verification judge the published content;
 this document contains no stored test transcript, count or historical object

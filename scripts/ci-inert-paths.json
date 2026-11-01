@@ -105,7 +105,7 @@
   },
   {
     "glob": "tests/kernel/**",
-    "reason": "Kernel architecture inventories; only the docs cite them."
+    "reason": "Kernel architecture inventories; only the docs cite them. The one a self-test reads is owned by the scripts filter."
   },
   {
     "glob": "tests/playground/**",

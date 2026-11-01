@@ -320,6 +320,7 @@ export const PATH_FILTERS = Object.freeze({
   scripts: [
     "scripts/**",
     "tests/formatter/**",
+    "tests/kernel/LRA0/**",
     "catalogs/formatter-*.toml",
     "fixtures/formatter/**",
     ".github/workflows/nightly.yml",
