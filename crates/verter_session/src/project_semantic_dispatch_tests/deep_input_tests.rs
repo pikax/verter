@@ -1167,23 +1167,11 @@ fn arrows_initializing_declarators_nested_deep_answer_on_a_small_stack() {
 }
 
 /// Arrows nested 200 deep, each an arm of a conditional declarator's
-/// initializer the body returns: the arm walk suspends at its nested
-/// function value as a plain declarator does, beside a nullish or a literal
-/// arm, or behind a sibling arm that writes. 480 KiB needed, so a level
-/// costing more than 0.8 KiB overflows. TypeScript 7.0.2: `1`, under every
-/// setting.
-#[test]
-fn arrows_in_conditional_declarators_nested_deep_answer_on_a_small_stack() {
-    in_a_fresh_process(test_path!(), || {
-        for (open, close) in [
-            ("() => { const f = b ? ", " : null; return f; }"),
-            ("() => { const f = b ? ", " : 0; return f; }"),
-            ("() => { const f = b ? 0 : ", "; return f; }"),
-            (
-                "() => { let w: unknown; const f = b ? (w = 0) : ",
-                "; return f; }",
-            ),
-        ] {
+/// initializer the body returns, in `forms`, read on a small stack in a fresh
+/// process. TypeScript 7.0.2: `1`, under every setting.
+fn conditional_declarator_arrows_answer(test: &str, forms: [(&'static str, &'static str); 2]) {
+    in_a_fresh_process(test, || {
+        for (open, close) in forms {
             assert_eq!(
                 on_a_stack(SMALL_STACK, move || mismatches(
                     &returning(wrap(NESTED_FUNCTIONS, open, close)),
@@ -1194,6 +1182,37 @@ fn arrows_in_conditional_declarators_nested_deep_answer_on_a_small_stack() {
             );
         }
     });
+}
+
+/// The arm walk suspends at a consequent's nested function value as a plain
+/// declarator does, beside a nullish or a literal arm. 480 KiB needed, so a
+/// level costing more than 0.8 KiB overflows.
+#[test]
+fn arrows_in_conditional_declarator_consequents_nested_deep_answer_on_a_small_stack() {
+    conditional_declarator_arrows_answer(
+        test_path!(),
+        [
+            ("() => { const f = b ? ", " : null; return f; }"),
+            ("() => { const f = b ? ", " : 0; return f; }"),
+        ],
+    );
+}
+
+/// The arm walk suspends at an alternate's nested function value too, behind
+/// a literal arm or a sibling that forks the flow with a write. 480 KiB
+/// needed, so a level costing more than 0.8 KiB overflows.
+#[test]
+fn arrows_in_conditional_declarator_alternates_nested_deep_answer_on_a_small_stack() {
+    conditional_declarator_arrows_answer(
+        test_path!(),
+        [
+            ("() => { const f = b ? 0 : ", "; return f; }"),
+            (
+                "() => { let w: unknown; const f = b ? (w = 0) : ",
+                "; return f; }",
+            ),
+        ],
+    );
 }
 
 /// Invoked arrows nested 200 deep in a conditional declarator's arms: the
