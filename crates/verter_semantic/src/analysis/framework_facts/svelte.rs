@@ -46,6 +46,15 @@ use verter_type_expr::facts::{
     SvelteLegacyPropFact, SvelteModuleExportFact, SvelteScriptFactsFact, SvelteSnippetImportFact,
 };
 
+// Reserved contribution homes for the svelte carrier. Each module below is
+// declaration-only: its doc line names the node that fills it, and
+// contribution nodes write inside their own reserved module only.
+mod context;
+mod forwarding;
+mod hydration;
+mod render_tree;
+mod scheduling;
+
 #[path = "svelte_payload.rs"]
 mod payload;
 use payload::*;

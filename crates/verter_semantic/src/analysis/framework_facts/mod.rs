@@ -32,6 +32,26 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 
 pub mod svelte;
 
+// Reserved homes for planned framework-contribution modules. Each module
+// below is declaration-only: its doc line names the node that fills it, and
+// contribution nodes write inside their own reserved module only.
+mod alpine;
+mod angular;
+mod astro;
+mod ember;
+mod lit;
+mod marko;
+mod mdx;
+mod next;
+mod nuxt;
+mod preact;
+mod qwik;
+mod react;
+mod solid;
+mod stencil;
+mod sveltekit;
+mod vue;
+
 mod negative_evidence_seal {
     pub trait Sealed {}
 }

@@ -75,6 +75,25 @@ mod style_syntax;
 pub mod template;
 pub mod type_eval_build;
 
+// Reserved homes for planned fact-family modules. Each module below is
+// declaration-only: its doc line names the node that fills it, and fact
+// nodes write inside their own reserved module only.
+mod composed_page;
+mod context;
+mod effects;
+mod forwarding;
+mod html_fragments;
+mod hydration;
+mod json_module;
+#[cfg(test)]
+#[path = "json_module_tests.rs"]
+mod json_module_tests;
+mod linkage;
+mod render_tree;
+mod template_dialects;
+mod transport;
+mod value_flow;
+
 #[cfg(test)]
 #[path = "type_expr_tests.rs"]
 mod type_expr_tests;
