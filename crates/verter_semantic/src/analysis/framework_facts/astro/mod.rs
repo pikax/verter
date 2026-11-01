@@ -1,6 +1,6 @@
 //! Filled by FWD1-ASTRO/TRN1-ASTRO/RND1-ASTRO.
 
-mod composed_page;
-mod forwarding;
-mod render_tree;
-mod transport;
+pub(crate) mod composed_page;
+pub(crate) mod forwarding;
+pub(crate) mod render_tree;
+pub(crate) mod transport;

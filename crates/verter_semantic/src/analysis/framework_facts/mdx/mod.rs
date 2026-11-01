@@ -1,4 +1,4 @@
 //! Filled by FWD1-MDX/RND1-MDX.
 
-mod forwarding;
-mod render_tree;
+pub(crate) mod forwarding;
+pub(crate) mod render_tree;

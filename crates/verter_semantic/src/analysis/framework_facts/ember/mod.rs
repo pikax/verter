@@ -1,5 +1,5 @@
 //! Filled by FWD1-EMBER/RND1-EMBER/EFF3-EMBER.
 
-mod forwarding;
-mod render_tree;
-mod scheduling;
+pub(crate) mod forwarding;
+pub(crate) mod render_tree;
+pub(crate) mod scheduling;

@@ -49,11 +49,11 @@ use verter_type_expr::facts::{
 // Reserved contribution homes for the svelte carrier. Each module below is
 // declaration-only: its doc line names the node that fills it, and
 // contribution nodes write inside their own reserved module only.
-mod context;
-mod forwarding;
-mod hydration;
-mod render_tree;
-mod scheduling;
+pub(crate) mod context;
+pub(crate) mod forwarding;
+pub(crate) mod hydration;
+pub(crate) mod render_tree;
+pub(crate) mod scheduling;
 
 #[path = "svelte_payload.rs"]
 mod payload;

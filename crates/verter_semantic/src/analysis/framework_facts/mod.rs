@@ -34,23 +34,26 @@ pub mod svelte;
 
 // Reserved homes for planned framework-contribution modules. Each module
 // below is declaration-only: its doc line names the node that fills it, and
-// contribution nodes write inside their own reserved module only.
-mod alpine;
-mod angular;
-mod astro;
-mod ember;
-mod lit;
-mod marko;
-mod mdx;
-mod next;
-mod nuxt;
-mod preact;
-mod qwik;
-mod react;
-mod solid;
-mod stencil;
-mod sveltekit;
-mod vue;
+// contribution nodes write inside their own reserved module only. The whole
+// reserved tree (these homes and each contribution home inside them) is
+// `pub(crate)` so the sibling fact families under `analysis` can address a
+// contribution without editing this shared parent.
+pub(crate) mod alpine;
+pub(crate) mod angular;
+pub(crate) mod astro;
+pub(crate) mod ember;
+pub(crate) mod lit;
+pub(crate) mod marko;
+pub(crate) mod mdx;
+pub(crate) mod next;
+pub(crate) mod nuxt;
+pub(crate) mod preact;
+pub(crate) mod qwik;
+pub(crate) mod react;
+pub(crate) mod solid;
+pub(crate) mod stencil;
+pub(crate) mod sveltekit;
+pub(crate) mod vue;
 
 mod negative_evidence_seal {
     pub trait Sealed {}

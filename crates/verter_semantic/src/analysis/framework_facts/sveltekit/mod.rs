@@ -1,4 +1,4 @@
 //! Filled by TRN1-SVELTEKIT/CPD1-SVELTEKIT.
 
-mod composed_page;
-mod transport;
+pub(crate) mod composed_page;
+pub(crate) mod transport;

@@ -77,22 +77,24 @@ pub mod type_eval_build;
 
 // Reserved homes for planned fact-family modules. Each module below is
 // declaration-only: its doc line names the node that fills it, and fact
-// nodes write inside their own reserved module only.
-mod composed_page;
-mod context;
-mod effects;
-mod forwarding;
-mod html_fragments;
-mod hydration;
-mod json_module;
+// nodes write inside their own reserved module only. They are `pub(crate)`
+// so per-framework contributions (under `framework_facts`) can name their
+// family without editing this shared parent.
+pub(crate) mod composed_page;
+pub(crate) mod context;
+pub(crate) mod effects;
+pub(crate) mod forwarding;
+pub(crate) mod html_fragments;
+pub(crate) mod hydration;
+pub(crate) mod json_module;
 #[cfg(test)]
 #[path = "json_module_tests.rs"]
-mod json_module_tests;
-mod linkage;
-mod render_tree;
-mod template_dialects;
-mod transport;
-mod value_flow;
+pub(crate) mod json_module_tests;
+pub(crate) mod linkage;
+pub(crate) mod render_tree;
+pub(crate) mod template_dialects;
+pub(crate) mod transport;
+pub(crate) mod value_flow;
 
 #[cfg(test)]
 #[path = "type_expr_tests.rs"]
