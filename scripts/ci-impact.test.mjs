@@ -579,15 +579,24 @@ test("matchPathFilters reports every filter and owns exactly the files some filt
     "packages/vue-vscode/src/extension.ts",
     "scripts/jetbrains-gate.mjs",
     "docs/guide.md",
+    "catalogs/formatter-compatibility-v1.toml",
+    "catalogs/formatter-compatibility-yaml-v1.toml",
+    "fixtures/formatter/corpora/vue/valid.txt",
+    "tests/formatter/verify.mjs",
   ]);
   assert.deepEqual(Object.keys(hits).sort(), Object.keys(PATH_FILTERS).sort());
   assert.equal(hits.jetbrains, true);
   assert.equal(hits.js, true);
   assert.equal(hits.proto, true);
+  assert.equal(hits.scripts, true);
   assert.deepEqual([...owned].sort(), [
+    "catalogs/formatter-compatibility-v1.toml",
+    "catalogs/formatter-compatibility-yaml-v1.toml",
+    "fixtures/formatter/corpora/vue/valid.txt",
     "package.json",
     "packages/vue-vscode/src/extension.ts",
     "scripts/jetbrains-gate.mjs",
+    "tests/formatter/verify.mjs",
   ]);
 });
 

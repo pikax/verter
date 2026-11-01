@@ -1,0 +1,20 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/less/expected/valid-insert-pragma.txt",
+  "normalized_options": {
+    "insertPragma": true
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 10
+  },
+  "formatted_cursor": 7,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/less/expected/valid-insert-pragma.txt",
+    "edits": []
+  },
+  "divergence": null
+}

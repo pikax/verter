@@ -1,0 +1,20 @@
+{
+  "outcome": "unsupported",
+  "reason": "InapplicableOption: vueIndentScriptAndStyle",
+  "output": null,
+  "normalized_options": {
+    "vueIndentScriptAndStyle": true
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 39
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": null,
+    "edits": []
+  },
+  "divergence": null
+}

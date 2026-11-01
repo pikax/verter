@@ -1,0 +1,20 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/typescript/expected/verbatim-island-markup-ignore.txt",
+  "normalized_options": {
+    "embeddedLanguageFormatting": "off"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 37
+  },
+  "formatted_cursor": 37,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/typescript/expected/verbatim-island-markup-ignore.txt",
+    "edits": []
+  },
+  "divergence": "retained-recovery-island"
+}
