@@ -6,8 +6,9 @@
 //! formatter output — plus the provenance identity, carrier and table contract
 //! that joins authored views to rendered segments. These are formatter-internal
 //! domains, not a public capability: nothing here crosses a serialization
-//! boundary, and the crate is deliberately dependency-free, so the foundation
-//! cannot parse, render, format or serialize a request.
+//! boundary. Its only external dependency is a regular-expression engine for
+//! pinned text-width tables; it cannot parse carrier source, analyze semantics,
+//! route or serialize a request.
 //!
 //! The coordinate and provenance wrappers implement no parser, printer, map,
 //! range/cursor, route or protocol policy; the modules below are reserved
@@ -22,11 +23,10 @@ mod coordinates_tests;
 #[cfg(test)]
 mod provenance_tests;
 
-// Reserved homes for the planned formatter modules. Each module below is
-// declaration-only: its doc line names the work that fills it, and each
-// owning implementation writes inside its own reserved module only.
+// Document construction and rendering are framework-neutral. Other modules
+// remain reserved for their respective owners.
 mod cursor;
-mod doc;
+pub mod doc;
 mod edit;
 mod embedded;
 mod explain;
@@ -35,7 +35,13 @@ mod pragma;
 mod printers;
 mod range;
 mod recovery;
-mod render;
+pub mod render;
 mod service;
 mod suppression;
 mod view;
+
+#[cfg(test)]
+#[path = "../tests/unit/provenance_render.rs"]
+mod provenance_render_tests;
+
+mod width;
