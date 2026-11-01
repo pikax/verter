@@ -228,7 +228,7 @@ fn store(account: &Arc<SemanticRetentionAccount>) -> WorkspaceIndex {
 
 fn upsert(partition: CompletePartition, expected: ExpectedPrior) -> SlotChange {
     SlotChange::Upsert {
-        partition,
+        partition: Box::new(partition),
         expected,
     }
 }
@@ -590,7 +590,7 @@ fn ingress_rejects_every_unprovable_draft_instead_of_decoding_it_as_empty() {
     };
     let mut exact_unresolved = base();
     exact_unresolved.key.schema.table = TableKind::Links;
-    exact_unresolved.records[0].row = IndexRow::Link(unresolved_link);
+    exact_unresolved.records[0].row = IndexRow::Link(Box::new(unresolved_link));
     assert!(matches!(
         rejected(exact_unresolved, &admission()),
         IngressRejection::UnresolvedMarkedExact { .. }
@@ -1855,4 +1855,24 @@ fn style_definitions_count_each_block_once_however_many_occurrences_it_holds() {
         "one path per defining block"
     );
     assert_eq!(flow.style_var_usages.len(), 1, "one path per using block");
+}
+
+#[test]
+fn the_project_models_own_observation_is_sufficient_read_evidence_for_membership() {
+    let account = account();
+    let a = unit("a");
+    let mut observed = observation(
+        &a,
+        MembershipStatus::Complete,
+        &["p1"],
+        PreferredOwner::None,
+    );
+    observed.read_set = ReadSet::of([ReadWitness {
+        key: ObservationKey {
+            owner: ObservationOwner::ProjectModel,
+            subject: a.digest(),
+        },
+        fingerprint: digest("membership-v1"),
+    }]);
+    assert!(publishable_membership(observed, &admission(), &account).is_ok());
 }

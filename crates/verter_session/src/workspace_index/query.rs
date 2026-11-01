@@ -57,7 +57,7 @@ pub struct IndexQuery {
 pub struct IndexContinuation {
     generation: u64,
     key: PostingKey,
-    next: PostingRef,
+    next: Box<PostingRef>,
 }
 
 /// What a partial answer did cover.
@@ -152,7 +152,7 @@ enum Stop {
     /// A budget ran out before this posting.
     Budget {
         key: PostingKey,
-        next: PostingRef,
+        next: Box<PostingRef>,
     },
     Cancelled,
 }
@@ -175,7 +175,7 @@ impl Walk<'_> {
             if budget_spent {
                 return Err(Stop::Budget {
                     key: key.clone(),
-                    next: posting.clone(),
+                    next: Box::new(posting.clone()),
                 });
             }
             self.work.posting_visits += 1;
@@ -344,7 +344,7 @@ fn walk_keys(
         walk.work.key_lookups += 1;
         let resume = continuation
             .filter(|_| position == start)
-            .map(|resume| &resume.next);
+            .map(|resume| resume.next.as_ref());
         if let Some(postings) = snapshot.postings.get(key) {
             walk.visit_key(key, postings, resume)?;
         } else {
@@ -380,7 +380,7 @@ fn walk_prefix(
         walk.work.key_lookups += 1;
         let resume = continuation
             .filter(|resume| resume.key == *key)
-            .map(|resume| &resume.next);
+            .map(|resume| resume.next.as_ref());
         walk.visit_key(key, postings, resume)?;
     }
     Ok(())

@@ -22,9 +22,9 @@ use verter_language::FileLanguage;
 use verter_span::{SourceByteOffset, SourceByteRange, Span};
 
 use super::delta::{
-    ContributionDelta, ExpectedPrior, IngressRejection, ObservationOracle, PartialCause,
-    PartialEnumeration, PartitionDraft, PublishOutcome, PublishRefusal, RetirementEvidence,
-    SchemaAdmission, SlotChange,
+    ContributionDelta, ExpectedPrior, ObservationOracle, PartialCause, PartialEnumeration,
+    PartitionDraft, PublishOutcome, PublishRefusal, RetirementEvidence, SchemaAdmission,
+    SlotChange,
 };
 use super::identity::{
     CatalogRevisionId, ContributionId, ContributionKey, DemandEpoch, ObservationKey,
@@ -707,7 +707,7 @@ impl VerterHost {
                 ],
                 // Resolving the specifier is the project model's proof to give;
                 // the edge stays explicit about not having it.
-                IndexRow::Link(LinkRow {
+                IndexRow::Link(Box::new(LinkRow {
                     relation: LinkRelation::Import,
                     role: LinkRole::Unresolved,
                     source: Endpoint::Unit(unit.clone()),
@@ -716,7 +716,7 @@ impl VerterHost {
                         cause: FactCause::SpecifierUnresolved,
                     },
                     resolution: None,
-                }),
+                })),
                 origin,
                 FactQuality::Unresolved,
             );
@@ -967,12 +967,15 @@ impl VerterHost {
                     Ok(partition) => {
                         current_slots.insert(id);
                         changes.push(SlotChange::Upsert {
-                            partition,
+                            partition: Box::new(partition),
                             expected,
                         });
                     }
                     Err(rejection) => {
-                        report_rejection(&rejection);
+                        verter_debug_assert::verter_debug_assert!(
+                            false,
+                            "a host partition failed its own registered schema: {rejection:?}"
+                        );
                         partial_cause = Some(PartialCause::UnsupportedCoverage);
                     }
                 }
@@ -1212,13 +1215,6 @@ fn retire(held: &super::snapshot::Contribution, fingerprint: CanonicalDigest) ->
             },
         },
     }
-}
-
-fn report_rejection(rejection: &IngressRejection) {
-    debug_assert!(
-        false,
-        "a first-party partition failed its own registered schema: {rejection:?}"
-    );
 }
 
 fn block_scope(scoped: bool, is_module: bool) -> StyleScope {

@@ -458,7 +458,7 @@ pub enum MembershipRow {
 pub enum IndexRow {
     Name(NameRow),
     Component(ComponentRow),
-    Link(LinkRow),
+    Link(Box<LinkRow>),
     Registration(RegistrationRow),
     Stylesheet(StylesheetRow),
     ConfigEnv(ConfigEnvRow),
