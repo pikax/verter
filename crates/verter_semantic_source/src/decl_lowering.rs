@@ -1075,8 +1075,9 @@ pub struct DeclLoweringCounters {
     /// payloads (`MacroFieldAddressTable` builds): at most one per retained
     /// snapshot, however many of its fields are demanded.
     pub macro_field_address_builds: verter_audit::observe::ObservedU64,
-    /// Units of macro field-address work those builds performed
-    /// (`MacroFieldAddressTable::work`): linear in the file's macro surface.
+    /// Units of macro field-address work: the traversal of each table build
+    /// plus every hop a field demand takes from its address to its node.
+    /// Linear in the file's macro surface.
     pub macro_field_address_work: verter_audit::observe::ObservedU64,
     /// Class elements lowered by selective class-body lowering: one per raw
     /// `ClassBody.body` element a member demand lowered. A demand for one
