@@ -918,6 +918,87 @@ fn carrier_companions_record_every_role_and_advance_version_on_content_change() 
     );
 }
 
+#[test]
+fn an_open_carrier_companion_set_requires_a_compile_pin_before_publication() {
+    use tower_lsp_server::ls_types::{TextDocumentItem, Uri};
+    use verter_session::external_ts::ScriptKind;
+    use verter_session::{HostConfig, VerterHost};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = crate::documents::DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///src/Child.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><div /></template>".into(),
+    });
+    let mut companions = [
+        crate::external_ts::CarrierCompanion::carrier_ide_from_generated(
+            Arc::from("/src/Child.vue.tsx"),
+            CANONICAL,
+            "export default {};",
+            None,
+            ScriptKind::Tsx,
+            0,
+        ),
+    ];
+    assert!(
+        record_and_version_carrier_companions(
+            documents.provider_surfaces(),
+            Some(&documents),
+            &host,
+            CANONICAL,
+            &mut companions,
+            None,
+        )
+        .is_err(),
+        "an unrecorded open IDE companion must not be authorized for publication"
+    );
+
+    let (pin_uri, revision) = documents.open_compile_pin(CANONICAL);
+    record_and_version_carrier_companions(
+        documents.provider_surfaces(),
+        Some(&documents),
+        &host,
+        CANONICAL,
+        &mut companions,
+        Some((&pin_uri.unwrap(), &revision.unwrap())),
+    )
+    .expect("a current pin records and authorizes the companion");
+}
+
+#[test]
+fn a_carrier_companion_without_its_source_cannot_be_published() {
+    use verter_session::external_ts::ScriptKind;
+    use verter_session::{HostConfig, VerterHost};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let store = ProviderSurfaceStore::new();
+    let mut companions = [
+        crate::external_ts::CarrierCompanion::carrier_ide_from_generated(
+            Arc::from("/src/Child.vue.tsx"),
+            CANONICAL,
+            "export default {};",
+            None,
+            ScriptKind::Tsx,
+            0,
+        ),
+    ];
+    assert!(
+        record_and_version_carrier_companions(
+            &store,
+            None,
+            &host,
+            CANONICAL,
+            &mut companions,
+            None,
+        )
+        .is_err(),
+        "a missing source must not authorize unrecorded companion bytes"
+    );
+}
+
 /// M6: `record_carrier_companion_surface` returns the EXACT generation
 /// [`ProviderSurfaceStore::record`] linearized for the capture, so the batch
 /// versioner stamps from that value rather than a second `current_snapshot` read

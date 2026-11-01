@@ -1129,6 +1129,14 @@ gateway's membership authorization remains the commit authority. Superseded
 unresolved IDE work applies and records nothing, requeues, and releases the lane
 before a separate transaction compiles the new revision.
 
+An IDE companion whose compile pin moved must stop the entire companion publish
+before the membership store is written. An open compile without a pin or any
+companion whose source is unavailable also refuses the pass; a fallback version
+cannot authorize unrecorded bytes. Returning to previously published bytes
+can otherwise make interactive repair trust an unchanged surface while the
+plugin serves an intermediate revision. The refused pass stays queued; its
+discard logs at INFO so normal CI logs retain that ordering evidence.
+
 **Guards**: `sync_file_retains_stale_paths_when_owner_change_sync_fails` (`sync_coordinator_tests.rs`) + `scanner_sync_retains_stale_paths_when_owner_change_sync_fails` (`workspace_scanner.rs`) — the close-AFTER-successful-sync ordering proofs: on an owner change whose replacement sync FAILS, the prior path is NOT closed. The per-kind close-after-sync helpers (`revert_unsynced_kinds`, `genuinely_stale_after_sync`, `dropped_api_path_on_unowned_conversion`, `committed_binding_matches_current`) and their integration paths are pinned by the discriminating drain / aliased-resync / barrel / foreground regression tests in `provider_sync.rs` + `server_tests.rs`.
 
 ## Multi-Root Workspace & Per-Project Configuration

@@ -649,7 +649,7 @@ pub(crate) fn record_carrier_ide_surface_fenced(
             })
             .is_some();
         if !recorded {
-            tracing::debug!(
+            tracing::info!(
                 "provider_surface_store: discarding IDE surface for {provider_path} — the \
                  open document moved mid-sync"
             );
@@ -796,9 +796,8 @@ pub(crate) fn record_carrier_companion_surface_with_source(
 /// [`record_carrier_companion_surface`] offers non-fenced callers.
 ///
 /// `Err(CompanionRecordSuperseded)` when the pin no longer matches the open
-/// document: the compiled IDE content belongs to a revision the editor no
-/// longer holds. `Ok(None)` when the record was skipped for any other reason
-/// (an open carrier compiled without a pin, or an unavailable source).
+/// document or an open carrier was compiled without a pin. `Ok(None)` when
+/// the carrier source is unavailable; the batch recorder refuses that too.
 #[allow(
     clippy::too_many_arguments,
     reason = "the fenced record choke point needs the pin alongside every other producer input"
@@ -829,7 +828,7 @@ fn record_carrier_companion_surface_fenced(
                 )
             })
         else {
-            tracing::debug!(
+            tracing::info!(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  open document moved mid-sync"
             );
@@ -843,7 +842,7 @@ fn record_carrier_companion_surface_fenced(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  carrier is open but no revision was pinned for this compile"
             );
-            return Ok(None);
+            return Err(CompanionRecordSuperseded);
         }
     }
     Ok(record_carrier_companion_surface(
@@ -857,9 +856,9 @@ fn record_carrier_companion_surface_fenced(
     ))
 }
 
-/// The fenced `CarrierIde` record was refused because the open document moved
-/// after the compile's pin: the companions carry content of a revision the
-/// editor no longer holds. A caller must publish none of them — the provider
+/// A companion could not be recorded against a current carrier source: the open
+/// document moved, its compile pin is missing, or the source is unavailable.
+/// A caller must publish none of the companions — the provider
 /// store would otherwise serve that content while every LSP-side record (the
 /// refused surface, the committed state) still describes the live revision,
 /// and a later edit back to an already-committed text would find nothing to
@@ -915,9 +914,9 @@ pub(crate) fn record_and_version_carrier_companions(
         // Stamp the version from the generation `record` linearized for THIS
         // capture (returned directly), NOT a second `current_snapshot` read: the
         // re-read could race a concurrent close to `None` (pinning the IDE
-        // companion at the `1` fail-safe) or to a sibling capture's generation. The
-        // `1` fail-safe survives only when the carrier source was unavailable
-        // (record skipped, returns `None`).
+        // companion at a fallback version) or to a sibling capture's generation.
+        // A missing generation refuses the entire pass: fallback versions would
+        // authorize delivery of bytes no recorded surface describes.
         let generation = if companion.role == SnapshotRole::CarrierIde {
             record_carrier_companion_surface_fenced(
                 store,
@@ -940,7 +939,7 @@ pub(crate) fn record_and_version_carrier_companions(
                 companion.map_json.as_deref(),
             )
         }
-        .unwrap_or(1);
+        .ok_or(CompanionRecordSuperseded)?;
         companion.version = generation;
     }
     Ok(())
