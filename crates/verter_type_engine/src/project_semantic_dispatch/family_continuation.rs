@@ -140,6 +140,27 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         ))
     }
 
+    /// The skeleton read for one declaration in the cycle gate's FIFO walk.
+    pub(super) fn cycle_gate_hop_key(
+        &self,
+        current: &crate::semantic_query::DeclIdentity,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            self.dispatch.type_slot_for(
+                current.canonical_id.clone(),
+                current.owner,
+                current.decl_name.clone(),
+            ),
+            Arc::from([]),
+            self.dispatch.instantiate_context_for(
+                &current.canonical_id,
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Skeleton,
+                ),
+            ),
+        ))
+    }
+
     /// The project generation a fence pins.
     pub(super) fn project_generation(&self) -> u64 {
         self.dispatch.snapshot.current_project_generation()
@@ -220,6 +241,12 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
 /// A family build between two of its stages: what the stages before the
 /// read it waits on computed.
 pub(super) enum FamilyBuild {
+    TemplateUnion(
+        Box<QueryBuildOutput>,
+        Box<crate::semantic_query::SemanticNodeData>,
+    ),
+    ResolveDecl(crate::semantic_query_memo::ObservedGraphSelfRoot),
+    CycleGate(Box<super::cycle_gate::CycleGateBuild>),
     MacroPayload(MacroPayloadBuild),
     ReduceIntersection(ReduceIntersectionBuild),
     OverloadSet(OverloadSetBuild),
@@ -253,7 +280,10 @@ impl FamilyBuild {
             Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::ClassInstanceSurface(_)
-            | Self::ClassStaticSurface(_) => false,
+            | Self::ClassStaticSurface(_)
+            | Self::CycleGate(_)
+            | Self::ResolveDecl(_)
+            | Self::TemplateUnion(..) => false,
         }
     }
 }
@@ -282,6 +312,8 @@ pub(super) struct GlobalRead {
 pub(super) enum FamilyStep {
     /// The build's output.
     Done(Box<QueryBuildOutput>),
+    /// A completed family whose result has its own value domain.
+    Value(Box<QueryBuildOutput<SemanticQueryValue>>),
     /// The build reads this query next, holding everything it computed.
     Need(SemanticQueryKey, Box<FamilyBuild>),
     /// The build reads this file's indexed input next, holding everything
@@ -310,10 +342,13 @@ static_assertions::assert_not_impl_any!(FamilyStep: Clone, Copy);
 /// ([`ProjectSemanticDispatch::begin_family_build`]).
 pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
     match key {
-        SemanticQueryKey::ResolveMacroPayload { .. }
+        SemanticQueryKey::TemplateLiteralReduce { .. }
+        | SemanticQueryKey::ResolveMacroPayload { .. }
+        | SemanticQueryKey::ResolveDecl(_)
         | SemanticQueryKey::ReduceIntersection { .. }
         | SemanticQueryKey::ApparentType { .. }
-        | SemanticQueryKey::ResolveClassSurface { .. } => true,
+        | SemanticQueryKey::ResolveClassSurface { .. }
+        | SemanticQueryKey::ClassifyMaterializationCycleGate(_) => true,
         // Explicit type arguments instantiate each candidate through the
         // substitution engine, which still reads in place.
         SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
@@ -332,6 +367,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     #[inline(never)]
     pub(super) fn begin_family_build(&self, key: &SemanticQueryKey) -> Option<FamilyStep> {
         match key {
+            SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
+                Some(self.begin_template_literal_reduce(pattern, args))
+            }
+            SemanticQueryKey::ResolveDecl(key) => Some(self.begin_resolve_decl(key)),
+            SemanticQueryKey::ClassifyMaterializationCycleGate(key) => {
+                Some(self.continuation_stage().begin_cycle_gate(key))
+            }
             SemanticQueryKey::ResolveMacroPayload {
                 owner,
                 macro_index,
@@ -399,6 +441,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
+            FamilyBuild::TemplateUnion(mut output, fallback) => {
+                let read = super::narrow_value_cache_read(read);
+                output.result = QueryResult::Value(match read.value {
+                    QueryResult::Value(node) => node,
+                    _ => self.graph().intern_node(*fallback),
+                });
+                FamilyStep::Done(output)
+            }
+            FamilyBuild::ResolveDecl(root) => {
+                let read = super::narrow_value_cache_read(read);
+                let completeness = read.fact_status.completeness();
+                let mut roots = vec![root];
+                if let QueryResult::Value(node) = &read.value {
+                    roots.extend(self.observed_self_roots_from_nodes([*node]));
+                }
+                let mut output: QueryBuildOutput = (read.value, read.dep_signature).into();
+                output.cache_suppress = read.cache_suppress;
+                output.merge_completeness(completeness);
+                FamilyStep::Done(Box::new(output.with_observed_self_roots(roots)))
+            }
+            FamilyBuild::CycleGate(build) => self
+                .continuation_stage()
+                .resume_cycle_gate_hop(*build, super::narrow_value_cache_read(read)),
             FamilyBuild::MacroPayload(build) => FamilyStep::Done(Box::new(
                 self.continuation_stage()
                     .finish_resolve_macro_payload(build, super::narrow_value_cache_read(read)),
@@ -432,9 +497,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
+            FamilyBuild::CycleGate(build) => self
+                .continuation_stage()
+                .resume_cycle_gate_owner(*build, serve),
             FamilyBuild::MacroPayload(build) => self
                 .continuation_stage()
                 .resume_macro_payload_owner(build, serve),
+            FamilyBuild::TemplateUnion(..) => unreachable!("a template union is a query read"),
+            FamilyBuild::ResolveDecl(_) => unreachable!("a declaration target is a query read"),
             FamilyBuild::ReduceIntersection(_) => {
                 unreachable!("an intersection reduction reads no file")
             }
@@ -465,7 +535,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | FamilyBuild::ReduceIntersection(_)
             | FamilyBuild::OverloadSet(_)
             | FamilyBuild::ClassInstanceSurface(_)
-            | FamilyBuild::ClassStaticSurface(_) => {
+            | FamilyBuild::ClassStaticSurface(_)
+            | FamilyBuild::CycleGate(_)
+            | FamilyBuild::TemplateUnion(..)
+            | FamilyBuild::ResolveDecl(_) => {
                 unreachable!("only an apparent type looks a global declaration up")
             }
         }
@@ -486,7 +559,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | FamilyBuild::ReduceIntersection(_)
             | FamilyBuild::OverloadSet(_)
             | FamilyBuild::ApparentType(_)
-            | FamilyBuild::ClassInstanceSurface(_) => {
+            | FamilyBuild::ClassInstanceSurface(_)
+            | FamilyBuild::CycleGate(_)
+            | FamilyBuild::TemplateUnion(..)
+            | FamilyBuild::ResolveDecl(_) => {
                 unreachable!("only a class's static surface reads declarations in place")
             }
         }
@@ -518,7 +594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(step) = self.begin_family_build(key) else {
             return false;
         };
-        let _ = self.drive_family_in_place(step);
+        let _ = self.drive_family_value_in_place(step);
         true
     }
 
@@ -562,10 +638,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Drive a family build to its output, reading each query it names in
     /// place: the synchronous producer's driver.
     #[inline(never)]
-    pub(super) fn drive_family_in_place(&self, mut step: FamilyStep) -> QueryBuildOutput {
+    pub(super) fn drive_family_in_place(&self, step: FamilyStep) -> QueryBuildOutput {
+        match self.complete_family_in_place(step) {
+            FamilyStep::Done(output) => *output,
+            _ => unreachable!("a node family completes in the node domain"),
+        }
+    }
+
+    pub(super) fn drive_family_value_in_place(
+        &self,
+        step: FamilyStep,
+    ) -> QueryBuildOutput<SemanticQueryValue> {
+        match self.complete_family_in_place(step) {
+            FamilyStep::Done(output) => (*output).into(),
+            FamilyStep::Value(output) => *output,
+            _ => unreachable!("the family completed"),
+        }
+    }
+
+    fn complete_family_in_place(&self, mut step: FamilyStep) -> FamilyStep {
         loop {
             match step {
-                FamilyStep::Done(output) => return *output,
+                done @ (FamilyStep::Done(_) | FamilyStep::Value(_)) => return done,
                 FamilyStep::Need(key, build) => {
                     let read = self.read_family_need_in_place(key, &build);
                     step = self.resume_family_build(*build, read);

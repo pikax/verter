@@ -1,0 +1,23 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/valid-markup-strict.txt",
+  "normalized_options": {
+    "bracketSameLine": true,
+    "htmlWhitespaceSensitivity": "strict",
+    "vueIndentScriptAndStyle": true,
+    "singleAttributePerLine": true
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 55
+  },
+  "formatted_cursor": 60,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/valid-markup-strict.txt",
+    "edits": []
+  },
+  "divergence": null
+}

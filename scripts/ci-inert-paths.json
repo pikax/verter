@@ -158,5 +158,13 @@
   {
     "glob": "test-results/**",
     "reason": "A tracked test report js-build-test overwrites before reading it."
+  },
+  {
+    "glob": "tests/web-compat/WBC0/contract.md",
+    "reason": "Compatibility authority contract prose; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/web-compat/evidence/WBC0/cases.md",
+    "reason": "Compatibility review case table; no ci.yml job reads its contents."
   }
 ]
