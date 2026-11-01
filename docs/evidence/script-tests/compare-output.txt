@@ -1,0 +1,3 @@
+SCR0-AC1 full: 48/48 recorded commands reproduced command-for-command, in order (diff empty)
+SCR0-AC1 ci: 25/25 recorded commands reproduced command-for-command, in order (diff empty)
+OK
