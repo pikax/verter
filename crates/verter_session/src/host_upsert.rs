@@ -418,7 +418,7 @@ impl VerterHost {
         // Derived work can join an index producer whose source integration
         // needs the admission fence. Source and workspace publication above
         // are complete before any such dependency is awaited.
-        self.materialize_pending_contributors();
+        self.materialize_pending_declarations();
         self.materialize_upsert_carrier_routes(&mut outcomes);
         if !changed.is_empty() {
             self.ingest_changed_program_files(changed);

@@ -2605,6 +2605,7 @@ impl VerterHost {
         let _ = observation;
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
+        self.assert_index_claim_unfenced(canonical_id);
 
         // Fast path: check FileArtifactStore through the project-global cache.
         // R3: query the scheduler's current `whole_hash` for the
@@ -3173,10 +3174,6 @@ impl VerterHost {
         // The loop is bounded; under sustained churn (every attempt
         // fenced) the last fenced result is served ReturnOnly — the same
         // bounded-fallback shape as `run_stable_request`.
-        verter_debug_assert!(
-            !self.block_content.admission_fence.is_owned_by_current_thread(),
-            "a flight's leader loads source under the admission fence, so a holder must not claim one: {canonical_id}"
-        );
         const MAX_FLIGHT_ATTEMPTS: usize = 3;
         let mut last_fenced: Option<Arc<crate::project_type_store::IndexedReady>> = None;
         for _attempt in 0..MAX_FLIGHT_ATTEMPTS {

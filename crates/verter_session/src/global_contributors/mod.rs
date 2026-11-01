@@ -743,10 +743,11 @@ pub struct GlobalContributorIndex {
     /// `grouped`.
     mutate: parking_lot::Mutex<()>,
     revision: AtomicU64,
-    /// Overlay `.ts` files with file-level `declare module`/`declare global`
-    /// or file-scope script globals that have not yet been IndexedReady.
-    /// Drained from contribution collection, not from upsert, so fence
-    /// flights stay cold.
+    /// Contributors not yet IndexedReady: ambient declaration files, and
+    /// overlay `.ts` files with file-level `declare module`/`declare global`
+    /// or file-scope script globals. Declaration files are drained when an
+    /// upsert releases the admission fence. Scripts are drained only from
+    /// contribution collection, so fence flights stay cold.
     pending_overlay_ambient: parking_lot::Mutex<FxHashMap<Arc<str>, u64>>,
     /// The note a pending entry carries, so settling one never drops a newer.
     pending_overlay_notes: AtomicU64,

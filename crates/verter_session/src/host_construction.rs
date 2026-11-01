@@ -1340,24 +1340,49 @@ impl VerterHost {
             .note_pending_overlay_ambient(canonical);
     }
 
-    /// Make every pending contributor IndexedReady.
+    /// Make the pending declaration files IndexedReady. Ordinary scripts stay
+    /// cold until a population lookup.
+    pub(crate) fn materialize_pending_declarations(&self) {
+        self.materialize_pending_contributors(is_ambient_declaration_canonical);
+    }
+
+    /// Make the `selected` pending contributors IndexedReady.
     ///
     /// Each claims its file's index flight, whose leader may be loading the
     /// source under the admission fence, so this runs with the fence released.
     /// A load integrates and re-checks against the current source in its own
     /// fence turn, and an entry stays pending until it is indexed, so a reader
     /// meeting a contributor still in progress reads an incomplete population
-    /// and indexes it too, joining the same flight.
-    pub(crate) fn materialize_pending_contributors(&self) {
+    /// and indexes it too, joining the same flight. A fenced flight published
+    /// nothing and nothing re-notes an unchanged file, so its entry stays for
+    /// the next lookup.
+    fn materialize_pending_contributors(&self, selected: impl Fn(&str) -> bool) {
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
         for (member, note) in index.pending_overlay_ambient() {
+            if !selected(&member) {
+                continue;
+            }
             let _ = self.ensure_loaded(&member);
-            let _ = self.ensure_indexed_ready_serve(&member);
-            index.settle_pending_overlay_ambient(&member, note);
+            if self
+                .ensure_indexed_ready_serve(&member)
+                .is_none_or(|serve| serve.store_published)
+            {
+                index.settle_pending_overlay_ambient(&member, note);
+            }
         }
+    }
+
+    /// An index flight's leader may be loading its source under the admission
+    /// fence, so a thread holding the fence must not claim one, even when this
+    /// call would be answered warm: another run reaches the same line cold.
+    pub(crate) fn assert_index_claim_unfenced(&self, canonical: &str) {
+        verter_debug_assert!(
+            !self.block_content.admission_fence.is_owned_by_current_thread(),
+            "a flight's leader loads source under the admission fence, so a holder must not claim one: {canonical}"
+        );
     }
 
     /// Drain overlay `.ts` ambient / file-scope script contributors
@@ -1368,14 +1393,14 @@ impl VerterHost {
     pub(crate) fn ingest_program_ambient_roots(&self) {
         self.ingest_injected_ambient_roots(None);
         self.ingest_configured_programs();
-        self.materialize_pending_contributors();
+        self.materialize_pending_contributors(|_| true);
     }
 
-    /// Classify changed injected members and make the contributors among
+    /// Classify changed injected members and make the declaration files among
     /// them IndexedReady.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
         self.classify_injected_ambient_roots(except);
-        self.materialize_pending_contributors();
+        self.materialize_pending_declarations();
     }
 
     /// Classify only changed injected members, recording each contributor
