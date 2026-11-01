@@ -40,6 +40,30 @@ describe("pollUntilWithin", () => {
     await vi.advanceTimersByTimeAsync(20);
     await rejected;
   });
+
+  it("includes the last observed hover text when semantic readiness times out", async () => {
+    vi.useFakeTimers();
+    const request = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce("const dailyValue: any")
+      .mockResolvedValue("(function) renderDaily(): string");
+    const result = pollUntilWithin(
+      "semantic hover src/DailyBinding.svelte#dailyValue",
+      request,
+      (text) => semanticHoverReady(text, ["dailyValue", "label"]),
+      10,
+      5,
+      (text) => text,
+    );
+    const rejected = expect(result).rejects.toThrow(
+      "semantic hover src/DailyBinding.svelte#dailyValue not ready within 10ms; " +
+        "last observed: (function) renderDaily(): string",
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+    await rejected;
+    expect(request).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe("semanticHoverReady", () => {

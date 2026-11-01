@@ -4,6 +4,7 @@ export async function pollUntilWithin<T>(
   ready: (value: T) => boolean,
   timeoutMs: number,
   intervalMs = 150,
+  describe?: (value: T) => string,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
 
@@ -16,7 +17,8 @@ export async function pollUntilWithin<T>(
     if (ready(latest)) return latest;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      throw new Error(`${label} not ready within ${timeoutMs}ms`);
+      const observation = describe ? `; last observed: ${describe(latest)}` : "";
+      throw new Error(`${label} not ready within ${timeoutMs}ms${observation}`);
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remainingMs)));
   }

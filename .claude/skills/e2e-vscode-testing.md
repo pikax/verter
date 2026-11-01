@@ -106,6 +106,11 @@ Each entry declares `parentTimeoutMs` — the **smallest** deadline that budget 
 run under — plus a `reason` when it exceeds the suite default. It is a lower bound, not an
 equality, because a shared budget legitimately runs under many parents.
 
+Semantic hover polling includes the last observed hover text in its timeout
+error. Pass an observation formatter through `pollUntil` / `pollUntilWithin`
+when the rejected value is needed to distinguish a wrong provider answer from
+an empty response; formatting happens only on timeout.
+
 That claim is **load-bearing and checked at runtime.** The suite runner hands the registry
 Mocha's current runnable, and `pollBudget` refuses two things: a runnable whose real deadline
 is *below* the claim (the claim is wrong, and everything measured against it — including any
