@@ -1,0 +1,307 @@
+{
+  "schema": "dialect-inventory/v1",
+  "kind": "contract-only",
+  "productionChanges": false,
+  "currentNativeSource": {
+    "package": "verter_css_syntax",
+    "version": "0.0.1-beta.7",
+    "versionSource": "Cargo.toml [workspace.package]",
+    "grammarSource": "crates/verter_css_syntax/src/dialect.rs",
+    "grammarConformance": "not established by package version",
+    "grammarEpoch": 1,
+    "grammarEpochSource": "crates/verter_css_syntax/src/version.rs::CssSyntaxGrammarVersion::CURRENT"
+  },
+  "dependencies": [
+    {
+      "package": "vite",
+      "version": "8.3.5",
+      "source": "pnpm-lock.yaml importers packages/unplugin and packages/vue-vscode",
+      "role": "external transform orchestration, not dialect grammar"
+    },
+    {
+      "package": "vscode-css-languageservice",
+      "version": "6.3.10",
+      "source": "pnpm-lock.yaml importer packages/vue-vscode",
+      "role": "host-local direct CSS/SCSS/Less service, not shared semantic authority"
+    },
+    {
+      "package": "postcss",
+      "version": "8.5.31",
+      "source": "pnpm-lock.yaml vite@8.3.5 snapshot",
+      "role": "external plugin pipeline; does not identify custom grammar"
+    }
+  ],
+  "dialects": [
+    {
+      "id": "pug",
+      "spellings": ["pug", "jade"],
+      "parser": {
+        "current": null,
+        "target": "verter_pug_syntax",
+        "decision": "PAR CL09 / H09 NewParser",
+        "owner": "DIAL1"
+      },
+      "facts": {
+        "current": "none for authored Pug",
+        "target": "canonical template facts with lexical binding contexts, holes and many-to-many origins",
+        "owner": "DIAL2"
+      },
+      "operationsOwner": "DIAL3",
+      "formatOwner": "DIAL4",
+      "transform": {
+        "route": "packages/unplugin/src/core/preprocessor.ts::preprocessTemplate",
+        "engine": "pug",
+        "version": null,
+        "versionReason": "Optional workspace import; no pug lock entry. No supported release qualified here.",
+        "output": "HTML",
+        "map": "not returned"
+      },
+      "grammarEvidence": "PAR-T07 and DIAL1-AC2; exact corpus/release must be pinned by DIAL1",
+      "capabilityCells": {
+        "authoredParse": "not natively available",
+        "recovery": "not qualified",
+        "diagnostics": "only individually evidenced authored/producer diagnostics, with stage and coordinate domain",
+        "completion": "no full dialect claim; require exact host/profile operation evidence",
+        "hover": "no full dialect claim; require exact host/profile operation evidence",
+        "definition": "no full dialect claim; require exact host/profile operation evidence",
+        "references": "no full dialect claim; require exact host/profile operation evidence",
+        "renameAndEdits": "require canonical facts and exact reversible current authored origins",
+        "formatting": "no dedicated dialect view qualified by this inventory",
+        "runtimeCompile": "conditional external engine/config/trust; not authored intelligence",
+        "authoredMaps": "not returned",
+        "fullAuthoredIntelligence": false
+      }
+    },
+    {
+      "id": "scss",
+      "spellings": ["scss"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/scss.rs",
+        "decision": "PAR CL05 Dialect of CSS",
+        "owner": "DIAL5"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts; dynamic evaluation is incomplete",
+        "target": "SCSS authored semantic syntax contributions",
+        "owner": "DIAL5"
+      },
+      "operationsOwner": "DIAL8",
+      "formatOwner": "DIAL8 handoff into existing FMTCS0/FMTCL0 views",
+      "transform": {
+        "route": "preprocessStyle via Vite; direct Sass outside Vite; style-preprocess-worker.mjs",
+        "engine": "sass / sass-embedded",
+        "version": "1.106.1",
+        "versionReason": "Both exact lock entries; workspace-resolved engines still require actual version evidence.",
+        "output": "CSS",
+        "map": "optional Source Map V3, validated before authored use"
+      },
+      "grammarEvidence": "PAR-T01/PAR-T02; current crate tests are bounded, not whole-release conformance",
+      "capabilityCells": {
+        "authoredParse": "existing bounded native structure",
+        "recovery": "existing lossless structure; exact-version corpus still required",
+        "diagnostics": "only individually evidenced authored/producer diagnostics, with stage and coordinate domain",
+        "completion": "no full dialect claim; require exact host/profile operation evidence",
+        "hover": "no full dialect claim; require exact host/profile operation evidence",
+        "definition": "no full dialect claim; require exact host/profile operation evidence",
+        "references": "no full dialect claim; require exact host/profile operation evidence",
+        "renameAndEdits": "require canonical facts and exact reversible current authored origins",
+        "formatting": "no dedicated dialect view qualified by this inventory",
+        "runtimeCompile": "conditional external engine/config/trust; not authored intelligence",
+        "authoredMaps": "optional Source Map V3, validated before authored use",
+        "fullAuthoredIntelligence": false
+      }
+    },
+    {
+      "id": "less",
+      "spellings": ["less"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/less.rs",
+        "decision": "PAR CL06 Dialect of CSS",
+        "owner": "DIAL5"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts; dynamic evaluation is incomplete",
+        "target": "Less authored semantic syntax contributions",
+        "owner": "DIAL5"
+      },
+      "operationsOwner": "DIAL8",
+      "formatOwner": "DIAL8 handoff into existing FMTCS0/FMTCL0 views",
+      "transform": {
+        "route": "packages/unplugin/src/core/preprocessor.ts::preprocessStyle via Vite only",
+        "engine": "less",
+        "version": "4.9.1",
+        "versionReason": "pnpm lock entry; not a Verter grammar support declaration.",
+        "output": "CSS",
+        "map": "optional pipeline map"
+      },
+      "grammarEvidence": "PAR-T01/PAR-T02; exact dialect recovery is not inherited from plain CSS",
+      "capabilityCells": {
+        "authoredParse": "existing bounded native structure",
+        "recovery": "existing lossless structure; exact-version corpus still required",
+        "diagnostics": "only individually evidenced authored/producer diagnostics, with stage and coordinate domain",
+        "completion": "no full dialect claim; require exact host/profile operation evidence",
+        "hover": "no full dialect claim; require exact host/profile operation evidence",
+        "definition": "no full dialect claim; require exact host/profile operation evidence",
+        "references": "no full dialect claim; require exact host/profile operation evidence",
+        "renameAndEdits": "require canonical facts and exact reversible current authored origins",
+        "formatting": "no dedicated dialect view qualified by this inventory",
+        "runtimeCompile": "conditional external engine/config/trust; not authored intelligence",
+        "authoredMaps": "optional pipeline map",
+        "fullAuthoredIntelligence": false
+      }
+    },
+    {
+      "id": "sass-indented",
+      "spellings": ["sass"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/sass.rs",
+        "decision": "PAR CL07 dedicated layout frontend in CSS owner",
+        "owner": "DIAL6S"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts without preprocessing",
+        "target": "indented-Sass variables, mixins, imports and interpolation with exact origins",
+        "owner": "DIAL6SF"
+      },
+      "operationsOwner": "DIAL8",
+      "formatOwner": "DIAL8 handoff into existing FMTCS0/FMTCL0 views",
+      "transform": {
+        "route": "unplugin Vite/direct Sass/worker; vue-vscode css/transpiler.ts",
+        "engine": "sass / sass-embedded",
+        "version": "1.106.1",
+        "versionReason": "Locked build tools; VS Code resolves workspace sass and records its banner version separately.",
+        "output": "CSS and qualified producer diagnostics",
+        "map": "optional; producer input diagnostics and generated output use distinct spaces"
+      },
+      "grammarEvidence": "PAR-T03/PAR-T04; indentation edit/recovery corpus owned by DIAL6S",
+      "capabilityCells": {
+        "authoredParse": "existing bounded native structure",
+        "recovery": "existing lossless structure; exact-version corpus still required",
+        "diagnostics": "only individually evidenced authored/producer diagnostics, with stage and coordinate domain",
+        "completion": "no full dialect claim; require exact host/profile operation evidence",
+        "hover": "no full dialect claim; require exact host/profile operation evidence",
+        "definition": "no full dialect claim; require exact host/profile operation evidence",
+        "references": "no full dialect claim; require exact host/profile operation evidence",
+        "renameAndEdits": "require canonical facts and exact reversible current authored origins",
+        "formatting": "no dedicated dialect view qualified by this inventory",
+        "runtimeCompile": "conditional external engine/config/trust; not authored intelligence",
+        "authoredMaps": "optional; producer input diagnostics and generated output use distinct spaces",
+        "fullAuthoredIntelligence": false
+      }
+    },
+    {
+      "id": "stylus",
+      "spellings": ["stylus", "styl"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/stylus.rs",
+        "decision": "PAR CL08 dedicated layout frontend in CSS owner",
+        "owner": "DIAL6Y"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts without preprocessing",
+        "target": "conservative Stylus symbols and preprocessor provenance with exact origins",
+        "owner": "DIAL6YF"
+      },
+      "operationsOwner": "DIAL8",
+      "formatOwner": "DIAL8 handoff into existing FMTCS0/FMTCL0 views",
+      "transform": {
+        "route": "Vite pipeline; vue-vscode css/transpiler.ts; no direct non-Vite unplugin branch",
+        "engine": "stylus",
+        "version": null,
+        "versionReason": "No stylus lock entry; workspace version is observed, not assumed.",
+        "output": "CSS and qualified producer diagnostics",
+        "map": "optional producer map; not a guessed authored mapping"
+      },
+      "grammarEvidence": "PAR-T05/PAR-T06; Stylus precedence/recovery must use its own corpus",
+      "capabilityCells": {
+        "authoredParse": "existing bounded native structure",
+        "recovery": "existing lossless structure; exact-version corpus still required",
+        "diagnostics": "only individually evidenced authored/producer diagnostics, with stage and coordinate domain",
+        "completion": "no full dialect claim; require exact host/profile operation evidence",
+        "hover": "no full dialect claim; require exact host/profile operation evidence",
+        "definition": "no full dialect claim; require exact host/profile operation evidence",
+        "references": "no full dialect claim; require exact host/profile operation evidence",
+        "renameAndEdits": "require canonical facts and exact reversible current authored origins",
+        "formatting": "no dedicated dialect view qualified by this inventory",
+        "runtimeCompile": "conditional external engine/config/trust; not authored intelligence",
+        "authoredMaps": "optional producer map; not a guessed authored mapping",
+        "fullAuthoredIntelligence": false
+      }
+    },
+    {
+      "id": "custom-postcss",
+      "spellings": ["postcss", "provider-defined exact syntax id"],
+      "parser": {
+        "current": null,
+        "decision": "Explicit syntax provider; postcss is a pipeline name, not a grammar",
+        "owner": "DIAL7"
+      },
+      "facts": {
+        "current": "no native custom-syntax facts; ProcessedContentRequired",
+        "target": "provider-qualified authored contributions or typed partiality",
+        "owner": "DIAL7"
+      },
+      "operationsOwner": "DIAL7",
+      "formatOwner": "shared CSS/formatter owner after exact provider qualification",
+      "transform": {
+        "route": "Vite preprocessCSS with configured PostCSS plugins/syntax",
+        "engine": "postcss plus explicit provider/plugin chain",
+        "version": "8.5.31",
+        "versionReason": "Vite 8.3.5 lock dependency; 8.5.20 also exists transitively. Neither pins arbitrary custom syntax.",
+        "output": "provider-specific CSS",
+        "map": "captured per stage; absent mapping remains explicit"
+      },
+      "grammarEvidence": "No universal custom grammar/release. DIAL7 records exact provider, options, syntax epoch and source/license before admission",
+      "capabilityCells": {
+        "authoredParse": "not natively available",
+        "recovery": "not qualified",
+        "diagnostics": "only individually evidenced authored/producer diagnostics, with stage and coordinate domain",
+        "completion": "no full dialect claim; require exact host/profile operation evidence",
+        "hover": "no full dialect claim; require exact host/profile operation evidence",
+        "definition": "no full dialect claim; require exact host/profile operation evidence",
+        "references": "no full dialect claim; require exact host/profile operation evidence",
+        "renameAndEdits": "require canonical facts and exact reversible current authored origins",
+        "formatting": "no dedicated dialect view qualified by this inventory",
+        "runtimeCompile": "conditional external engine/config/trust; not authored intelligence",
+        "authoredMaps": "captured per stage; absent mapping remains explicit",
+        "fullAuthoredIntelligence": false
+      }
+    }
+  ],
+  "receivingContracts": {
+    "syntax": "PAR PD01-PD09; DIAL1, DIAL5, DIAL6S, DIAL6Y",
+    "origins": "EMB0I primitives, DIAL2 Pug integration, DIAL7 transform integration",
+    "semantics": "DIAL2 canonical template facts; DIAL3 Vue operations; DIAL6SF/DIAL6YF stylesheet facts; DIAL6 integration qualification; DIAL8 CSS symbol and FMTCS0/FMTCL0 consumer cutover",
+    "format": "DIAL4 Pug contribution to existing formatter; DIAL8 exact-owner handoff for CSS dialect FMTCS0/FMTCL0 views",
+    "lint": "DIAL4L; no new dialect lint service here",
+    "transformIdentity": "STP38; DIAL7 adapters",
+    "publicDelivery": "each producer AC4: VIM/DX exact cells, DOC1-tested examples/reference, permissions/uncertainty/migration; product terminal audits real evidence"
+  },
+  "deletionSet": [],
+  "deletionRationale": "Additive contract data only; current runtime routes are retained. README assigns concrete later reconciliation/cutover owners.",
+  "conditions": [
+    "Formatter or generated-output evidence alone cannot qualify full authored language intelligence.",
+    "Authored automatic edits require an exact reversible current origin chain.",
+    "Runtime compilation requires explicit trust and actual producer/config/build/session evidence."
+  ],
+  "conditionJustifications": [
+    {
+      "condition": "Formatter or generated-output evidence alone cannot qualify full authored language intelligence.",
+      "concern": "correctness",
+      "prevents": "Plausible false authored rename/reference support inferred from a working printer or renderer (charter AC2).",
+      "notCoveredBecause": "Compilation/format tests do not prove authored bindings; producer AC4 must qualify operation projection."
+    },
+    {
+      "condition": "Authored automatic edits require an exact reversible current origin chain.",
+      "concern": "correctness",
+      "prevents": "Plausible wrong-source edits for mixin expansions or unmapped generated CSS (EMB contract and charter forbidden offset approximation).",
+      "notCoveredBecause": "A successful external transform does not prove map invertibility or revision validity."
+    },
+    {
+      "condition": "Runtime compilation requires explicit trust and actual producer/config/build/session evidence.",
+      "concern": "security",
+      "prevents": "Plausible execution of workspace code under a static-only support claim (charter runtime clause).",
+      "notCoveredBecause": "Static syntax CI does not establish permission or identify the actual workspace compiler."
+    }
+  ]
+}
