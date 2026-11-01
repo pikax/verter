@@ -261,6 +261,37 @@ fn planner_selects_only_demanded_member_value() {
     assert!(plan.is_value(graph.expr_site_node(b_init)));
 }
 
+/// An object literal a call consumes names its reads as the call's inputs:
+/// the returned call selects the innermost `value`, and neither the shadowed
+/// outer `value` nor an unread sibling. A statement call nothing demands
+/// selects nothing for value.
+#[test]
+fn planner_call_object_argument_selects_only_its_own_reads() {
+    let source = "function f() {
+        const unrelated = notDeclared();
+        const skipped = notDeclared();
+        const value = 1;
+        log({ skipped });
+        {
+            const value = 2;
+            return box({ a: { value } });
+        }
+    }";
+    let skeleton = skeleton_of(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = plan_return(&skeleton, &graph, &[]);
+
+    let value = skeleton.name_id("value").expect("value interned");
+    let values: Vec<_> = skeleton.bindings_named(value).collect();
+    let [outer, inner] = values[..] else {
+        panic!("two `value` bindings, got {values:?}");
+    };
+    assert!(plan.is_value(graph.binding_node(inner)));
+    assert!(!plan.is_value(graph.binding_node(outer)));
+    assert!(!plan.is_selected(binding_node(&skeleton, &graph, "unrelated")));
+    assert!(!plan.is_value(binding_node(&skeleton, &graph, "skipped")));
+}
+
 /// The two-frontier soundness case: `return { a: (x = "s"), b:
 /// x.toUpperCase() }` demanding `['b']` must NOT value-select sibling
 /// `a`, but MUST keep `a`'s evaluation effect reachable (its initializer
