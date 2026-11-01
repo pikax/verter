@@ -5,10 +5,16 @@
 //! the rendered result's ordered retained provenance units as stable anchors.
 //! A claimed unit is an anchor only when it is addressable in the authored
 //! source, ordered after the previous anchor, and its rendered bytes are
-//! exactly its authored bytes; any other claim proves nothing and stays gap
-//! content. In each gap between anchors the maximal equal Unicode-scalar
+//! exactly its authored bytes; a claim that is not addressable in this source
+//! is refused with its position, and every other claim proves nothing and
+//! stays gap content — including a claim whose range boundary falls inside an
+//! authored CRLF pair, because the `maps.crlf` law forbids any edit boundary
+//! there. In each gap between anchors the maximal equal Unicode-scalar
 //! prefix is stripped, then a non-overlapping maximal equal scalar suffix, and
-//! only the remaining replacement is emitted. A unit that is zero-width in
+//! only the remaining replacement is emitted; when a replacement boundary
+//! would fall inside an authored CRLF pair the replaced range extends over the
+//! whole pair together with its equal stripped partner. A unit that is
+//! zero-width in
 //! both spaces separates nothing, so adjacent gaps coalesce through it;
 //! insertions at an equal boundary follow rendered source order (walk order).
 //! Anchors emit nothing, so unchanged prefixes, suffixes and internal stable
@@ -39,7 +45,8 @@ pub struct FormatEdit {
 pub struct EditWork {
     /// Scalar-to-scalar comparisons: retained-unit verification plus gap
     /// prefix/suffix stripping. The locked ceiling is
-    /// `4*(authored_bytes + rendered_bytes) + 64`.
+    /// `4*(authored_bytes + rendered_bytes) + 64`, ratified as the
+    /// `edit_comparisons` bound in `catalogs/formatter-performance-v1.toml`.
     pub edit_comparisons: usize,
 }
 
@@ -68,10 +75,15 @@ impl FormatEditSet {
         for (index, edit) in self.edits.iter().enumerate() {
             AuthoredFormatByteRange::for_source(source, edit.range.start(), edit.range.end())
                 .map_err(|error| EditError::InvalidEdit { index, error })?;
-            if edit.range.is_empty() && edit.text.is_empty() {
+            let start = edit.range.start().get() as usize;
+            let end = edit.range.end().get() as usize;
+            if edit.range.is_empty() {
+                if edit.text.is_empty() {
+                    return Err(EditError::NoOpEdit { index });
+                }
+            } else if edit.text == source[start..end] {
                 return Err(EditError::NoOpEdit { index });
             }
-            let start = edit.range.start().get() as usize;
             if start < cursor {
                 return Err(EditError::EditsOutOfOrder { index });
             }
@@ -89,6 +101,12 @@ impl FormatEditSet {
 pub enum EditError {
     /// The rendered segments do not tile the rendered text exactly.
     SegmentsNotContiguous { index: usize },
+    /// A rendered segment's claimed range is invalid for the rendered text:
+    /// out of bounds or not at a UTF-8 scalar boundary.
+    InvalidRenderedRange {
+        index: usize,
+        error: CoordinateError,
+    },
     /// A retained unit's claimed range is invalid for the authored source.
     InvalidRetainedRange {
         index: usize,
@@ -103,7 +121,8 @@ pub enum EditError {
         index: usize,
         error: CoordinateError,
     },
-    /// An edit replaces nothing with nothing.
+    /// An edit replaces nothing, or replaces its range with byte-identical
+    /// text.
     NoOpEdit { index: usize },
 }
 
@@ -114,6 +133,12 @@ impl fmt::Display for EditError {
                 write!(
                     f,
                     "rendered segment {index} does not tile the rendered text"
+                )
+            }
+            Self::InvalidRenderedRange { index, error } => {
+                write!(
+                    f,
+                    "rendered segment {index} claims an invalid range: {error}"
                 )
             }
             Self::InvalidRetainedRange { index, error } => {
@@ -128,7 +153,9 @@ impl fmt::Display for EditError {
             Self::InvalidEdit { index, error } => {
                 write!(f, "edit {index} is invalid for its source: {error}")
             }
-            Self::NoOpEdit { index } => write!(f, "edit {index} replaces nothing with nothing"),
+            Self::NoOpEdit { index } => {
+                write!(f, "edit {index} replaces nothing or byte-identical text")
+            }
         }
     }
 }
@@ -151,10 +178,13 @@ pub fn derive_edits(
         });
     }
     // The segments must tile the rendered text exactly: one contiguous cover
-    // with no hole and no overhang.
+    // with no hole and no overhang, every endpoint addressable in that text
+    // at a scalar boundary.
     let mut tiled_end = 0;
     for (index, segment) in segments.iter().enumerate() {
         let range = rendered_range(segment);
+        FormattedByteRange::for_source(rendered_text, range.start(), range.end())
+            .map_err(|error| EditError::InvalidRenderedRange { index, error })?;
         if range.start().get() as usize != tiled_end {
             return Err(EditError::SegmentsNotContiguous { index });
         }
@@ -188,8 +218,13 @@ pub fn derive_edits(
         let r_end = rendered.end().get() as usize;
         // A stable anchor is ordered and byte-equal on both sides. An
         // out-of-order or unequal claim is a move or a transformation, not a
-        // retained unit: it stays gap content and fabricates no bijection.
+        // retained unit: it stays gap content and fabricates no bijection. An
+        // anchor's boundaries become edit boundaries, and the `maps.crlf` law
+        // forbids an edit boundary inside an authored CRLF pair, so a claim
+        // whose range boundary splits a pair proves nothing either.
         if a_start < anchor_a_end
+            || splits_crlf_pair(authored, a_start)
+            || splits_crlf_pair(authored, a_end)
             || !retained_equal(
                 &authored[a_start..a_end],
                 &rendered_text[r_start..r_end],
@@ -255,7 +290,9 @@ fn retained_equal(authored: &str, rendered: &str, work: &mut EditWork) -> bool {
 
 /// Close one gap: strip the maximal equal scalar prefix, then the
 /// non-overlapping maximal equal scalar suffix, and emit the remaining
-/// replacement only. A gap whose content ended up equal emits nothing.
+/// replacement only. A gap whose content ended up equal emits nothing. A
+/// replacement boundary that would fall inside an authored CRLF pair backs
+/// off over the whole pair (`fixtures/formatter/laws.json`, `maps.crlf`).
 fn close_gap(
     authored: &str,
     authored_gap: Range<usize>,
@@ -295,14 +332,36 @@ fn close_gap(
         suffix_from += left.len_utf8();
         suffix_to += right.len_utf8();
     }
-    let replacement_from = &from[prefix_from..from.len() - suffix_from];
-    let replacement_to = &to[prefix_to..to.len() - suffix_to];
-    if replacement_from.is_empty() && replacement_to.is_empty() {
+    if from.len() - prefix_from - suffix_from == 0 && to.len() - prefix_to - suffix_to == 0 {
         return Ok(());
     }
+    // The `maps.crlf` law: an edit boundary never falls inside an authored
+    // CRLF pair. A stripping boundary that lands between the `\r` and the
+    // `\n` backs off over the whole pair by un-stripping its equal rendered
+    // partner, so the replacement covers the pair. Each endpoint needs at
+    // most one step: the backed-off start sits before the `\r` and the
+    // backed-off end after the `\n`, neither inside another pair.
+    while prefix_from > 0 && splits_crlf_pair(authored, authored_gap.start + prefix_from) {
+        prefix_from -= 1;
+        prefix_to -= to[..prefix_to]
+            .chars()
+            .next_back()
+            .expect("a stripped prefix scalar has an equal rendered partner")
+            .len_utf8();
+    }
+    while suffix_from > 0 && splits_crlf_pair(authored, authored_gap.end - suffix_from) {
+        suffix_from -= 1;
+        suffix_to -= to[to.len() - suffix_to..]
+            .chars()
+            .next()
+            .expect("a stripped suffix scalar has an equal rendered partner")
+            .len_utf8();
+    }
+    let replacement_to = &to[prefix_to..to.len() - suffix_to];
     // Gap endpoints come from validated anchor claims (or the two zero
-    // offsets) and stripping advances on scalar boundaries, so the minting
-    // below cannot fail for an addressable source.
+    // offsets) and stripping, including its CRLF back-off, advances on
+    // scalar boundaries, so the minting below cannot fail for an
+    // addressable source.
     let start = u32::try_from(authored_gap.start + prefix_from).map_err(|_| {
         EditError::AuthoredTooLarge {
             source_len: authored.len(),
@@ -318,4 +377,14 @@ fn close_gap(
         text: replacement_to.to_owned(),
     });
     Ok(())
+}
+
+/// Whether `offset` falls strictly inside a CRLF pair of `source`: between
+/// the `\r` and the `\n`. Such a boundary may never anchor a retained unit or
+/// bound an edit (`fixtures/formatter/laws.json`, `maps.crlf`).
+fn splits_crlf_pair(source: &str, offset: usize) -> bool {
+    offset > 0
+        && offset < source.len()
+        && source.as_bytes()[offset - 1] == b'\r'
+        && source.as_bytes()[offset] == b'\n'
 }

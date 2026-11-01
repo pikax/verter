@@ -278,7 +278,7 @@ fn subtree_reuse_cannot_expand_work_exponentially() {
 
 #[test]
 fn pinned_width_oracle_cases_choose_both_sides_of_the_boundary() {
-    for row in include_str!("width-cases.tsv").lines() {
+    for row in include_str!("../width-cases.tsv").lines() {
         let (points, columns) = row.split_once('\t').unwrap();
         let text: String = points
             .split(',')

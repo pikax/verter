@@ -63,9 +63,16 @@ fn tuples(set: &FormatEditSet) -> Vec<(u32, u32, String)> {
 }
 
 /// The acceptance invariants every derived set must satisfy: sorted by
-/// authored position, non-overlapping, in bounds at scalar boundaries, and
-/// free of no-op edits.
+/// authored position, non-overlapping, in bounds at scalar boundaries, free
+/// of no-op edits, and never bounded inside an authored CRLF pair.
 fn assert_well_formed(set: &FormatEditSet, authored: &str) {
+    let splits_pair = |offset: u32| {
+        let offset = offset as usize;
+        offset > 0
+            && offset < authored.len()
+            && authored.as_bytes()[offset - 1] == b'\r'
+            && authored.as_bytes()[offset] == b'\n'
+    };
     for pair in set.edits.windows(2) {
         assert!(
             pair[1].range.start().get() >= pair[0].range.end().get(),
@@ -88,6 +95,14 @@ fn assert_well_formed(set: &FormatEditSet, authored: &str) {
                 "edit replaces bytes with identical bytes"
             );
         }
+        assert!(
+            !splits_pair(edit.range.start().get()),
+            "edit start splits a CRLF pair: {edit:?}"
+        );
+        assert!(
+            !splits_pair(edit.range.end().get()),
+            "edit end splits a CRLF pair: {edit:?}"
+        );
     }
 }
 
@@ -215,11 +230,11 @@ fn table_cases_apply_exactly_for_every_edit_kind() {
         &[(0, 3, "")],
     );
     row(
-        "crlf to lf deletes each carriage return",
+        "crlf to lf replaces each whole pair",
         "a\r\nb\r\n",
         "a\nb\n",
         &[(0, 1, 0, 1), (3, 4, 2, 3)],
-        &[(1, 2, ""), (4, 5, "")],
+        &[(1, 3, "\n"), (4, 6, "\n")],
     );
     row(
         "lf to crlf inserts each carriage return",
@@ -227,6 +242,24 @@ fn table_cases_apply_exactly_for_every_edit_kind() {
         "a\r\nb\r\n",
         &[(0, 1, 0, 1), (2, 3, 3, 4)],
         &[(1, 1, "\r"), (3, 3, "\r")],
+    );
+    // An insertion between the `\r` and the `\n` never yields an edit
+    // boundary inside the pair: the pair is replaced as a whole.
+    row(
+        "insertion inside a crlf pair replaces the whole pair",
+        "a\r\nb",
+        "a\rX\nb",
+        &[],
+        &[(1, 3, "\rX\n")],
+    );
+    // A claim whose boundary splits the pair cannot anchor: it stays gap
+    // content and the pair is still replaced as a whole.
+    row(
+        "retained claim splitting a crlf pair stays gap content",
+        "a\r\nb",
+        "a\nb",
+        &[(0, 1, 0, 1), (2, 3, 1, 2), (3, 4, 2, 3)],
+        &[(1, 3, "\n")],
     );
     row(
         "multibyte replacement at scalar boundaries",
@@ -401,8 +434,31 @@ fn pipeline_derivation_from_a_rendered_doc_applies_exactly() {
         .is_empty());
 }
 
+/// The ratified performance catalog, so the enforced `edit_comparisons`
+/// ceiling is read from its lock and a changed lock fails the bound test
+/// instead of passing against a stale copy of the number.
+const PERFORMANCE_CATALOG: &str =
+    include_str!("../../../../catalogs/formatter-performance-v1.toml");
+
 fn adversary_bound(set: &FormatEditSet, authored: &str, rendered: &str) -> usize {
     let bound = 4 * (authored.len() + rendered.len()) + 64;
+    let locked = PERFORMANCE_CATALOG
+        .lines()
+        .zip(PERFORMANCE_CATALOG.lines().skip(1))
+        .find_map(|(counter, ceiling)| {
+            if counter.trim() != "counter = \"edit_comparisons\"" {
+                return None;
+            }
+            ceiling
+                .trim()
+                .strip_prefix("ceiling = ")
+                .map(|value| value.trim_matches('"'))
+        })
+        .expect("edit_comparisons bound locked in the performance catalog");
+    assert_eq!(
+        locked, "4*(A_in+B_emit)+64",
+        "the enforced ceiling no longer matches the ratified edit_comparisons lock"
+    );
     assert!(
         set.work.edit_comparisons <= bound,
         "edit_comparisons {} exceeds the locked ceiling {bound}",
@@ -521,6 +577,55 @@ fn malformed_rendered_segments_and_retained_claims_are_refused() {
     );
 }
 
+#[test]
+fn rendered_ranges_that_do_not_fit_the_text_are_refused() {
+    // Segments minted against another text of the same byte length: the
+    // ranges tile numerically but do not address the supplied rendered text,
+    // and the derivation refuses instead of slicing at a non-boundary.
+    let authored = "ab";
+    let mut table = FormatProvenanceTable::new(0_u32);
+    let claim = R::for_source(authored, O::from_raw(0), O::from_raw(1)).unwrap();
+    let id = table.bind_authored(claim);
+    let segment = |r0, r1| {
+        Segment::Source(Provenanced::new(
+            RenderedSegment {
+                range: crate::coordinates::FormattedByteRange::new(
+                    crate::coordinates::FormattedByteOffset::from_raw(r0),
+                    crate::coordinates::FormattedByteOffset::from_raw(r1),
+                )
+                .unwrap(),
+            },
+            AuthoredProvenance::new(id, claim),
+        ))
+    };
+    // `é` is also two bytes, but byte 1 lies inside the scalar.
+    assert_eq!(
+        derive_edits(authored, "é", &[segment(0, 1)]),
+        Err(EditError::InvalidRenderedRange {
+            index: 0,
+            error: crate::coordinates::CoordinateError::NotCharBoundary { offset: 1 }
+        })
+    );
+    // A range past the end of a shorter rendered text is refused the same
+    // way.
+    assert_eq!(
+        derive_edits(authored, "x", &[segment(0, 2)]),
+        Err(EditError::InvalidRenderedRange {
+            index: 0,
+            error: crate::coordinates::CoordinateError::OutOfBounds {
+                offset: 2,
+                source_len: 1
+            }
+        })
+    );
+    // An out-of-order start is still a contiguity failure once the range
+    // itself addresses the text.
+    assert_eq!(
+        derive_edits(authored, "ab", &[segment(1, 2)]),
+        Err(EditError::SegmentsNotContiguous { index: 0 })
+    );
+}
+
 fn hand_edit(start: u32, end: u32, text: &str) -> FormatEdit {
     // Inversion-checked only: validating the range against the source is
     // `apply`'s job, including the refusals under test.
@@ -559,6 +664,11 @@ fn applying_rejects_malformed_edit_sets() {
         },
     );
     malformed(vec![hand_edit(3, 3, "")], EditError::NoOpEdit { index: 0 });
+    // Replacing a non-empty range with byte-identical text is also a no-op.
+    malformed(
+        vec![hand_edit(0, 2, "ab")],
+        EditError::NoOpEdit { index: 0 },
+    );
     // A well-formed set still applies: sorted insertions at one boundary
     // follow stored (rendered) order.
     let set = FormatEditSet {
