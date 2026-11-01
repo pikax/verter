@@ -204,7 +204,7 @@ export const POLL_BUDGETS = {
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
   restartEntryDiagnostics: {
-    budgetMs: 45_000,
+    budgetMs: 60_000,
     parentTimeoutMs: 120_000,
     reason:
       "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
@@ -215,8 +215,9 @@ export const POLL_BUDGETS = {
       "about sixty by the time the matrix suites restart — and the serve loop polls handler " +
       "futures one at a time, so the entry's readiness request queues behind that entire FIFO. " +
       "Restart-plus-replay takes 15-18s on a healthy CI runner and 19-36s on a loaded one (the " +
-      "same measurements `restartTypeProviderSync` cites), so like that budget it must not " +
-      "share the cold root handshake's 30s",
+      "same measurements `restartTypeProviderSync` cites), and a required-shard run has lost " +
+      "this wait at the old 30s with the scanner still advancing — 60s keeps at least a 1.5x " +
+      "margin over the largest of those measurements",
   },
   restartTypeProviderSync: {
     budgetMs: 45_000,
@@ -404,11 +405,11 @@ export const POLL_SEQUENCES = {
       "restartEntryDiagnostics",
       "waitForFileReady",
     ],
-    parentTimeoutMs: 150_000,
+    parentTimeoutMs: 180_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
       "server epoch: restart and entry diagnostics, then file ready — twice, in series, under its " +
-      "own 150s",
+      "own 180s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],
