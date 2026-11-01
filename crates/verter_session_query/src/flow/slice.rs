@@ -3204,23 +3204,6 @@ impl SliceFreshness {
         }
     }
 
-    /// Whether ANY leaf of the tree is fresh.
-    #[must_use]
-    pub fn any_fresh(&self) -> bool {
-        match self {
-            Self::Fresh => true,
-            Self::Pinned | Self::Asserted | Self::WideningNullish => false,
-            Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
-        }
-    }
-
-    /// Whether the tree mixes fresh and pinned leaves — the shape whose
-    /// widening decision needs PER-ARM evaluation.
-    #[must_use]
-    pub fn is_mixed(&self) -> bool {
-        self.any_fresh() && !self.all_fresh()
-    }
-
     /// Whether EVERY leaf of the tree is a bare `null` / `undefined` /
     /// `void` value (and the tree is non-empty) — an initializer whose
     /// value is only nullable, whatever the null algebra.

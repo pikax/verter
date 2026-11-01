@@ -13598,6 +13598,76 @@ struct EvolvingPart {
     fresh_values: Vec<SemanticNodeId>,
 }
 
+/// One step of [`FlowEvaluator::run_arm_walk`]'s explicit stack.
+enum ArmStep<'e> {
+    /// A position: a conditional's arms are entered, anything else is one
+    /// part.
+    Visit(
+        &'e verter_session_query::flow::slice::SliceExpr,
+        &'e verter_session_query::flow::slice::SliceFreshness,
+    ),
+    /// An arm entered under its reading of the guard. A `forked` arm's state
+    /// joins its sibling's after the conditional.
+    EnterArm {
+        guard: &'e verter_session_query::flow::slice::SliceGuard,
+        positive: bool,
+        arm: &'e verter_session_query::flow::slice::SliceExpr,
+        fact: &'e verter_session_query::flow::slice::SliceFreshness,
+        forked: bool,
+    },
+    /// The arm's guard reading comes off.
+    Leave(NarrowingSnapshot),
+    /// A forked arm ended: its state is kept for the join and the state
+    /// reaching the conditional is restored for the next arm.
+    EndForkedArm,
+    /// Both arms of the innermost fork ended: their states join.
+    JoinFork,
+}
+
+/// A conditional whose arms change reaching values, its arms evaluating from
+/// the state that reached it ([`FlowEvaluator::eval_branching_union`]).
+struct ArmFork {
+    entry: FlowProductStore,
+    entry_writes: FlowWriteObservation,
+    arms: Vec<FlowProductStore>,
+}
+
+/// A part suspended at a nested function value in its expression.
+struct ArmPartRun<'e> {
+    expr: &'e verter_session_query::flow::slice::SliceExpr,
+    freshness: &'e verter_session_query::flow::slice::SliceFreshness,
+    holds_before: usize,
+    run: ExprRun<'e>,
+}
+
+/// [`FlowEvaluator::run_arm_walk`]'s state: the conditional's arms still to
+/// evaluate from an explicit stack, the part suspended at a nested function
+/// value when there is one, and the parts collected so far.
+struct ArmWalk<'e> {
+    /// Whether any arm of the tree changes a reaching value: the single
+    /// tree walk that spares every arm-free conditional its own.
+    changes_reaching_values: bool,
+    steps: Vec<ArmStep<'e>>,
+    forks: Vec<ArmFork>,
+    running: Option<ArmPartRun<'e>>,
+    parts: Vec<EvolvingPart>,
+}
+
+impl<'e> ArmWalk<'e> {
+    fn new(
+        expr: &'e verter_session_query::flow::slice::SliceExpr,
+        freshness: &'e verter_session_query::flow::slice::SliceFreshness,
+    ) -> Self {
+        Self {
+            changes_reaching_values: expression_changes_reaching_values(expr),
+            steps: vec![ArmStep::Visit(expr, freshness)],
+            forks: Vec::new(),
+            running: None,
+            parts: Vec::new(),
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How many flow-return bodies this thread evaluated
@@ -14299,6 +14369,15 @@ struct RegionEvalFrame<'r> {
 enum Pending<'r> {
     Return(Box<PendingReturn<'r>>),
     Binding(Box<PendingBinding<'r>>),
+    ConditionalConst(Box<PendingConditionalConst<'r>>),
+}
+
+/// A conditional `const` whose arm walk is suspended at a nested function
+/// value in an arm: the binding it makes once every arm has a value.
+struct PendingConditionalConst<'r> {
+    binding: verter_session_query::flow::skeleton::SkeletonBindingId,
+    kind: verter_session_query::flow::slice::SliceBindingKind,
+    walk: ArmWalk<'r>,
 }
 
 /// A declarator whose initializer's evaluation is suspended at a nested
@@ -18104,53 +18183,88 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         })
     }
 
-    /// The recursive collector behind [`Self::eval_evolving_rhs`] and the
-    /// ternary return argument: a ternary's arms evaluate under the SAME
-    /// guard scoping as the ordinary `SliceExpr::Union` evaluation
-    /// (positive reading on the consequent, negated on the alternate,
-    /// arm-scoped narrows) and each contributes one [`EvolvingPart`]. The
-    /// freshness tree mirrors the lowering's own descent, so a
-    /// Union/PerArm pair aligns by construction; a mismatch means the
-    /// mirror missed a form — the widening decision is then UNPROVEN, so
-    /// the whole position fails toward the typed gap (unwidened,
-    /// degraded, never warm) rather than guessing either direction.
+    /// The collector behind [`Self::eval_evolving_rhs`] and the ternary
+    /// return argument, each arm evaluated in place
+    /// ([`Self::run_arm_walk`]).
     fn collect_evolving_parts(
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
         freshness: &verter_session_query::flow::slice::SliceFreshness,
-        parts: &mut Vec<EvolvingPart>,
-    ) {
-        use verter_session_query::flow::slice::{SliceExpr, SliceFreshness, SliceGuard};
-        // A ternary nested in a ternary's arm costs no native level: the
-        // arms are visited from an explicit stack, each entered under its
-        // guard reading and left at its own narrowing mark, in order.
-        enum Work<'e> {
-            Visit(&'e SliceExpr, &'e SliceFreshness),
-            EnterArm {
-                guard: &'e SliceGuard,
-                positive: bool,
-                arm: &'e SliceExpr,
-                fact: &'e SliceFreshness,
-            },
-            Leave(NarrowingSnapshot),
+    ) -> Vec<EvolvingPart> {
+        let mut walk = ArmWalk::new(expr, freshness);
+        if self.run_arm_walk(&mut walk, None, false).is_some() {
+            unreachable!("an arm evaluated in place never suspends");
         }
-        let mut work = vec![Work::Visit(expr, freshness)];
-        while let Some(item) = work.pop() {
-            match item {
-                Work::Visit(expr, freshness) => {
+        walk.parts
+    }
+
+    /// A ternary's arms evaluate under the SAME guard scoping as the
+    /// ordinary `SliceExpr::Union` evaluation (positive reading on the
+    /// consequent, negated on the alternate, arm-scoped narrows) and each
+    /// contributes one [`EvolvingPart`]. A conditional whose arms change
+    /// reaching values forks the flow at its test exactly as
+    /// [`Self::eval_branching_union`] does, so an arm's write reaches only
+    /// the join. The freshness tree mirrors the lowering's own descent, so
+    /// a Union/PerArm pair aligns by construction; a mismatch means the
+    /// mirror missed a form — the widening decision is then UNPROVEN, so
+    /// the whole position fails toward the typed gap (unwidened, degraded,
+    /// never warm) rather than guessing either direction.
+    ///
+    /// A ternary nested in a ternary's arm costs no native level: the arms
+    /// are visited from `walk`'s explicit stack, each entered under its
+    /// guard reading and left at its own narrowing mark, in order. With
+    /// `suspend`, a nested function value in an arm answers its demand with
+    /// `walk` suspended there, and `delivered` is its value on the next
+    /// entry; without, it evaluates in place and this answers `None` once
+    /// every arm has its part.
+    fn run_arm_walk<'e>(
+        &mut self,
+        walk: &mut ArmWalk<'e>,
+        delivered: Option<SemanticNodeId>,
+        suspend: bool,
+    ) -> Option<NestedDemand>
+    where
+        'd: 'e,
+    {
+        use verter_session_query::flow::slice::{SliceExpr, SliceFreshness};
+        if let Some(node) = delivered {
+            let part = walk
+                .running
+                .take()
+                .expect("the part the walk is suspended at");
+            if let Some(demand) =
+                self.run_arm_part(walk, part, Some(Positional::Value(node)), suspend)
+            {
+                return Some(demand);
+            }
+        }
+        while let Some(step) = walk.steps.pop() {
+            match step {
+                ArmStep::Visit(expr, freshness) => {
                     if let SliceExpr::Union { arms, guard } = expr {
                         match freshness {
                             SliceFreshness::PerArm(facts) if facts.len() == arms.len() => {
+                                let forked = walk.changes_reaching_values
+                                    && union_branches_change_reaching_values(arms);
+                                if forked {
+                                    walk.forks.push(ArmFork {
+                                        entry: self.products.clone(),
+                                        entry_writes: self.products.observe_writes(),
+                                        arms: Vec::with_capacity(2),
+                                    });
+                                    walk.steps.push(ArmStep::JoinFork);
+                                }
                                 let entered = arms.iter().zip(facts.iter()).enumerate().map(
-                                    |(index, (arm, fact))| Work::EnterArm {
+                                    |(index, (arm, fact))| ArmStep::EnterArm {
                                         guard,
                                         positive: index == 0,
                                         arm,
                                         fact,
+                                        forked,
                                     },
                                 );
-                                let entered: Vec<Work<'_>> = entered.collect();
-                                work.extend(entered.into_iter().rev());
+                                let entered: Vec<ArmStep<'_>> = entered.collect();
+                                walk.steps.extend(entered.into_iter().rev());
                                 continue;
                             }
                             _ => {
@@ -18160,34 +18274,93 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                     }
-                    self.collect_evolving_part(expr, freshness, parts);
+                    let part = ArmPartRun {
+                        expr,
+                        freshness,
+                        holds_before: self.holds.len(),
+                        run: ExprRun::new(expr),
+                    };
+                    if let Some(demand) = self.run_arm_part(walk, part, None, suspend) {
+                        return Some(demand);
+                    }
                 }
-                Work::EnterArm {
+                ArmStep::EnterArm {
                     guard,
                     positive,
                     arm,
                     fact,
+                    forked,
                 } => {
                     let mark = self.narrowing_snapshot();
                     self.apply_guard_scoped(guard, positive);
-                    work.push(Work::Leave(mark));
-                    work.push(Work::Visit(arm, fact));
+                    if forked {
+                        walk.steps.push(ArmStep::EndForkedArm);
+                    }
+                    walk.steps.push(ArmStep::Leave(mark));
+                    walk.steps.push(ArmStep::Visit(arm, fact));
                 }
-                Work::Leave(mark) => self.restore_narrowings(mark),
+                ArmStep::Leave(mark) => self.restore_narrowings(mark),
+                ArmStep::EndForkedArm => {
+                    let fork = walk.forks.last_mut().expect("the fork the arm is in");
+                    fork.arms.push(self.products.clone());
+                    let entry = fork.entry.clone();
+                    self.restore_arm_entry(&entry);
+                }
+                ArmStep::JoinFork => {
+                    let fork = walk.forks.pop().expect("the fork the arms ended");
+                    let [consequent, alternate] = &fork.arms[..] else {
+                        unreachable!("a fork has two arms");
+                    };
+                    self.join_arm_writes(
+                        consequent,
+                        true,
+                        alternate,
+                        true,
+                        &fork.entry,
+                        &fork.entry_writes,
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    /// Run one part of [`Self::run_arm_walk`], `delivered` the value of the
+    /// nested function value it suspended at: its demand when it suspends
+    /// again, otherwise its [`EvolvingPart`] is collected.
+    fn run_arm_part<'e>(
+        &mut self,
+        walk: &mut ArmWalk<'e>,
+        mut part: ArmPartRun<'e>,
+        delivered: Option<Positional<SemanticNodeId>>,
+        suspend: bool,
+    ) -> Option<NestedDemand>
+    where
+        'd: 'e,
+    {
+        match self.run_expr(&mut part.run, delivered, suspend) {
+            ExprProgress::Nested(demand) => {
+                walk.running = Some(part);
+                Some(demand)
+            }
+            ExprProgress::Done(outcome) => {
+                let evolving =
+                    self.evolving_part(part.expr, part.freshness, outcome, part.holds_before);
+                walk.parts.push(evolving);
+                None
             }
         }
     }
 
-    /// One part of [`Self::collect_evolving_parts`]: a position that is no
-    /// ternary of per-arm freshness, evaluated.
-    fn collect_evolving_part(
+    /// One part of [`Self::run_arm_walk`]: a position that is no ternary of
+    /// per-arm freshness, with its evaluated `outcome`.
+    fn evolving_part(
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
         freshness: &verter_session_query::flow::slice::SliceFreshness,
-        parts: &mut Vec<EvolvingPart>,
-    ) {
-        let holds_before = self.holds.len();
-        let outcome = self.eval_expr(expr);
+        outcome: Positional<SemanticNodeId>,
+        holds_before: usize,
+    ) -> EvolvingPart {
         let node = self.settle_composite_part(outcome, holds_before);
         let bare_literal = matches!(
             freshness,
@@ -18203,12 +18376,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .is_some_and(|call| call.values.contains(&node))
             || self.fresh_narrowed_literal(expr, node) == Some(node));
         let fresh_values = self.position_fresh_values(expr, node, freshness);
-        parts.push(EvolvingPart {
+        EvolvingPart {
             node,
             arm: self.reduction_arm(expr, node),
             fresh,
             fresh_values,
-        });
+        }
     }
 
     /// The parts [`Self::collect_evolving_parts`] collects for a
@@ -18223,8 +18396,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         expr: &verter_session_query::flow::slice::SliceExpr,
         freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Vec<EvolvingPart> {
-        let mut parts: Vec<EvolvingPart> = Vec::new();
-        self.collect_evolving_parts(expr, freshness, &mut parts);
+        let parts = self.collect_evolving_parts(expr, freshness);
+        self.reduce_evolving_parts(parts)
+    }
+
+    /// `parts` after the conditional's subtype reduction
+    /// ([`Self::collect_reduced_evolving_parts`]).
+    fn reduce_evolving_parts(&mut self, parts: Vec<EvolvingPart>) -> Vec<EvolvingPart> {
         let mut arms: Vec<ReductionArm> = Vec::with_capacity(parts.len());
         for part in &parts {
             if !arms.iter().any(|arm| arm.node == part.arm.node) {
@@ -25960,18 +26138,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         match outcome {
             Positional::Value(node) => {
                 let membership = self.binding_init_membership(kind, init, node, freshness);
-                // An unannotated declaration always widens a
-                // `unique symbol` another declaration created
-                // (`widenTypeForVariableLikeDeclaration`):
-                // `const l = u` is `symbol`. A union holding
-                // one keeps it.
-                let node = if is_unique_symbol_node(self.dispatch.graph(), node) {
-                    self.dispatch
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
-                } else {
-                    node
-                };
+                let node = self.declared_unique_symbol_widened(node);
                 match kind {
                     verter_session_query::flow::slice::SliceBindingKind::Const => {
                         self.bind_local(
@@ -26079,6 +26246,89 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
+    /// An unannotated declaration always widens a `unique symbol` another
+    /// declaration created (`widenTypeForVariableLikeDeclaration`): `const l
+    /// = u` is `symbol`. A union holding one keeps it.
+    fn declared_unique_symbol_widened(&self, node: SemanticNodeId) -> SemanticNodeId {
+        if is_unique_symbol_node(self.dispatch.graph(), node) {
+            self.dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
+        } else {
+            node
+        }
+    }
+
+    /// Bind a conditional `const` to its initializer's arm `parts`
+    /// ([`Self::run_arm_walk`]), so the binding records EXACTLY which values
+    /// widen at a widening read: pinned-wins collapse of equal constituents,
+    /// then `Partial` membership over the surviving fresh values.
+    fn bind_conditional_const(
+        &mut self,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
+        parts: Vec<EvolvingPart>,
+    ) {
+        let mut parts = self.reduce_evolving_parts(parts);
+        // Under `strictNullChecks` off a nullable arm beside another arm is
+        // erased from the initializer's union, so it neither pins nor blocks
+        // the surviving arms' freshness (`const y = c ? null : 1` is the
+        // fresh `1`).
+        if !self.nullability.is_strict() {
+            let graph = self.dispatch.graph();
+            if parts.iter().any(|part| !is_nullable_node(graph, part.node)) {
+                parts.retain(|part| !is_nullable_node(graph, part.node));
+            }
+        }
+        let pinned = self.pinned_literal_blockers(&parts);
+        let mut merged: Vec<EvolvingPart> = Vec::new();
+        for part in parts {
+            let data = self.dispatch.arena().node_data(part.node);
+            match merged
+                .iter_mut()
+                .find(|existing| self.dispatch.arena().node_data(existing.node) == data)
+            {
+                Some(existing) => {
+                    existing.fresh &= part.fresh;
+                    existing.fresh_values.extend(part.fresh_values);
+                }
+                None => merged.push(part),
+            }
+        }
+        let nodes: Vec<SemanticNodeId> = merged.iter().map(|part| part.node).collect();
+        let value = self.union(&nodes);
+        let all_fresh = merged.iter().all(|part| part.fresh);
+        let mut fresh_values: Vec<SemanticNodeId> = Vec::new();
+        for part in &merged {
+            if part.fresh {
+                fresh_values.push(part.node);
+            } else {
+                // A pinned-shaped arm may still CARRY fresh values (a call's
+                // kept deposit or authored fresh arm): those enter the
+                // membership so a widening read of the binding widens them.
+                fresh_values.extend_from_slice(&part.fresh_values);
+            }
+        }
+        let fresh_values = self.uncancelled_fresh_values(&fresh_values, &pinned);
+        let membership = if fresh_values.is_empty() {
+            None
+        } else if all_fresh {
+            Some(WideningMembership::All)
+        } else {
+            Some(WideningMembership::Partial(Arc::from(
+                fresh_values.into_boxed_slice(),
+            )))
+        };
+        let value = self.declared_unique_symbol_widened(value);
+        self.bind_local(
+            &FlowProductSubject::Local(binding),
+            kind,
+            value,
+            membership,
+            false,
+        );
+    }
+
     /// The statement walk of [`Self::eval_region`] (the recording shell
     /// wraps every entry and exit).
     fn eval_region_statements<'r>(
@@ -26105,6 +26355,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .expect("the statement the region is suspended at")
             {
                 Pending::Return(pending) => pending,
+                Pending::ConditionalConst(mut pending) => {
+                    if let Some(demand) = self.run_arm_walk(&mut pending.walk, Some(node), true) {
+                        frame.pending = Some(Pending::ConditionalConst(pending));
+                        frame.contributors = contributors;
+                        frame.path_alive = path_alive;
+                        return RegionEvalStep::Nested(demand);
+                    }
+                    let PendingConditionalConst {
+                        binding,
+                        kind,
+                        walk,
+                    } = *pending;
+                    self.bind_conditional_const(binding, kind, walk.parts);
+                    return self.eval_region_statements_from(frame, contributors, path_alive);
+                }
                 Pending::Binding(mut pending) => {
                     match self.run_expr(&mut pending.run, Some(Positional::Value(node)), true) {
                         ExprProgress::Nested(demand) => {
@@ -27118,71 +27383,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         // per arm before recording the binding's membership.
                         if *kind == verter_session_query::flow::slice::SliceBindingKind::Const
                             && matches!(
-                                init,
-                                verter_session_query::flow::slice::SliceExpr::Union { .. }
+                                (init, freshness),
+                                (
+                                    verter_session_query::flow::slice::SliceExpr::Union { .. },
+                                    verter_session_query::flow::slice::SliceFreshness::PerArm(_)
+                                )
                             )
                         {
-                            let mut parts = self.collect_reduced_evolving_parts(init, freshness);
-                            // Under `strictNullChecks` off a nullable arm
-                            // beside another arm is erased from the
-                            // initializer's union, so it neither pins nor
-                            // blocks the surviving arms' freshness
-                            // (`const y = c ? null : 1` is the fresh `1`).
-                            if !self.nullability.is_strict() {
-                                let graph = self.dispatch.graph();
-                                if parts.iter().any(|part| !is_nullable_node(graph, part.node)) {
-                                    parts.retain(|part| !is_nullable_node(graph, part.node));
-                                }
+                            let mut walk = ArmWalk::new(init, freshness);
+                            // A nested function value in an arm evaluates
+                            // from the caller's stack; the binding is made
+                            // once every arm has its value.
+                            if let Some(demand) = self.run_arm_walk(&mut walk, None, true) {
+                                frame.pending = Some(Pending::ConditionalConst(Box::new(
+                                    PendingConditionalConst {
+                                        binding: *binding,
+                                        kind: *kind,
+                                        walk,
+                                    },
+                                )));
+                                frame.contributors = contributors;
+                                frame.path_alive = path_alive;
+                                return RegionEvalStep::Nested(demand);
                             }
-                            let pinned = self.pinned_literal_blockers(&parts);
-                            let mut merged: Vec<EvolvingPart> = Vec::new();
-                            for part in parts {
-                                let data = self.dispatch.arena().node_data(part.node);
-                                match merged.iter_mut().find(|existing| {
-                                    self.dispatch.arena().node_data(existing.node) == data
-                                }) {
-                                    Some(existing) => {
-                                        existing.fresh &= part.fresh;
-                                        existing.fresh_values.extend(part.fresh_values);
-                                    }
-                                    None => merged.push(part),
-                                }
-                            }
-                            let nodes: Vec<SemanticNodeId> =
-                                merged.iter().map(|part| part.node).collect();
-                            let value = self.union(&nodes);
-                            let all_fresh = merged.iter().all(|part| part.fresh);
-                            let mut fresh_values: Vec<SemanticNodeId> = Vec::new();
-                            for part in &merged {
-                                if part.fresh {
-                                    fresh_values.push(part.node);
-                                } else {
-                                    // A pinned-shaped arm may still CARRY
-                                    // fresh values (a call's kept deposit
-                                    // or authored fresh arm) — those enter
-                                    // the membership so a widening read of
-                                    // the binding widens them.
-                                    fresh_values.extend_from_slice(&part.fresh_values);
-                                }
-                            }
-                            let fresh_values =
-                                self.uncancelled_fresh_values(&fresh_values, &pinned);
-                            let membership = if fresh_values.is_empty() {
-                                None
-                            } else if all_fresh {
-                                Some(WideningMembership::All)
-                            } else {
-                                Some(WideningMembership::Partial(Arc::from(
-                                    fresh_values.into_boxed_slice(),
-                                )))
-                            };
-                            self.bind_local(
-                                &FlowProductSubject::Local(*binding),
-                                *kind,
-                                value,
-                                membership,
-                                false,
-                            );
+                            self.bind_conditional_const(*binding, *kind, walk.parts);
                             continue;
                         }
                         let outcome = {
