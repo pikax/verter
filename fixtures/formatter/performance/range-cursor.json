@@ -1,20 +1,17 @@
 {
   "source_fixture_id": "medium",
-  "after_edit": "fixtures/formatter/performance/edit.json",
   "queries": [
     {
       "ordinal": 1,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 2,
@@ -51,16 +48,14 @@
     {
       "ordinal": 6,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 7,
@@ -97,16 +92,14 @@
     {
       "ordinal": 11,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 12,
@@ -143,16 +136,14 @@
     {
       "ordinal": 16,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 17,
@@ -189,16 +180,14 @@
     {
       "ordinal": 21,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 22,
@@ -235,16 +224,14 @@
     {
       "ordinal": 26,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 27,
@@ -281,16 +268,14 @@
     {
       "ordinal": 31,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 32,
@@ -327,16 +312,14 @@
     {
       "ordinal": 36,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 37,
@@ -373,16 +356,14 @@
     {
       "ordinal": 41,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 42,
@@ -419,16 +400,14 @@
     {
       "ordinal": 46,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 47,
@@ -465,16 +444,14 @@
     {
       "ordinal": 51,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 52,
@@ -511,16 +488,14 @@
     {
       "ordinal": 56,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 57,
@@ -557,16 +532,14 @@
     {
       "ordinal": 61,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 62,
@@ -603,16 +576,14 @@
     {
       "ordinal": 66,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 67,
@@ -649,16 +620,14 @@
     {
       "ordinal": 71,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 72,
@@ -695,16 +664,14 @@
     {
       "ordinal": 76,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 77,
@@ -741,16 +708,14 @@
     {
       "ordinal": 81,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 82,
@@ -787,16 +752,14 @@
     {
       "ordinal": 86,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 87,
@@ -833,16 +796,14 @@
     {
       "ordinal": 91,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 92,
@@ -879,16 +840,14 @@
     {
       "ordinal": 96,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 97,
@@ -925,16 +884,14 @@
     {
       "ordinal": 101,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 102,
@@ -971,16 +928,14 @@
     {
       "ordinal": 106,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 107,
@@ -1017,16 +972,14 @@
     {
       "ordinal": 111,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 112,
@@ -1063,16 +1016,14 @@
     {
       "ordinal": 116,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 117,
@@ -1109,16 +1060,14 @@
     {
       "ordinal": 121,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 122,
@@ -1155,16 +1104,14 @@
     {
       "ordinal": 126,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 127,
@@ -1201,16 +1148,14 @@
     {
       "ordinal": 131,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 132,
@@ -1247,16 +1192,14 @@
     {
       "ordinal": 136,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 137,
@@ -1293,16 +1236,14 @@
     {
       "ordinal": 141,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 142,
@@ -1339,16 +1280,14 @@
     {
       "ordinal": 146,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 147,
@@ -1385,16 +1324,14 @@
     {
       "ordinal": 151,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 152,
@@ -1431,16 +1368,14 @@
     {
       "ordinal": 156,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 157,
@@ -1477,16 +1412,14 @@
     {
       "ordinal": 161,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 162,
@@ -1523,16 +1456,14 @@
     {
       "ordinal": 166,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 167,
@@ -1569,16 +1500,14 @@
     {
       "ordinal": 171,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 172,
@@ -1615,16 +1544,14 @@
     {
       "ordinal": 176,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 177,
@@ -1661,16 +1588,14 @@
     {
       "ordinal": 181,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 182,
@@ -1707,16 +1632,14 @@
     {
       "ordinal": 186,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 187,
@@ -1753,16 +1676,14 @@
     {
       "ordinal": 191,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 192,
@@ -1799,16 +1720,14 @@
     {
       "ordinal": 196,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 197,
@@ -1845,16 +1764,14 @@
     {
       "ordinal": 201,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 202,
@@ -1891,16 +1808,14 @@
     {
       "ordinal": 206,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 207,
@@ -1937,16 +1852,14 @@
     {
       "ordinal": 211,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 212,
@@ -1983,16 +1896,14 @@
     {
       "ordinal": 216,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 217,
@@ -2029,16 +1940,14 @@
     {
       "ordinal": 221,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 222,
@@ -2075,16 +1984,14 @@
     {
       "ordinal": 226,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 227,
@@ -2121,16 +2028,14 @@
     {
       "ordinal": 231,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 232,
@@ -2167,16 +2072,14 @@
     {
       "ordinal": 236,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 237,
@@ -2213,16 +2116,14 @@
     {
       "ordinal": 241,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 242,
@@ -2259,16 +2160,14 @@
     {
       "ordinal": 246,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 247,
@@ -2305,16 +2204,14 @@
     {
       "ordinal": 251,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 252,
@@ -2351,16 +2248,14 @@
     {
       "ordinal": 256,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 257,
@@ -2397,16 +2292,14 @@
     {
       "ordinal": 261,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 262,
@@ -2443,16 +2336,14 @@
     {
       "ordinal": 266,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 267,
@@ -2489,16 +2380,14 @@
     {
       "ordinal": 271,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 272,
@@ -2535,16 +2424,14 @@
     {
       "ordinal": 276,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 277,
@@ -2581,16 +2468,14 @@
     {
       "ordinal": 281,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 282,
@@ -2627,16 +2512,14 @@
     {
       "ordinal": 286,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 287,
@@ -2673,16 +2556,14 @@
     {
       "ordinal": 291,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 292,
@@ -2719,16 +2600,14 @@
     {
       "ordinal": 296,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 297,
@@ -2765,16 +2644,14 @@
     {
       "ordinal": 301,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 302,
@@ -2811,16 +2688,14 @@
     {
       "ordinal": 306,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 307,
@@ -2857,16 +2732,14 @@
     {
       "ordinal": 311,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 312,
@@ -2903,16 +2776,14 @@
     {
       "ordinal": 316,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 317,
@@ -2949,16 +2820,14 @@
     {
       "ordinal": 321,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 322,
@@ -2995,16 +2864,14 @@
     {
       "ordinal": 326,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 327,
@@ -3041,16 +2908,14 @@
     {
       "ordinal": 331,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 332,
@@ -3087,16 +2952,14 @@
     {
       "ordinal": 336,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 337,
@@ -3133,16 +2996,14 @@
     {
       "ordinal": 341,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 342,
@@ -3179,16 +3040,14 @@
     {
       "ordinal": 346,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 347,
@@ -3225,16 +3084,14 @@
     {
       "ordinal": 351,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 352,
@@ -3271,16 +3128,14 @@
     {
       "ordinal": 356,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 357,
@@ -3317,16 +3172,14 @@
     {
       "ordinal": 361,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 362,
@@ -3363,16 +3216,14 @@
     {
       "ordinal": 366,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 367,
@@ -3409,16 +3260,14 @@
     {
       "ordinal": 371,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 372,
@@ -3455,16 +3304,14 @@
     {
       "ordinal": 376,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 377,
@@ -3501,16 +3348,14 @@
     {
       "ordinal": 381,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 382,
@@ -3547,16 +3392,14 @@
     {
       "ordinal": 386,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 387,
@@ -3593,16 +3436,14 @@
     {
       "ordinal": 391,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 392,
@@ -3639,16 +3480,14 @@
     {
       "ordinal": 396,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 397,
@@ -3685,16 +3524,14 @@
     {
       "ordinal": 401,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 402,
@@ -3731,16 +3568,14 @@
     {
       "ordinal": 406,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 407,
@@ -3777,16 +3612,14 @@
     {
       "ordinal": 411,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 412,
@@ -3823,16 +3656,14 @@
     {
       "ordinal": 416,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 417,
@@ -3869,16 +3700,14 @@
     {
       "ordinal": 421,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 422,
@@ -3915,16 +3744,14 @@
     {
       "ordinal": 426,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 427,
@@ -3961,16 +3788,14 @@
     {
       "ordinal": 431,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 432,
@@ -4007,16 +3832,14 @@
     {
       "ordinal": 436,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 437,
@@ -4053,16 +3876,14 @@
     {
       "ordinal": 441,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 442,
@@ -4099,16 +3920,14 @@
     {
       "ordinal": 446,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 447,
@@ -4145,16 +3964,14 @@
     {
       "ordinal": 451,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 452,
@@ -4191,16 +4008,14 @@
     {
       "ordinal": 456,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 457,
@@ -4237,16 +4052,14 @@
     {
       "ordinal": 461,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 462,
@@ -4283,16 +4096,14 @@
     {
       "ordinal": 466,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 467,
@@ -4329,16 +4140,14 @@
     {
       "ordinal": 471,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 472,
@@ -4375,16 +4184,14 @@
     {
       "ordinal": 476,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 477,
@@ -4421,16 +4228,14 @@
     {
       "ordinal": 481,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 482,
@@ -4467,16 +4272,14 @@
     {
       "ordinal": 486,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 487,
@@ -4513,16 +4316,14 @@
     {
       "ordinal": 491,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 492,
@@ -4559,16 +4360,14 @@
     {
       "ordinal": 496,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 497,
@@ -4605,16 +4404,14 @@
     {
       "ordinal": 501,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 502,
@@ -4651,16 +4448,14 @@
     {
       "ordinal": 506,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 507,
@@ -4697,16 +4492,14 @@
     {
       "ordinal": 511,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 512,
@@ -4743,16 +4536,14 @@
     {
       "ordinal": 516,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 517,
@@ -4789,16 +4580,14 @@
     {
       "ordinal": 521,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 522,
@@ -4835,16 +4624,14 @@
     {
       "ordinal": 526,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 527,
@@ -4881,16 +4668,14 @@
     {
       "ordinal": 531,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 532,
@@ -4927,16 +4712,14 @@
     {
       "ordinal": 536,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 537,
@@ -4973,16 +4756,14 @@
     {
       "ordinal": 541,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 542,
@@ -5019,16 +4800,14 @@
     {
       "ordinal": 546,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 547,
@@ -5065,16 +4844,14 @@
     {
       "ordinal": 551,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 552,
@@ -5111,16 +4888,14 @@
     {
       "ordinal": 556,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 557,
@@ -5157,16 +4932,14 @@
     {
       "ordinal": 561,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 562,
@@ -5203,16 +4976,14 @@
     {
       "ordinal": 566,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 567,
@@ -5249,16 +5020,14 @@
     {
       "ordinal": 571,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 572,
@@ -5295,16 +5064,14 @@
     {
       "ordinal": 576,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 577,
@@ -5341,16 +5108,14 @@
     {
       "ordinal": 581,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 582,
@@ -5387,16 +5152,14 @@
     {
       "ordinal": 586,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 587,
@@ -5433,16 +5196,14 @@
     {
       "ordinal": 591,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 592,
@@ -5479,16 +5240,14 @@
     {
       "ordinal": 596,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 597,
@@ -5525,16 +5284,14 @@
     {
       "ordinal": 601,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 602,
@@ -5571,16 +5328,14 @@
     {
       "ordinal": 606,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 607,
@@ -5617,16 +5372,14 @@
     {
       "ordinal": 611,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 612,
@@ -5663,16 +5416,14 @@
     {
       "ordinal": 616,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 617,
@@ -5709,16 +5460,14 @@
     {
       "ordinal": 621,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 622,
@@ -5755,16 +5504,14 @@
     {
       "ordinal": 626,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 627,
@@ -5801,16 +5548,14 @@
     {
       "ordinal": 631,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 632,
@@ -5847,16 +5592,14 @@
     {
       "ordinal": 636,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 637,
@@ -5893,16 +5636,14 @@
     {
       "ordinal": 641,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 642,
@@ -5939,16 +5680,14 @@
     {
       "ordinal": 646,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 647,
@@ -5985,16 +5724,14 @@
     {
       "ordinal": 651,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 652,
@@ -6031,16 +5768,14 @@
     {
       "ordinal": 656,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 657,
@@ -6077,16 +5812,14 @@
     {
       "ordinal": 661,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 662,
@@ -6123,16 +5856,14 @@
     {
       "ordinal": 666,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 667,
@@ -6169,16 +5900,14 @@
     {
       "ordinal": 671,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 672,
@@ -6215,16 +5944,14 @@
     {
       "ordinal": 676,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 677,
@@ -6261,16 +5988,14 @@
     {
       "ordinal": 681,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 682,
@@ -6307,16 +6032,14 @@
     {
       "ordinal": 686,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 687,
@@ -6353,16 +6076,14 @@
     {
       "ordinal": 691,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 692,
@@ -6399,16 +6120,14 @@
     {
       "ordinal": 696,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 697,
@@ -6445,16 +6164,14 @@
     {
       "ordinal": 701,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 702,
@@ -6491,16 +6208,14 @@
     {
       "ordinal": 706,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 707,
@@ -6537,16 +6252,14 @@
     {
       "ordinal": 711,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 712,
@@ -6583,16 +6296,14 @@
     {
       "ordinal": 716,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 717,
@@ -6629,16 +6340,14 @@
     {
       "ordinal": 721,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 722,
@@ -6675,16 +6384,14 @@
     {
       "ordinal": 726,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 727,
@@ -6721,16 +6428,14 @@
     {
       "ordinal": 731,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 732,
@@ -6767,16 +6472,14 @@
     {
       "ordinal": 736,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 737,
@@ -6813,16 +6516,14 @@
     {
       "ordinal": 741,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 742,
@@ -6859,16 +6560,14 @@
     {
       "ordinal": 746,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 747,
@@ -6905,16 +6604,14 @@
     {
       "ordinal": 751,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 752,
@@ -6951,16 +6648,14 @@
     {
       "ordinal": 756,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 757,
@@ -6997,16 +6692,14 @@
     {
       "ordinal": 761,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 762,
@@ -7043,16 +6736,14 @@
     {
       "ordinal": 766,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 767,
@@ -7089,16 +6780,14 @@
     {
       "ordinal": 771,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 772,
@@ -7135,16 +6824,14 @@
     {
       "ordinal": 776,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 777,
@@ -7181,16 +6868,14 @@
     {
       "ordinal": 781,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 782,
@@ -7227,16 +6912,14 @@
     {
       "ordinal": 786,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 787,
@@ -7273,16 +6956,14 @@
     {
       "ordinal": 791,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 792,
@@ -7319,16 +7000,14 @@
     {
       "ordinal": 796,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 797,
@@ -7365,16 +7044,14 @@
     {
       "ordinal": 801,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 802,
@@ -7411,16 +7088,14 @@
     {
       "ordinal": 806,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 807,
@@ -7457,16 +7132,14 @@
     {
       "ordinal": 811,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 812,
@@ -7503,16 +7176,14 @@
     {
       "ordinal": 816,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 817,
@@ -7549,16 +7220,14 @@
     {
       "ordinal": 821,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 822,
@@ -7595,16 +7264,14 @@
     {
       "ordinal": 826,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 827,
@@ -7641,16 +7308,14 @@
     {
       "ordinal": 831,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 832,
@@ -7687,16 +7352,14 @@
     {
       "ordinal": 836,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 837,
@@ -7733,16 +7396,14 @@
     {
       "ordinal": 841,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 842,
@@ -7779,16 +7440,14 @@
     {
       "ordinal": 846,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 847,
@@ -7825,16 +7484,14 @@
     {
       "ordinal": 851,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 852,
@@ -7871,16 +7528,14 @@
     {
       "ordinal": 856,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 857,
@@ -7917,16 +7572,14 @@
     {
       "ordinal": 861,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 862,
@@ -7963,16 +7616,14 @@
     {
       "ordinal": 866,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 867,
@@ -8009,16 +7660,14 @@
     {
       "ordinal": 871,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 872,
@@ -8055,16 +7704,14 @@
     {
       "ordinal": 876,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 877,
@@ -8101,16 +7748,14 @@
     {
       "ordinal": 881,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 882,
@@ -8147,16 +7792,14 @@
     {
       "ordinal": 886,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 887,
@@ -8193,16 +7836,14 @@
     {
       "ordinal": 891,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 892,
@@ -8239,16 +7880,14 @@
     {
       "ordinal": 896,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 897,
@@ -8285,16 +7924,14 @@
     {
       "ordinal": 901,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 902,
@@ -8331,16 +7968,14 @@
     {
       "ordinal": 906,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 907,
@@ -8377,16 +8012,14 @@
     {
       "ordinal": 911,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 912,
@@ -8423,16 +8056,14 @@
     {
       "ordinal": 916,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 917,
@@ -8469,16 +8100,14 @@
     {
       "ordinal": 921,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 922,
@@ -8515,16 +8144,14 @@
     {
       "ordinal": 926,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 927,
@@ -8561,16 +8188,14 @@
     {
       "ordinal": 931,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 932,
@@ -8607,16 +8232,14 @@
     {
       "ordinal": 936,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 937,
@@ -8653,16 +8276,14 @@
     {
       "ordinal": 941,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 942,
@@ -8699,16 +8320,14 @@
     {
       "ordinal": 946,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 947,
@@ -8745,16 +8364,14 @@
     {
       "ordinal": 951,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 952,
@@ -8791,16 +8408,14 @@
     {
       "ordinal": 956,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 957,
@@ -8837,16 +8452,14 @@
     {
       "ordinal": 961,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 962,
@@ -8883,16 +8496,14 @@
     {
       "ordinal": 966,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 967,
@@ -8929,16 +8540,14 @@
     {
       "ordinal": 971,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 972,
@@ -8975,16 +8584,14 @@
     {
       "ordinal": 976,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 977,
@@ -9021,16 +8628,14 @@
     {
       "ordinal": 981,
       "kind": "map",
-      "id": "inserted",
       "domain": "authored",
-      "start": 2,
-      "end": 2,
+      "start": 40,
+      "end": 40,
       "bias": "right",
+      "boundary": "inserted-after",
       "expected": {
-        "formatted": 3
-      },
-      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+        "formatted": 41
+      }
     },
     {
       "ordinal": 982,
@@ -9067,16 +8672,14 @@
     {
       "ordinal": 986,
       "kind": "map",
-      "id": "deleted",
       "domain": "authored",
-      "start": 3,
-      "end": 3,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "deleted-after",
       "expected": {
-        "formatted": 2
-      },
-      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 987,
@@ -9113,16 +8716,14 @@
     {
       "ordinal": 991,
       "kind": "map",
-      "id": "retained",
       "domain": "authored",
-      "start": 6,
-      "end": 6,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "retained-after",
       "expected": {
-        "formatted": 7
-      },
-      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 992,
@@ -9159,16 +8760,14 @@
     {
       "ordinal": 996,
       "kind": "map",
-      "id": "replaced",
       "domain": "authored",
-      "start": 6,
-      "end": 7,
+      "start": 43,
+      "end": 43,
       "bias": "right",
+      "boundary": "replaced-after",
       "expected": {
-        "outcome": "ambiguous-replacement"
-      },
-      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
-      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
+        "formatted": 43
+      }
     },
     {
       "ordinal": 997,
@@ -9201,6 +8800,77 @@
       "end": 102400,
       "bias": "right",
       "boundary": "EOF"
+    }
+  ],
+  "prepared_result_edits": [
+    {
+      "start": 40,
+      "end": 40,
+      "text": " "
+    },
+    {
+      "start": 42,
+      "end": 43,
+      "text": ""
+    },
+    {
+      "start": 40385,
+      "end": 40386,
+      "text": "1"
+    }
+  ],
+  "geometry_controls": [
+    {
+      "kind": "map",
+      "id": "inserted",
+      "domain": "authored",
+      "start": 2,
+      "end": 2,
+      "bias": "right",
+      "expected": {
+        "formatted": 3
+      },
+      "source_path": "fixtures/formatter/performance/query-inserted-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-inserted-output.txt"
+    },
+    {
+      "kind": "map",
+      "id": "deleted",
+      "domain": "authored",
+      "start": 3,
+      "end": 3,
+      "bias": "right",
+      "expected": {
+        "formatted": 2
+      },
+      "source_path": "fixtures/formatter/performance/query-deleted-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-deleted-output.txt"
+    },
+    {
+      "kind": "map",
+      "id": "retained",
+      "domain": "authored",
+      "start": 6,
+      "end": 6,
+      "bias": "right",
+      "expected": {
+        "formatted": 7
+      },
+      "source_path": "fixtures/formatter/performance/query-retained-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-retained-output.txt"
+    },
+    {
+      "kind": "map",
+      "id": "replaced",
+      "domain": "authored",
+      "start": 6,
+      "end": 7,
+      "bias": "right",
+      "expected": {
+        "outcome": "ambiguous-replacement"
+      },
+      "source_path": "fixtures/formatter/performance/query-replaced-input.txt",
+      "formatted_path": "fixtures/formatter/performance/query-replaced-output.txt"
     }
   ]
 }

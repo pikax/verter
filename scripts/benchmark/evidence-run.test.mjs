@@ -31,6 +31,8 @@ import {
 } from "./evidence-run.mjs";
 import { loadFormatterLock, ROOT, validateFormatterLock } from "../../tests/formatter/verify.mjs";
 
+import { buildFormatterSummary } from "../../tests/formatter/evidence.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "evidence-run-fixtures");
 const RUNNER = join(HERE, "evidence-run.mjs");
@@ -141,6 +143,22 @@ describe("formatter contract", () => {
         /pair allowance/,
       ],
       ["calibration", (l) => delete l.performance.calibration.operation_schedule, /calibration/],
+      [
+        "empty operations",
+        (l) => (l.performance.calibration.operation_schedule = []),
+        /calibration/,
+      ],
+      ["empty sampling", (l) => (l.performance.calibration.sample_order = []), /calibration/],
+      ["invalid seed", (l) => (l.performance.calibration.seed = -1), /calibration/],
+      [
+        "query source",
+        (l) => {
+          l.artifacts[
+            "fixtures/formatter/performance/range-cursor.json"
+          ].json.queries[0].source_path = "fixtures/formatter/performance/query-inserted-input.txt";
+        },
+        /query basis/,
+      ],
       ["numeric mode", (l) => l.performance.mode.pop(), /mode/],
       ["route owner", (l) => l.inventory.routes.pop(), /route inventory/],
       ["duplicate owner", (l) => l.inventory.routes.push(l.inventory.routes[0]), /duplicate route/],
@@ -154,29 +172,38 @@ describe("formatter contract", () => {
 
   test("evidence requires the candidate and a known corpus, with every mode unmeasured", async () => {
     const lock = loadFormatterLock();
+    const loaded = loadManifest("formatter-performance");
     for (const corpus of lock.performance.fixture) {
-      const dir = freshDir();
-      const code = await quiet(() =>
-        main([
-          "--run",
-          "formatter-performance",
-          "--candidate",
-          "review-candidate",
-          "--corpus",
-          corpus.id,
-          "--dry-run",
-          "--out",
-          dir,
-        ]),
-      );
-      assert.equal(code, 0);
-      const summary = readSummary(dir);
+      const summary = buildFormatterSummary(loaded, {
+        candidate: "review-candidate",
+        corpus: corpus.id,
+        dryRun: true,
+        worker: readWorker(),
+      });
       assert.equal(summary.run.candidate, "review-candidate");
       assert.equal(summary.run.corpus, corpus.id);
       assert.equal(summary.validation.verdict, "not run");
       assert.equal(summary.cells.length, lock.performance.mode.length);
       assert.ok(summary.cells.every((c) => c.status === "not run"));
     }
+    const dir = freshDir();
+    assert.equal(
+      await quiet(() =>
+        main([
+          "--run",
+          "formatter-performance",
+          "--candidate",
+          "review-candidate",
+          "--corpus",
+          "medium",
+          "--dry-run",
+          "--out",
+          dir,
+        ]),
+      ),
+      0,
+    );
+    assert.equal(readSummary(dir).run.corpus, "medium");
     await assert.rejects(
       main(["--run", "formatter-performance", "--corpus", "medium", "--dry-run"]),
       /candidate/,
