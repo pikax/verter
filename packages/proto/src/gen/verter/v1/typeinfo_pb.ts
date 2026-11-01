@@ -238,7 +238,9 @@ export type SymbolEntryDto = Message<"verter.v1.SymbolEntryDto"> & {
 
   /**
    * SFC-absolute span. Encoded as `(start, end)`; absent when the
-   * host had no analysis-snapshot span for this symbol.
+   * host had no analysis-snapshot span for this symbol. UTF-8 byte
+   * offsets, 0-based half-open, in the file the symbol list was requested for
+   * (schema 9 unit contract).
    *
    * @generated from field: uint32 span_start = 3;
    */
@@ -3245,7 +3247,9 @@ export type GraphDiagnostic = Message<"verter.v1.GraphDiagnostic"> & {
   messageNameId: number;
 
   /**
-   * Optional originating span. SFC-absolute byte offsets.
+   * Optional originating span. SFC-absolute UTF-8 byte offsets, 0-based
+   * half-open, in the file `span_canonical_name_id` names. Emitted only when
+   * exact; otherwise `has_span` is false and the offsets are not meaningful.
    *
    * @generated from field: uint32 span_canonical_name_id = 3;
    */
@@ -4282,6 +4286,10 @@ export const GraphTypeNodeRefSchema: GenMessage<GraphTypeNodeRef> /*@__PURE__*/ 
 );
 
 /**
+ * A range in the file `canonical_id` names: UTF-8 byte offsets, 0-based
+ * half-open (schema 9 unit contract). On a request an inverted or file-less
+ * ref is a typed MalformedPayload before execution.
+ *
  * @generated from message verter.v1.GraphSpanRef
  */
 export type GraphSpanRef = Message<"verter.v1.GraphSpanRef"> & {
@@ -4584,6 +4592,9 @@ export type FrameworkSurfaceMemberDeclaration =
     canonicalSourceId: number;
 
     /**
+     * UTF-8 byte offsets, 0-based half-open, in the file `canonical_source_id`
+     * names (schema 9 unit contract).
+     *
      * @generated from field: uint32 span_start = 4;
      */
     spanStart: number;

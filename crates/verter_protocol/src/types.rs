@@ -60,6 +60,67 @@ impl SpanEncodingTag {
     }
 }
 
+/// A half-open range that names its own encoding: `[start, end)` counted in
+/// `encoding` units from the start of the file the owning record names,
+/// 0-based. The one wire shape for ranges whose source file is not at hand
+/// where they are produced; Rust-native facts stay [`verter_span::Span`] bytes
+/// and are wrapped here only at the serialization boundary.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct TaggedSpan {
+    pub start: u32,
+    pub end: u32,
+    pub encoding: SpanEncodingTag,
+}
+
+impl TaggedSpan {
+    /// A native UTF-8 byte span as a tagged wire range. An inverted range is
+    /// [`verter_span::CoordError::InvalidBoundary`] — never swapped or emptied.
+    pub fn utf8(span: verter_span::Span) -> Result<Self, verter_span::CoordError> {
+        if span.start > span.end {
+            return Err(verter_span::CoordError::InvalidBoundary);
+        }
+        Ok(Self {
+            start: span.start,
+            end: span.end,
+            encoding: SpanEncodingTag::Utf8,
+        })
+    }
+}
+
+/// A payload whose every `spanStart`/`spanEnd` pair is a UTF-8 byte offset,
+/// flattened under one top-level `spanEncoding` tag. The tag is the wire
+/// contract for the analysis JSON the adapters publish untouched from the
+/// Rust-native facts; consumers convert through it (exact or refused) and
+/// never recount locally. Serializes without an intermediate copy.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Utf8SpanPayload<P: Serialize> {
+    pub span_encoding: SpanEncodingTag,
+    #[serde(flatten)]
+    pub payload: P,
+}
+
+impl<P: Serialize> Utf8SpanPayload<P> {
+    #[must_use]
+    pub fn new(payload: P) -> Self {
+        Self {
+            span_encoding: SpanEncodingTag::Utf8,
+            payload,
+        }
+    }
+}
+
+/// `serde(serialize_with)` adapter: emit a native byte [`verter_span::Span`]
+/// as a [`TaggedSpan`] (`utf8.v1`), refusing an inverted range.
+pub fn serialize_utf8_tagged_span<S: serde::Serializer>(
+    span: &verter_span::Span,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let tagged = TaggedSpan::utf8(*span).map_err(serde::ser::Error::custom)?;
+    tagged.serialize(serializer)
+}
+
 // =============================================================================
 // Shared (both input and output)
 // =============================================================================
@@ -853,6 +914,8 @@ pub enum PublicApiProjectionSubject {
         syntax_index: u32,
     },
     ScriptSetupAttrs {
+        /// UTF-8 byte range in the authored SFC, serialized as a tagged range.
+        #[serde(serialize_with = "serialize_utf8_tagged_span")]
         source_range: verter_span::Span,
     },
     /// The whole source: a failure not attributable to one syntax slot (a
@@ -893,7 +956,7 @@ mod public_api_projection_subject_tests {
             .unwrap(),
             serde_json::json!({
                 "kind": "scriptSetupAttrs",
-                "sourceRange": { "start": 31, "end": 37 },
+                "sourceRange": { "start": 31, "end": 37, "encoding": "utf8.v1" },
             })
         );
         assert_eq!(
@@ -1801,6 +1864,9 @@ pub struct FfiStructureRange {
     pub source_space_token: String,
     pub start: u32,
     pub end: u32,
+    /// Encoding of `start`/`end` (always `utf8.v1`: structure ranges are the
+    /// native byte ranges of the registered carrier).
+    pub encoding: SpanEncodingTag,
 }
 
 #[derive(Serialize, Clone)]
@@ -1950,8 +2016,10 @@ pub struct FfiResolvedTypeDeclaration {
     pub requested_name: String,
     pub resolved_name: String,
     pub canonical_source: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// The declaration's range in `canonical_source`, tagged. Absent when the
+    /// native span is not an exact range (inverted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<TaggedSpan>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -1965,8 +2033,10 @@ pub struct FfiResolvedNativeProp {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
     pub visibility: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// The property's range in the owning component's source, tagged. Absent
+    /// when the native span is not an exact range (inverted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<TaggedSpan>,
 }
 
 #[derive(Serialize, Clone)]

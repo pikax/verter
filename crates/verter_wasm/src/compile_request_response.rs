@@ -21,7 +21,7 @@ use serde::Serialize;
 use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string, host_node_kind_to_ffi};
 use verter_protocol::types::{
     FfiDestructuredBlockMeta, FfiDiagnosticsSnapshot, FfiIdeResponse, FfiVirtualMeta,
-    FfiVirtualNodeKind,
+    FfiVirtualNodeKind, Utf8SpanPayload,
 };
 use verter_session as host;
 
@@ -72,7 +72,9 @@ pub(crate) enum WasmCompiledProduct {
     },
     IdeCompanion(FfiIdeResponse),
     Analysis {
-        analysis: Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        analysis: Utf8SpanPayload<
+            Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        >,
     },
 }
 
@@ -199,9 +201,9 @@ fn compiled_product_to_wasm(
         host::CompiledProduct::Ide(response) => {
             WasmCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source)?)
         }
-        host::CompiledProduct::Analysis(snapshot) => {
-            WasmCompiledProduct::Analysis { analysis: snapshot }
-        }
+        host::CompiledProduct::Analysis(snapshot) => WasmCompiledProduct::Analysis {
+            analysis: Utf8SpanPayload::new(snapshot),
+        },
     })
 }
 

@@ -821,7 +821,7 @@ describe("typeinfo proto TS bindings", () => {
     // canonical source-ordered object-spread program; schema 8 adds tag 34,
     // the applied compiler intrinsic (`Awaited<T>`), carrying a closed op
     // enum and operand node ids rather than a declaration symbol.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(8);
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(9);
   });
 
   it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {

@@ -126,6 +126,7 @@ pub fn host_to_ffi_symbol_entry(entry: SymbolEntry) -> FfiSymbolEntry {
     FfiSymbolEntry {
         name: entry.name,
         kind: kind.to_string(),
+        span_encoding: verter_protocol::types::SpanEncodingTag::Utf8,
         span_start,
         span_end,
         has_span,

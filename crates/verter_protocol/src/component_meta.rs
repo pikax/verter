@@ -1488,6 +1488,7 @@ fn semantic_structure_range(
         source_space_token: structure.source_space_tokens[span.source_space.get() as usize].clone(),
         start: span.start,
         end: span.end,
+        encoding: SpanEncodingTag::Utf8,
     }
 }
 
@@ -1689,10 +1690,33 @@ fn authored_name_to_proto(value: &FfiAuthoredName) -> proto::AuthoredName {
     }
 }
 
+fn position_encoding_to_proto(tag: SpanEncodingTag) -> proto::PositionEncoding {
+    match tag {
+        SpanEncodingTag::Utf8 => proto::PositionEncoding::Utf8Bytes,
+        SpanEncodingTag::Utf16 => proto::PositionEncoding::Utf16CodeUnits,
+    }
+}
+
+/// A tagged range whose source space is the owning message's file: the range
+/// carries its encoding and an empty source-space token.
+fn tagged_span_to_proto(value: TaggedSpan) -> proto::CanonicalRange {
+    proto::CanonicalRange {
+        source_space_token: String::new(),
+        encoding: position_encoding_to_proto(value.encoding) as i32,
+        representation: Some(proto::canonical_range::Representation::OffsetRange(
+            proto::OffsetRange {
+                start: value.start,
+                end: value.end,
+            },
+        )),
+        encoding_session_token: String::new(),
+    }
+}
+
 fn structure_range_to_proto(value: &FfiStructureRange) -> proto::CanonicalRange {
     proto::CanonicalRange {
         source_space_token: value.source_space_token.clone(),
-        encoding: proto::PositionEncoding::Utf8Bytes as i32,
+        encoding: position_encoding_to_proto(value.encoding) as i32,
         representation: Some(proto::canonical_range::Representation::OffsetRange(
             proto::OffsetRange {
                 start: value.start,
@@ -2277,8 +2301,7 @@ fn resolved_macro_meta_to_proto(
                 is_optional: prop.is_optional,
                 type_annotation_id: builder.string_id_opt(prop.type_annotation.as_deref()),
                 visibility_id: builder.string_id(&prop.visibility),
-                span_start: prop.span_start,
-                span_end: prop.span_end,
+                span: prop.span.map(tagged_span_to_proto),
             })
             .collect(),
         jsdoc: mac
@@ -2349,8 +2372,7 @@ fn resolved_type_declaration_to_proto(
         requested_name_id: builder.string_id(&declaration.requested_name),
         resolved_name_id: builder.string_id(&declaration.resolved_name),
         canonical_source_id: builder.string_id(&declaration.canonical_source),
-        span_start: declaration.span_start,
-        span_end: declaration.span_end,
+        span: declaration.span.map(tagged_span_to_proto),
         kind_id: builder.string_id(&declaration.kind),
         text_id: builder.string_id_opt(declaration.text.as_deref()),
     }

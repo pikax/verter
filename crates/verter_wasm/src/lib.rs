@@ -729,7 +729,7 @@ impl WasmVerterHost {
     #[wasm_bindgen(js_name = getAnalysis)]
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
         let output = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
-        to_wasm_value(&output)
+        to_wasm_value(&output.as_ref().map(Utf8SpanPayload::new))
     }
 
     /// Execute ONE typed compile request against an already-registered

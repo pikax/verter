@@ -9,7 +9,7 @@ use napi::bindgen_prelude::*;
 use napi::{Env, Error, Result, Status};
 use verter_compiler::compile_request::{CompileRequestError, ProductKind};
 use verter_ffi::convert::host_error_to_string;
-use verter_protocol::types::{FfiDiagnostic, SpanEncodingTag};
+use verter_protocol::types::{FfiDiagnostic, SpanEncodingTag, Utf8SpanPayload};
 use verter_session as host;
 
 use crate::{
@@ -181,7 +181,7 @@ pub(crate) fn compile_request_response_to_napi(
                 analysis: None,
             }),
             host::CompiledProduct::Analysis(analysis) => {
-                let analysis = serde_json::to_string(analysis.as_ref()).map_err(|error| {
+                let analysis = serde_json::to_string(&Utf8SpanPayload::new(analysis.as_ref())).map_err(|error| {
                     Error::new(
                         Status::GenericFailure,
                         format!("analysis serialization error: {error}"),

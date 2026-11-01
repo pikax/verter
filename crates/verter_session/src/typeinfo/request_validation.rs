@@ -116,6 +116,9 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // Schema 7 remains accepted for requests that do not require the
     // compiler-intrinsic application node introduced by schema 8.
     7,
+    // Schema 8 remains accepted: v9 adds no field, it states the UTF-8
+    // byte unit of every span and validates request span refs.
+    8,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 
@@ -375,12 +378,24 @@ pub fn validate_flow_narrowing_request(
     if request.canonical_id.is_empty() {
         return Err(missing_project_path_error());
     }
-    let _span = request
-        .span
-        .as_ref()
-        .ok_or_else(malformed_payload_error_with_detail("missing span"))?;
+    validate_span_ref(request.span.as_ref())?;
     validate_projection_reduction_context(request.context.as_ref())?;
     validate_display_policy(request.display_policy.as_ref())?;
+    Ok(())
+}
+
+/// Validate a request `GraphSpanRef`: present, naming a file, and a
+/// non-inverted half-open UTF-8 byte range. Past-end and off-boundary checks
+/// need the named file's content snapshot and belong to the executor that
+/// reads the span; an inverted range is never normalised or swapped.
+fn validate_span_ref(span: Option<&wire::SpanRef>) -> Result<(), TypeInfoRequestError> {
+    let span = span.ok_or_else(malformed_payload_error_with_detail("missing span"))?;
+    if span.canonical_id.is_empty() {
+        return Err(malformed_payload_error_with_detail("span names no file")());
+    }
+    if span.start > span.end {
+        return Err(malformed_payload_error_with_detail("span is inverted")());
+    }
     Ok(())
 }
 
@@ -396,10 +411,7 @@ pub fn validate_contextual_type_request(
     if request.canonical_id.is_empty() {
         return Err(missing_project_path_error());
     }
-    let _span = request
-        .span
-        .as_ref()
-        .ok_or_else(malformed_payload_error_with_detail("missing span"))?;
+    validate_span_ref(request.span.as_ref())?;
     validate_projection_reduction_context(request.context.as_ref())?;
     validate_display_policy(request.display_policy.as_ref())?;
     Ok(())

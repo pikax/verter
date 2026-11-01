@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::TaggedSpan;
+
 /// Component surface DTO for protocol responses.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,8 +36,8 @@ pub struct PropDto {
     pub default_value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Event DTO.
@@ -47,8 +49,8 @@ pub struct EventDto {
     pub payload_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Slot DTO.
@@ -62,8 +64,8 @@ pub struct SlotDto {
     pub bindings: Vec<SlotBindingDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Slot binding DTO.
@@ -82,8 +84,8 @@ pub struct ModelDto {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_text: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Expose DTO.
@@ -91,8 +93,8 @@ pub struct ModelDto {
 #[serde(rename_all = "camelCase")]
 pub struct ExposeDto {
     pub name: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Boundary issue DTO for diagnostic output.
@@ -102,8 +104,8 @@ pub struct BoundaryIssueDto {
     pub kind: String,
     pub component_name: String,
     pub member_name: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Reactivity fact DTO.
@@ -123,8 +125,8 @@ pub struct ReactivityDto {
 pub struct ProvenanceStepDto {
     pub kind: String,
     pub description: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 #[cfg(test)]
@@ -140,8 +142,7 @@ mod tests {
                 type_text: Some("string".into()),
                 default_value: Some("'blue'".into()),
                 description: None,
-                span_start: 10,
-                span_end: 50,
+                span: TaggedSpan::utf8(verter_span::Span::new(10, 50)).unwrap(),
             }],
             ..Default::default()
         };
@@ -149,7 +150,9 @@ mod tests {
         assert!(json.contains("\"isOptional\""));
         assert!(json.contains("\"typeText\""));
         assert!(json.contains("\"defaultValue\""));
-        assert!(json.contains("\"spanStart\""));
+        // Spans are tagged ranges, never a bare unit-less pair.
+        assert!(json.contains("\"span\":{\"start\":10,\"end\":50,\"encoding\":\"utf8.v1\"}"));
+        assert!(!json.contains("\"spanStart\""));
         // Negative: no snake_case
         assert!(!json.contains("\"is_optional\""));
         assert!(!json.contains("\"type_text\""));
@@ -171,8 +174,7 @@ mod tests {
             kind: "unknownProp".into(),
             component_name: "Button".into(),
             member_name: "unknown".into(),
-            span_start: 100,
-            span_end: 107,
+            span: TaggedSpan::utf8(verter_span::Span::new(100, 107)).unwrap(),
         };
         let json = serde_json::to_string(&dto).unwrap();
         let back: BoundaryIssueDto = serde_json::from_str(&json).unwrap();
@@ -199,8 +201,7 @@ mod tests {
             type_text: Some("'sm' | 'md' | 'lg'".into()),
             default_value: Some("'md'".into()),
             description: Some("Button size".into()),
-            span_start: 10,
-            span_end: 50,
+            span: TaggedSpan::utf8(verter_span::Span::new(10, 50)).unwrap(),
         };
         let json = serde_json::to_string(&prop).unwrap();
         let back: PropDto = serde_json::from_str(&json).unwrap();
@@ -215,8 +216,7 @@ mod tests {
             name: "update".into(),
             payload_type: Some("[value: string]".into()),
             description: None,
-            span_start: 30,
-            span_end: 40,
+            span: TaggedSpan::utf8(verter_span::Span::new(30, 40)).unwrap(),
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: EventDto = serde_json::from_str(&json).unwrap();
@@ -235,8 +235,7 @@ mod tests {
                 type_text: Some("string".into()),
             }],
             description: Some("Header area".into()),
-            span_start: 50,
-            span_end: 60,
+            span: TaggedSpan::utf8(verter_span::Span::new(50, 60)).unwrap(),
         };
         let json = serde_json::to_string(&slot).unwrap();
         let back: SlotDto = serde_json::from_str(&json).unwrap();
@@ -250,8 +249,7 @@ mod tests {
         let model = ModelDto {
             name: "checked".into(),
             type_text: Some("boolean".into()),
-            span_start: 0,
-            span_end: 20,
+            span: TaggedSpan::utf8(verter_span::Span::new(0, 20)).unwrap(),
         };
         let json = serde_json::to_string(&model).unwrap();
         let back: ModelDto = serde_json::from_str(&json).unwrap();
@@ -267,15 +265,13 @@ mod tests {
                 type_text: Some("string".into()),
                 default_value: None,
                 description: None,
-                span_start: 0,
-                span_end: 10,
+                span: TaggedSpan::utf8(verter_span::Span::new(0, 10)).unwrap(),
             }],
             events: vec![EventDto {
                 name: "click".into(),
                 payload_type: None,
                 description: None,
-                span_start: 20,
-                span_end: 30,
+                span: TaggedSpan::utf8(verter_span::Span::new(20, 30)).unwrap(),
             }],
             slots: vec![],
             models: vec![],
@@ -299,8 +295,7 @@ mod tests {
             trace: vec![ProvenanceStepDto {
                 kind: "source".into(),
                 description: "ref(0)".into(),
-                span_start: 10,
-                span_end: 15,
+                span: TaggedSpan::utf8(verter_span::Span::new(10, 15)).unwrap(),
             }],
         };
         let json = serde_json::to_string(&dto).unwrap();

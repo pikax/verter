@@ -1507,6 +1507,8 @@ pub struct NapiTscMacroFailureSubject {
 pub struct NapiSourceRange {
     pub start: u32,
     pub end: u32,
+    /// Versioned encoding tag of `start`/`end` (`"utf8.v1"`: UTF-8 bytes).
+    pub encoding: String,
 }
 
 #[napi(object)]
@@ -1570,6 +1572,7 @@ impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
                     sourceRange: NapiSourceRange {
                         start: source_range.start,
                         end: source_range.end,
+                        encoding: SpanEncodingTag::Utf8.as_wire().to_string(),
                     },
                 })
             }
@@ -3133,7 +3136,7 @@ impl NapiVerterHost {
         }))
         .map(|opt| {
             opt.map(|snapshot| {
-                serde_json::to_string(&snapshot).map_err(|e| {
+                serde_json::to_string(&Utf8SpanPayload::new(&snapshot)).map_err(|e| {
                     Error::new(
                         Status::GenericFailure,
                         format!("analysis serialization error: {e}"),
@@ -5251,7 +5254,11 @@ defineProps<{ value: Unsafe }>()
         assert!(matches!(
             attrs_error.subject,
             Either3::B(NapiTscScriptSetupAttrsFailureSubject {
-                sourceRange: NapiSourceRange { start: 31, end: 37 },
+                sourceRange: NapiSourceRange {
+                    start: 31,
+                    end: 37,
+                    ..
+                },
                 ..
             })
         ));
