@@ -86,15 +86,15 @@ fn aggregating_the_same_keys_counts_the_same_work_on_every_index() {
     }
 }
 
-/// An index sized for its members hashes each key once: growing into the
-/// same keys rehashes every key it already holds, at each doubling.
+/// An index sized for its members skips the rehashes: growing into the same
+/// keys rehashes every key it already holds, at each doubling.
 #[test]
-fn a_sized_aggregation_hashes_each_key_once() {
+fn a_sized_index_skips_the_rehashes_of_growing() {
     let keys: Vec<_> = (0..512)
         .map(|i| AuthoredPropertyKey::string(format!("key-{i}")))
         .collect();
     let before = key_scan_comparisons_for_tests();
-    let mut aggregation = OrderedMemberAggregation::with_capacity(keys.len());
+    let mut aggregation = OrderedMemberAggregation::with_index_capacity(keys.len());
     for key in &keys {
         aggregation.entry(key, || ());
     }

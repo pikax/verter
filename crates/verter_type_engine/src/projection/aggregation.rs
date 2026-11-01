@@ -94,12 +94,14 @@ impl<A> OrderedMemberAggregation<A> {
         }
     }
 
-    /// An aggregation sized for `members` members, so the index never
-    /// rehashes the keys it already holds.
-    pub fn with_capacity(members: usize) -> Self {
+    /// An aggregation whose index is sized for `members` members, so it never
+    /// rehashes the keys it already holds. The entries still grow as
+    /// properties arrive: `members` counts repeats, and growing them rehashes
+    /// nothing.
+    pub fn with_index_capacity(members: usize) -> Self {
         Self {
             slots: HashMap::with_capacity_and_hasher(members, KeyHashState::default()),
-            entries: Vec::with_capacity(members),
+            entries: Vec::new(),
         }
     }
 

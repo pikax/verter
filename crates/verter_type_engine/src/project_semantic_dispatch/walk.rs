@@ -1686,7 +1686,7 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         seen_values: rustc_hash::FxHashSet<SemanticNodeId>,
     }
 
-    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::with_capacity(
+    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::with_index_capacity(
         contributor_surfaces
             .iter()
             .map(|surface| surface.members.len())
