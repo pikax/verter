@@ -341,18 +341,10 @@ pub fn directory_distance(dir_a: &str, dir_b: &str) -> u32 {
 /// Within the same tier, files closer (by [`directory_distance`]) to any
 /// priority directory come first.
 pub fn priority_sort(classified: &mut [(String, Tier)], priority_dirs: &[String]) {
-    classified.sort_by(|a, b| {
-        // Primary: tier ordering
-        let tier_cmp = a.1.cmp(&b.1);
-        if tier_cmp != std::cmp::Ordering::Equal {
-            return tier_cmp;
-        }
-
-        // Secondary: distance to nearest priority dir (lower = earlier)
-        let dist_a = min_distance_to_priority(&a.0, priority_dirs);
-        let dist_b = min_distance_to_priority(&b.0, priority_dirs);
-        dist_a.cmp(&dist_b)
-    });
+    // Primary: tier ordering. Secondary: distance to nearest priority dir
+    // (lower = earlier). Each file's distance is computed once per sort.
+    classified
+        .sort_by_cached_key(|(path, tier)| (*tier, min_distance_to_priority(path, priority_dirs)));
 }
 
 fn min_distance_to_priority(path: &str, priority_dirs: &[String]) -> u32 {
@@ -736,22 +728,37 @@ fn background_publish_workspace_carriers(is_tsgo: bool, has_publish_store: bool)
     is_tsgo || has_publish_store
 }
 
-/// Drain priority signals from the channel and re-sort remaining unprocessed files.
+/// Drain priority signals from the channel, then re-sort the remaining
+/// unprocessed files once.
+///
+/// Every read of a document demands it and its imports again, so an editor
+/// polling one document queues signals faster than a sort per signal finishes.
+/// Sorting inside the loop would keep this synchronous drain from ever seeing an
+/// empty channel while the polling lasts, and the scan would not advance. It
+/// takes only what is queued on entry, so it ends however fast signals arrive;
+/// the rest wait for the next drain.
 fn drain_priority_signals(
     rx: &mut mpsc::UnboundedReceiver<ScannerSignal>,
     priority_dirs: &mut Vec<String>,
     remaining: &mut [(String, Tier)],
 ) {
-    while let Ok(signal) = rx.try_recv() {
+    let mut signalled = false;
+    for _ in 0..rx.len() {
+        let Ok(signal) = rx.try_recv() else {
+            break;
+        };
         match signal {
             ScannerSignal::PriorityFile(canonical_id) => {
+                signalled = true;
                 let dir = parent_dir(&canonical_id);
                 if !priority_dirs.contains(&dir) {
                     priority_dirs.push(dir);
                 }
-                priority_sort(remaining, priority_dirs);
             }
         }
+    }
+    if signalled {
+        priority_sort(remaining, priority_dirs);
     }
 }
 
@@ -1727,6 +1734,39 @@ mod tests {
                 "Other-tier file at index {fo} must come after last ProjectSource at index {lp}"
             );
         }
+    }
+
+    /// `far` moves behind the others, so the drain must sort. `first` and
+    /// `second` tie on their final distance, so a stable sort keeps their order
+    /// unless an earlier sort under only some of the signals moved them, and
+    /// that earlier sort is the cost a queued batch must not pay.
+    #[test]
+    fn a_batch_of_priority_signals_is_one_reorder() {
+        let far = "/root/other/deep/er/Far.vue".to_string();
+        let first = "/root/late/x/First.vue".to_string();
+        let second = "/root/early/y/Second.vue".to_string();
+        let mut remaining = vec![
+            (far.clone(), Tier::ProjectSource),
+            (first.clone(), Tier::ProjectSource),
+            (second.clone(), Tier::ProjectSource),
+        ];
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for opened in ["/root/early/Opened.vue", "/root/late/Opened.vue"] {
+            tx.send(ScannerSignal::PriorityFile(opened.to_string()))
+                .expect("the receiver is alive");
+        }
+        let mut priority_dirs = Vec::new();
+
+        drain_priority_signals(&mut rx, &mut priority_dirs, &mut remaining);
+
+        assert_eq!(priority_dirs, ["/root/early", "/root/late"]);
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), second.as_str(), far.as_str()]
+        );
     }
 
     #[test]

@@ -2605,6 +2605,7 @@ impl VerterHost {
         let _ = observation;
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
+        self.assert_index_claim_unfenced(canonical_id);
 
         // Fast path: check FileArtifactStore through the project-global cache.
         // R3: query the scheduler's current `whole_hash` for the

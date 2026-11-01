@@ -632,6 +632,7 @@ impl VerterHost {
             return None;
         }
 
+        self.assert_index_claim_unfenced(canonical_id);
         // Overlay singleflight (the Canonical-Dependency-Cache collapse
         // contract): concurrent overlay requests for the SAME canonical
         // + overlay content + overlay-set discriminator collapse onto

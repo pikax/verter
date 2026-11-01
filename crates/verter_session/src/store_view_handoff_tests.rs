@@ -305,6 +305,10 @@ fn pending_maintenance() -> (Arc<VerterHost>, verter_execution::tasks::TaskRegis
     assert!(store.retained_retired_version_count() > 0);
     drop(old);
     assert!(store.root_release_reclamation_pending());
+    // The scheduler stages behind the upserts answer before their owners
+    // release the task they ran under; only the handoff's own tasks may
+    // remain for the tests to count.
+    assert!(registry.wait_for_no_active_tasks_for_tests(std::time::Duration::from_secs(10)));
     (host, registry)
 }
 #[test]
