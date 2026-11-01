@@ -36,6 +36,7 @@ extern crate verter_debug_assert;
 mod api_check;
 mod checker;
 mod error_map;
+mod position;
 mod reporter;
 mod tsconfig;
 
@@ -113,6 +114,37 @@ struct Cli {
     /// List all included files and exit
     #[arg(long = "listFiles")]
     list_files: bool,
+
+    /// Code unit the reported column is counted in. Lines and columns are
+    /// one-based; the column unit is explicit, never inferred. A position that
+    /// cannot be converted exactly is reported without a line/column.
+    #[arg(
+        long = "position-encoding",
+        value_name = "ENCODING",
+        value_enum,
+        default_value_t = position::ColumnEncoding::Utf16
+    )]
+    position_encoding: position::ColumnEncoding,
+
+    /// Report only diagnostics at this position: `FILE:LINE:CHAR`, one-based
+    /// line and column in the selected `--position-encoding`.
+    #[arg(
+        long = "at",
+        value_name = "FILE:LINE:CHAR",
+        value_parser = position::Selector::parse_line_char,
+        conflicts_with = "offset"
+    )]
+    at: Option<position::Selector>,
+
+    /// Report only diagnostics at this position: `FILE:OFFSET`, a zero-based
+    /// offset in the selected `--position-encoding` counted from the start of
+    /// the file.
+    #[arg(
+        long = "offset",
+        value_name = "FILE:OFFSET",
+        value_parser = position::Selector::parse_offset
+    )]
+    offset: Option<position::Selector>,
 
     /// List emitted files after compilation
     #[arg(long = "listEmittedFiles")]
@@ -225,8 +257,23 @@ fn main() {
          Verter-native diagnostic instead)"
     );
 
+    let selector = cli.at.clone().or_else(|| cli.offset.clone());
+    let positions = reporter::PositionRenderer::new(cli.position_encoding);
+    let selected_position = match selector.as_ref().map(|s| positions.resolve_selector(s)) {
+        None => None,
+        Some(Ok(position)) => Some(position),
+        Some(Err(message)) => {
+            eprintln!("verter-tsc: {message}");
+            process::exit(2);
+        }
+    };
     for diagnostic in &result.diagnostics {
-        println!("{diagnostic}");
+        if let (Some(selector), Some(position)) = (selector.as_ref(), selected_position) {
+            if !positions.is_at(diagnostic, selector.file(), position) {
+                continue;
+            }
+        }
+        println!("{}", positions.render(diagnostic));
     }
     for failure in &result.public_api_failures {
         println!("{failure}");

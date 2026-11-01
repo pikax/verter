@@ -126,21 +126,119 @@ impl fmt::Display for Severity {
     }
 }
 
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Diagnostic {
+    /// The rendered line for this diagnostic at `position` (one-based line and
+    /// column in the caller's selected encoding), or without a position when
+    /// `None` — a position that could not be converted exactly is never
+    /// guessed.
+    fn render_at(&self, position: Option<(u32, u32)>) -> String {
+        let location = match position {
+            Some((line, col)) => format!("{}({},{})", self.file, line, col),
+            None => self.file.clone(),
+        };
         match self.verter_code {
-            Some(code) => write!(
-                f,
-                "{}({},{}): {} {}: {}",
-                self.file, self.line, self.col, self.severity, code, self.message
-            ),
-            None => write!(
-                f,
-                "{}({},{}): {} TS{}: {}",
-                self.file, self.line, self.col, self.severity, self.ts_code, self.message
+            Some(code) => format!("{location}: {} {code}: {}", self.severity, self.message),
+            None => format!(
+                "{location}: {} TS{}: {}",
+                self.severity, self.ts_code, self.message
             ),
         }
     }
+}
+
+/// `tsc` convention: one-based line, one-based UTF-16 column.
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render_at(Some((self.line, self.col))))
+    }
+}
+
+/// Renders diagnostics with their column in the user-selected code unit.
+///
+/// A diagnostic's `(line, col)` is the engine's one-based line and one-based
+/// UTF-16 column. For any other encoding the column is re-counted against the
+/// exact file content (read once per file); a file that cannot be read, a line
+/// the file does not have, or a column inside a surrogate pair leaves the
+/// diagnostic reported without a position.
+pub struct PositionRenderer {
+    encoding: crate::position::ColumnEncoding,
+    files: std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<String>>>>,
+}
+
+impl PositionRenderer {
+    #[must_use]
+    pub fn new(encoding: crate::position::ColumnEncoding) -> Self {
+        Self {
+            encoding,
+            files: std::cell::RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn text(&self, file: &str) -> Option<std::rc::Rc<String>> {
+        self.files
+            .borrow_mut()
+            .entry(file.to_string())
+            .or_insert_with(|| std::fs::read_to_string(file).ok().map(std::rc::Rc::new))
+            .clone()
+    }
+
+    /// The diagnostic's one-based `(line, col)` in the selected encoding, or
+    /// `None` when it cannot be converted exactly.
+    #[must_use]
+    pub fn position(&self, diagnostic: &Diagnostic) -> Option<(u32, u32)> {
+        use crate::position::{ColumnEncoding, LineTable};
+        if self.encoding == ColumnEncoding::Utf16 || diagnostic.col == 1 {
+            // UTF-16 is the engine's own unit; column 1 is the line start in
+            // every encoding, whatever the content.
+            return Some((diagnostic.line, diagnostic.col));
+        }
+        let text = self.text(&diagnostic.file)?;
+        let column = LineTable::new(&text)
+            .convert_column(
+                diagnostic.line,
+                diagnostic.col,
+                ColumnEncoding::Utf16,
+                self.encoding,
+            )
+            .ok()?;
+        Some((diagnostic.line, column))
+    }
+
+    /// The rendered diagnostic line.
+    #[must_use]
+    pub fn render(&self, diagnostic: &Diagnostic) -> String {
+        diagnostic.render_at(self.position(diagnostic))
+    }
+
+    /// Resolve a command-line selector to a one-based `(line, column)` in the
+    /// selected encoding, validated against the selected file's content.
+    pub fn resolve_selector(
+        &self,
+        selector: &crate::position::Selector,
+    ) -> Result<(u32, u32), String> {
+        let file = selector.file();
+        let text = self
+            .text(file)
+            .ok_or_else(|| format!("cannot read '{file}' to resolve the selected position"))?;
+        selector
+            .resolve(&crate::position::LineTable::new(&text), self.encoding)
+            .map_err(|error| format!("selected position in '{file}': {error}"))
+    }
+
+    /// Whether `diagnostic` is reported at `file`:`position`.
+    #[must_use]
+    pub fn is_at(&self, diagnostic: &Diagnostic, file: &str, position: (u32, u32)) -> bool {
+        same_file(&diagnostic.file, file) && self.position(diagnostic) == Some(position)
+    }
+}
+
+fn same_file(reported: &str, selected: &str) -> bool {
+    let normalise = |path: &str| {
+        std::fs::canonicalize(path)
+            .map(|canonical| canonical.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.replace('\\', "/").trim_start_matches("./").to_string())
+    };
+    normalise(reported) == normalise(selected)
 }
 
 /// Parse the raw output of `tsc` into a list of diagnostics.
