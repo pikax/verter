@@ -281,7 +281,6 @@ impl VerterHost {
     ///
     /// Processed block content is compiler input and never mutates the carrier's
     /// authored analysis. Returns `None` if the file is not in the scheduler.
-    #[allow(dead_code)] // Used by css_var_flow migration (upcoming)
     pub(crate) fn effective_style_analyses(
         &self,
         canonical_id: &str,

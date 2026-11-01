@@ -2812,81 +2812,29 @@ impl VerterHost {
 
     /// Returns cross-component CSS variable flow for a given variable name.
     ///
-    /// Scans all files in the host to find where the variable is defined (in `<style>`),
-    /// referenced via `var()` (in `<style>`), set via `:style` bindings (in `<template>`),
-    /// and manipulated via DOM APIs (in `<script>`).
+    /// Reads the workspace index's postings to find where the variable is defined
+    /// (in `<style>`), referenced via `var()` (in `<style>`), set via `:style` bindings
+    /// (in `<template>`), and manipulated via DOM APIs (in `<script>`). Paths are in
+    /// the index's canonical order.
     ///
-    /// When `profile` is provided, override-aware style/template/script state is
-    /// used for that compile profile. `None` keeps the read profileless/raw.
+    /// Processed block content never mutates the carrier's authored analysis, so
+    /// every profile reads the same raw facts. This answers the whole population:
+    /// [`Self::css_var_candidates`] takes finite budgets and reports coverage.
     pub fn css_var_flow(
         &self,
         var_name: &str,
         profile: Option<&CompileProfile>,
     ) -> verter_semantic::analysis::CssVarFlow {
-        let profile_hash = profile.map(compile_profile_hash);
-
-        let canonical_ids: Vec<String> = self
-            .scheduler
-            .node_ids()
-            .into_iter()
-            .filter(|id| !self.is_canonical_evicted(id))
-            .collect();
-
-        let mut flow = verter_semantic::analysis::CssVarFlow {
-            name: var_name.to_string(),
-            ..Default::default()
-        };
-
-        for canonical_id in canonical_ids {
-            let path: std::sync::Arc<std::path::Path> =
-                std::sync::Arc::from(std::path::Path::new(canonical_id.as_str()));
-
-            let style_analyses = self
-                .effective_style_analyses(&canonical_id, profile_hash)
-                .unwrap_or_default();
-
-            // Check style blocks for definitions and var() references
-            for style in &style_analyses {
-                if let Some(ref css) = style.css {
-                    let has_def = css.custom_properties.iter().any(|p| p.name == var_name);
-                    if has_def {
-                        flow.style_definitions.push(std::sync::Arc::clone(&path));
-                    }
-
-                    let has_ref = css.var_usages.iter().any(|u| u.reference.name == var_name);
-                    if has_ref {
-                        flow.style_var_usages.push(std::sync::Arc::clone(&path));
-                    }
-                }
-            }
-
-            // Check template for :style CSS variable bindings
-            let _ = profile_hash;
-            let template_analysis = self.raw_template_analysis_for_file(&canonical_id);
-
-            if let Some(ref tmpl) = template_analysis {
-                if tmpl.css_var_names.iter().any(|n| n == var_name) {
-                    flow.template_definitions.push(std::sync::Arc::clone(&path));
-                }
-            }
-
-            // Check script for DOM API CSS variable manipulations
-            let script_has_manipulation = self
-                .effective_file_state(&canonical_id, profile_hash)
-                .map(|efs| {
-                    efs.script_analysis
-                        .css_var_manipulations
-                        .iter()
-                        .any(|m| m.var_name == var_name)
-                })
-                .unwrap_or(false);
-
-            if script_has_manipulation {
-                flow.script_manipulations.push(std::sync::Arc::clone(&path));
-            }
-        }
-
-        flow
+        let _ = profile;
+        self.css_var_candidates(
+            var_name,
+            crate::workspace_index::QueryBudgets {
+                postings: u32::MAX,
+                records: u32::MAX,
+            },
+            &|| false,
+        )
+        .flow
     }
 
     pub(crate) fn load_export_graph_analysis(
