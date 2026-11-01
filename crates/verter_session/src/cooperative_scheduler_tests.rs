@@ -1282,3 +1282,113 @@ fn workspace_resolution_shares_scheduler_authority_on_attach_and_replacement() {
         assert_eq!(scope.task().registry().wait_graph_occupancy().edges, 0);
     }
 }
+
+/// A file's index flight loads its source under the admission fence, so an
+/// upsert that follows the flight while holding the fence is never released.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ambient_ingestion_does_not_follow_a_flight_under_admission() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// How long a blocked run takes to fail. Only the cycle reaches it: every
+    /// wait below ends on a signal.
+    const CYCLE_DETECTION: Duration = Duration::from_secs(15);
+
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace.clone()));
+    let contributor = "/shared.d.ts";
+    workspace.inject_file(
+        contributor.into(),
+        Arc::from("declare const shared: number;"),
+    );
+
+    let (leader_loaded, await_leader) = mpsc::channel();
+    let (admission_held, await_admission) = mpsc::channel();
+    let await_admission = parking_lot::Mutex::new(await_admission);
+    *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || {
+        leader_loaded.send(()).expect("the test is waiting");
+        await_admission
+            .lock()
+            .recv()
+            .expect("the upsert reaches its ingestion");
+    }));
+    *host.test_force.ambient_ingestion_cursor_hook.0.lock() = Some(Arc::new(move || {
+        admission_held.send(()).expect("the leader is waiting");
+    }));
+
+    let (finished, await_finished) = mpsc::channel();
+    let leader_host = Arc::clone(&host);
+    let leader_finished = finished.clone();
+    std::thread::spawn(move || {
+        let served = leader_host.ensure_indexed_ready_serve_unobserved(contributor);
+        leader_finished
+            .send(served.is_some())
+            .expect("the test is waiting");
+    });
+    await_leader
+        .recv_timeout(CYCLE_DETECTION)
+        .expect("the leader claims the flight and loads its source");
+
+    let upsert_host = Arc::clone(&host);
+    std::thread::spawn(move || {
+        register_ts_source(&upsert_host, "/entry.ts", "export const entry = 1;");
+        finished.send(true).expect("the test is waiting");
+    });
+
+    for _ in 0..2 {
+        assert!(
+            await_finished
+                .recv_timeout(CYCLE_DETECTION)
+                .expect("the upsert and the flight's leader must not wait on each other"),
+            "the contributor is served"
+        );
+    }
+    assert!(host
+        .project_type_store()
+        .indexed()
+        .get_any(contributor)
+        .is_some());
+}
+
+/// Readers treat a pending contributor as an incomplete population, so a
+/// contributor stays pending until it is indexed, and it is indexed with the
+/// admission fence released.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_contributor_stays_pending_until_it_is_indexed_outside_admission() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace.clone()));
+    workspace.inject_file(
+        "/pending.d.ts".into(),
+        Arc::from("declare const pending: number;"),
+    );
+    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let weak = Arc::downgrade(&host);
+    let observed_hook = observed.clone();
+    *host.test_force.indexed_source_capture_seam_hook.0.lock() = Some(Arc::new(move || {
+        let host = weak.upgrade().expect("fixture owns host");
+        observed_hook.lock().push((
+            host.block_content
+                .admission_fence
+                .is_owned_by_current_thread(),
+            host.project_type_store()
+                .indexed()
+                .global_contributor_index()
+                .has_pending_overlay_ambient(),
+        ));
+    }));
+
+    register_ts_source(&host, "/entry.ts", "export const entry = 1;");
+
+    assert_eq!(
+        observed.lock().first(),
+        Some(&(false, true)),
+        "the contributor indexes first, unfenced and still pending"
+    );
+    let index = host.project_type_store().indexed();
+    assert!(!index
+        .global_contributor_index()
+        .has_pending_overlay_ambient());
+    assert!(index.get_any("/pending.d.ts").is_some());
+}
