@@ -19,6 +19,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { builtinModules, createRequire } from "node:module";
 
+import { loadShardedIndex } from "../../../scripts/lib/sharded-index.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
 const PKG_DIR = path.join(REPO_ROOT, "packages/vue-vscode");
@@ -30,9 +32,14 @@ const dxReceiptBasis = readJson(
 const dxHostClasses = readJson(
   path.join(REPO_ROOT, "tests/product-experience/DX0/products/host-execution-class.v1.json"),
 );
-const dxOwnership = readJson(
+// Sharded exposure-ownership map (DXM0): the header keeps identity and
+// receiving amendments; outcome rows come from per-owner fragments through
+// the shared loader, never from a monolithic array.
+const dxOwnershipShards = loadShardedIndex(
+  path.join(REPO_ROOT, "tests/product-experience/DX0/products/exposure-ownership"),
   path.join(REPO_ROOT, "tests/product-experience/DX0/products/exposure-ownership-map.json"),
 );
+const dxOwnership = { ...dxOwnershipShards.header, outcomes: dxOwnershipShards.rows };
 const dxExposureContract = readJson(
   path.join(REPO_ROOT, "tests/product-experience/DX0/products/feature-exposure-contract.v1.json"),
 );

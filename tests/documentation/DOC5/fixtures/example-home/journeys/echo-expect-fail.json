@@ -1,0 +1,15 @@
+{
+  "id": "echo-expect-fail",
+  "description": "observes a declared nonzero exit code",
+  "executionClass": "NodeOnly",
+  "pins": {
+    "node": ">=22"
+  },
+  "steps": [
+    {
+      "exampleId": "echo",
+      "file": "echo/fail.mjs",
+      "expectExit": 7
+    }
+  ]
+}

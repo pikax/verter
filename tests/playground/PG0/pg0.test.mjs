@@ -16,6 +16,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadShardedIndex } from "../../../scripts/lib/sharded-index.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
 const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
@@ -29,9 +31,19 @@ const dxReceiptBasis = readJson(
 const dxHostClasses = readJson(
   path.join(REPO_ROOT, "tests/product-experience/DX0/products/host-execution-class.v1.json"),
 );
-const dxOwnership = readJson(
-  path.join(REPO_ROOT, "tests/product-experience/DX0/products/exposure-ownership-map.json"),
+// The exposure-ownership map is a sharded index: the header keeps the map
+// identity and receiving amendments, and outcome rows live in per-owner
+// fragments merged by the shared loader. No reader parses a shared
+// row array anymore.
+const dxMapHeaderPath = path.join(
+  REPO_ROOT,
+  "tests/product-experience/DX0/products/exposure-ownership-map.json",
 );
+const dxMapShards = loadShardedIndex(
+  path.join(REPO_ROOT, "tests/product-experience/DX0/products/exposure-ownership"),
+  dxMapHeaderPath,
+);
+const dxOwnership = { ...dxMapShards.header, outcomes: dxMapShards.rows };
 const bwhPlatformServices = readJson(
   path.join(REPO_ROOT, "tests/browser-host/BWH0/products/platform-host-services.v1.json"),
 );
@@ -432,6 +444,10 @@ test("PG0-AC-OWNER: one final owner, vocabulary reuse, no parallel namespaces", 
     /contract-only receiver/,
     "flipped map must fail the contract-only receiver predicate",
   );
+});
+
+test("the exposure-ownership header contains metadata and no outcome rows", () => {
+  assert.equal(Object.hasOwn(readJson(dxMapHeaderPath), "outcomes"), false);
 });
 
 test("PG0 session model binds the receipt basis verbatim and adds no engine", () => {

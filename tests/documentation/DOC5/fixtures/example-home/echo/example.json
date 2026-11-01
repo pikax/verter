@@ -1,0 +1,11 @@
+{
+  "id": "echo",
+  "files": [
+    "echo/run.mjs",
+    "echo/fail.mjs",
+    "echo/slow.mjs"
+  ],
+  "surfaces": [],
+  "executionClass": "NodeOnly",
+  "proofClass": "static-proof"
+}

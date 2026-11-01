@@ -1,0 +1,18 @@
+{
+  "id": "unplugin-vite",
+  "files": [
+    "unplugin-vite/vite.config.ts"
+  ],
+  "imports": [
+    "vite",
+    "@verter/unplugin/vite"
+  ],
+  "peers": [
+    "vite"
+  ],
+  "surfaces": [
+    "vue.managed.compile.raw"
+  ],
+  "executionClass": "NativeOnly",
+  "proofClass": "static-proof"
+}

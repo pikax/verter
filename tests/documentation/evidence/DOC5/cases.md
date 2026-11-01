@@ -11,14 +11,18 @@ Commands (run on the candidate; do not treat this file as an execution transcrip
 - `pnpm --filter docs check`
 
 Deletion population this node: empty. The recipe home, the recipes and
-journeys manifest sections, the recipes gate and the journey executor
+journeys resolved collections, the recipes gate and the journey executor
 are additive; the DOC0 executable-examples plan's deferral of runtime
 example execution to DOC5 executable journeys is discharged by amending
 that plan in place, so no second deferral record survives.
 
 AC1: the DOC1 harness stays the sole owning interface. The recipe model
-and the journey model are declared in `examples/reference/manifest.json`
-(`recipes`, `journeys`) and validated only through `validate()`; the docs
+and the journey model resolve from the metadata header
+`examples/reference/manifest.json`, `recipes/<id>.json` topic fragments and
+`journeys/<id>.json` journey fragments under that home. Examples register
+in `<id>/example.json`; producers update their own fragments without adding
+row arrays to the header. The resolved collections are validated only
+through `validate()`; the docs
 package check invokes the same script unchanged. All eight topics are
 pending with named producing nodes (CSS0, WBC0, DBG0, TST0, RTI0, AX0,
 WPF0, SEC0) and the home declares a real `cli-version-smoke` NativeOnly

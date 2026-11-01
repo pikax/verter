@@ -204,14 +204,20 @@ export const POLL_BUDGETS = {
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
   restartEntryDiagnostics: {
-    budgetMs: 30_000,
-    parentTimeoutMs: 60_000,
+    budgetMs: 60_000,
+    parentTimeoutMs: 120_000,
     reason:
       "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
-      "level-1 announcement, and the entry document's own merged diagnostics under its sync and " +
-      "import closure. It takes the cold root handshake's 30s and nothing wider: the restarted " +
-      "server certifies the entry while its workspace scan is still running, so neither the scan " +
-      "nor the replay of every held document is on this path",
+      "level-1 announcement, and the entry document's own merged diagnostics. The replay IS on " +
+      "this path: `closeAllEditors` closes editor tabs, but a document opened through the " +
+      "workspace API stays in `workspace.textDocuments` (VS Code has no API to close one), so " +
+      "the restarted client replays a `did_open` for every document the earlier suites opened — " +
+      "about sixty by the time the matrix suites restart — and the serve loop polls handler " +
+      "futures one at a time, so the entry's readiness request queues behind that entire FIFO. " +
+      "Restart-plus-replay takes 15-18s on a healthy CI runner and 19-36s on a loaded one (the " +
+      "same measurements `restartTypeProviderSync` cites), and a required-shard run has lost " +
+      "this wait at the old 30s with the scanner still advancing — 60s keeps at least a 1.5x " +
+      "margin over the largest of those measurements",
   },
   restartTypeProviderSync: {
     budgetMs: 45_000,
@@ -378,11 +384,11 @@ export const POLL_SEQUENCES = {
   },
   restartedWorkspaceSuiteSetup: {
     members: ["restartEntryDiagnostics", "restartTypeProviderSync"],
-    parentTimeoutMs: 90_000,
+    parentTimeoutMs: 120_000,
     reason:
       "a suite that asserts workspace-wide state restarts the language server, waits for the NEW " +
       "server to certify its entry document, then for its level-2 announcement — in series " +
-      "under the hook's declared 90s deadline",
+      "under the hook's declared 120s deadline",
   },
   restartedWorkspaceReferences: {
     members: ["restartTypeProviderSync"],
@@ -399,11 +405,11 @@ export const POLL_SEQUENCES = {
       "restartEntryDiagnostics",
       "waitForFileReady",
     ],
-    parentTimeoutMs: 90_000,
+    parentTimeoutMs: 180_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
       "server epoch: restart and entry diagnostics, then file ready — twice, in series, under its " +
-      "own 90s",
+      "own 180s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "feature-exposure-contract.v1",
+    "currentOwner": "DX0",
+    "finalOwner": "DX0",
+    "receivingAcceptance": "DX0-AC1: playground gaps keep promotion blocked until an executable route and replay case exist"
+  },
+  {
+    "id": "host-execution-class.v1",
+    "currentOwner": "DX0",
+    "finalOwner": "DX0",
+    "receivingAcceptance": "DX0-AC2: native-only browser capability claims without a build are rejected"
+  },
+  {
+    "id": "product-receipt-basis.v1",
+    "currentOwner": "DX0",
+    "finalOwner": "DX0",
+    "receivingAcceptance": "DX0-AC-BASIS: receipt-binding runtime tests are bound to the downstream inspection owners, not fabricated here"
+  },
+  {
+    "id": "cross-surface-inventory.v1",
+    "currentOwner": "DX0",
+    "finalOwner": "DX0",
+    "receivingAcceptance": "DX0.1: current commands, analyses, clients and provider modes captured before consumers are added"
+  },
+  {
+    "id": "rails-policy.v1",
+    "currentOwner": "DX0",
+    "finalOwner": "DX0",
+    "receivingAcceptance": "DX0-AC3: native Flow facts stay separate from TypeScript hover/diagnostics"
+  }
+]

@@ -1,0 +1,27 @@
+[
+  {
+    "text": "API Reference",
+    "items": [
+      {
+        "text": "@verter/unplugin",
+        "link": "/api/unplugin"
+      },
+      {
+        "text": "@verter/native",
+        "link": "/api/native"
+      },
+      {
+        "text": "@verter/wasm",
+        "link": "/api/wasm"
+      },
+      {
+        "text": "@verter/types",
+        "link": "/api/types"
+      },
+      {
+        "text": "@verter/component-meta",
+        "link": "/api/component-meta"
+      }
+    ]
+  }
+]

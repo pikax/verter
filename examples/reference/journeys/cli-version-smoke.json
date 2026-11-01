@@ -1,0 +1,18 @@
+{
+  "id": "cli-version-smoke",
+  "description": "run the shipped verter-tsc bin and observe its version banner",
+  "executionClass": "NativeOnly",
+  "pins": {
+    "node": ">=22"
+  },
+  "steps": [
+    {
+      "exampleId": "shipped-cli",
+      "command": "verter-tsc",
+      "args": [
+        "--version"
+      ],
+      "expectExit": 0
+    }
+  ]
+}

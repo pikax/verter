@@ -1,0 +1,16 @@
+{
+  "id": "shipped-cli",
+  "files": [
+    "cli/commands.json"
+  ],
+  "commands": [
+    "verter-tsc",
+    "verter-lsp",
+    "verter-mcp"
+  ],
+  "surfaces": [
+    "vue.tsc.project_check"
+  ],
+  "executionClass": "NativeOnly",
+  "proofClass": "static-proof"
+}
