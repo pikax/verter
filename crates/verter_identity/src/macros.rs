@@ -18,6 +18,17 @@ macro_rules! digest_identity {
                 Self($crate::canonical::Canonical::from_encodable(value))
             }
 
+            /// Build from a borrowed exact-size descriptor
+            /// ([`ExactCanonicalEncode`](crate::exact::ExactCanonicalEncode)):
+            /// the retained payload is constructed in one allocating call
+            /// and one canonical-byte hash, byte-identical to
+            /// [`Self::from_canonical`].
+            pub fn from_exact<T: $crate::exact::ExactCanonicalEncode + ?Sized>(
+                value: &T,
+            ) -> Self {
+                Self($crate::canonical::Canonical::from_exact(value))
+            }
+
             /// The compact digest, for hot-path hashing/comparison.
             pub fn digest(&self) -> $crate::encoding::CanonicalDigest {
                 self.0.digest()

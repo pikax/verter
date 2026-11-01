@@ -8,6 +8,8 @@
 use std::sync::Arc;
 
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
+use crate::exact::{ExactCanonicalEncode, SizingSink, WriterSink};
+use crate::framing;
 
 /// Digest-plus-full-bytes canonical identity payload.
 ///
@@ -43,6 +45,54 @@ impl Canonical {
     /// Builds from a [`CanonicalEncode`] value.
     pub fn from_encodable<T: CanonicalEncode>(value: &T) -> Self {
         Self::from_encoder(&value.canonical_encode())
+    }
+
+    /// Builds from a borrowed [`ExactCanonicalEncode`] descriptor in one
+    /// allocating call and one canonical-byte hash.
+    ///
+    /// The descriptor's fields are described once (through
+    /// [`ExactCanonicalEncode::exact_fields`]); the construction measures
+    /// that description, allocates the retained storage at the exact
+    /// finished length, writes the header and every field — digest sets
+    /// canonicalized (sorted, deduplicated) in place — and hashes the
+    /// finished bytes once. There is no growing body buffer and no
+    /// encoding scratch, so the total work is bounded to that single
+    /// allocation and single hash, digest-set processing included. The
+    /// bytes are exactly the streaming grammar's: the measuring and
+    /// writing passes share [`crate::framing`] with
+    /// [`CanonicalEncoder`].
+    ///
+    /// Descriptors must be deterministic per borrow — `exact_fields` is
+    /// driven once to size and once to write, and a descriptor whose two
+    /// passes disagree fails an assertion rather than producing wrong
+    /// bytes.
+    pub fn from_exact<T: ExactCanonicalEncode + ?Sized>(value: &T) -> Self {
+        let mut sizing = SizingSink::new();
+        value.exact_fields(&mut sizing);
+
+        // The one allocating call: retained storage at the exact finished
+        // length.
+        let len = framing::total_len(T::DOMAIN_TAG, sizing.body_len());
+        let mut shared: Arc<[u8]> = std::iter::repeat_n(0, len).collect();
+        let out = Arc::get_mut(&mut shared).expect("a fresh slice has one handle");
+
+        let header = framing::HeaderLayout::new(T::DOMAIN_TAG, sizing.field_count());
+        let header_len = header.write_into(T::DOMAIN_TAG, out);
+        let mut writer = WriterSink::new(&mut out[header_len..]);
+        value.exact_fields(&mut writer);
+        assert_eq!(
+            writer.written(),
+            sizing.body_len(),
+            "an exact-size descriptor described different bytes to its sizing \
+             and writing passes; exact_fields must be deterministic per borrow"
+        );
+
+        // The one canonical-byte hash.
+        let digest = CanonicalDigest::of_bytes(&shared);
+        Self {
+            digest,
+            bytes: shared,
+        }
     }
 
     /// The compact digest.

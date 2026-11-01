@@ -26,6 +26,9 @@ mod macros;
 
 pub mod canonical;
 pub mod encoding;
+pub mod exact;
 pub mod identity;
 pub mod mapping;
 pub mod profile;
+
+mod framing;
