@@ -11,6 +11,7 @@ import {
   createBoundedText,
   createTextDigester,
   loadWorkspacePackages,
+  resolveExampleManifest,
   resolvePackageExport,
   resolveShippedCommand,
   sha256Text,
@@ -25,9 +26,13 @@ const generatedRel = "docs/generated/typeinfo-row-registry-counts.md";
 const viteConfig = readFileSync(join(repoRoot, viteConfigRel), "utf8");
 const commands = readFileSync(join(repoRoot, commandsRel), "utf8");
 const generated = readFileSync(join(repoRoot, generatedRel), "utf8");
-const manifest = JSON.parse(
-  readFileSync(join(repoRoot, "examples/reference/manifest.json"), "utf8"),
-);
+// The manifest is a sharded index (DXM0): the header keeps home/pin and the
+// two index pages, rows register through fragment files, and readers observe
+// only the merged view resolved by the shared loader.
+const manifestRel = "examples/reference/manifest.json";
+const manifestHeader = JSON.parse(readFileSync(join(repoRoot, manifestRel), "utf8"));
+const { manifest } = resolveExampleManifest(join(repoRoot, "examples/reference"));
+const exampleFragment = (id) => `examples/reference/${id}/example.json`;
 
 function opts(extra = {}) {
   return { repoRoot, skipTypeinfoCheck: true, ...extra };
@@ -101,13 +106,12 @@ test("a side-effect import of package source internals fails", async () => {
 });
 
 test("a declared node: builtin import is not treated as an unpublished export", async () => {
-  const mutated = structuredClone(manifest);
-  const example = mutated.examples.find((row) => row.id === "unplugin-vite");
-  example.imports = [...example.imports, "node:fs"];
+  const unplugin = structuredClone(manifest.examples.find((row) => row.id === "unplugin-vite"));
+  unplugin.imports = [...unplugin.imports, "node:fs"];
   const receipt = await validate(
     opts({
       overlays: {
-        "examples/reference/manifest.json": JSON.stringify(mutated),
+        [exampleFragment("unplugin-vite")]: JSON.stringify(unplugin),
         [viteConfigRel]: `${viteConfig}\nimport fs from "node:fs";\n`,
       },
     }),
@@ -146,12 +150,12 @@ test("an example that invokes a bin absent from shipped packages fails", async (
 });
 
 test("an example citing a surface absent from the capability catalog fails", async () => {
-  const mutated = structuredClone(manifest);
-  mutated.examples[0].surfaces = ["invented.capability.matrix"];
+  const unplugin = structuredClone(manifest.examples.find((row) => row.id === "unplugin-vite"));
+  unplugin.surfaces = ["invented.capability.matrix"];
   const receipt = await validate(
     opts({
       overlays: {
-        "examples/reference/manifest.json": JSON.stringify(mutated),
+        [exampleFragment("unplugin-vite")]: JSON.stringify(unplugin),
       },
     }),
   );
@@ -226,21 +230,390 @@ test("digest labels follow posixRel of the examples root", async () => {
   assert.equal(receipt.projectConfiguration.examplesRoot, "examples/reference");
 });
 
+// The complete pre-conversion manifest, frozen as the monolithic file
+// recorded it before the DXM0 sharding (collections in the loader id order).
+// The resolved manifest must deep-equal it across all six root fields and
+// every row field; the header keeps home/pin and the two index pages only.
+const FROZEN_MANIFEST = {
+  home: "examples/reference",
+  pin: {
+    node: ">=22",
+    typescript: "7.1.0-beta",
+    vue: "3.6.0-rc.5",
+  },
+  examples: [
+    {
+      id: "component-meta-session",
+      files: ["component-meta/session.ts"],
+      imports: ["@verter/component-meta"],
+      surfaces: ["vue.component_meta.scalar"],
+      executionClass: "NativeOnly",
+      proofClass: "static-proof",
+    },
+    {
+      id: "shipped-cli",
+      files: ["cli/commands.json"],
+      commands: ["verter-tsc", "verter-lsp", "verter-mcp"],
+      surfaces: ["vue.tsc.project_check"],
+      executionClass: "NativeOnly",
+      proofClass: "static-proof",
+    },
+    {
+      id: "types-helpers",
+      files: ["types-helpers/example.ts"],
+      imports: ["@verter/types"],
+      surfaces: ["vue.language_service.typing"],
+      executionClass: "ExternalOwner",
+      proofClass: "static-proof",
+    },
+    {
+      id: "unplugin-vite",
+      files: ["unplugin-vite/vite.config.ts"],
+      imports: ["vite", "@verter/unplugin/vite"],
+      peers: ["vite"],
+      surfaces: ["vue.managed.compile.raw"],
+      executionClass: "NativeOnly",
+      proofClass: "static-proof",
+    },
+  ],
+  sdkGuides: {
+    index: "sdk/README.md",
+    topics: [
+      {
+        id: "compatibility",
+        page: "sdk/compatibility.md",
+        status: "pending",
+        producingNode: "XSDK9",
+      },
+      {
+        id: "contribution",
+        page: "sdk/contribution.md",
+        status: "pending",
+        producingNode: "XSDK9",
+      },
+      {
+        id: "debugging",
+        page: "sdk/debugging.md",
+        status: "pending",
+        producingNode: "XSDK9",
+      },
+      {
+        id: "isolation",
+        page: "sdk/isolation.md",
+        status: "pending",
+        producingNode: "XSDK9",
+      },
+      {
+        id: "packaging",
+        page: "sdk/packaging.md",
+        status: "pending",
+        producingNode: "XSDK9",
+      },
+      {
+        id: "permissions",
+        page: "sdk/permissions.md",
+        status: "pending",
+        producingNode: "XSDK9",
+      },
+    ],
+  },
+  recipes: {
+    index: "guides/README.md",
+    topics: [
+      {
+        id: "accessibility",
+        page: "guides/accessibility.md",
+        status: "pending",
+        producingNode: "AX0",
+      },
+      {
+        id: "compatibility",
+        page: "guides/compatibility.md",
+        status: "pending",
+        producingNode: "WBC0",
+      },
+      {
+        id: "css",
+        page: "guides/css.md",
+        status: "pending",
+        producingNode: "CSS0",
+      },
+      {
+        id: "debug",
+        page: "guides/debug.md",
+        status: "pending",
+        producingNode: "DBG0",
+      },
+      {
+        id: "performance",
+        page: "guides/performance.md",
+        status: "pending",
+        producingNode: "WPF0",
+      },
+      {
+        id: "runtime",
+        page: "guides/runtime.md",
+        status: "pending",
+        producingNode: "RTI0",
+      },
+      {
+        id: "security",
+        page: "guides/security.md",
+        status: "pending",
+        producingNode: "SEC0",
+      },
+      {
+        id: "tests",
+        page: "guides/tests.md",
+        status: "pending",
+        producingNode: "TST0",
+      },
+    ],
+  },
+  journeys: [
+    {
+      id: "cli-version-smoke",
+      description: "run the shipped verter-tsc bin and observe its version banner",
+      executionClass: "NativeOnly",
+      pins: {
+        node: ">=22",
+      },
+      steps: [
+        {
+          exampleId: "shipped-cli",
+          command: "verter-tsc",
+          args: ["--version"],
+          expectExit: 0,
+        },
+      ],
+    },
+  ],
+};
+
+test("the sharded reference manifest resolves deep-equal to the frozen pre-conversion file", () => {
+  assert.deepEqual(
+    Object.keys(manifestHeader).sort(),
+    ["home", "pin", "recipes", "sdkGuides"],
+    "the header must keep only home, pin and the two index pages",
+  );
+  assert.equal(manifestHeader.sdkGuides.index, "sdk/README.md");
+  assert.equal(manifestHeader.recipes.index, "guides/README.md");
+  assert.deepEqual(manifest, FROZEN_MANIFEST);
+
+  // Twin: a planted fragment that drops one field of one row breaks the
+  // frozen comparison (the discriminator re-runs, not just the mutation).
+  const planted = structuredClone(manifest);
+  delete planted.examples.find((row) => row.id === "types-helpers").proofClass;
+  assert.throws(
+    () => assert.deepEqual(planted, FROZEN_MANIFEST),
+    /proofClass/,
+    "an altered fragment row must fail the frozen comparison",
+  );
+});
+
+test("a fragment edit changes the source digest", async () => {
+  const fresh = await validate(opts());
+  const row = structuredClone(manifest.examples.find((r) => r.id === "shipped-cli"));
+  row.commands = [...row.commands];
+  const edited = await validate(
+    opts({ overlays: { [exampleFragment("shipped-cli")]: JSON.stringify(row) } }),
+  );
+  assert.equal(edited.completenessState, fresh.completenessState);
+  assert.notEqual(edited.sourceRevisions.digest, fresh.sourceRevisions.digest);
+});
+
+// The pre-conversion vitepress sidebar, frozen section by section; the docs
+// sidebar is generated from docs/.vitepress/sidebar/<section>.json fragments.
+const FROZEN_SIDEBAR = {
+  "/guide/": [
+    {
+      text: "Introduction",
+      items: [
+        {
+          text: "What is Verter?",
+          link: "/guide/",
+        },
+        {
+          text: "Getting Started",
+          link: "/guide/getting-started",
+        },
+      ],
+    },
+    {
+      text: "Bundler Integration",
+      items: [
+        {
+          text: "Vite",
+          link: "/guide/vite",
+        },
+        {
+          text: "webpack",
+          link: "/guide/webpack",
+        },
+        {
+          text: "Other Bundlers",
+          link: "/guide/other-bundlers",
+        },
+      ],
+    },
+    {
+      text: "Features",
+      items: [
+        {
+          text: "Overview",
+          link: "/guide/features",
+        },
+        {
+          text: "Performance",
+          link: "/guide/performance",
+        },
+        {
+          text: "Cross-File Optimization",
+          link: "/guide/cross-file-optimization",
+        },
+        {
+          text: "Linting",
+          link: "/guide/linting",
+        },
+        {
+          text: "Architecture",
+          link: "/guide/architecture",
+        },
+      ],
+    },
+    {
+      text: "Advanced",
+      items: [
+        {
+          text: "Reactivity Classification",
+          link: "/guide/advanced/reactivity-classification",
+        },
+        {
+          text: "Template Compilation",
+          link: "/guide/advanced/template-compilation",
+        },
+      ],
+    },
+  ],
+  "/api/": [
+    {
+      text: "API Reference",
+      items: [
+        {
+          text: "@verter/unplugin",
+          link: "/api/unplugin",
+        },
+        {
+          text: "@verter/native",
+          link: "/api/native",
+        },
+        {
+          text: "@verter/wasm",
+          link: "/api/wasm",
+        },
+        {
+          text: "@verter/types",
+          link: "/api/types",
+        },
+        {
+          text: "@verter/component-meta",
+          link: "/api/component-meta",
+        },
+      ],
+    },
+  ],
+  "/editor/": [
+    {
+      text: "Editor Support",
+      items: [
+        {
+          text: "VS Code Extension",
+          link: "/editor/vscode",
+        },
+        {
+          text: "Other Editors (Lapce/Zed/Helix/Neovim)",
+          link: "/editor/other-editors",
+        },
+        {
+          text: "LSP Features",
+          link: "/editor/lsp-features",
+        },
+        {
+          text: "MCP Server",
+          link: "/editor/mcp-server",
+        },
+        {
+          text: "Settings Reference",
+          link: "/editor/settings",
+        },
+      ],
+    },
+  ],
+  "/contributing/": [
+    {
+      text: "Contributing",
+      items: [
+        {
+          text: "How to Contribute",
+          link: "/contributing/",
+        },
+        {
+          text: "Rust Setup",
+          link: "/contributing/rust-setup",
+        },
+        {
+          text: "Testing",
+          link: "/contributing/testing",
+        },
+        {
+          text: "Semantic Benchmark",
+          link: "/contributing/semantic-benchmark",
+        },
+        {
+          text: "CI/CD",
+          link: "/contributing/ci-cd",
+        },
+      ],
+    },
+  ],
+};
+
+test("the vitepress sidebar composes from per-section fragments only", () => {
+  const configRel = "docs/.vitepress/config.ts";
+  const config = readFileSync(join(repoRoot, configRel), "utf8");
+  const composed = {};
+  for (const section of Object.keys(FROZEN_SIDEBAR)) {
+    const name = section.replaceAll("/", "");
+    const fragmentRel = `docs/.vitepress/sidebar/${name}.json`;
+    assert.ok(config.includes(`./sidebar/${name}.json`), `${configRel} must import ${fragmentRel}`);
+    composed[section] = JSON.parse(readFileSync(join(repoRoot, fragmentRel), "utf8"));
+  }
+  assert.deepEqual(composed, FROZEN_SIDEBAR);
+
+  // No monolithic row survives in config.ts, and a planted fragment that
+  // drops an item breaks the frozen comparison.
+  assert.ok(!config.includes("/guide/getting-started"), "sidebar links live in fragments");
+  const planted = structuredClone(composed);
+  planted["/editor/"][0].items.shift();
+  assert.throws(
+    () => assert.deepEqual(planted, FROZEN_SIDEBAR),
+    /text/,
+    "an altered sidebar fragment must fail the frozen comparison",
+  );
+});
+
 test("custom examplesRoot labels receipts with that path", async () => {
   const root = "examples/alt-reference";
   const receipt = await validate(
     opts({
       examplesRoot: join(repoRoot, root),
       overlays: {
-        [`${root}/manifest.json`]: JSON.stringify({
-          examples: [
-            {
-              id: "alt",
-              files: ["alt.ts"],
-              imports: ["@verter/types"],
-              surfaces: ["vue.language_service.typing"],
-            },
-          ],
+        [`${root}/manifest.json`]: JSON.stringify({ home: root }),
+        [`${root}/alt/example.json`]: JSON.stringify({
+          id: "alt",
+          files: ["alt.ts"],
+          imports: ["@verter/types"],
+          surfaces: ["vue.language_service.typing"],
         }),
         [`${root}/alt.ts`]:
           'import type { PatchHidden } from "@verter/types";\nexport type T = PatchHidden<{}, {}>;\n',
@@ -319,12 +692,10 @@ test("a compound command is rejected before the bin lookup", async () => {
     assert.equal(resolved.ok, false, command);
     assert.equal(resolved.code, "compound-command", command);
   }
-  const mutated = structuredClone(manifest);
-  mutated.examples.find((row) => row.id === "shipped-cli").commands = [
-    "verter-tsc && cargo run -p verter_tsc",
-  ];
+  const shippedCli = structuredClone(manifest.examples.find((row) => row.id === "shipped-cli"));
+  shippedCli.commands = ["verter-tsc && cargo run -p verter_tsc"];
   const receipt = await validate(
-    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+    opts({ overlays: { [exampleFragment("shipped-cli")]: JSON.stringify(shippedCli) } }),
   );
   assert.notEqual(receipt.completenessState, "complete");
   const rejected = receipt.errors.find((item) => item.code === "unshipped-command");
@@ -333,10 +704,10 @@ test("a compound command is rejected before the bin lookup", async () => {
 });
 
 test("an example file outside the example home is rejected", async () => {
-  const mutated = structuredClone(manifest);
-  mutated.examples.find((row) => row.id === "types-helpers").files = ["../../package.json"];
+  const typesHelpers = structuredClone(manifest.examples.find((row) => row.id === "types-helpers"));
+  typesHelpers.files = ["../../package.json"];
   const receipt = await validate(
-    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+    opts({ overlays: { [exampleFragment("types-helpers")]: JSON.stringify(typesHelpers) } }),
   );
   assert.notEqual(receipt.completenessState, "complete");
   const outside = receipt.errors.find((item) => item.code === "example-outside-home");
@@ -382,11 +753,11 @@ test("an observed import of an undeclared non-peer package is unknown", async ()
 });
 
 test("manifest pins are validated against the running engine and the workspace", async () => {
-  const mutated = structuredClone(manifest);
-  mutated.pin = { ...mutated.pin, node: ">=999", typescript: "0.0.0-not-installed" };
-  const receipt = await validate(
-    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
-  );
+  const header = {
+    ...manifestHeader,
+    pin: { ...manifestHeader.pin, node: ">=999", typescript: "0.0.0-not-installed" },
+  };
+  const receipt = await validate(opts({ overlays: { [manifestRel]: JSON.stringify(header) } }));
   assert.notEqual(receipt.completenessState, "complete");
   const node = receipt.errors.find(
     (item) => item.code === "pin-mismatch" && item.package === "node",
