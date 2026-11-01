@@ -5,7 +5,7 @@ use crate::provenance::{AuthoredProvenance, FormatProvenanceTable, ProvenanceErr
 
 /// Synthetic caller-side source-revision identity: stable for one authored
 /// text revision, unequal across revisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Revision(u64);
 
 fn span(start: u32, end: u32) -> AuthoredFormatByteRange {
@@ -233,5 +233,51 @@ fn cross_revision_reuse_is_rejected() {
     assert_eq!(
         join_segments(&segments, &Revision(7), &other_revision_table),
         Err(ProvenanceError::RevisionMismatch)
+    );
+}
+
+#[test]
+fn stale_provenance_is_rejected_under_the_current_table_revision() {
+    // The destination's own revision is supplied, the ordinal and the range
+    // coincide, and the stale binding must still be rejected: a binding
+    // minted under revision 7 never joins a revision-8 identity space. The
+    // identity itself carries its minting revision, so no caller-supplied
+    // basis can launder it.
+    let (old_table, old_segments) = render_against(Revision(7));
+    let (mut current_table, _) = render_against(Revision(8));
+
+    assert_ne!(old_table.source_revision(), current_table.source_revision());
+
+    let stale = *old_segments[0].provenance();
+    let current = current_table
+        .iter()
+        .next()
+        .expect("the current revision bound at least one span");
+    // Coinciding ordinal and range across revisions never make two minted
+    // identities equal, and the join under the destination's own revision is
+    // still a cross-revision join.
+    assert_ne!(stale.id(), current.id());
+    assert_eq!(stale.range(), current.range());
+    assert_eq!(
+        current_table.validate(current_table.source_revision(), &stale),
+        Err(ProvenanceError::RevisionMismatch)
+    );
+    assert_eq!(
+        join_segments(
+            &old_segments,
+            current_table.source_revision(),
+            &current_table
+        ),
+        Err(ProvenanceError::RevisionMismatch)
+    );
+    // The stale identity never resolves or re-declares in the current
+    // table's numbering space: this table never minted it.
+    assert_eq!(
+        current_table.resolve(stale.id()),
+        Err(ProvenanceError::UnknownId { id: stale.id() })
+    );
+    assert_eq!(
+        current_table.declare(stale.id(), stale.range()),
+        Err(ProvenanceError::UnknownId { id: stale.id() })
     );
 }

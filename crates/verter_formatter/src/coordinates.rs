@@ -8,11 +8,22 @@
 //! reuse of the compiler's generated-output coordinates: an authored position
 //! can never stand in for a formatted one, in either direction.
 //!
+//! Raw integer construction is internal to the formatter: the public boundary
+//! hands coordinates over already typed and checked, so no public API takes a
+//! bare integer where a coordinate is meant.
+//!
 //! ```compile_fail
-//! use verter_formatter::coordinates::{AuthoredFormatByteOffset, FormattedByteOffset};
+//! use verter_formatter::coordinates::{
+//!     AuthoredFormatByteOffset, FormattedByteOffset,
+//! };
 //! fn authored_only(_offset: AuthoredFormatByteOffset) {}
+//! fn formatted_offset() -> FormattedByteOffset {
+//!     // However a formatted offset is obtained inside the formatter, it is
+//!     // a formatted offset.
+//!     unreachable!()
+//! }
 //! // A formatted offset cannot stand in for an authored offset.
-//! authored_only(FormattedByteOffset::from_raw(0));
+//! authored_only(formatted_offset());
 //! ```
 //!
 //! ```compile_fail
@@ -23,14 +34,18 @@
 //! ```
 //!
 //! ```compile_fail
-//! use verter_formatter::coordinates::{
-//!     AuthoredFormatByteRange, FormattedByteOffset,
-//! };
+//! use verter_formatter::coordinates::{AuthoredFormatByteRange, FormattedByteOffset};
+//! fn formatted_offset() -> FormattedByteOffset {
+//!     unreachable!()
+//! }
 //! // An authored range cannot be built from formatted offsets.
-//! let _ = AuthoredFormatByteRange::new(
-//!     FormattedByteOffset::from_raw(0),
-//!     FormattedByteOffset::from_raw(1),
-//! );
+//! let _ = AuthoredFormatByteRange::new(formatted_offset(), formatted_offset());
+//! ```
+//!
+//! ```compile_fail
+//! use verter_formatter::coordinates::FormattedByteOffset;
+//! // Raw integer construction is not part of the public coordinate boundary.
+//! let _ = FormattedByteOffset::from_raw(0);
 //! ```
 
 use std::fmt;
@@ -87,11 +102,17 @@ macro_rules! utf8_byte_domain {
         pub struct $offset(u32);
 
         impl $offset {
-            /// Explicit named construction from a raw byte value. This is the
-            /// only integer entry point; there is no `From<u32>` and no
-            /// conversion into any other coordinate domain.
+            /// Construction from a raw byte value: a test-fixture seam, not a
+            /// public entry point. No public API takes an integer where a
+            /// coordinate is meant — offsets cross the public boundary only
+            /// as already-typed values bound to their exact source text, and
+            /// the formatter modules that fill this crate will mint them
+            /// through their own internal checked paths. There is no
+            /// `From<u32>` and no conversion into any other coordinate
+            /// domain.
+            #[cfg(test)]
             #[inline]
-            pub const fn from_raw(value: u32) -> Self {
+            pub(crate) const fn from_raw(value: u32) -> Self {
                 Self(value)
             }
 
