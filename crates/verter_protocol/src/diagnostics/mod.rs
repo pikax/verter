@@ -1,3 +1,3 @@
 //! Filled by NCK2.
 
-mod authority;
+pub mod authority;

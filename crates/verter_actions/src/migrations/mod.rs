@@ -1,7 +1,7 @@
 //! Filled by MIG1.
 
-mod extension;
-mod recipe;
-mod recipes;
-mod transaction;
-mod verify;
+pub mod extension;
+pub mod recipe;
+pub mod recipes;
+pub mod transaction;
+pub mod verify;

@@ -1,4 +1,4 @@
 //! Filled by DX1.
 
-mod mcp;
-mod relations;
+pub mod mcp;
+pub mod relations;

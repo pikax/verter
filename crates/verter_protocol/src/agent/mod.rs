@@ -1,6 +1,6 @@
 //! Filled by AGM-ID.
 
-mod envelope;
-mod ids;
-mod plan;
-mod receipt;
+pub mod envelope;
+pub mod ids;
+pub mod plan;
+pub mod receipt;

@@ -24,8 +24,16 @@ pub use types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 // declaration-only: its doc line names the node that fills it, and product
 // nodes write inside their own reserved module only.
 pub mod assists;
-mod fix_intents;
-mod migrations;
-mod refactors;
-mod rename_intents;
-mod transaction;
+pub mod compat_prefix;
+pub mod css_custom_property;
+pub mod css_logical;
+pub mod css_value_assists;
+pub mod fix_all;
+pub mod fix_intents;
+pub mod inline_style_to_class;
+pub mod migrations;
+pub mod refactors;
+pub mod rename_intents;
+pub mod scss_module;
+pub mod transaction;
+pub mod verify;

@@ -1,20 +1,20 @@
 //! Filled by ACT1.
 
-mod a11y_intelligence;
-mod component_contract;
-mod composed_page_explain;
-mod context_explain;
-mod cypress;
-mod effects_explain;
-mod embedded_documents;
-mod forwarding_explain;
-mod html_fragments_explain;
-mod hydration_explain;
-mod interpretation;
-mod js_change_signature;
-mod js_extract_inline;
-mod js_move_declaration;
-mod regex_captures;
-mod regex_simplify;
-mod render_tree_explain;
-mod transport_explain;
+pub mod a11y_intelligence;
+pub mod component_contract;
+pub mod composed_page_explain;
+pub mod context_explain;
+pub mod cypress;
+pub mod effects_explain;
+pub mod embedded_documents;
+pub mod forwarding_explain;
+pub mod html_fragments_explain;
+pub mod hydration_explain;
+pub mod interpretation;
+pub mod js_change_signature;
+pub mod js_extract_inline;
+pub mod js_move_declaration;
+pub mod regex_captures;
+pub mod regex_simplify;
+pub mod render_tree_explain;
+pub mod transport_explain;
