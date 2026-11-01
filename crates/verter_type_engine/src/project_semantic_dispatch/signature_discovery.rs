@@ -551,6 +551,10 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 self.apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[unknown])
             }
             SemanticNodeData::KeyOf { .. } | SemanticNodeData::Mapped { .. } => Ok(Vec::new()),
+            // The checker's error type reads as `any`, which has no signatures.
+            SemanticNodeData::Opaque(error) if super::build::is_certified_recovery(error) => {
+                Ok(Vec::new())
+            }
             SemanticNodeData::Opaque(error) => Err(DiscoveryError::Incomplete(
                 IncompleteReason::from_query_error(error),
             )),

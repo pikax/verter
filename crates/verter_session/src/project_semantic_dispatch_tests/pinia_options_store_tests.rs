@@ -205,7 +205,7 @@ pub(super) fn answer_mismatch(answer: &TypeExpr, checker: &str) -> Option<String
 pub(super) const SCENARIO: &str = "/pinia/scenario.ts";
 
 /// The named demand of the probe alias `__P{index}`.
-fn named_answer(
+pub(super) fn named_answer(
     host: &crate::VerterHost,
     index: usize,
 ) -> verter_type_engine::semantic_query_memo::node_roots::NodeRoot {
@@ -218,7 +218,7 @@ fn named_answer(
 }
 
 /// `node` projected to its wire answer.
-fn wire_answer(
+pub(super) fn wire_answer(
     host: &crate::VerterHost,
     node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
 ) -> TypeExpr {
@@ -450,6 +450,15 @@ fn marked_store_mismatches(project: &Project<'_>, setting: Setting) -> Vec<Strin
             setting.label
         ));
     }
+    match store_result(&host) {
+        Ok(store) if store.checker_diagnostics().is_empty() => {}
+        Ok(store) => failures.push(format!(
+            "{}: a valid store reports {:?}",
+            setting.label,
+            store.checker_diagnostics()
+        )),
+        Err(error) => failures.push(format!("{}: the store is {error}", setting.label)),
+    }
     let mut report = |probe: &str, failure: Option<String>| {
         failures.extend(failure.map(|failure| format!("{}: `{probe}`: {failure}", setting.label)));
     };
@@ -633,10 +642,21 @@ fn namesake_diagnostics(scenario: &str, no_implicit_any: bool) -> Vec<(u32, u32,
 }
 
 /// Every failure of a store a namesake stands beside to answer as the
-/// checker's recovery does, in one compiler setting: each member alone and in
-/// the whole store, the shared flow result of the store's initializer free
-/// of any refusal, and its diagnostics each at the checker's position.
+/// checker's recovery does, in one compiler setting.
 fn namesake_mismatches(project: &Project<'_>, setting: Setting) -> Vec<String> {
+    recovered_store_mismatches(project, setting, &NAMESAKE_STORE, namesake_diagnostics)
+}
+
+/// Every failure of an erroneous store to answer as the checker's recovery
+/// does, in one compiler setting: each member alone and in the whole store as
+/// `checker` lists them, the shared flow result of the store's initializer
+/// free of any refusal, and its `diagnostics` each at the checker's position.
+fn recovered_store_mismatches(
+    project: &Project<'_>,
+    setting: Setting,
+    checker: &[&str; 8],
+    diagnostics: fn(&str, bool) -> Vec<(u32, u32, u32)>,
+) -> Vec<String> {
     let probes: Vec<&str> = MEMBERS
         .iter()
         .map(|(probe, _)| *probe)
@@ -647,15 +667,15 @@ fn namesake_mismatches(project: &Project<'_>, setting: Setting) -> Vec<String> {
     let answers: Vec<TypeExpr> = (0..probes.len())
         .map(|index| wire_answer(&host, &named_answer(&host, index)))
         .collect();
-    for ((probe, checker), answer) in probes.iter().zip(&NAMESAKE_STORE).zip(&answers) {
+    for ((probe, checker), answer) in probes.iter().zip(checker).zip(&answers) {
         failures.extend(
             answer_mismatch(answer, checker)
                 .map(|failure| format!("{}: `{probe}`: {failure}", setting.label)),
         );
     }
     match &answers[probes.len() - 1] {
-        TypeExpr::Tuple { elements, .. } if elements.len() == NAMESAKE_STORE.len() => {
-            for (element, checker) in elements.iter().zip(&NAMESAKE_STORE) {
+        TypeExpr::Tuple { elements, .. } if elements.len() == checker.len() => {
+            for (element, checker) in elements.iter().zip(checker) {
                 failures.extend(
                     answer_mismatch(&element.ty, checker)
                         .map(|failure| format!("{}: `{WHOLE_STORE}`: {failure}", setting.label)),
@@ -685,7 +705,7 @@ fn namesake_mismatches(project: &Project<'_>, setting: Setting) -> Vec<String> {
                 .collect();
             let scenario = format!("type __BenchInit = 0;\n{}\n", project.scenario);
             let no_implicit_any = !setting.options.contains("noImplicitAny");
-            if found != namesake_diagnostics(&scenario, no_implicit_any) {
+            if found != diagnostics(&scenario, no_implicit_any) {
                 failures.push(format!(
                     "{}: the store's diagnostics are {found:?}",
                     setting.label
@@ -902,46 +922,62 @@ fn a_namesake_shadows_its_own_modules_global_contribution_with_both_checks_off()
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// With no `ThisType` declared, the checker reports the name (TS2304 at
-/// both `ThisType` references of the options declaration, and TS7006 on
-/// each getter's `state` under `noImplicitAny`) and recovers: `G & <error>`
+/// The checker's store with no `ThisType` declared (TypeScript, all four
+/// settings alike), member by member as [`WHOLE_STORE`] lists them. `G & <error>`
 /// and `A & <error>` are the error type, so `getters` and `actions` infer
-/// nothing. The state members, `$id` and `$state` answer as the marker-typed
-/// store's, the call is not refused, and neither inference reaches a getter
-/// or an action through the marker: `double` and `first` stay unread on the
-/// store, and no action is typed. Measured on TypeScript, all four settings:
-/// each of those members is absent there (TS2339 at the probe, `any`).
-fn assert_undeclared_marker_recovery(setting: Setting) {
-    let project = Project::store("", &[]);
-    let probes: Vec<&str> = MEMBERS
-        .iter()
-        .map(|(probe, _)| *probe)
-        .chain(["St['$state']", "St"])
+/// nothing: the state members, `$id` and `$state` answer as the marked store's,
+/// and each getter and action is absent from it, TS2339 and `any` at its read.
+const UNDECLARED_STORE: [&str; 8] = [
+    "number",
+    "{ id: number; }[]",
+    "any",
+    "any",
+    "any",
+    "any",
+    "\"counter\"",
+    "{ count: number; items: { id: number; }[]; name: string; } & \
+     PiniaCustomStateProperties<{ count: number; items: { id: number; }[]; name: string; }>",
+];
+
+/// What the checker reports around a store with no `ThisType` declared: TS2304
+/// at both references to the name, and, since the error type types no
+/// callback, TS7006 on each getter's `state` under `noImplicitAny`. The
+/// actions read `this` as the error type: no member of it is absent and no
+/// return is circular.
+fn undeclared_diagnostics(scenario: &str, no_implicit_any: bool) -> Vec<(u32, u32, u32)> {
+    let offset = |at: usize| u32::try_from(at).expect("a fixture offset");
+    let mut expected: Vec<(u32, u32, u32)> = scenario
+        .match_indices("ThisType<")
+        .map(|(at, _)| (2304, offset(at), offset(at + "ThisType".len())))
         .collect();
-    let mut failures = Vec::new();
-    let host = project.host(setting.options, &probes);
-    let answers: Vec<TypeExpr> = (0..probes.len())
-        .map(|index| wire_answer(&host, &named_answer(&host, index)))
-        .collect();
-    // The members the checker answers as the marked store's.
-    for ordinal in [0, 1, 6, 7] {
-        failures.extend(
-            answer_mismatch(&answers[ordinal], NAMESAKE_STORE[ordinal])
-                .map(|failure| format!("{}: `{}`: {failure}", setting.label, probes[ordinal])),
+    if no_implicit_any {
+        expected.extend(
+            scenario
+                .match_indices("(state) =>")
+                .map(|(at, _)| (7006, offset(at + 1), offset(at + 1 + "state".len()))),
         );
     }
-    // No getter or action came through the marker.
-    for ordinal in [2, 3, 4, 5] {
-        if answer_mismatch(&answers[ordinal], MEMBERS[ordinal].1).is_none() {
+    expected.sort_by_key(|&(_, start, _)| start);
+    expected
+}
+
+/// Every failure of the store with no `ThisType` declared to answer as the
+/// checker's recovery does, the getters' and actions' reads each carrying the
+/// absent member's diagnostic rather than any other cause.
+fn assert_undeclared_marker_recovery(setting: Setting) {
+    let project = Project::store("", &[]);
+    let mut failures =
+        recovered_store_mismatches(&project, setting, &UNDECLARED_STORE, undeclared_diagnostics);
+    let probes: Vec<&str> = MEMBERS.iter().map(|(probe, _)| *probe).collect();
+    let host = project.host(setting.options, &probes);
+    for ordinal in 2..=5 {
+        let code = named_answer(&host, ordinal).checker_recovery_code();
+        if code != Some(2339) {
             failures.push(format!(
-                "{}: `{}` was inferred through the undeclared marker",
+                "{}: `{}` carries {code:?}, not TS2339",
                 setting.label, probes[ordinal]
             ));
         }
-    }
-    match store_degradation(&host) {
-        Ok(None) => {}
-        refused => failures.push(format!("{}: the store is {refused:?}", setting.label)),
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -786,12 +786,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     )
                     .into_complete_active_query_build_node(self)
                     // An access the evaluation could not read (an open
-                    // generic's element, an absent key) keeps the authored,
-                    // deferred access rather than relating a miss sentinel.
+                    // generic's element) keeps the authored, deferred access
+                    // rather than relating a miss sentinel. The checker's
+                    // error type for an absent key is the access's answer.
                     .filter(|node| {
                         !matches!(
                             self.graph().node_data(*node).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
+                            Some(SemanticNodeData::Opaque(error))
+                                if !super::build::is_certified_recovery(error)
                         )
                     })
                     .unwrap_or(check);

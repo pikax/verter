@@ -21,7 +21,9 @@ use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::{OwnedSlice, PrimitiveName, TypeExpr};
 
 use super::differential_harness_tests::ALL;
-use super::pinia_options_store_tests::{answer_mismatch, Project, SCENARIO};
+use super::pinia_options_store_tests::{
+    answer_mismatch, named_answer, wire_answer, Project, SCENARIO,
+};
 use crate::VerterHost;
 
 /// Where a row's diagnostics are read from: a function of the scenario.
@@ -423,6 +425,93 @@ fn a_position_the_checker_recovers_nothing_for_keeps_its_cause() {
             .expect("the value projects"),
         TypeExpr::Primitive(PrimitiveName::Any)
     );
+}
+
+/// A written access a closed type proves absent is the checker's TS2339 and its
+/// error type, read through whatever names the type and in whatever position
+/// the access stands; a conditional over the error type is the error type.
+#[test]
+fn a_written_access_the_object_proves_absent_is_the_error_type() {
+    let project = Project::module(
+        "type Named = { a: 1 } & { c: 2 };\n\
+         type Applied<T> = { own: T } & Named;\n\
+         type Open<T> = (T & { a: 1 })['b'];\n",
+    );
+    let failures = project.mismatches(&[
+        ("{ a: 1 }['b']", "any"),
+        ("Named['b']", "any"),
+        ("Applied<1>['b']", "any"),
+        ("Pick<{ a: 1 }, 'a'>['b']", "any"),
+        ("[{ a: 1 }['b'], { a: 1 }['a']]", "[any, 1]"),
+        ("ReturnType<{ a: 1 }['b']>", "any"),
+        ("{ a: 1 }['b'] extends string ? 1 : 2", "any"),
+        ("Undeclared['b']", "any"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let host = project.host(ALL[0].options, &["{ a: 1 }['b']", "Applied<1>['b']"]);
+    for probe in 0..2 {
+        assert_eq!(
+            named_answer(&host, probe).checker_recovery_code(),
+            Some(2339)
+        );
+    }
+}
+
+/// An access absence is not proven for keeps its answer or its cause: an index
+/// signature or a present member reads its value, an open type parameter is
+/// decided once it is bound, and an unresolved import proves nothing.
+#[test]
+fn an_access_absence_is_not_proven_for_is_no_recovery() {
+    let project = Project::module(
+        "import { Missing } from './nowhere';\n\
+         type Open<T> = (T & { a: 1 })['b'];\n\
+         export type Unresolved = Missing['b'];\n\
+         export type Heritage = Missing & { a: 1 };\n",
+    );
+    let failures = project.mismatches(&[
+        ("Record<string, 1>['b']", "1"),
+        ("Open<{ b: 2 }>", "2"),
+        ("Open<{ c: 2 }>", "any"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let host = project.host(ALL[0].options, &["Unresolved", "Heritage['b']"]);
+    for probe in 0..2 {
+        let node = named_answer(&host, probe);
+        assert_eq!(node.checker_recovery_code(), None);
+        assert_ne!(
+            wire_answer(&host, &node),
+            TypeExpr::Primitive(PrimitiveName::Any)
+        );
+    }
+}
+
+/// What a literal's functions report on their own is no report once the call
+/// gives the literal a `this`: a valid marked store reports nothing, and a read
+/// the marked `this` still lacks stays reported.
+#[test]
+fn a_contextual_this_takes_the_literals_own_reports() {
+    let marked = "declare function m<A>(o: { a?: A & ThisType<A & { n: 1 }> }): A;\n";
+    let valid = Project::module(&format!(
+        "{marked}export const v = m({{ a: {{ r() {{ return this.n; }} }} }});"
+    ));
+    let host = valid.host(ALL[0].options, &["typeof v"]);
+    let result = result_of(&host, &initializer("v")).expect("the store has a value");
+    assert!(
+        result.checker_diagnostics().is_empty(),
+        "{:?}",
+        result.checker_diagnostics()
+    );
+    let absent = Project::module(&format!(
+        "{marked}export const v = m({{ a: {{ r() {{ return this.nope; }} }} }});"
+    ));
+    let host = absent.host(ALL[0].options, &["typeof v"]);
+    let result = result_of(&host, &initializer("v")).expect("the store has a value");
+    let codes: Vec<u32> = result
+        .checker_diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code().code())
+        .collect();
+    assert_eq!(codes, [2339]);
 }
 
 /// A cancelled request answers no recovery, and the retry computes it.

@@ -155,8 +155,8 @@ the checker's first failure and records no diagnostic.
 
 ## Error recovery in a flow
 
-`project_semantic_dispatch/flow_return_recovery.rs` owns the two recoveries the flow rail answers.
-Each is `Opaque(QueryError::CheckerRecovery)` with a certified basis: it reads, relates and prints
+`project_semantic_dispatch/flow_return_recovery.rs` owns the recoveries the flow rail answers. A
+recovery is `Opaque(QueryError::CheckerRecovery)` with a certified basis: it reads, relates and prints
 as `any`, leaves the result complete (no `FlowReturnDegradation`, warm-admissible) and stays
 distinct from an authored `any` and from every typed gap. A consumer tells a recovery from a
 refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
@@ -185,11 +185,32 @@ refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
   their report name through signature composition; their TS7023 occurrence rides the enclosing flow
   result and the nested body's replayed diagnostic effects.
 
+- **A written indexed access.** `build_project_path` answers a single literal `Index` hop whose walk
+  missed with TS2339 and the error type when `indexed_access_proves_absence` holds: every constituent,
+  through the aliases and declarations naming them, settles to a closed object lacking the key and its
+  apparent members. A deferred operator, an open type parameter or a walk that stopped proves nothing and
+  keeps its answer. A conditional over the error type is the error type, signature utilities included, and
+  the error type has no signatures (`SignaturesOfType`).
+- **The error type as a literal's contextual type.** A written union or intersection holding the error
+  type is that type (`contextual_error_type`). The literal's `this` reads it, so a read off `this` reports
+  nothing and no return through it is circular, and its functions have no contextual signature:
+  `report_error_contextual` records TS7006 on each plain unannotated parameter under `noImplicitAny`.
+- **TS2304.** A name `names_nothing_in_program` proves undeclared recovers with `undeclared_name_recovery`,
+  whose origin is the reference. A literal that error type types reports TS2304 at every reference in the
+  flow's own file, each found on the retained parse (`type_reference_name_spans`) skipping what a type
+  parameter, mapped key, `infer` or local declaration binds. A reference in another file is no position of
+  this flow, and a broken lease reports nothing and is never cached.
+- **A literal's reports before its contextual `this`.** The call first reads a context-sensitive argument
+  with no contextual type, whose `this` is its own literal. `forget_own_literal_reports` removes those
+  TS2339 and TS7023 reports when the call gives that literal a marker's `this` or the error type.
+
 Known limits, each a narrower diagnostic rather than a wrong answer: TS2339 on a declared literal's
 `this` prints `typeof value`, and on a literal a generic call infers it prints the literal rather
 than the instantiated contextual type; the code and position are exact. TS7022 (a local holding the
 read) and TS7024 (an anonymous function) are not reported. A cycle through another file's
-initializer stays a typed `Unresolved` failure.
+initializer stays a typed `Unresolved` failure. TS7006 is reported only where the error type is the
+literal's contextual type, and TS2304 only for a name such a literal's contextual type reads. A literal
+whose contextual type is an authored `any` still reads its own `this`, where the checker reads `any`.
 
 ## Formatted node and walker diagnostics
 

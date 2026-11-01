@@ -11579,14 +11579,65 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// A literal index absent from an exact closed domain, including the
-    /// apparent members the ordinary path reader adds. This proves absence
-    /// without asking the unavailable member for a value.
+    /// A literal index `base` proves absent, through the aliases and
+    /// declarations `base` names: every constituent of a composite lacks it
+    /// (`getPropertyOfType`), so the read is the checker's TS2339. A
+    /// constituent that does not settle to an object, a deferred operator or
+    /// an open type parameter among them, proves nothing.
     pub(super) fn indexed_access_proves_absence(
         &self,
         base: SemanticNodeId,
         index: &IndexKey,
         context: crate::semantic_query::ProjectionReductionContext,
+    ) -> bool {
+        let origin = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
+        let mut pending = vec![base];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let concrete = match self.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+            };
+            let data = self.graph().node_data(concrete);
+            match data.as_deref() {
+                Some(SemanticNodeData::Union(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Object(_)) => {
+                    if !self.object_proves_index_absent(concrete, index, context, origin.clone()) {
+                        return false;
+                    }
+                }
+                _ => match self
+                    .normalize_node_for_structural_fact_demand(concrete, context)
+                    .into_complete_node()
+                {
+                    Some(resolved) if resolved != concrete => pending.push(resolved),
+                    _ => return false,
+                },
+            }
+        }
+        true
+    }
+
+    /// A literal index absent from an exact closed domain, including the
+    /// apparent members the ordinary path reader adds. This proves absence
+    /// without asking the unavailable member for a value.
+    fn object_proves_index_absent(
+        &self,
+        base: SemanticNodeId,
+        index: &IndexKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+        origin: Option<verter_type_expr::OwnedStr>,
     ) -> bool {
         let key = match index {
             IndexKey::String(name) => PropertyKey::String(verter_type_expr::OwnedStr::from(name)),
@@ -11611,7 +11662,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         walker.origin_file = self
             .graph()
             .node_scope(base)
-            .and_then(|scope| scope.canonical_file());
+            .and_then(|scope| scope.canonical_file())
+            .or(origin);
         self.probe_optional(|| {
             matches!(
                 walker.apparent_member_surface(base, view, &key),

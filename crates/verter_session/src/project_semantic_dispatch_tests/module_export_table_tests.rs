@@ -746,8 +746,8 @@ fn star_exports_exclude_ambiguous_names_and_default() {
         files: &files,
         ..ProbeProject::default()
     };
-    for probe in ["typeof ns.x", "(typeof ns)['x']", "typeof ns.default"] {
-        let measured = super::checker_probe_lane_tests::with_probe_in(
+    let measure = |probe: &str| {
+        super::checker_probe_lane_tests::with_probe_in(
             project,
             "import * as ns from './index';",
             probe,
@@ -756,12 +756,21 @@ fn star_exports_exclude_ambiguous_names_and_default() {
                     dispatch, node, 0,
                 )
             },
-        );
+        )
+    };
+    for probe in ["typeof ns.x", "typeof ns.default"] {
         assert_eq!(
-            measured, "Opaque(Miss)",
+            measure(probe),
+            "Opaque(Miss)",
             "excluded namespace member: {probe}"
         );
     }
+    // A written access reads the closed surface the table publishes.
+    let written = measure("(typeof ns)['x']");
+    assert!(
+        written.contains("CheckerRecovery"),
+        "excluded namespace member, written: {written}"
+    );
 }
 
 #[test]

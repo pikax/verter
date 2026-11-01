@@ -14794,6 +14794,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut walker = PathWalker::new(self, context, &fence);
         walker.record_prefix_receipts(start_base, &walker_path);
         let result = walker.walk(start_base, walker_path.as_ref());
+        // A written indexed access its object proves absent is the checker's
+        // TS2339. A walk that stopped early proves nothing, and a walk that
+        // found a value or kept a carrier reads no further declaration here.
+        let result = match path.as_ref() {
+            [PathSegment::Index(index)]
+                if matches!(
+                    walker.completeness,
+                    crate::semantic_query::ResultCompleteness::Complete
+                ) && matches!(
+                    self.graph().node_data(result).as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::Miss))
+                ) && self.indexed_access_proves_absence(base, index, context) =>
+            {
+                self.absent_index_recovery()
+            }
+            _ => result,
+        };
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
         // A member read through a reference binds the member's polymorphic

@@ -575,7 +575,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A `keyof` that settles to a `keyof` read nothing; an access may
         // read a member written `keyof P`, which is what it denotes.
         let reads_nothing = match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Opaque(_)) => true,
+            Some(SemanticNodeData::Opaque(error)) => {
+                !crate::project_semantic_dispatch::build::is_certified_recovery(error)
+            }
             Some(SemanticNodeData::KeyOf { .. }) => matches!(
                 graph.node_data(operator).as_deref(),
                 Some(SemanticNodeData::KeyOf { .. })

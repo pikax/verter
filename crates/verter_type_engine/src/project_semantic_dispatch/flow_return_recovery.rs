@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use verter_session_query::flow::frame_span::FrameSpan;
 use verter_session_query::flow::slice::{SliceCall, SliceExpr};
+use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use super::{CallValue, FlowDemandDriver, FlowEvaluator, InArmPresence, Positional};
 use crate::semantic_query::checker_policy;
@@ -267,10 +268,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     pub(super) fn reads_own_literal(&self, root: &SliceExpr, node: SemanticNodeId) -> bool {
         match root {
             SliceExpr::This(verter_session_query::flow::slice::SliceThis::Value { .. }) => true,
-            SliceExpr::This(_) => self
-                .receiver
-                .as_ref()
-                .is_some_and(|bound| bound.infer_literal_members && bound.binder == node),
+            SliceExpr::This(_) => self.receiver.as_ref().is_some_and(|bound| {
+                bound.infer_literal_members && bound.base.is_none() && bound.binder == node
+            }),
             _ => false,
         }
     }
@@ -318,6 +318,111 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         self.dispatch.mark_return_cycle(target);
         let recovery = self.circular_return_recovery();
         Positional::Value(CallValue::of_resolved_call(self.dispatch, recovery))
+    }
+
+    /// What the checker reports for a literal the error type `contextual`
+    /// types: TS2304 at each reference to the undeclared name it reads, and,
+    /// since the error type gives its functions no contextual signature,
+    /// TS7006 on each of their parameters nothing else types.
+    pub(super) fn report_error_contextual(
+        &mut self,
+        contextual: SemanticNodeId,
+        entries: &[verter_session_query::flow::slice::SliceObjectEntry],
+    ) {
+        use verter_session_query::flow::slice::SliceObjectEntry;
+        for occurrence in self
+            .dispatch
+            .contextual_undeclared_names(contextual, self.canonical)
+        {
+            self.record_checker_diagnostic(occurrence);
+        }
+        if !self.no_implicit_any {
+            return;
+        }
+        for entry in entries {
+            if let SliceObjectEntry::Member(member) = entry {
+                if let SliceExpr::NestedFunctionValue { function, .. } = &member.value {
+                    let Some((_, parameters)) = self.nested_function_facts(function) else {
+                        continue;
+                    };
+                    for (name, span) in parameters {
+                        self.record_checker_diagnostic(CheckerDiagnosticOccurrence::new(
+                            span.start,
+                            span.end,
+                            checker_policy::implicit_any_parameter(),
+                            Box::new([name.as_ref().into()]),
+                            Box::default(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A literal a contextual type gives its `this` (a marker's, or the error
+    /// type): what its functions reported while it was read on its own, before
+    /// the call gave it that type, is no report of the checker's. Its absent
+    /// members and its circular returns are those of a `this` it does not have.
+    pub(super) fn forget_own_literal_reports(
+        &mut self,
+        entries: &[verter_session_query::flow::slice::SliceObjectEntry],
+    ) {
+        use verter_session_query::flow::slice::SliceObjectEntry;
+        for entry in entries {
+            let SliceObjectEntry::Member(member) = entry else {
+                continue;
+            };
+            let SliceExpr::NestedFunctionValue { function, .. } = &member.value else {
+                continue;
+            };
+            let Some((body, _)) = self.nested_function_facts(function) else {
+                continue;
+            };
+            let name = member.spans.name;
+            self.checker_diagnostics.retain(|diagnostic| {
+                !(diagnostic.code() == CheckerDiagnosticCode::PropertyDoesNotExist
+                    && body.start <= diagnostic.start()
+                    && diagnostic.end() <= body.end
+                    || diagnostic.code() == CheckerDiagnosticCode::CircularReturn
+                        && name.is_some_and(|name| diagnostic.start() == name.start))
+            });
+        }
+    }
+
+    /// The span of the nested function `function`, and the name and span of
+    /// each plain parameter of it with neither an annotation nor a default.
+    fn nested_function_facts(
+        &mut self,
+        function: &verter_session_query::function_program::FunctionProgramKey,
+    ) -> Option<(verter_span::Span, Vec<(Arc<str>, verter_span::Span)>)> {
+        use verter_session_query::function_program::FunctionBindingKind;
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
+                owner: function.declaration.owner,
+                symbol: function.declaration.name.clone(),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: function.part.clone(),
+            overload_ordinal: function.overload_ordinal,
+        };
+        let key = self.dispatch.flow_return_key_for(&identity);
+        let site = self.dispatch.flow_slice_demand_site(&key).ok()?;
+        let index = site.source_demand.function_program_index();
+        let entry = index.get(function)?.entry();
+        let parameters = entry
+            .params()
+            .iter()
+            .filter(|param| !param.has_ts_annotation && !param.has_initializer && !param.rest)
+            .filter_map(|param| {
+                let name = param.name.as_ref()?;
+                let binding = entry.bindings().iter().find(|binding| {
+                    binding.kind == FunctionBindingKind::Param && binding.name == *name
+                })?;
+                Some((Arc::clone(name), binding.span))
+            })
+            .collect();
+        Some((entry.span(), parameters))
     }
 
     /// The checker's error type for a circular return.

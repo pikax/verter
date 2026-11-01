@@ -254,6 +254,35 @@ pub(crate) const fn unresolved_type_name() -> CheckerDiagnostic {
     }
 }
 
+/// The checker's error type after its TS2304 for `name`, which nothing in
+/// `scope`'s program declares. Its origin is the reference, which names the
+/// diagnostic's subject and the file that reports it.
+pub(crate) fn undeclared_name_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
+    name: std::sync::Arc<str>,
+    scope: crate::semantic_query::NodeScopeId,
+) -> SemanticNodeId {
+    let origin = graph.intern_node(SemanticNodeData::new_bare_ref(
+        name,
+        scope,
+        std::sync::Arc::from([]),
+    ));
+    graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: unresolved_type_name(),
+        basis: RecoveryBasis::Certified,
+        origin: Some(origin),
+    }))
+}
+
+/// The checker's TS7006 for a parameter nothing types. Its report depends on
+/// `noImplicitAny`; the parameter is `any` regardless.
+pub(crate) const fn implicit_any_parameter() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::ImplicitAnyParameter,
+        operation: CheckerDiagnosticOperation::ParameterDeclaration,
+    }
+}
+
 /// The checker's TS2339 for a member read off a type that proves it absent.
 /// A checker error: the read is the error type, `any`, in every setting.
 pub(crate) const fn absent_member() -> CheckerDiagnostic {

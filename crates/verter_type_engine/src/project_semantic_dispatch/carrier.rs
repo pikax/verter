@@ -1166,9 +1166,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // declaration there is, is the checker's TS2304.
             if self.names_nothing_in_program(scope, name) {
                 return CarrierResolutionPlan::complete(
-                    crate::semantic_query::checker_policy::checker_recovery(
+                    crate::semantic_query::checker_policy::undeclared_name_recovery(
                         self.graph(),
-                        crate::semantic_query::checker_policy::unresolved_type_name(),
+                        Arc::clone(name),
+                        scope.clone(),
                     ),
                 );
             }

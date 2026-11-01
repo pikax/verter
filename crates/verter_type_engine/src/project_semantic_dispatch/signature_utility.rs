@@ -272,6 +272,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             subject: SemanticNodeId,
             context: ProjectionReductionContext,
         ) -> Option<SemanticNodeId> {
+            // A conditional over the checker's error type is that error type
+            // (`getConditionalType`), and these utilities are conditionals.
+            if self.is_conditional_checker_recovery(subject) {
+                return Some(subject);
+            }
             let Some(arms) = self.settled_union_arms(subject) else {
                 return self.resolve_signature_utility_on_arm(utility, subject, context);
             };

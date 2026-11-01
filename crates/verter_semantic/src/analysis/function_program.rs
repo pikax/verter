@@ -2863,6 +2863,227 @@ impl<'a> Visit<'a> for ReferencedTypeNames {
     }
 }
 
+/// The span of each name that reads the type `name` in `program`, where no
+/// type parameter, mapped key, `infer` declaration or local type declaration
+/// binds it, in source order.
+#[must_use]
+pub fn type_reference_name_spans(
+    program: &oxc_ast::ast::Program<'_>,
+    name: &str,
+) -> Vec<verter_span::Span> {
+    let mut references = NameReferences {
+        name,
+        found: Vec::new(),
+    };
+    references.visit_program(program);
+    references
+        .found
+        .sort_by_key(|span: &verter_span::Span| span.start);
+    references.found
+}
+
+/// [`type_reference_name_spans`]: a subtree a binder of `name` scopes is not
+/// entered.
+struct NameReferences<'n> {
+    name: &'n str,
+    found: Vec<verter_span::Span>,
+}
+
+impl NameReferences<'_> {
+    fn clause_binds(
+        &self,
+        declaration: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+    ) -> bool {
+        declaration.is_some_and(|declaration| {
+            declaration
+                .params
+                .iter()
+                .any(|param| param.name.name.as_str() == self.name)
+        })
+    }
+
+    fn statements_declare(&self, statements: &[oxc_ast::ast::Statement<'_>]) -> bool {
+        use oxc_ast::ast::{Declaration, Statement};
+        statements.iter().any(|statement| {
+            let declared = match statement {
+                Statement::TSTypeAliasDeclaration(alias) => alias.id.name.as_str(),
+                Statement::TSInterfaceDeclaration(interface) => interface.id.name.as_str(),
+                Statement::TSEnumDeclaration(declaration) => declaration.id.name.as_str(),
+                Statement::ClassDeclaration(class) => {
+                    class.id.as_ref().map_or("", |id| id.name.as_str())
+                }
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSTypeAliasDeclaration(alias) => alias.id.name.as_str(),
+                    Declaration::TSInterfaceDeclaration(interface) => interface.id.name.as_str(),
+                    Declaration::TSEnumDeclaration(declaration) => declaration.id.name.as_str(),
+                    Declaration::ClassDeclaration(class) => {
+                        class.id.as_ref().map_or("", |id| id.name.as_str())
+                    }
+                    _ => "",
+                },
+                _ => "",
+            };
+            declared == self.name
+        })
+    }
+
+    fn infers_name(&self, extends: &oxc_ast::ast::TSType<'_>) -> bool {
+        struct Infers<'n> {
+            name: &'n str,
+            found: bool,
+        }
+        impl<'a> Visit<'a> for Infers<'_> {
+            fn visit_ts_infer_type(&mut self, infer: &oxc_ast::ast::TSInferType<'a>) {
+                self.found |= infer.type_parameter.name.name.as_str() == self.name;
+            }
+        }
+        let mut infers = Infers {
+            name: self.name,
+            found: false,
+        };
+        infers.visit_ts_type(extends);
+        infers.found
+    }
+
+    fn record(&mut self, type_name: &oxc_ast::ast::TSTypeName<'_>) {
+        if let oxc_ast::ast::TSTypeName::IdentifierReference(id) = type_name {
+            if id.name.as_str() == self.name {
+                self.found
+                    .push(verter_span::Span::new(id.span.start, id.span.end));
+            }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for NameReferences<'_> {
+    fn visit_ts_type_reference(&mut self, reference: &oxc_ast::ast::TSTypeReference<'a>) {
+        self.record(&reference.type_name);
+        walk::walk_ts_type_reference(self, reference);
+    }
+
+    fn visit_ts_interface_heritage(&mut self, heritage: &oxc_ast::ast::TSInterfaceHeritage<'a>) {
+        self.record(&heritage.type_name);
+        walk::walk_ts_interface_heritage(self, heritage);
+    }
+
+    fn visit_ts_class_implements(&mut self, implements: &oxc_ast::ast::TSClassImplements<'a>) {
+        self.record(&implements.expression);
+        walk::walk_ts_class_implements(self, implements);
+    }
+
+    fn visit_ts_interface_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::TSInterfaceDeclaration<'a>,
+    ) {
+        if !self.clause_binds(declaration.type_parameters.as_deref()) {
+            walk::walk_ts_interface_declaration(self, declaration);
+        }
+    }
+
+    fn visit_ts_type_alias_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::TSTypeAliasDeclaration<'a>,
+    ) {
+        if !self.clause_binds(declaration.type_parameters.as_deref()) {
+            walk::walk_ts_type_alias_declaration(self, declaration);
+        }
+    }
+
+    fn visit_class(&mut self, class: &oxc_ast::ast::Class<'a>) {
+        if !self.clause_binds(class.type_parameters.as_deref()) {
+            walk::walk_class(self, class);
+        }
+    }
+
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        if !self.clause_binds(function.type_parameters.as_deref()) {
+            walk::walk_function(self, function, flags);
+        }
+    }
+
+    fn visit_arrow_function_expression(
+        &mut self,
+        function: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+    ) {
+        if !self.clause_binds(function.type_parameters.as_deref()) {
+            walk::walk_arrow_function_expression(self, function);
+        }
+    }
+
+    fn visit_ts_function_type(&mut self, function: &oxc_ast::ast::TSFunctionType<'a>) {
+        if !self.clause_binds(function.type_parameters.as_deref()) {
+            walk::walk_ts_function_type(self, function);
+        }
+    }
+
+    fn visit_ts_constructor_type(&mut self, constructor: &oxc_ast::ast::TSConstructorType<'a>) {
+        if !self.clause_binds(constructor.type_parameters.as_deref()) {
+            walk::walk_ts_constructor_type(self, constructor);
+        }
+    }
+
+    fn visit_ts_method_signature(&mut self, signature: &oxc_ast::ast::TSMethodSignature<'a>) {
+        if !self.clause_binds(signature.type_parameters.as_deref()) {
+            walk::walk_ts_method_signature(self, signature);
+        }
+    }
+
+    fn visit_ts_call_signature_declaration(
+        &mut self,
+        signature: &oxc_ast::ast::TSCallSignatureDeclaration<'a>,
+    ) {
+        if !self.clause_binds(signature.type_parameters.as_deref()) {
+            walk::walk_ts_call_signature_declaration(self, signature);
+        }
+    }
+
+    fn visit_ts_construct_signature_declaration(
+        &mut self,
+        signature: &oxc_ast::ast::TSConstructSignatureDeclaration<'a>,
+    ) {
+        if !self.clause_binds(signature.type_parameters.as_deref()) {
+            walk::walk_ts_construct_signature_declaration(self, signature);
+        }
+    }
+
+    fn visit_ts_mapped_type(&mut self, mapped: &oxc_ast::ast::TSMappedType<'a>) {
+        if mapped.key.name.as_str() != self.name {
+            walk::walk_ts_mapped_type(self, mapped);
+        }
+    }
+
+    fn visit_ts_conditional_type(&mut self, conditional: &oxc_ast::ast::TSConditionalType<'a>) {
+        if self.infers_name(&conditional.extends_type) {
+            self.visit_ts_type(&conditional.check_type);
+            self.visit_ts_type(&conditional.false_type);
+        } else {
+            walk::walk_ts_conditional_type(self, conditional);
+        }
+    }
+
+    fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
+        if !self.statements_declare(&block.body) {
+            walk::walk_block_statement(self, block);
+        }
+    }
+
+    fn visit_function_body(&mut self, body: &oxc_ast::ast::FunctionBody<'a>) {
+        if !self.statements_declare(&body.statements) {
+            walk::walk_function_body(self, body);
+        }
+    }
+
+    fn visit_ts_module_block(&mut self, block: &oxc_ast::ast::TSModuleBlock<'a>) {
+        if !self.statements_declare(&block.body) {
+            walk::walk_ts_module_block(self, block);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry build: inventory + stable hash
 // ---------------------------------------------------------------------------

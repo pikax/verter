@@ -1870,6 +1870,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     _ => return None,
                 }
             }
+            crate::semantic_query::CheckerDiagnosticCode::CannotFindName => {
+                let origin = self.graph().node_data((*origin)?)?;
+                let (name, _) = origin.bare_ref_head()?;
+                vec![name.to_owned()]
+            }
             _ if !code.message().contains('{') => Vec::new(),
             _ => return None,
         };
@@ -1901,6 +1906,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 span
             }
+            // Reported at each reference ([`Self::undeclared_name_occurrences`]),
+            // never at a call that reads one.
+            crate::semantic_query::CheckerDiagnosticCode::CannotFindName => return None,
             _ => call_span,
         };
         Some(crate::semantic_query::CheckerDiagnosticOccurrence::new(
@@ -1914,6 +1922,71 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .into_boxed_slice(),
             Box::default(),
         ))
+    }
+
+    /// The checker's TS2304 at each reference, in the file `canonical`, to a
+    /// name the recovery `node` proved undeclared. A reference in another
+    /// file is no position of this one. A retained parse that cannot be read
+    /// reports nothing and keeps the reading out of every cache.
+    pub(in crate::project_semantic_dispatch) fn undeclared_name_occurrences(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        let Some((diagnostic, arguments)) = self.checker_recovery_arguments(node) else {
+            return Vec::new();
+        };
+        let (crate::semantic_query::CheckerDiagnosticCode::CannotFindName, [name]) =
+            (diagnostic.code, arguments.as_slice())
+        else {
+            return Vec::new();
+        };
+        let referenced_here = self
+            .graph()
+            .node_data(node)
+            .and_then(|data| match data.as_ref() {
+                SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                    origin: Some(origin),
+                    ..
+                }) => self.graph().node_data(*origin),
+                _ => None,
+            })
+            .and_then(|origin| {
+                origin
+                    .bare_ref_head()
+                    .and_then(|(_, scope)| scope.canonical_file())
+            })
+            .is_some_and(|file| file.as_ref() == canonical);
+        if !referenced_here {
+            return Vec::new();
+        }
+        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
+            return Vec::new();
+        };
+        match self
+            .ctx
+            .type_reference_name_spans(&serve.indexed.shallow_state, name)
+        {
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(spans)) => spans
+                .iter()
+                .map(|span| {
+                    crate::semantic_query::CheckerDiagnosticOccurrence::new(
+                        span.start,
+                        span.end,
+                        diagnostic,
+                        Box::new([name.as_str().into()]),
+                        Box::default(),
+                    )
+                })
+                .collect(),
+            verter_session_query::source::demand::DemandOutcome::Ready(None) => Vec::new(),
+            verter_session_query::source::demand::DemandOutcome::LeaseMiss => {
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Where the checker reports the diagnostic a recovery node carries

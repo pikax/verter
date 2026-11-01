@@ -2483,3 +2483,38 @@ const derived = wrap(() => 4);
     };
     assert!(site.args[0].function_return_source.is_some());
 }
+
+#[test]
+fn type_reference_name_spans_skip_every_binder_of_the_name() {
+    let source = "type A = Und['b'];\n\
+         type U<Und> = Und;\n\
+         type V = { [Und in 'x']: Und };\n\
+         type W = 1 extends infer Und ? Und : never;\n\
+         function f<Und>(x: Und) { let y: Und = x; return y; }\n\
+         function g() { type Und = 1; let y: Und = 1; return y; }\n\
+         interface H extends Und {}\n\
+         class C implements Und {}\n\
+         declare const v: Und;\n\
+         namespace N { export type Und = 1; export type Inner = Und; }\n";
+    let allocator = oxc_allocator::Allocator::default();
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
+    let found: Vec<(u32, u32)> = type_reference_name_spans(&parsed.program, "Und")
+        .into_iter()
+        .map(|span| (span.start, span.end))
+        .collect();
+    let at = |needle: &str, skip: usize| {
+        let start = u32::try_from(source.find(needle).expect("the source holds it") + skip)
+            .expect("a source offset");
+        (start, start + 3)
+    };
+    assert_eq!(
+        found,
+        [
+            at("Und['b']", 0),
+            at("extends Und {}", "extends ".len()),
+            at("implements Und {}", "implements ".len()),
+            at("v: Und;", "v: ".len()),
+        ]
+    );
+}

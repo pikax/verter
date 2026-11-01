@@ -11103,6 +11103,12 @@ pub(super) trait FlowDemandDriver {
         canonical: &str,
     ) -> Option<SemanticNodeId>;
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId;
+    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
+    fn contextual_undeclared_names(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence>;
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
@@ -11852,6 +11858,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::contextual_carrier_view(self, node)
+    }
+    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::contextual_error_type(self, node)
+    }
+    fn contextual_undeclared_names(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        ProjectSemanticDispatch::contextual_undeclared_names(self, node, canonical)
     }
     fn contextual_object_member(
         &self,
@@ -12760,6 +12776,16 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
         self.driver.contextual_carrier_view(node)
+    }
+    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.driver.contextual_error_type(node)
+    }
+    fn contextual_undeclared_names(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        self.driver.contextual_undeclared_names(node, canonical)
     }
     fn contextual_object_member(
         &self,
@@ -14904,28 +14930,38 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .contextual_object_this_type(context, self.canonical)
             })
             .or(enclosing_contextual_this.filter(|_| inherits_receiver));
+        let contextual_error =
+            contextual.and_then(|context| self.dispatch.contextual_error_type(context));
+        if contextual_error.is_some() || self.contextual_object_this.is_some() {
+            self.forget_own_literal_reports(entries);
+        }
+        if let (Some(context), Some(_)) = (contextual, contextual_error) {
+            self.report_error_contextual(context, entries);
+        }
         let contextual_this = self
             .no_implicit_this
             .then(|| {
-                self.contextual_object_this.or_else(|| {
-                    contextual.and_then(|context| {
-                        self.dispatch
-                            .contextual_object_this_type(context, self.canonical)
-                            .or_else(|| {
-                                let context = self.dispatch.resolved_reduction_view(context);
-                                (!matches!(
-                                    self.dispatch.graph().node_data(context).as_deref(),
-                                    Some(
-                                        SemanticNodeData::TypeParam { .. }
-                                            | SemanticNodeData::Primitive(
-                                                PrimitiveKind::Any | PrimitiveKind::Unknown
-                                            )
-                                    )
-                                ))
-                                .then_some(context)
-                            })
+                contextual_error
+                    .or(self.contextual_object_this)
+                    .or_else(|| {
+                        contextual.and_then(|context| {
+                            self.dispatch
+                                .contextual_object_this_type(context, self.canonical)
+                                .or_else(|| {
+                                    let context = self.dispatch.resolved_reduction_view(context);
+                                    (!matches!(
+                                        self.dispatch.graph().node_data(context).as_deref(),
+                                        Some(
+                                            SemanticNodeData::TypeParam { .. }
+                                                | SemanticNodeData::Primitive(
+                                                    PrimitiveKind::Any | PrimitiveKind::Unknown
+                                                )
+                                        )
+                                    ))
+                                    .then_some(context)
+                                })
+                        })
                     })
-                })
             })
             .flatten();
         let infer_literal_members = contextual_this.is_none()

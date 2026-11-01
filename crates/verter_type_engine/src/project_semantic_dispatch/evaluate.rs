@@ -1240,6 +1240,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.resolve_structural_fact_demand(node, context, true, false)
     }
 
+    /// The checker's error type for a written indexed access its object
+    /// proves absent: TS2339, which the read recovers from as `any`.
+    pub(super) fn absent_index_recovery(&self) -> SemanticNodeId {
+        crate::semantic_query::checker_policy::checker_recovery(
+            self.graph(),
+            crate::semantic_query::checker_policy::absent_member(),
+        )
+    }
+
     /// The named declaration an indexed access reads, when its terminal is
     /// one: the object evaluated, the member read at navigate altitude, and
     /// the read kept only when it is a declaration or class reference.
@@ -2910,15 +2919,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .with_orthogonal_axes_from(frame.context),
                             }
                         }
+                        // A settled object answers without the walk. Any other
+                        // object is the walk's to read, as far as it demands.
                         index
-                            if self.indexed_access_proves_absence(
+                            if matches!(
+                                self.graph().node_data(child.node).as_deref(),
+                                Some(SemanticNodeData::Object(_))
+                            ) && self.indexed_access_proves_absence(
                                 child.node,
                                 &index,
                                 frame.context,
                             ) =>
                         {
-                            // A completed member domain owns optional absence.
-                            DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss))
+                            DeferredEvaluationAction::Finish(self.absent_index_recovery())
                         }
                         index => {
                             let read = self.execute_read(SemanticQueryKey::IndexedAccess {
