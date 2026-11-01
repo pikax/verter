@@ -1,0 +1,319 @@
+{
+  "owners": [
+    {
+      "id": "CLI1",
+      "path": ["CLI0", "CLI1"],
+      "targets": ["packages/verter/src/app"],
+      "acceptance": "CLI1-AC1"
+    },
+    {
+      "id": "CLI2",
+      "path": ["CLI0", "CLI1", "CLI2"],
+      "targets": ["packages/verter/src/commands/typecheck"],
+      "acceptance": "CLI2-AC1"
+    },
+    {
+      "id": "CLI3",
+      "path": ["CLI0", "CLI1", "CLI2", "CLI5", "CLI3"],
+      "targets": ["packages/verter/src/commands/check", "packages/verter/src/commands/fix"],
+      "acceptance": "CLI3-AC1"
+    },
+    {
+      "id": "CLI4",
+      "path": ["CLI0", "CLI1", "CLI4"],
+      "targets": [
+        "packages/verter/src/commands/type-info",
+        "packages/verter/src/commands/lsp",
+        "packages/verter/src/commands/mcp",
+        "crates/verter_mcp_server/src"
+      ],
+      "acceptance": "CLI4-AC1"
+    },
+    {
+      "id": "CLI5",
+      "path": ["CLI0", "CLI1", "CLI2", "CLI5"],
+      "targets": [
+        "packages/verter/package.json",
+        "packages/verter/bin",
+        "packages/binary-launcher",
+        "packages/verter-lsp"
+      ],
+      "acceptance": "CLI5-AC1"
+    },
+    {
+      "id": "CLIC0",
+      "path": ["CLI0", "CLI1", "CLIC0"],
+      "targets": ["packages/verter/src/commands/compile"],
+      "acceptance": "CLIC0-AC1"
+    },
+    {
+      "id": "CLIF0",
+      "path": ["CLI0", "CLI1", "CLIF0"],
+      "targets": ["packages/verter/src/commands/format"],
+      "acceptance": "CLIF0-AC1"
+    },
+    {
+      "id": "CLIL0",
+      "path": ["CLI0", "CLI1", "CLIL0"],
+      "targets": ["packages/verter/src/commands/lint"],
+      "acceptance": "CLIL0-AC1"
+    },
+    {
+      "id": "CLITS0",
+      "path": ["CLI0", "CLI1", "CLITS0"],
+      "targets": ["packages/verter/src/commands/tsc", "packages/verter-tsc"],
+      "acceptance": "CLITS0-AC1"
+    },
+    {
+      "id": "TSB7",
+      "path": ["CLI0", "CLI1", "TSB7"],
+      "targets": ["packages/verter/src/commands/build"],
+      "acceptance": "TSB7-AC1"
+    }
+  ],
+  "inventory": [
+    {
+      "id": "ApplicationServices",
+      "owner": "CLI1",
+      "kind": "outcome"
+    },
+    {
+      "id": "SelectionPlan",
+      "owner": "CLI1",
+      "kind": "outcome"
+    },
+    {
+      "id": "Reporter",
+      "owner": "CLI1",
+      "kind": "outcome"
+    },
+    {
+      "id": "WriteTransaction",
+      "owner": "CLI1",
+      "kind": "outcome"
+    },
+    {
+      "id": "CommandCapability",
+      "owner": "CLI1",
+      "kind": "outcome"
+    },
+    {
+      "id": "typecheck",
+      "owner": "CLI2",
+      "kind": "outcome"
+    },
+    {
+      "id": "tsc",
+      "owner": "CLITS0",
+      "kind": "outcome"
+    },
+    {
+      "id": "compile",
+      "owner": "CLIC0",
+      "kind": "outcome"
+    },
+    {
+      "id": "type-info",
+      "owner": "CLI4",
+      "kind": "outcome"
+    },
+    {
+      "id": "lsp",
+      "owner": "CLI4",
+      "kind": "outcome"
+    },
+    {
+      "id": "mcp",
+      "owner": "CLI4",
+      "kind": "outcome"
+    },
+    {
+      "id": "format",
+      "owner": "CLIF0",
+      "kind": "outcome"
+    },
+    {
+      "id": "lint",
+      "owner": "CLIL0",
+      "kind": "outcome"
+    },
+    {
+      "id": "check",
+      "owner": "CLI3",
+      "kind": "outcome"
+    },
+    {
+      "id": "fix",
+      "owner": "CLI3",
+      "kind": "outcome"
+    },
+    {
+      "id": "build",
+      "owner": "TSB7",
+      "kind": "outcome"
+    },
+    {
+      "id": "package-and-bin",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "shell-invocation",
+      "owner": "CLI1",
+      "kind": "consumer"
+    },
+    {
+      "id": "terminal-users",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "editor-hosts",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "agent-hosts",
+      "owner": "CLI4",
+      "kind": "consumer"
+    },
+    {
+      "id": "tsc-wrapper",
+      "owner": "CLITS0",
+      "kind": "route"
+    },
+    {
+      "id": "lsp-wrapper",
+      "owner": "CLI5",
+      "kind": "route"
+    },
+    {
+      "id": "mcp-wrapper",
+      "owner": "CLI4",
+      "kind": "route"
+    },
+    {
+      "id": "native-mcp-alias",
+      "owner": "CLI4",
+      "kind": "route"
+    },
+    {
+      "id": "command-local-semantic-engine",
+      "owner": "CLI1",
+      "kind": "route"
+    },
+    {
+      "id": "non-atomic-multi-file-writes",
+      "owner": "CLI1",
+      "kind": "route"
+    },
+    {
+      "id": "ambiguous-offset-encoding",
+      "owner": "CLI1",
+      "kind": "route"
+    },
+    {
+      "id": "watch-and-wrapper-retirement",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "vscode-lsp-client",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "vscode-mcp-client",
+      "owner": "CLI4",
+      "kind": "consumer"
+    },
+    {
+      "id": "lapce-native-client",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "zed-native-client",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "benchmark-native-client",
+      "owner": "CLI5",
+      "kind": "consumer"
+    },
+    {
+      "id": "programmatic-resolvers",
+      "owner": "CLI5",
+      "kind": "consumer"
+    }
+  ],
+  "commands": [
+    {
+      "name": "typecheck",
+      "owner": "CLI2",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "tsc",
+      "owner": "CLITS0",
+      "effect": "explicit-emit",
+      "compilerDisposition": "Supported"
+    },
+    {
+      "name": "compile",
+      "owner": "CLIC0",
+      "effect": "explicit-emit",
+      "compilerDisposition": "Supported"
+    },
+    {
+      "name": "type-info",
+      "owner": "CLI4",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "lsp",
+      "owner": "CLI4",
+      "effect": "protocol",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "mcp",
+      "owner": "CLI4",
+      "effect": "protocol",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "format",
+      "owner": "CLIF0",
+      "effect": "explicit-write",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "lint",
+      "owner": "CLIL0",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "check",
+      "owner": "CLI3",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "fix",
+      "owner": "CLI3",
+      "effect": "explicit-write",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "build",
+      "owner": "TSB7",
+      "effect": "explicit-emit",
+      "compilerDisposition": "FutureSeparateTrain"
+    }
+  ]
+}
