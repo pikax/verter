@@ -17,15 +17,6 @@ export const FORMAT_VERSION = 1;
 
 const IDENTIFIER_PATTERN = /^[a-zA-Z_0-9\-$@]+$/u;
 const RELEASE_VERSION_PATTERN = /^\d+(\.\d+)*$/u;
-const RELEASE_STATUSES = new Set([
-  "retired",
-  "current",
-  "exclusive",
-  "beta",
-  "nightly",
-  "esr",
-  "planned",
-]);
 
 /** A failure that stops generation outright; no partial snapshot is ever written. */
 export class SnapshotGenerationError extends Error {
@@ -62,21 +53,28 @@ function assertRecordId(id) {
   }
 }
 
-function projectBrowsers(browsers) {
+function projectBrowsers(browsers, schema) {
+  const validator = schemaValidator(schema);
   const lines = [];
   for (const id of Object.keys(browsers ?? {})) {
     const browser = browsers[id];
     assertRecordId(id);
-    if (typeof browser?.name !== "string" || typeof browser.type !== "string") {
-      throw new SnapshotGenerationError("browser-record", `${id}: missing name or type`);
+    // The published schema describes a single browser file, not the combined
+    // package's browser map. Validate raw fields, including those we drop below.
+    const failure = validator.validate(schema, { browsers: { [id]: browser } });
+    if (failure !== null) {
+      throw new SnapshotGenerationError(
+        "browser-record",
+        `${id}: ${failure.instance_path} (${failure.keyword})`,
+      );
     }
     const releases = {};
     for (const version of Object.keys(browser.releases ?? {})) {
       const release = browser.releases[version];
-      if (!RELEASE_VERSION_PATTERN.test(version) || !RELEASE_STATUSES.has(release?.status)) {
+      if (!RELEASE_VERSION_PATTERN.test(version)) {
         throw new SnapshotGenerationError(
           "browser-record",
-          `${id} ${version}: invalid release version or status`,
+          `${id} ${version}: invalid release version`,
         );
       }
       releases[version] = {
@@ -222,6 +220,7 @@ export function buildSnapshot({
   bcd,
   webFeatures,
   bcdSchema,
+  bcdBrowserSchema,
   webFeaturesSchema,
   datasets,
   recipeDigest,
@@ -290,7 +289,7 @@ export function buildSnapshot({
     throw new SnapshotGenerationError("bcd-structure", "the dataset carries no support records");
   }
 
-  const browserLines = projectBrowsers(bcd.browsers);
+  const browserLines = projectBrowsers(bcd.browsers, bcdBrowserSchema);
   const render = (section, lines) =>
     lines
       .sort((a, b) => compareBytes(a.id, b.id))

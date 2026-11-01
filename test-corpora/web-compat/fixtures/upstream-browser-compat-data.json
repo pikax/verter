@@ -10,7 +10,7 @@
       "preview_name": "Canary",
       "releases": {
         "9": { "status": "retired", "release_date": "2011-02-03", "engine": "WebKit", "engine_version": "534", "release_notes": "https://example.test/9" },
-        "10": { "status": "retired", "release_date": "2011-03-08", "engine": "WebKit" },
+        "10": { "status": "retired", "release_date": "2011-03-08", "engine": "WebKit", "engine_version": "534" },
         "19": { "status": "retired" },
         "20": { "status": "retired" },
         "21": { "status": "retired" },
@@ -26,6 +26,7 @@
       "name": "Firefox",
       "type": "desktop",
       "accepts_flags": true,
+      "accepts_webextensions": true,
       "releases": {
         "50": { "status": "retired" },
         "60": { "status": "esr" },
@@ -35,6 +36,8 @@
     "safari": {
       "name": "Safari",
       "type": "desktop",
+      "accepts_flags": false,
+      "accepts_webextensions": true,
       "releases": {
         "1.5": { "status": "retired" },
         "1.10": { "status": "retired" },
@@ -44,6 +47,8 @@
     "oculus": {
       "name": "Quest Browser",
       "type": "xr",
+      "accepts_flags": false,
+      "accepts_webextensions": false,
       "releases": { "23.0": { "status": "current" } }
     }
   },

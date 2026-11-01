@@ -1,4 +1,4 @@
-// A closed draft-07 subset validator for the two pinned compatibility schemas.
+// A closed draft-07 subset validator for the pinned compatibility schemas.
 // An unrecognised keyword throws rather than passing silently, so a schema
 // upgrade that introduces new validation semantics stops generation instead of
 // weakening it.
@@ -189,7 +189,12 @@ export function schemaValidator(root) {
         if (!isPlainObject(value)) return null;
         for (const name of Object.keys(argument)) {
           if (!Object.hasOwn(value, name)) continue;
-          const failure = check(argument[name], value, path);
+          const dependency = argument[name];
+          const failure = check(
+            Array.isArray(dependency) ? { required: dependency } : dependency,
+            value,
+            path,
+          );
           if (failure !== null) return failure;
         }
         return null;

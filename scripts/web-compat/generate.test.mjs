@@ -29,6 +29,7 @@ const corpus = (...parts) => join(CORPUS_DIR, ...parts);
 const readJson = (...parts) => JSON.parse(readFileSync(corpus(...parts), "utf8"));
 
 const bcdSchemaBytes = readFileSync(corpus("schemas", PINS.bcd.schemaFile));
+const bcdBrowserSchemaBytes = readFileSync(corpus("schemas", PINS.bcd.browserSchemaFile));
 const wfSchemaBytes = readFileSync(corpus("schemas", PINS.webFeatures.schemaFile));
 
 function buildFixture(overrides = {}) {
@@ -208,6 +209,18 @@ describe("compatibility snapshot generation", () => {
   });
 
   it("rejects browser release data it cannot trust rather than omitting it", () => {
+    // Positive control: every browser passes the single-browser schema envelope.
+    assert.equal(buildFixture().header.counts.browsers, 4);
+    const missingEngineVersion = readJson("fixtures", "upstream-browser-compat-data.json");
+    delete missingEngineVersion.browsers.chrome.releases["100"].engine_version;
+    assert.throws(() => buildFixture({ bcd: missingEngineVersion }), {
+      code: "browser-record",
+    });
+    const invalidDroppedField = readJson("fixtures", "upstream-browser-compat-data.json");
+    invalidDroppedField.browsers.chrome.releases["9"].release_notes = "http://example.test/9";
+    assert.throws(() => buildFixture({ bcd: invalidDroppedField }), {
+      code: "browser-record",
+    });
     const bcd = readJson("fixtures", "upstream-browser-compat-data.json");
     bcd.browsers.chrome.releases.latest = { status: "current" };
     assert.throws(() => buildFixture({ bcd }), { code: "browser-record" });
@@ -232,6 +245,7 @@ describe("compatibility snapshot generation", () => {
           bcdArtifact: artifactTarball(PINS.bcd),
           webFeaturesArtifact: artifactTarball(PINS.webFeatures),
           bcdSchemaBytes,
+          bcdBrowserSchemaBytes,
         }),
       { code: "integrity" },
     );
@@ -241,8 +255,19 @@ describe("compatibility snapshot generation", () => {
           bcdArtifact: Buffer.alloc(0),
           webFeaturesArtifact: Buffer.alloc(0),
           bcdSchemaBytes: Buffer.concat([bcdSchemaBytes, Buffer.from(" ")]),
+          bcdBrowserSchemaBytes,
         }),
       { code: "integrity" },
+    );
+    assert.throws(
+      () =>
+        generateFromArtifacts({
+          bcdArtifact: Buffer.alloc(0),
+          webFeaturesArtifact: Buffer.alloc(0),
+          bcdSchemaBytes,
+          bcdBrowserSchemaBytes: Buffer.concat([bcdBrowserSchemaBytes, Buffer.from(" ")]),
+        }),
+      /integrity: browsers\.schema\.json/,
     );
   });
 
@@ -262,6 +287,23 @@ describe("compatibility snapshot generation", () => {
     assert.throws(() => validator.validate({ $ref: "#/definitions/absent" }, 1), /dangling/);
     assert.equal(validator.validate({ type: "boolean", nullable: true }, null), null);
     assert.equal(validator.validate({ type: "boolean" }, null).keyword, "type");
+  });
+
+  it("enforces property dependencies and preserves schema dependencies", () => {
+    const validator = schemaValidator({});
+    const schema = { dependencies: { engine: ["engine_version"] } };
+    assert.equal(validator.validate(schema, {}), null);
+    assert.equal(validator.validate(schema, { engine: "Blink", engine_version: "100" }), null);
+    assert.deepEqual(validator.validate(schema, { engine: "Blink" }), {
+      instance_path: "/engine_version",
+      keyword: "required",
+    });
+    const dependentSchema = { dependencies: { engine: { required: ["engine_version"] } } };
+    assert.equal(validator.validate(dependentSchema, { engine: "Blink" }).keyword, "required");
+    assert.equal(
+      validator.validate(dependentSchema, { engine: "Blink", engine_version: "100" }),
+      null,
+    );
   });
 
   it("keeps the committed outputs bound to this recipe and the pinned inputs", () => {
@@ -290,6 +332,19 @@ describe("compatibility snapshot generation", () => {
       })),
     );
     assert.equal(sha256(bcdSchemaBytes), PINS.bcd.schemaDigest);
+    assert.equal(sha256(bcdBrowserSchemaBytes), PINS.bcd.browserSchemaDigest);
+    const schemaDigests = {
+      "compat-data.schema.json": sha256(bcdSchemaBytes),
+      "browsers.schema.json": sha256(bcdBrowserSchemaBytes),
+    };
+    assert.equal(
+      header.datasets[0].schema_digest,
+      sha256(Buffer.from(canonicalJson(schemaDigests))),
+    );
+    schemaDigests["browsers.schema.json"] = "sha256:changed";
+    const changedSchemas = structuredClone(header.datasets);
+    changedSchemas[0].schema_digest = sha256(Buffer.from(canonicalJson(schemaDigests)));
+    assert.notEqual(deriveSnapshotId({ ...header, datasets: changedSchemas }), header.snapshot_id);
     assert.equal(header.datasets[1].schema_digest, sha256(wfSchemaBytes));
     assert.equal(
       header.datasets[0].license_digest,
@@ -307,6 +362,11 @@ describe("compatibility snapshot generation", () => {
     for (const pin of [PINS.bcd, PINS.webFeatures]) {
       assert.ok(pin.artifactUrl.startsWith("https://registry.npmjs.org/"));
     }
+    assert.ok(
+      PINS.bcd.browserSchemaUrl.startsWith(
+        `https://raw.githubusercontent.com/mdn/browser-compat-data/v${PINS.bcd.release}/`,
+      ),
+    );
     assert.ok(
       PINS.bcd.schemaUrl.startsWith(
         `https://raw.githubusercontent.com/mdn/browser-compat-data/v${PINS.bcd.release}/`,

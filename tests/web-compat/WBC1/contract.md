@@ -61,6 +61,16 @@ the whole record. The quarantine names the instance path and keyword and is
 counted in the header. Structural failures in browser release data stop
 generation, because every answer depends on that data.
 
+Each raw browser is validated as `{ browsers: { [id]: browser } }` against
+the pinned `browsers.schema.json` before projection, including discarded fields
+and the `engine` dependency on `engine_version`. Browser release status comes
+from that schema; the generator additionally requires numeric release keys and
+a nonempty release population for the session's exact-target representation.
+The BCD `schema_digest` is SHA-256 of canonical JSON mapping both schema filenames
+to their raw-byte SHA-256 labels. This binds both schemas without changing the
+strict generated header shape or weakening the Rust reader. Regeneration changes
+the admitted snapshot pin; old snapshots remain unpinned.
+
 The pinned BCD release has 75 browser statements using `version_removed: false`,
 which its own published schema forbids. They answer
 `Unknown(SchemaMismatch)` for that browser; they are not repaired, because

@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import {
   buildSnapshot,
+  canonicalJson,
   renderNotice,
   sha256,
   SnapshotGenerationError,
@@ -43,6 +44,10 @@ export const PINS = Object.freeze({
       "https://raw.githubusercontent.com/mdn/browser-compat-data/v5.7.6/schemas/compat-data.schema.json",
     schemaFile: "compat-data.schema.json",
     schemaDigest: "sha256:e5faa5c194391a0cc2cbf6e9e78bf2e2de10cc5762337c06ff5c7da13d9de97d",
+    browserSchemaUrl:
+      "https://raw.githubusercontent.com/mdn/browser-compat-data/v5.7.6/schemas/browsers.schema.json",
+    browserSchemaFile: "browsers.schema.json",
+    browserSchemaDigest: "sha256:773bb4bf00d3dd7cb63f48b1c33c4b1f7db738ceb3d3c16ab8d0190a2365e640",
   }),
   webFeatures: Object.freeze({
     name: "web-features",
@@ -180,9 +185,29 @@ async function fetchBytes(url) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-/** Derive every committed output from the three pinned inputs. Byte-deterministic and offline. */
-export function generateFromArtifacts({ bcdArtifact, webFeaturesArtifact, bcdSchemaBytes }) {
+// Keep the existing dataset schema-digest field, binding both named BCD schemas
+// through an unambiguous canonical JSON object of their raw-byte digests.
+function bcdSchemaDigest(bcdSchemaBytes, bcdBrowserSchemaBytes) {
+  return sha256(
+    Buffer.from(
+      canonicalJson({
+        [PINS.bcd.schemaFile]: sha256(bcdSchemaBytes),
+        [PINS.bcd.browserSchemaFile]: sha256(bcdBrowserSchemaBytes),
+      }),
+      "utf8",
+    ),
+  );
+}
+
+/** Derive every committed output from the pinned inputs. Byte-deterministic and offline. */
+export function generateFromArtifacts({
+  bcdArtifact,
+  webFeaturesArtifact,
+  bcdSchemaBytes,
+  bcdBrowserSchemaBytes,
+}) {
   verifyIntegrity(PINS.bcd.schemaFile, bcdSchemaBytes, PINS.bcd.schemaDigest);
+  verifyIntegrity(PINS.bcd.browserSchemaFile, bcdBrowserSchemaBytes, PINS.bcd.browserSchemaDigest);
   const bcdEntries = openArtifact(PINS.bcd, bcdArtifact);
   const wfEntries = openArtifact(PINS.webFeatures, webFeaturesArtifact, [
     PINS.webFeatures.schemaEntry,
@@ -191,13 +216,18 @@ export function generateFromArtifacts({ bcdArtifact, webFeaturesArtifact, bcdSch
   const bcdLicense = bcdEntries.get(PINS.bcd.licenseEntry);
   const wfLicense = wfEntries.get(PINS.webFeatures.licenseEntry);
   const datasets = [
-    datasetIdentity(PINS.bcd, PINS.bcd.schemaDigest, sha256(bcdLicense)),
+    datasetIdentity(
+      PINS.bcd,
+      bcdSchemaDigest(bcdSchemaBytes, bcdBrowserSchemaBytes),
+      sha256(bcdLicense),
+    ),
     datasetIdentity(PINS.webFeatures, sha256(wfSchemaBytes), sha256(wfLicense)),
   ];
   const { bytes, header } = buildSnapshot({
     bcd: JSON.parse(bcdEntries.get("package/data.json").toString("utf8")),
     webFeatures: JSON.parse(wfEntries.get("package/data.json").toString("utf8")),
     bcdSchema: JSON.parse(bcdSchemaBytes.toString("utf8")),
+    bcdBrowserSchema: JSON.parse(bcdBrowserSchemaBytes.toString("utf8")),
     webFeaturesSchema: JSON.parse(wfSchemaBytes.toString("utf8")),
     datasets,
     recipeDigest: recipeDigest(),
@@ -210,6 +240,7 @@ export function generateFromArtifacts({ bcdArtifact, webFeaturesArtifact, bcdSch
       [join("pinned", PINS.webFeatures.licenseFile), wfLicense],
       [join("pinned", "NOTICE.md"), Buffer.from(renderNotice(datasets), "utf8")],
       [join("schemas", PINS.bcd.schemaFile), bcdSchemaBytes],
+      [join("schemas", PINS.bcd.browserSchemaFile), bcdBrowserSchemaBytes],
       [join("schemas", PINS.webFeatures.schemaFile), wfSchemaBytes],
     ]),
   };
@@ -225,6 +256,8 @@ export function generateFixture() {
   const bcdBytes = corpus("fixtures", "upstream-browser-compat-data.json");
   const wfBytes = corpus("fixtures", "upstream-web-features.json");
   const bcdSchemaBytes = corpus("schemas", PINS.bcd.schemaFile);
+  const bcdBrowserSchemaBytes = corpus("schemas", PINS.bcd.browserSchemaFile);
+  verifyIntegrity(PINS.bcd.browserSchemaFile, bcdBrowserSchemaBytes, PINS.bcd.browserSchemaDigest);
   const wfSchemaBytes = corpus("schemas", PINS.webFeatures.schemaFile);
   const fixtureIdentity = (pin, file, bytes, schemaBytes) => ({
     ...datasetIdentity(pin, sha256(schemaBytes), sha256(corpus("pinned", pin.licenseFile))),
@@ -236,9 +269,13 @@ export function generateFixture() {
     bcd: JSON.parse(bcdBytes.toString("utf8")),
     webFeatures: JSON.parse(wfBytes.toString("utf8")),
     bcdSchema: JSON.parse(bcdSchemaBytes.toString("utf8")),
+    bcdBrowserSchema: JSON.parse(bcdBrowserSchemaBytes.toString("utf8")),
     webFeaturesSchema: JSON.parse(wfSchemaBytes.toString("utf8")),
     datasets: [
-      fixtureIdentity(PINS.bcd, "upstream-browser-compat-data.json", bcdBytes, bcdSchemaBytes),
+      {
+        ...fixtureIdentity(PINS.bcd, "upstream-browser-compat-data.json", bcdBytes, bcdSchemaBytes),
+        schema_digest: bcdSchemaDigest(bcdSchemaBytes, bcdBrowserSchemaBytes),
+      },
       fixtureIdentity(PINS.webFeatures, "upstream-web-features.json", wfBytes, wfSchemaBytes),
     ],
     recipeDigest: FIXTURE_RECIPE,
@@ -260,15 +297,18 @@ async function main(argv) {
     artifactsDir === null
       ? fetchBytes(url)
       : Promise.resolve(readFileSync(join(artifactsDir, file)));
-  const [bcdArtifact, webFeaturesArtifact, bcdSchemaBytes] = await Promise.all([
-    read(PINS.bcd.artifactFile, PINS.bcd.artifactUrl),
-    read(PINS.webFeatures.artifactFile, PINS.webFeatures.artifactUrl),
-    read(PINS.bcd.schemaFile, PINS.bcd.schemaUrl),
-  ]);
+  const [bcdArtifact, webFeaturesArtifact, bcdSchemaBytes, bcdBrowserSchemaBytes] =
+    await Promise.all([
+      read(PINS.bcd.artifactFile, PINS.bcd.artifactUrl),
+      read(PINS.webFeatures.artifactFile, PINS.webFeatures.artifactUrl),
+      read(PINS.bcd.schemaFile, PINS.bcd.schemaUrl),
+      read(PINS.bcd.browserSchemaFile, PINS.bcd.browserSchemaUrl),
+    ]);
   const { header, files } = generateFromArtifacts({
     bcdArtifact,
     webFeaturesArtifact,
     bcdSchemaBytes,
+    bcdBrowserSchemaBytes,
   });
   const stale = [];
   for (const [relative, bytes] of files) {

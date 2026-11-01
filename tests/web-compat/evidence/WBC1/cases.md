@@ -19,6 +19,13 @@ the canonical Rust gate. Generator tests are in
 
 ## Receiving cases
 
+Browser-schema admission is covered by `rejects browser release data it cannot
+trust rather than omitting it`: a valid multi-browser input is the control;
+missing `engine_version` and malformed discarded `release_notes` reject before
+projection. `enforces property dependencies and preserves schema dependencies`
+distinguishes both dependency forms. The integrity and recipe tests bind the
+verbatim browser schema and both BCD schema digests to the snapshot identity.
+
 | Case | Test |
 | --- | --- |
 | Baseline is not support | `baseline_status_never_answers_for_a_target`; `web_feature_groupings_keep_baseline_apart_from_support` |

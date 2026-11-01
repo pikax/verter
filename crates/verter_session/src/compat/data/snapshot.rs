@@ -23,7 +23,7 @@ const SNAPSHOT_FORMAT_KEYWORD: &str = "snapshot-format";
 /// The one snapshot the session admits by default. A dataset or recipe change
 /// re-mints this identity, so no other data can answer silently.
 const ADMITTED_SNAPSHOT_ID: &str =
-    "sha256:3b7a93438abf2bd1a0485bb13172537619f641d845e3758a2adf14544be96797";
+    "sha256:be17e0f9aa0336d332623af9ee89294d30f998b6205e5c659f7ec7cffc9728e4";
 
 /// The exact snapshot identity a caller accepts. There is no floating form.
 #[derive(Debug, Clone, PartialEq, Eq)]
