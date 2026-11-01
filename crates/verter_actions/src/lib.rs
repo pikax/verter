@@ -19,3 +19,13 @@ mod types;
 pub use engine::ActionEngine;
 pub use provider::{ActionContext, ActionProvider};
 pub use types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
+
+// Reserved homes for planned actions product modules. Each module below is
+// declaration-only: its doc line names the node that fills it, and product
+// nodes write inside their own reserved module only.
+pub mod assists;
+mod fix_intents;
+mod migrations;
+mod refactors;
+mod rename_intents;
+mod transaction;

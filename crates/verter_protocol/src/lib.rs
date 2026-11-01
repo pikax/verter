@@ -37,3 +37,24 @@ pub mod verter {
 pub const GENERATED_VERTER_V1_RS: &str = include_str!(concat!(env!("OUT_DIR"), "/verter.v1.rs"));
 
 pub mod component_facts;
+
+// Reserved homes for planned protocol product modules. Each module below is
+// declaration-only: its doc line names the node that fills it, and product
+// nodes write inside their own reserved module only.
+mod agent;
+mod compat;
+mod config_env;
+mod diagnostics;
+mod engine_status;
+mod execution;
+mod formatter;
+mod html;
+mod inspection;
+mod language_service;
+mod presentation;
+mod project_profile;
+mod realms;
+mod runtime_inspector;
+mod security;
+mod source_modules;
+mod workspace_intel;
