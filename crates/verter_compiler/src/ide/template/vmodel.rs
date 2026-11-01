@@ -375,9 +375,9 @@ pub(super) fn process_v_model<'alloc>(
                     &EmitOp::InsertMapped {
                         at,
                         text: EmitText::Borrowed(
-                            &source[span.start.0 as usize..span.end.0 as usize],
+                            &source[span.start().0 as usize..span.end().0 as usize],
                         ),
-                        source_start: span.start,
+                        source_start: span.start(),
                         content_offset: GeneratedByteLen(0),
                     },
                 );
@@ -392,7 +392,7 @@ pub(super) fn process_v_model<'alloc>(
                     &EmitOp::InsertMapped {
                         at,
                         text: EmitText::Borrowed(name.as_str()),
-                        source_start: arg.start,
+                        source_start: arg.start(),
                         content_offset: GeneratedByteLen(0),
                     },
                 );

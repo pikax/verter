@@ -156,17 +156,17 @@ pub fn emit_op<'alloc>(out: &mut CodeGenOutput<'alloc>, op: &EmitOp<'_>) {
             // UNMAPPED replacement: delete the original bytes, then insert the
             // synthetic text as an `Inserted` chunk (maps to None). NEVER a mapped
             // `out.overwrite(start, end, text)`.
-            out.overwrite(source.start.0, source.end.0, "");
+            out.overwrite(source.start().0, source.end().0, "");
             if !text.is_empty() {
                 match text {
-                    EmitText::Static(s) => out.prepend_static(source.start.0, s),
-                    EmitText::Borrowed(s) => out.prepend_alloc(source.start.0, s),
-                    EmitText::Owned(s) => out.prepend_alloc(source.start.0, s),
+                    EmitText::Static(s) => out.prepend_static(source.start().0, s),
+                    EmitText::Borrowed(s) => out.prepend_alloc(source.start().0, s),
+                    EmitText::Owned(s) => out.prepend_alloc(source.start().0, s),
                 }
             }
         }
         EmitOp::MoveOriginal { source, at } => {
-            out.move_wrapped(source.start.0, source.end.0, at.0, "", "");
+            out.move_wrapped(source.start().0, source.end().0, at.0, "", "");
         }
     }
 }
@@ -343,10 +343,10 @@ impl<'a> ExprPlan<'a> {
         for (i, piece) in self.pieces.iter().enumerate() {
             let start = match piece {
                 ExprPiece::Verbatim { range } => {
-                    if range.start.0 < offset && offset < range.end.0 {
+                    if range.start().0 < offset && offset < range.end().0 {
                         let (head, tail) = (
-                            SourceByteRange::new(range.start, SourceByteOffset(offset)),
-                            SourceByteRange::new(SourceByteOffset(offset), range.end),
+                            SourceByteRange::new(range.start(), SourceByteOffset(offset)),
+                            SourceByteRange::new(SourceByteOffset(offset), range.end()),
                         );
                         self.pieces[i] = ExprPiece::Verbatim { range: head };
                         self.pieces
@@ -354,7 +354,7 @@ impl<'a> ExprPlan<'a> {
                         index = i + 1;
                         break;
                     }
-                    range.start.0
+                    range.start().0
                 }
                 ExprPiece::Ident { source_start, .. }
                 | ExprPiece::IgnoredIdent { source_start, .. } => source_start.0,
@@ -392,8 +392,8 @@ pub fn plan_user_expr<'a>(
     resolver: &BindingResolver<'_>,
     opts: ExprOptions,
 ) -> ExprPlan<'a> {
-    let start = span.start.0;
-    let end = span.end.0;
+    let start = span.start().0;
+    let end = span.end().0;
     let expr = &source[start as usize..end as usize];
 
     // Filter bindings to those inside the span (a larger enclosing expression's
@@ -637,7 +637,7 @@ fn emit_plan_relocated<'alloc>(
                 }
             }
             ExprPiece::Verbatim { range } => {
-                let slice = &source[range.start.0 as usize..range.end.0 as usize];
+                let slice = &source[range.start().0 as usize..range.end().0 as usize];
                 // A relocated verbatim slice is a byte-for-byte copy of the authored
                 // bytes at `range.start`, so it OWNS that authored span. Emitting it
                 // unmapped punched a hole through the middle of an authored
@@ -661,7 +661,7 @@ fn emit_plan_relocated<'alloc>(
                     mapped(
                         out,
                         EmitText::Borrowed(line),
-                        SourceByteOffset(range.start.0 + offset),
+                        SourceByteOffset(range.start().0 + offset),
                     );
                 }
             }

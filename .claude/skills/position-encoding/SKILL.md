@@ -18,13 +18,13 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 
 ### Typed LSP / generated-TSX coordinate wrappers
 
-Intra-process boundary newtypes (also in `verter_span`, **no serde**) used by the LSP `PositionMapper` and cross-file navigation stack. No `From` between source-side and generated-side types (no `From<GeneratedByteRange> for SourceByteRange`); `LspPosition`/`TsPosition` are distinct so a TSX position can never be passed where a Vue LSP position is expected.
+The byte-coordinate domain newtypes live in `crates/verter_span/src/coord/` (re-exported at their historical `verter_span::` paths) and carry a checked API with typed errors (`CoordError::{InvalidBoundary, Overflow, NotCharBoundary}`): `checked_add`/`checked_sub` (refuse to leave `u32`; `checked_sub` answers the base-relative byte **length** `checked_add` takes, never an absolute offset), range construction refusing `end < start` on both `new` (panics) and `checked_new` (typed `InvalidBoundary`; the range endpoints are private and read through `start()`/`end()`, so no safe code can assemble or mutate an inverted range, and `len()` is a plain subtraction), and `validate(content)` (extent + char boundary). Requester encodings (UTF-16/UTF-32 units, TypeScript-wire line/column) are NOT converted by the core: the boundary adapters own each wire's base, terminator set and snapshot and convert through byte offsets. The exact-or-refused model of that conversion (`from_utf16`/`to_utf16`, `from_utf32`/`to_utf32`, `from_line_col`/`line_col`, including `u32`-width `Overflow`) is `cfg(test)` support in `coord/encoding_support.rs`, not API. Nothing clamps, snaps or saturates, and no converted mirror of a document is cached. Intra-process boundary newtypes (**no serde**) used by the LSP `PositionMapper` and cross-file navigation stack. No `From` between source-side and generated-side types (no `From<GeneratedByteRange> for SourceByteRange`); `LspPosition`/`TsPosition` are distinct so a TSX position can never be passed where a Vue LSP position is expected.
 
 | Type | Meaning |
 | ---- | ------- |
-| `SourceByteOffset` / `SourceByteRange` | byte offset / `[start,end)` range into the original `.vue` source |
-| `GeneratedByteOffset` / `GeneratedByteRange` | byte offset / `[start,end)` range into the generated TSX |
-| `GeneratedByteLen` | length of a generated-TSX content region (`content_offset` domain) |
+| `SourceByteOffset` / `SourceByteRange` | byte offset / `[start,end)` range into the original `.vue` source (CD1) |
+| `GeneratedByteOffset` / `GeneratedByteRange` / `GeneratedByteLen` | byte offset / `[start,end)` range / region length in the generated TSX (CD3) |
+| `EmbeddedByteOffset` / `EmbeddedByteRange` | byte offset / `[start,end)` range into cooked or derived text whose bytes are not the authored bytes (CD4) |
 | `SourceUtf16Offset` / `GeneratedUtf16Offset` | UTF-16 code-unit offsets (source / generated) |
 | `LspPosition { line, character }` | 0-based Vue source position, LSP-negotiated encoding (Vue side) |
 | `TsPosition { line, character }` | 0-based generated-TSX position (TSX side) |
@@ -46,7 +46,7 @@ Intra-process boundary newtypes (also in `verter_span`, **no serde**) used by th
 - `GeneratedSpan::new(generated: Span, origin: Span)` — create resolved mapping directly
 - `slice(&self, source: &str) -> &str` — on `Span`, `RelativeSpan`, `PartialGeneratedSpan`
 - `From<oxc_span::Span>` for both `Span` and `RelativeSpan`
-- `LspPosition::new(line, character)` / `TsPosition::new(line, character)`; `SourceByteRange::new(..)` / `GeneratedByteRange::new(..)` (typed LSP/TSX coordinate wrappers)
+- `LspPosition::new(line, character)` / `TsPosition::new(line, character)`; `SourceByteRange::new(..)` / `GeneratedByteRange::new(..)` and the checked coord API (`SourceByteOffset::new(..)`, `checked_new`, `checked_add`/`checked_sub` (a rebase answers a length), `validate`)
 - **No `From` conversions between span types, nor between source-side and generated-side coordinate wrappers** — type safety enforced at compile time
 
 ## CSS Variable Analysis Spans

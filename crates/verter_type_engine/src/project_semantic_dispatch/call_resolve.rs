@@ -4252,7 +4252,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// survive the deposit (the whole-candidate transform collapses a tuple
     /// to its element array, which is the rule for an authored array-literal
     /// argument, not for a rest bundle). The assembled tuple is therefore
-    /// deposited as authored.
+    /// deposited as authored, and an argument's regular constituents stay
+    /// regular in its element.
     fn generic_rest_relation(
         &self,
         arguments: &[CallArgument],
@@ -4273,7 +4274,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .flatten();
         let element_value = |argument: &CallArgument| match policy {
             Some(policy) if argument.literal_mode == ArgumentLiteralMode::Widened => {
-                self.call_inference_candidate(argument.node, policy)
+                let regular = argument
+                    .literal_provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.position(&[]));
+                match regular {
+                    Some(regular) if policy == ConstParamPolicy::NonConst => {
+                        match regular.literals.as_deref() {
+                            Some(kept) => {
+                                self.contextual_literal_candidate(argument.node, kept, policy)
+                            }
+                            None => argument.node,
+                        }
+                    }
+                    _ => self.call_inference_candidate(argument.node, policy),
+                }
             }
             _ => argument.node,
         };
