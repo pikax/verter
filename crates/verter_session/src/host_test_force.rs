@@ -132,8 +132,11 @@ pub(crate) struct TestForceKnobs {
     /// therefore observe the fenced serve exactly as the production
     /// mid-flight-supersession path produces it, while the served `indexed` still
     /// resolves the value (ReturnOnly). Per-host (no process-global concurrency
-    /// hazard). `#[cfg(test)]`-gated: the only reader is the `#[cfg(test)]`
-    /// override at the top of `ensure_indexed_ready_serve`.
+    /// hazard). A retained signature's settled verdict is reused while the
+    /// validation token is unchanged, so a test that fences one moves a token
+    /// dimension as well, as every production fence has. `#[cfg(test)]`-gated:
+    /// the only reader is the `#[cfg(test)]` override at the top of
+    /// `ensure_indexed_ready_serve`.
     #[cfg(test)]
     pub(crate) force_indexed_ready_serve_fence_for_tests: std::sync::atomic::AtomicBool,
     /// Force the owner import-route witness to take its typed refusal arm.
