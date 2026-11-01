@@ -458,6 +458,76 @@ fn valid_sealed_token(token: &str) -> bool {
         && !token.chars().any(char::is_control)
 }
 
+/// The 0-based UTF-8 byte range of 1-based `line` of `content`, excluding its
+/// terminator. Lines end at `\n`, `\r\n` or a lone `\r`; a trailing
+/// terminator starts one final empty line.
+fn line_text(content: &str, line: u32) -> Option<&str> {
+    let bytes = content.as_bytes();
+    let mut line_no = 1u32;
+    let mut start = 0usize;
+    loop {
+        let mut end = start;
+        while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
+            end += 1;
+        }
+        if line_no == line {
+            return Some(&content[start..end]);
+        }
+        if end >= bytes.len() {
+            return None;
+        }
+        end += if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        line_no += 1;
+        start = end;
+    }
+}
+
+/// Validate a preprocessor-reported 1-based `line` and 1-based UTF-16
+/// `column` against the exact `content` the tool consumed. Exact or refused:
+/// a zero base, a line past the last, a column past the end of its line, or a
+/// column without a line is [`CoordError::InvalidBoundary`]; a column inside
+/// a surrogate pair is [`CoordError::NotCharBoundary`]. `None`/`None` is an
+/// absent position and always valid.
+pub(crate) fn check_preprocessor_position(
+    content: &str,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> Result<(), verter_span::CoordError> {
+    use verter_span::CoordError;
+    let (line, column) = match (line, column) {
+        (None, None) => return Ok(()),
+        (None, Some(_)) => return Err(CoordError::InvalidBoundary),
+        (Some(line), column) => (line, column),
+    };
+    if line == 0 {
+        return Err(CoordError::InvalidBoundary);
+    }
+    let text = line_text(content, line).ok_or(CoordError::InvalidBoundary)?;
+    let Some(column) = column else {
+        return Ok(());
+    };
+    let target = u64::from(column.checked_sub(1).ok_or(CoordError::InvalidBoundary)?);
+    let mut units = 0u64;
+    for ch in text.chars() {
+        if target == units {
+            return Ok(());
+        }
+        units += ch.len_utf16() as u64;
+        if target < units {
+            return Err(CoordError::NotCharBoundary);
+        }
+    }
+    if target == units {
+        Ok(())
+    } else {
+        Err(CoordError::InvalidBoundary)
+    }
+}
+
 fn position_within_utf16_content(content: &str, line: u32, column: u32) -> bool {
     content
         .split('\n')
@@ -1945,7 +2015,14 @@ impl VerterHost {
                     source_map: entry.source_map,
                     source_map_hash: entry.source_map_hash,
                     dependencies: entry.dependencies,
-                    diagnostics: entry.diagnostics,
+                    // The tool reported against the bytes it consumed: validate
+                    // each position against that exact input, keeping the
+                    // message of any whose position is refused.
+                    diagnostics: entry
+                        .diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.validated_against(&pending.input_content))
+                        .collect(),
                     processor_identity: entry.processor_identity,
                     processor_version: entry.processor_version,
                     config_fingerprint: entry.config_fingerprint,
@@ -2019,6 +2096,62 @@ pub(crate) fn attach_external_request_tokens(
 
 #[cfg(test)]
 mod tests {
+    use verter_span::CoordError;
+
+    /// A preprocessor-reported position is exact against the input the tool
+    /// consumed: 1-based line and UTF-16 column, `\n`/`\r\n`/lone-`\r` line
+    /// terminators, refusing zero bases, past-end and in-pair columns.
+    #[test]
+    fn preprocessor_position_is_validated_against_the_tool_input() {
+        // Lines: "a😀b" (cols 1..=5: a=1, 😀=2..3, b=4, end=5), "" , "x", "".
+        let input = "a\u{1F600}b\r\n\rx\n";
+        let check = super::check_preprocessor_position;
+        assert_eq!(check(input, None, None), Ok(()));
+        assert_eq!(check(input, Some(1), None), Ok(()));
+        assert_eq!(check(input, Some(1), Some(1)), Ok(()));
+        assert_eq!(check(input, Some(1), Some(2)), Ok(()), "before the emoji");
+        assert_eq!(
+            check(input, Some(1), Some(3)),
+            Err(CoordError::NotCharBoundary),
+            "the second unit of the surrogate pair"
+        );
+        assert_eq!(check(input, Some(1), Some(4)), Ok(()), "after the emoji");
+        assert_eq!(check(input, Some(1), Some(5)), Ok(()), "end of the line");
+        assert_eq!(
+            check(input, Some(1), Some(6)),
+            Err(CoordError::InvalidBoundary)
+        );
+        // `\r\n` is one terminator; the lone `\r` ends the empty line 2.
+        assert_eq!(check(input, Some(2), Some(1)), Ok(()));
+        assert_eq!(
+            check(input, Some(2), Some(2)),
+            Err(CoordError::InvalidBoundary)
+        );
+        assert_eq!(check(input, Some(3), Some(2)), Ok(()), "end of `x`");
+        assert_eq!(
+            check(input, Some(4), Some(1)),
+            Ok(()),
+            "the final empty line"
+        );
+        assert_eq!(
+            check(input, Some(5), Some(1)),
+            Err(CoordError::InvalidBoundary)
+        );
+        // Zero bases and a column without a line are never guessed.
+        assert_eq!(
+            check(input, Some(0), Some(1)),
+            Err(CoordError::InvalidBoundary)
+        );
+        assert_eq!(
+            check(input, Some(1), Some(0)),
+            Err(CoordError::InvalidBoundary)
+        );
+        assert_eq!(
+            check(input, None, Some(1)),
+            Err(CoordError::InvalidBoundary)
+        );
+    }
+
     use super::*;
     use std::sync::{mpsc, Barrier};
     use std::time::Duration;
@@ -2200,6 +2333,7 @@ mod tests {
             message: "deprecated division".to_string(),
             line: Some(2),
             column: Some(4),
+            position_refusal: None,
         }];
         let _admitted = host
             .apply_block_overrides(BlockOverrideRequest {

@@ -196,9 +196,16 @@ pub struct FfiPreprocessorDiagnostic {
     /// `"error"`, `"warning"`, or `"info"`.
     pub severity: String,
     pub message: String,
-    /// Line/column within the preprocessor's own source, if reported.
+    /// 1-based line within the preprocessor's own input text, if reported.
+    /// Lines end at `\n`, `\r\n` or a lone `\r`.
     pub line: Option<u32>,
+    /// 1-based column in UTF-16 code units within `line`, if reported.
     pub column: Option<u32>,
+    /// Versioned encoding tag of `column`. Required whenever `line` or
+    /// `column` is present, and must be `utf16.v1`: a position without it, or
+    /// under another encoding, is rejected (the diagnostic keeps its message).
+    #[serde(default)]
+    pub position_encoding: Option<SpanEncodingTag>,
 }
 
 /// A single preprocessed block override (template, script, style, or custom).

@@ -174,6 +174,8 @@ fn project_member_origin(
             "canonicalSource": resolve_string(strings, d.canonical_source_id),
             "spanStart": d.span_start,
             "spanEnd": d.span_end,
+            // The framework-surface wire states UTF-8 bytes (schema 9).
+            "spanEncoding": verter_protocol::types::SpanEncodingTag::Utf8.as_wire(),
         })
     });
     let chain: Vec<serde_json::Value> = origin

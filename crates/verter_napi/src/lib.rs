@@ -1273,8 +1273,13 @@ pub struct NapiPreprocessorDiagnostic {
     /// `"error"`, `"warning"`, or `"info"`.
     pub severity: String,
     pub message: String,
+    /// 1-based line within the preprocessor's own input text.
     pub line: Option<u32>,
+    /// 1-based column in UTF-16 code units within `line`.
     pub column: Option<u32>,
+    /// Versioned encoding tag of `column`; required (and must be `"utf16.v1"`)
+    /// whenever `line` or `column` is present.
+    pub positionEncoding: Option<String>,
 }
 
 #[napi(object)]
@@ -3013,13 +3018,21 @@ impl NapiVerterHost {
                         .diagnostics
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|d| FfiPreprocessorDiagnostic {
-                            severity: d.severity,
-                            message: d.message,
-                            line: d.line,
-                            column: d.column,
+                        .map(|d| {
+                            Ok(FfiPreprocessorDiagnostic {
+                                severity: d.severity,
+                                message: d.message,
+                                line: d.line,
+                                column: d.column,
+                                position_encoding: d
+                                    .positionEncoding
+                                    .as_deref()
+                                    .map(verter_ffi::convert::parse_request_encoding_tag)
+                                    .transpose()
+                                    .map_err(ffi_err)?,
+                            })
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>>>()?,
                     processor_identity: e.processorIdentity,
                     processor_version: e.processorVersion,
                     config_fingerprint: e.configFingerprint,

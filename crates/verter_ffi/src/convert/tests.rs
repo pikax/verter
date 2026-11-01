@@ -105,6 +105,57 @@ fn block_override_wire_reconstructs_the_exact_captured_echo() {
     assert_eq!(echo.basis_token.as_str(), "basis");
 }
 
+/// A preprocessor diagnostic position crosses the ingress only under the
+/// versioned UTF-16 tag: an untagged position or one tagged `utf8.v1` is
+/// rejected (typed, message kept), never passed through as a guessed unit.
+#[test]
+fn preprocessor_diagnostic_position_requires_the_utf16_tag() {
+    let converted = |line, column, tag| {
+        let mut entry = valid_block_override_entry();
+        entry.diagnostics = vec![FfiPreprocessorDiagnostic {
+            severity: "warning".to_string(),
+            message: "unused".to_string(),
+            line,
+            column,
+            position_encoding: tag,
+        }];
+        ffi_block_override_to_host(FfiBlockOverrideRequest {
+            canonical_id: "/src/App.vue".to_string(),
+            overrides: vec![entry],
+        })
+        .expect("the entry itself is admissible")
+        .overrides
+        .remove(0)
+        .diagnostics
+        .remove(0)
+    };
+
+    let tagged = converted(Some(2), Some(3), Some(SpanEncodingTag::Utf16));
+    assert_eq!((tagged.line, tagged.column), (Some(2), Some(3)));
+    assert_eq!(tagged.position_refusal, None);
+
+    let untagged = converted(Some(2), Some(3), None);
+    assert_eq!((untagged.line, untagged.column), (None, None));
+    assert_eq!(
+        untagged.position_refusal,
+        Some(host::PreprocessorPositionRefusal::EncodingNotDeclared)
+    );
+    assert_eq!(
+        untagged.message, "unused",
+        "the diagnostic keeps its message"
+    );
+
+    let bytes = converted(Some(2), Some(3), Some(SpanEncodingTag::Utf8));
+    assert_eq!(
+        bytes.position_refusal,
+        Some(host::PreprocessorPositionRefusal::UnsupportedEncoding)
+    );
+
+    // No position at all needs no tag.
+    let absent = converted(None, None, None);
+    assert_eq!(absent.position_refusal, None);
+}
+
 #[test]
 fn block_override_wire_rejects_every_malformed_nominal_token() {
     for field in [

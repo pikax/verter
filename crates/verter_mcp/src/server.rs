@@ -146,8 +146,51 @@ pub struct ApiNameParams {
 pub struct QuickFixParams {
     #[schemars(description = "File path of the Vue component")]
     pub path: String,
-    #[schemars(description = "Byte offset in the SFC source where the cursor is")]
+    #[schemars(
+        description = "UTF-8 byte offset (0-based, encoding tag utf8.v1) in the SFC source where the cursor is. An offset inside a UTF-8 sequence or past the end of the source is rejected."
+    )]
     pub offset: u32,
+}
+
+/// The versioned, fixed position encoding of every MCP tool: all offsets and
+/// spans in a tool's input and output are UTF-8 byte offsets, 0-based, with
+/// ranges half-open, counted from the start of the file the value names.
+/// Advertised on every tool's `_meta` and on each tagged record.
+const MCP_POSITION_ENCODING: verter_protocol::types::SpanEncodingTag =
+    verter_protocol::types::SpanEncodingTag::Utf8;
+
+/// `_meta` key under which every tool states its fixed position encoding.
+const MCP_COORDINATES_META_KEY: &str = "verter.dev/coordinates";
+
+/// The fixed position-encoding property stamped onto every tool schema.
+fn mcp_coordinates_meta() -> serde_json::Value {
+    serde_json::json!({
+        "contractVersion": verter_protocol::types::COORDINATE_CONTRACT_VERSION,
+        "encoding": MCP_POSITION_ENCODING.as_wire(),
+        "base": 0,
+        "ranges": "half-open",
+    })
+}
+
+/// Validate a request byte offset against the exact `source` it indexes:
+/// exact or refused. Past-end is `InvalidBoundary`; inside a UTF-8 sequence
+/// is `NotCharBoundary` (never snapped to the previous boundary).
+fn check_mcp_byte_offset(source: &str, offset: u32) -> Result<(), ErrorData> {
+    let refusal = if offset as usize > source.len() {
+        "InvalidBoundary"
+    } else if !source.is_char_boundary(offset as usize) {
+        "NotCharBoundary"
+    } else {
+        return Ok(());
+    };
+    Err(ErrorData::invalid_params(
+        format!(
+            "offset {offset} is not a valid {} position of the source ({} bytes): {refusal}",
+            MCP_POSITION_ENCODING.as_wire(),
+            source.len()
+        ),
+        Some(serde_json::json!({ "code": refusal, "encoding": MCP_POSITION_ENCODING.as_wire() })),
+    ))
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -301,7 +344,11 @@ fn public_api_projection_mcp_error(
         verter_session::PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
             serde_json::json!({
                 "kind": "scriptSetupAttrs",
-                "sourceRange": { "start": source_range.start, "end": source_range.end },
+                "sourceRange": {
+                    "start": source_range.start,
+                    "end": source_range.end,
+                    "encoding": MCP_POSITION_ENCODING.as_wire(),
+                },
             })
         }
         verter_session::PublicApiProjectionSubject::Source => {
@@ -352,8 +399,22 @@ impl VerterMcpServer {
             action_engine: Arc::new(verter_actions::ActionEngine::builtin()),
             project_root,
             config,
-            tool_router: Self::tool_router(),
+            tool_router: Self::coordinate_tagged_tool_router(),
         }
+    }
+
+    /// The generated tool router with every tool's fixed position encoding
+    /// stated on its schema (`_meta`): no tool leaves its offsets' unit to a
+    /// description.
+    fn coordinate_tagged_tool_router() -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        for route in router.map.values_mut() {
+            let mut meta = route.attr.meta.take().unwrap_or_default();
+            meta.0
+                .insert(MCP_COORDINATES_META_KEY.to_string(), mcp_coordinates_meta());
+            route.attr.meta = Some(meta);
+        }
+        router
     }
 
     fn resolve(&self, path: &str) -> String {
@@ -924,7 +985,12 @@ impl VerterMcpServer {
             });
         }
 
-        let json = serde_json::to_string_pretty(&diag_vec).map_err(|e| mcp_err(e.to_string()))?;
+        // Each diagnostic names its span encoding beside `spanStart`/`spanEnd`.
+        let tagged: Vec<_> = diag_vec
+            .iter()
+            .map(verter_protocol::types::Utf8SpanPayload::new)
+            .collect();
+        let json = serde_json::to_string_pretty(&tagged).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
@@ -1012,6 +1078,7 @@ impl VerterMcpServer {
             let filtered: Vec<_> = diag_vec
                 .iter()
                 .filter(|d| !errors_only || d.severity == Severity::Error)
+                .map(verter_protocol::types::Utf8SpanPayload::new)
                 .collect();
 
             if !filtered.is_empty() {
@@ -1075,6 +1142,7 @@ impl VerterMcpServer {
             blocks: &[],
         };
 
+        check_mcp_byte_offset(&source, params.offset)?;
         let actions = self.action_engine.actions_at(params.offset, &ctx);
         let actions_json: Vec<serde_json::Value> = actions
             .into_iter()
@@ -1090,6 +1158,7 @@ impl VerterMcpServer {
                         "replacement": e.replacement,
                         "span_start": e.span.start,
                         "span_end": e.span.end,
+                        "span_encoding": MCP_POSITION_ENCODING.as_wire(),
                     })).collect::<Vec<_>>(),
                 })
             })
@@ -1971,6 +2040,8 @@ impl VerterMcpServer {
                     .push(serde_json::json!({
                         "span_start": occurrence.span.start,
                         "span_end": occurrence.span.end,
+
+                        "span_encoding": MCP_POSITION_ENCODING.as_wire(),
                         "reactivity_kind": reactivity,
                     }));
             }
@@ -2033,6 +2104,8 @@ impl VerterMcpServer {
                 "arg": call.arg_value,
                 "span_start": call.span.start,
                 "span_end": call.span.end,
+
+                "span_encoding": MCP_POSITION_ENCODING.as_wire(),
             }));
         }
 
@@ -2043,6 +2116,8 @@ impl VerterMcpServer {
                 "arg": query.selector_text,
                 "span_start": query.span.start,
                 "span_end": query.span.end,
+
+                "span_encoding": MCP_POSITION_ENCODING.as_wire(),
             }));
         }
 
@@ -2456,6 +2531,8 @@ impl VerterMcpServer {
                     "name": unresolved.name,
                     "span_start": unresolved.span.start,
                     "span_end": unresolved.span.end,
+
+                    "span_encoding": MCP_POSITION_ENCODING.as_wire(),
                     "message": format!("'{}' is used in template but not defined in script", unresolved.name),
                 }));
             }
@@ -3574,7 +3651,9 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
 /// revision cannot change what Verter negotiates.
 const ADVERTISED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
-#[tool_handler]
+// The handler lists and dispatches through the stored router, so every tool
+// carries the coordinate stamp `coordinate_tagged_tool_router` applied.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for VerterMcpServer {
     fn get_info(&self) -> ServerConfig {
         // `ServerConfig::new`/`InitializeResult::new` default `server_info` via
@@ -3784,9 +3863,30 @@ defineProps<{ value: Unsafe }>()
             error.data.expect("structured data")["subject"],
             serde_json::json!({
                 "kind": "scriptSetupAttrs",
-                "sourceRange": { "start": 31, "end": 37 },
+                "sourceRange": { "start": 31, "end": 37, "encoding": "utf8.v1" },
             })
         );
+    }
+
+    /// The quick-fix offset is validated against the exact source: past-end
+    /// is `InvalidBoundary`, inside a UTF-8 sequence is `NotCharBoundary`,
+    /// and neither is snapped or clamped.
+    #[test]
+    fn mcp_byte_offset_is_exact_or_refused() {
+        let source = "a\u{1F600}b";
+        for ok in [0u32, 1, 5, 6] {
+            assert!(check_mcp_byte_offset(source, ok).is_ok(), "{ok}");
+        }
+        for (offset, code) in [
+            (2u32, "NotCharBoundary"),
+            (4, "NotCharBoundary"),
+            (7, "InvalidBoundary"),
+            (u32::MAX, "InvalidBoundary"),
+        ] {
+            let error = check_mcp_byte_offset(source, offset).expect_err("refused");
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(error.data.expect("data")["code"], code, "{offset}");
+        }
     }
 
     // ── Bug 1: get_component_summary API section should use macros ──
