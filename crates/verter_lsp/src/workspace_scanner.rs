@@ -734,14 +734,19 @@ fn background_publish_workspace_carriers(is_tsgo: bool, has_publish_store: bool)
 /// Every read of a document demands it and its imports again, so an editor
 /// polling one document queues signals faster than a sort per signal finishes.
 /// Sorting inside the loop would keep this synchronous drain from ever seeing an
-/// empty channel while the polling lasts, and the scan would not advance.
+/// empty channel while the polling lasts, and the scan would not advance. It
+/// takes only what is queued on entry, so it ends however fast signals arrive;
+/// the rest wait for the next drain.
 fn drain_priority_signals(
     rx: &mut mpsc::UnboundedReceiver<ScannerSignal>,
     priority_dirs: &mut Vec<String>,
     remaining: &mut [(String, Tier)],
 ) {
     let mut signalled = false;
-    while let Ok(signal) = rx.try_recv() {
+    for _ in 0..rx.len() {
+        let Ok(signal) = rx.try_recv() else {
+            break;
+        };
         match signal {
             ScannerSignal::PriorityFile(canonical_id) => {
                 signalled = true;
@@ -1731,14 +1736,17 @@ mod tests {
         }
     }
 
-    /// `first` and `second` tie on their final distance, so a stable sort keeps
-    /// their order unless an earlier sort under only some of the signals moved
-    /// them, and that earlier sort is the cost a queued batch must not pay.
+    /// `far` moves behind the others, so the drain must sort. `first` and
+    /// `second` tie on their final distance, so a stable sort keeps their order
+    /// unless an earlier sort under only some of the signals moved them, and
+    /// that earlier sort is the cost a queued batch must not pay.
     #[test]
     fn a_batch_of_priority_signals_is_one_reorder() {
+        let far = "/root/other/deep/er/Far.vue".to_string();
         let first = "/root/late/x/First.vue".to_string();
         let second = "/root/early/y/Second.vue".to_string();
         let mut remaining = vec![
+            (far.clone(), Tier::ProjectSource),
             (first.clone(), Tier::ProjectSource),
             (second.clone(), Tier::ProjectSource),
         ];
@@ -1757,7 +1765,7 @@ mod tests {
                 .iter()
                 .map(|(path, _)| path.as_str())
                 .collect::<Vec<_>>(),
-            [first.as_str(), second.as_str()]
+            [first.as_str(), second.as_str(), far.as_str()]
         );
     }
 
