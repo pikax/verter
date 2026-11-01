@@ -48,8 +48,7 @@
       "id": "CLI6",
       "path": ["CLI0", "CLI1", "CLI2", "CLI5", "CLI6"],
       "targets": ["packages/verter/bin"],
-      "acceptance": "CLI6-AC1",
-      "status": "ruled-awaiting-controller-node"
+      "acceptance": "CLI6-AC1"
     },
     {
       "id": "CLIC0",

@@ -139,14 +139,14 @@ Retirement has two owners, in order. CLI5 converts each row carrying
 `converter: CLI5` to a thin wrapper over the same implementation, with
 `packages/verter/bin` as the receiving executable, and records the first unified
 release version with its telemetry and deprecation receipt. CLI5 deletes no
-wrapper. CLI6 ("CLI compatibility wrapper retirement"), the node after CLI5 that
-the operator ruled for this purpose on 2026-11-01, owns removal or structural
+wrapper. CLI6 ("CLI compatibility wrapper retirement"), ordered after CLI5 and
+TSB8's native compiler promotion, owns removal or structural
 rejection under CLI6-AC1: for each such row, after the named published-release
 receipt and zero-consumer/generated-reference proof, it records the next
 release's deletion receipt with the wrapper path removed or structurally
-rejected. The owner row's `status: ruled-awaiting-controller-node` records that
-the controller has not created CLI6 yet; CLI0-AC1 requires an existing node, so
-this contract cannot complete until the node exists and that field is removed.
+rejected. TSB7C's compatible bridge is already a predecessor of TSB8; retirement
+preserves both compiler tasks' use of `verter-tsc`. This retirement ordering does
+not delay CLI5's independent base release or make CLI6 a prerequisite of CLI0.
 
 Compatibility lasts exactly one published unified-CLI release: old executable
 names delegate to the corresponding command, preserve compatible args/exits and
