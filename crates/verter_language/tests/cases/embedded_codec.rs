@@ -1366,6 +1366,17 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
         chain.editable_preimage(&output, embedded(5, 15)),
         Err(Unmappable::NonInvertibleExpansion)
     );
+    // Its start is a position; its interior never is, even with no text to check.
+    assert_eq!(
+        chain
+            .authored_position(&output, DomainOffset::Embedded(eo(5)))
+            .map(|origin| origin.range),
+        Ok(sr(1, 1))
+    );
+    assert_eq!(
+        chain.authored_position(&output, DomainOffset::Embedded(eo(9))),
+        Err(Unmappable::NonInvertibleExpansion)
+    );
 
     let inlined = chain
         .provenance(&output, embedded(15, 20))
