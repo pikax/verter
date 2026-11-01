@@ -188,3 +188,35 @@ fn a_rejected_alternative_leaves_no_candidate_behind() {
     failures.extend(matrix.returns(&[("r1", "string")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A nested call reads only the fresh members of a mixed binding as widening.
+#[test]
+fn nested_call_argument_preserves_partial_widening_membership() {
+    let source = r##"
+declare function box<T>(value: T): { value: T };
+declare function nestedBox<T>(anchor: unknown, value: { value: T }): { value: { value: T } };
+export function mixed(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return box(value);
+}
+export function nested(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return nestedBox(value, { value: value });
+}
+export function pinned(flag: boolean) {
+    const value = flag ? "fixed" as const : 1 as const;
+    return box(value);
+}
+export function fresh() {
+    const value = "fresh";
+    return box(value);
+}
+"##;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("mixed", "{ value: string | 1; }"),
+        ("nested", "{ value: { value: string | 1; }; }"),
+        ("pinned", r#"{ value: "fixed" | 1; }"#),
+        ("fresh", "{ value: string; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -19757,7 +19757,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 reads
                     .iter()
                     .find(|(at, _)| *at == root)
-                    .map_or(ArgumentReadLiterals::Unmodeled, |(_, read)| *read)
+                    .map_or(ArgumentReadLiterals::Unmodeled, |(_, read)| read.clone())
             },
         )
     }
@@ -19786,20 +19786,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         // A member of a binding (`o.v`) is no declaration of its own: it
         // reads the member's type as it is, never a widening literal.
-        let (node, widens) = if value.path.len() > 1 {
+        let (node, widening) = if value.path.len() > 1 {
             let ty = verter_type_expr::TypeExpr::TypeOf(value.clone());
             (
                 self.frame_rooted_typeof_path_node(&ty, Some(&binding)),
-                false,
+                None,
             )
         } else {
             (
                 self.frame_binding_read(&binding),
-                self.widening_of(&binding),
+                self.membership_of(&binding),
             )
         };
         match node {
-            Some(node) => ArgumentReadLiterals::Frame { widens, node },
+            Some(node) => ArgumentReadLiterals::Frame { widening, node },
             None => ArgumentReadLiterals::Unmodeled,
         }
     }

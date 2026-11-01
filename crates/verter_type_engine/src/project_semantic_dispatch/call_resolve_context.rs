@@ -20,15 +20,19 @@ use crate::semantic_query::{
 
 /// How a call argument's read of a value binding contributes its literals,
 /// resolved in the scope the call is in.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::project_semantic_dispatch) enum ArgumentReadLiterals {
     /// The read names a binding of the call's owner scope: its declaration
     /// decides whether it widens, and its type is the owner-scope `typeof`.
     OwnerScope,
     /// The read names a binding of the function body the call is in (a
     /// parameter, a local), typed `node` there: regular unless the binding
-    /// keeps a widening literal.
-    Frame { widens: bool, node: SemanticNodeId },
+    /// keeps widening literals, with mixed bindings retaining their exact
+    /// fresh membership alongside the read type.
+    Frame {
+        widening: Option<super::super::flow_products::WideningMembership>,
+        node: SemanticNodeId,
+    },
     /// A read the call's scope does not model: its literals stay fresh.
     Unmodeled,
 }
@@ -326,6 +330,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     let regular_here = provenance
                         .and_then(|provenance| provenance.position(&position.path))
                         .map(|regular| regular.literals.clone());
+                    // The root keeps its type during contextual typing, but
+                    // its regular literals must still be excluded from fresh
+                    // inference deposits at the call boundary.
+                    if position.root {
+                        if let Some(regular) = &regular_here {
+                            for literal in literal_members(graph.store(), node) {
+                                if regular
+                                    .as_ref()
+                                    .is_none_or(|values| values.contains(&literal))
+                                {
+                                    keeps.extend(
+                                        reached
+                                            .iter()
+                                            .map(|&param| ContextKeptLiteral { literal, param }),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // A position whose literals are all regular is written
                     // as authored, nested composites included: it keeps its
                     // type, and every parameter the argument deposits into
@@ -756,8 +779,34 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     self.value_read_widens(canonical, owner, &value.path),
                                     RegularContributor::Authored(TypeExpr::TypeOf(value.clone())),
                                 ),
-                                ArgumentReadLiterals::Frame { widens, node } => {
-                                    (widens, RegularContributor::Resolved(node))
+                                ArgumentReadLiterals::Frame { widening, node } => {
+                                    use super::super::flow_products::WideningMembership;
+                                    match widening {
+                                        Some(WideningMembership::Partial(values)) => {
+                                            // Classify the literals of the actual read: narrowing
+                                            // may have removed some reaching fresh values.
+                                            for literal in literal_members(graph.store(), node) {
+                                                if values.iter().any(|&value| {
+                                                    same_literal(graph.store(), value, literal)
+                                                }) {
+                                                    mixed = true;
+                                                    reads_fresh = true;
+                                                    if separate {
+                                                        fresh.push(literal);
+                                                    }
+                                                } else {
+                                                    regular.push(RegularContributor::Resolved(
+                                                        literal,
+                                                    ));
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        Some(WideningMembership::All) => {
+                                            (true, RegularContributor::Resolved(node))
+                                        }
+                                        None => (false, RegularContributor::Resolved(node)),
+                                    }
                                 }
                                 ArgumentReadLiterals::Unmodeled => {
                                     mixed = true;

@@ -832,14 +832,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
             };
             // The regular literals the argument nests, whichever route typed
-            // it: its reads resolve in this frame's scope. A whole read of a
-            // binding nests none of its own.
+            // it: its reads resolve in this frame's scope. Whole binding
+            // reads also carry their top-level mixed membership.
             if typed.node.is_some()
-                && !matches!(
-                    binding,
-                    FlowIndexedArgumentBinding::ValueRead(_)
-                        | FlowIndexedArgumentBinding::SourceTypeQuery(_)
-                )
+                && !matches!(binding, FlowIndexedArgumentBinding::SourceTypeQuery(_))
             {
                 typed.literal_provenance =
                     self.frame_argument_literal_provenance(argument.literal_provenance.as_deref());
@@ -852,13 +848,41 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 self.adopt_argument_observations(&mut route.argument_observations);
                 return ResolveCallProgress::Done(None);
             };
+            // Indexed provenance records nested positions only. For a whole
+            // mixed binding read, supply the equivalent root record from
+            // this frame's reaching membership and actual read type.
+            if let FlowIndexedArgumentBinding::ValueRead(binding) = &binding {
+                if let Some(WideningMembership::Partial(fresh)) = self.membership_of(binding) {
+                    let graph = self.dispatch.graph();
+                    let regular = self
+                        .top_level_literal_nodes(ty)
+                        .into_iter()
+                        .filter(|literal| {
+                            let data = graph.node_data(*literal);
+                            !fresh.iter().any(|value| graph.node_data(*value) == data)
+                        })
+                        .collect::<Vec<_>>();
+                    typed.literal_provenance =
+                        Some(Arc::new(crate::semantic_query::ArgumentLiteralProvenance {
+                            positions: Arc::from([
+                                crate::semantic_query::ArgumentRegularPosition {
+                                    path: Arc::from([]),
+                                    literals: Some(Arc::from(regular)),
+                                },
+                            ]),
+                            fresh_reads: Arc::from([Arc::from([])]),
+                        }));
+                }
+            }
             // A read of a WIDENING-literal `const` is a FRESH literal source
             // exactly as a bare literal argument is (the checker widens
             // `wrap(a)` for `const a = "x"` identically to `wrap("x")`); the
             // indexed lowering classifies every reference as pinned because
             // only this frame knows the binding's widening membership.
             let reads_widening_local = match &binding {
-                FlowIndexedArgumentBinding::ValueRead(binding) => self.widening_of(binding),
+                FlowIndexedArgumentBinding::ValueRead(binding) => {
+                    self.membership_of(binding).is_some()
+                }
                 // A value declared outside the frame (`const c = 1` read as
                 // `c`) widens by its declared type.
                 FlowIndexedArgumentBinding::Free => match &argument.expression {

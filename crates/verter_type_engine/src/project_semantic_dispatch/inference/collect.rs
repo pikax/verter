@@ -129,7 +129,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // literal is regular).
                     if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
                         for literal in fresh_literals {
-                            session.note_fresh_literal_deposit(param_node, literal);
+                            if !context_keeps.contains(&literal) {
+                                session.note_fresh_literal_deposit(param_node, literal);
+                            }
                         }
                     }
                 }
