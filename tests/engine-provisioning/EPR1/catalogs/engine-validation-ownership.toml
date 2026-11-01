@@ -1,0 +1,833 @@
+schema = 1
+reconciledAgainst = "docs(arch): define external engine provisioning and trust policy (#1092)"
+reconciledOn = "2026-11-01"
+
+[[rows]]
+id = "EngineArtifactId"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EnginePlatform"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineFlavor"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineVersion"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineOrigin"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineOriginReceipt"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineArtifactDescriptor"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineCompatibilityRequirement"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#compatibility-contract"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineCompatibilityVerdict"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#compatibility-contract"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineIntegrityEvidence"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineSignatureEvidence"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineValidationReceipt"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "TrustedEngineOrigin"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineTrustRootId"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineProvisioningPolicy"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB1"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "EngineSourceKind"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOURCES"
+
+[[rows]]
+id = "EngineInstallLayout"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#installation-layout-and-concurrent-writers"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB7"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineReadyMarker"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#installation-layout-and-concurrent-writers"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB7"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineCacheKey"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-CACHE"
+
+[[rows]]
+id = "EngineCacheEntry"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-CACHE"
+
+[[rows]]
+id = "EngineRejection"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#public-validation-status"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "EngineRejectionReason"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#public-validation-status"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "EngineRevocation"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EnginePublicStatus"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#public-validation-status"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "EngineValidationWorkCounters"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-WORK"
+
+[[rows]]
+id = "identity-type-migration"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "compatibility-evaluator"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#compatibility-contract"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "normalized-receipt-construction"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "managed-acquisition-evidence"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB4"]
+acceptance = "EPR2-AC-VERIFY-FIRST"
+
+[[rows]]
+id = "shipping-provenance-evidence"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "optional-channel"
+owner = "EPR3"
+path = ["EPR1", "EPR3"]
+subblocks = ["EPR3-SB2", "EPR3-SB4"]
+acceptance = "EPR3-AC-SUPPLY"
+
+[[rows]]
+id = "readonly-ready-validation"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#installation-layout-and-concurrent-writers"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB7"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "managed-atomic-install"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#installation-layout-and-concurrent-writers"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB5"]
+acceptance = "EPR2-AC-SAFE-EXTRACT"
+
+[[rows]]
+id = "managed-concurrent-writers"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#installation-layout-and-concurrent-writers"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB5"]
+acceptance = "EPR2-AC-SAFE-EXTRACT"
+
+[[rows]]
+id = "installed-package-layout"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#installation-layout-and-concurrent-writers"
+applicability = "optional-channel"
+owner = "EPR3"
+path = ["EPR1", "EPR3"]
+subblocks = ["EPR3-SB5"]
+acceptance = "EPR3-AC-INSTALLED"
+
+[[rows]]
+id = "receipt-cache-invalidation"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-CACHE"
+
+[[rows]]
+id = "receipt-incremental-equals-fresh"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-INCREMENTAL"
+
+[[rows]]
+id = "validation-budgets-and-counters"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-WORK"
+
+[[rows]]
+id = "warm-identical-request-control"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-WORK"
+
+[[rows]]
+id = "revocation-aware-validation"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "revocation-cache-invalidation"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB6"]
+acceptance = "EPR4-AC-CACHE"
+
+[[rows]]
+id = "revocation-reporting"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "activation-revocation-race"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB1"]
+acceptance = "EPR5-AC-REVALIDATE"
+
+[[rows]]
+id = "activation-incremental-equals-fresh"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB1"]
+acceptance = "EPR5-AC-INCREMENTAL"
+
+[[rows]]
+id = "managed-quarantine"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB5"]
+acceptance = "EPR2-AC-SAFE-EXTRACT"
+
+[[rows]]
+id = "bundled-withdrawal"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "optional-channel"
+owner = "EPR3"
+path = ["EPR1", "EPR3"]
+subblocks = ["EPR3-SB4"]
+acceptance = "EPR3-AC-SUPPLY"
+
+[[rows]]
+id = "public-validation-status"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#public-validation-status"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "redaction-adapters"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#public-validation-status"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "activation-status"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#public-validation-status"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB6"]
+acceptance = "EPR5-AC-CAPABILITY"
+
+[[rows]]
+id = "activation-lifecycle-work"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB7"]
+acceptance = "EPR5-AC-WORK"
+
+[[rows]]
+id = "acquisition-work"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB7"]
+acceptance = "EPR2-AC-WORK"
+
+[[rows]]
+id = "shipping-zero-work"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#validation-cache-and-invalidation"
+applicability = "optional-channel"
+owner = "EPR3"
+path = ["EPR1", "EPR3"]
+subblocks = ["EPR3-SB7"]
+acceptance = "EPR3-AC-WORK"
+
+[[rows]]
+id = "browser-artifact-rejection"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#browser-worker-artifacts"
+applicability = "required"
+owner = "BWH8"
+path = ["EPR1", "BWH8"]
+subblocks = []
+acceptance = "BWH8-AC1"
+
+[[rows]]
+id = "browser-development-artifact-distinction"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#browser-worker-artifacts"
+applicability = "required"
+owner = "BWH8"
+path = ["EPR1", "BWH8"]
+subblocks = []
+acceptance = "BWH8-AC-OWNER"
+
+[[rows]]
+id = "source-environment-manual"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2", "EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "source-project-local"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2", "EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "source-system-path"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2", "EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "source-editor-shared"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2", "EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "source-managed-cache"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2", "EPR4-SB7"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "source-managed-download"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB4"]
+acceptance = "EPR2-AC-VERIFY-FIRST"
+
+[[rows]]
+id = "source-bundled-closed"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOURCES"
+
+[[rows]]
+id = "source-bundled-opened"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "optional-channel"
+owner = "EPR3"
+path = ["EPR1", "EPR3"]
+subblocks = ["EPR3-SB5"]
+acceptance = "EPR3-AC-INSTALLED"
+
+[[rows]]
+id = "source-browser-artifact"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#source-evidence-obligations"
+applicability = "required"
+owner = "BWH8"
+path = ["EPR1", "BWH8"]
+subblocks = []
+acceptance = "BWH8-AC1"
+
+[[rows]]
+id = "resolution-consumer"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#runtime-ownership-transfer"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "acquisition-consumer"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#runtime-ownership-transfer"
+applicability = "optional-channel"
+owner = "EPR2"
+path = ["EPR1", "EPR2"]
+subblocks = ["EPR2-SB4"]
+acceptance = "EPR2-AC-VERIFY-FIRST"
+
+[[rows]]
+id = "shipping-consumer"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#runtime-ownership-transfer"
+applicability = "optional-channel"
+owner = "EPR3"
+path = ["EPR1", "EPR3"]
+subblocks = ["EPR3-SB5"]
+acceptance = "EPR3-AC-INSTALLED"
+
+[[rows]]
+id = "activation-consumer"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#runtime-ownership-transfer"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB1"]
+acceptance = "EPR5-AC-REVALIDATE"
+
+[[rows]]
+id = "browser-loader-consumer"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#runtime-ownership-transfer"
+applicability = "required"
+owner = "BWH8"
+path = ["EPR1", "BWH8"]
+subblocks = []
+acceptance = "BWH8-AC-OWNER"
+
+[[rows]]
+id = "local-companion-consumer"
+role = "consumer"
+sourceRef = "docs/arch/engine-provisioning.md#runtime-ownership-transfer"
+applicability = "required"
+owner = "DX4"
+path = ["EPR1", "DX4"]
+subblocks = []
+acceptance = "DX4-AC-OWNER"
+
+[[rows]]
+id = "path-version-candidate-identity"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/validation.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "execute-before-validation"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/validation.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "untyped-candidate-rejection"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/discovery.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB5"]
+acceptance = "EPR4-AC-CONTRACT"
+
+[[rows]]
+id = "first-working-candidate-selection"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/discovery.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOLE"
+
+[[rows]]
+id = "unbound-ready-marker"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/discovery.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB7"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "check-then-follow-cache-path"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/discovery.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB7"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "bundle-path-manifest-trust"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/toolchain/bundle.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "tsserver-version-only-compatibility"
+role = "displaced"
+sourceRef = "crates/verter_type_runtime/src/discovery.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "tsserver-independent-tier-validation"
+role = "displaced"
+sourceRef = "crates/verter_type_runtime/src/discovery.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOLE"
+
+[[rows]]
+id = "editor-sdk-candidate-probe"
+role = "displaced"
+sourceRef = "packages/vue-vscode/src/sharedTsgoLaunch.ts"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOLE"
+
+[[rows]]
+id = "extension-typescript-trust-shortcut"
+role = "displaced"
+sourceRef = "packages/vue-vscode/src/extensionTsService.ts"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOLE"
+
+[[rows]]
+id = "second-engine-selection-authority"
+role = "displaced"
+sourceRef = "crates/verter_tsc/src/checker.rs"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB2"]
+acceptance = "EPR4-AC-SOLE"
+
+[[rows]]
+id = "raw-path-engine-connect"
+role = "displaced"
+sourceRef = "crates/verter_tsgo_api/src/client.rs"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB1"]
+acceptance = "EPR5-AC-REVALIDATE"
+
+[[rows]]
+id = "relay-shim-raw-path-execution"
+role = "displaced"
+sourceRef = "crates/verter_relay_shim/src/main.rs"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB1"]
+acceptance = "EPR5-AC-REVALIDATE"
+
+[[rows]]
+id = "coarse-provider-status"
+role = "displaced"
+sourceRef = "crates/verter_lsp/src/lib.rs"
+applicability = "required"
+owner = "EPR5"
+path = ["EPR1", "EPR4", "EPR5"]
+subblocks = ["EPR5-SB6"]
+acceptance = "EPR5-AC-CAPABILITY"
