@@ -4,7 +4,7 @@
 //
 // Recorded inputs (frozen at the conversion, before `package.json` was
 // edited): baseline-full.txt holds the 48 command lines of the replaced
-// `test:scripts` chain, baseline-ci.txt the 25 command lines of the replaced
+// `test:scripts` chain, baseline-ci.txt the 26 command lines of the replaced
 // `test:scripts:ci` chain.
 //
 // Method: run the real CLI (`--list` / `--ci --list`) as child processes and

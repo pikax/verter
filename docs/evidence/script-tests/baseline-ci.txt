@@ -1,3 +1,4 @@
+node --test scripts/benchmark/evidence-run.test.mjs
 vitest run scripts/sccache-env.test.mjs
 node --test scripts/observe-lane.test.mjs
 vitest run scripts/wasm-opt-cache.test.mjs
