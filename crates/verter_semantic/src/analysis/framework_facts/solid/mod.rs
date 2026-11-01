@@ -1,4 +1,8 @@
-//! Filled by FWD1-SOLID/CTX1-SOLID/TRN1-SOLID/RND1-SOLID/EFF3-SOLID.
+//! Filled by FWD1-SOLID.
+//! Filled by CTX1-SOLID.
+//! Filled by TRN1-SOLID.
+//! Filled by RND1-SOLID.
+//! Filled by EFF3-SOLID.
 
 pub(crate) mod context;
 pub(crate) mod forwarding;

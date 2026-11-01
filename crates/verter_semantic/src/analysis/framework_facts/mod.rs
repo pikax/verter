@@ -33,8 +33,10 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 pub mod svelte;
 
 // Reserved homes for planned framework-contribution modules. Each module
-// below is declaration-only: its doc line names the node that fills it, and
-// contribution nodes write inside their own reserved module only. The whole
+// below is declaration-only: each of its doc lines names exactly one owning
+// node, so a parent shared by several contributions carries one line per
+// owner, and contribution nodes write inside their own reserved module only.
+// The whole
 // reserved tree (these homes and each contribution home inside them) is
 // `pub(crate)` so the sibling fact families under `analysis` can address a
 // contribution without editing this shared parent.

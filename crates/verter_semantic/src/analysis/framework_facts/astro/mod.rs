@@ -1,4 +1,6 @@
-//! Filled by FWD1-ASTRO/TRN1-ASTRO/RND1-ASTRO.
+//! Filled by FWD1-ASTRO.
+//! Filled by TRN1-ASTRO.
+//! Filled by RND1-ASTRO.
 
 pub(crate) mod composed_page;
 pub(crate) mod forwarding;

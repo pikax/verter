@@ -1,4 +1,8 @@
-//! Filled by FWD1-LIT/CTX1-LIT/RND1-LIT/EFF3-LIT/LIT-INT.
+//! Filled by FWD1-LIT.
+//! Filled by CTX1-LIT.
+//! Filled by RND1-LIT.
+//! Filled by EFF3-LIT.
+//! Filled by LIT-INT.
 
 pub(crate) mod context;
 pub(crate) mod forwarding;

@@ -1,4 +1,8 @@
-//! Filled by FWD1-ANGULAR/CTX1-ANGULAR/TRN1-ANGULAR/RND1-ANGULAR/EFF3-ANGULAR.
+//! Filled by FWD1-ANGULAR.
+//! Filled by CTX1-ANGULAR.
+//! Filled by TRN1-ANGULAR.
+//! Filled by RND1-ANGULAR.
+//! Filled by EFF3-ANGULAR.
 
 pub(crate) mod context;
 pub(crate) mod forwarding;

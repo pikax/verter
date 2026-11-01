@@ -78,8 +78,10 @@ pub mod type_eval_build;
 // Reserved homes for planned fact-family modules. Each module below is
 // declaration-only: its doc line names the node that fills it, and fact
 // nodes write inside their own reserved module only. They are `pub(crate)`
-// so per-framework contributions (under `framework_facts`) can name their
-// family without editing this shared parent.
+// for consumers elsewhere in the crate: a contribution under
+// `framework_facts` descends from `analysis` and could name its family home
+// even if it were private, so the qualifier serves modules outside
+// `analysis` (query surfaces, analyzers) that otherwise could not.
 pub(crate) mod composed_page;
 pub(crate) mod context;
 pub(crate) mod effects;
