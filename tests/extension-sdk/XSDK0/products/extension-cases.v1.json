@@ -22,9 +22,9 @@
     {
       "id": "N03",
       "producer": "XSDK8",
-      "control": "revision-matched reversible plan with explicit grant",
-      "counterexample": "raw write, stale revision, missing authored reverse map or self-granted execution",
-      "required": "no writes; typed transaction refusal",
+      "control": "revision-matched reversible action proposal, from a data row or an isolated guest, with explicit grant, applied by LSO8's transaction engine",
+      "counterexample": "raw write, stale revision, missing authored reverse map, self-granted execution, or an action path used to evaluate a rule body",
+      "required": "no writes; typed transaction refusal; no rule body runs",
       "conditions": ["E07"]
     },
     {
@@ -38,31 +38,31 @@
     {
       "id": "N05",
       "producer": "XSDK1",
-      "control": "exact known tuple with granted required capability",
-      "counterexample": "range/floating version, unknown schema/kind/target or denied required capability",
-      "required": "reject without execution; optional denied capability reported disabled",
-      "conditions": ["E01", "E02"]
+      "control": "exact known tuple with resolved exact dependency; core mints provenance and digest; granted required capability participates",
+      "counterexample": "range/floating version or dependency, missing dependency, unknown schema/kind/target/capability id, manifest claiming official-static provenance or a digest that does not match the admitted bytes; or a known required capability, grant or host cell that is denied or unavailable",
+      "required": "unknown, ranged or forged inputs reject without execution; a denied or unavailable required capability, grant or host cell leaves the row registered and non-participating with a typed disabled reason and zero execution; optional denial reported disabled; grant changes leave snapshot identity unchanged",
+      "conditions": ["E01", "E02", "E03"]
     },
     {
       "id": "N06",
       "producer": "XSDK3",
-      "control": "qualified native guest with bounded mediated input",
-      "counterexample": "filesystem/network/process escape, fuel/memory exhaustion or cancellation",
-      "required": "denied capability, bounded typed refusal and resource teardown; subprocess alone insufficient",
+      "control": "qualified native guest with bounded mediated input computes registration rows, tool output or an action proposal",
+      "counterexample": "filesystem/network/process escape, fuel/memory exhaustion, cancellation, or a request to evaluate a rule body in the guest",
+      "required": "denied capability, bounded typed refusal and resource teardown; rule-body evaluation refused; subprocess alone insufficient",
       "conditions": ["E05"]
     },
     {
       "id": "N07",
       "producer": "XSDK4",
-      "control": "qualified browser guest with explicit inputs",
-      "counterexample": "ambient origin, workspace or network access attempt",
-      "required": "no ambient access; bounded refusal/teardown; ordinary worker not proof",
+      "control": "qualified browser guest with explicit inputs computes registration rows, tool output or an action proposal; data-only rows usable without a guest",
+      "counterexample": "ambient origin, workspace or network access attempt, or a guest offered as a substitute for unavailable LNT2 external rule execution",
+      "required": "no ambient access; bounded refusal/teardown; external rule execution reported unavailable, never run in the guest; ordinary worker not proof",
       "conditions": ["E05"]
     },
     {
       "id": "N08",
       "producer": "XSDK5",
-      "control": "selected fresh and incremental answers agree",
+      "control": "selected fresh and incremental guest answers agree",
       "counterexample": "edit/revert, version/config change or removal while guest reply is delayed",
       "required": "stale reply discarded; dependent results invalidated; unaffected controls retained",
       "conditions": ["E06"]
@@ -70,9 +70,9 @@
     {
       "id": "N09",
       "producer": "XSDK5",
-      "control": "completed selected result published once",
-      "counterexample": "cancelled/partial/malformed reply or unselected contribution",
-      "required": "no complete publication/cache warm; unselected execution count zero; teardown releases retention",
+      "control": "completed selected guest result published once",
+      "counterexample": "cancelled/partial/malformed reply, unselected contribution, or a rule body scheduled through the extension lifecycle",
+      "required": "no complete publication/cache warm; unselected execution count zero; lifecycle schedules no rule body; teardown releases retention",
       "conditions": ["E06"]
     },
     {
@@ -80,7 +80,7 @@
       "producer": "XSDK7",
       "control": "inspected local exact package installed and rolled back",
       "counterexample": "digest mismatch, incompatible upgrade or permission expansion without grant",
-      "required": "reject before snapshot replacement; existing session unaffected; removal yields new snapshot",
+      "required": "digest mismatch and incompatible upgrade reject before snapshot replacement; an ungranted permission expansion leaves the upgraded row non-participating until explicitly granted; existing session unaffected; removal yields new snapshot",
       "conditions": ["E01", "E02", "E03", "E08"]
     },
     {
@@ -98,11 +98,19 @@
       "counterexample": "example advertises unsupported host or permissions",
       "required": "DOC1 execution and VIM/DX evidence prevent unsupported claim; terminal checks completed artifacts",
       "conditions": ["E08"]
+    },
+    {
+      "id": "N13",
+      "producer": "XSDK2",
+      "control": "contributed or guest-computed T08 row naming an owned native body or LNT2 external execution is admitted as data",
+      "counterexample": "row carrying rule code, naming a native library or guest as its executor, or adding a second native/external authority for one diagnostic concept and exact profile",
+      "required": "typed rejection; rule bodies run only as owned native implementations or through LNT2; T08 row ownership stays LNT3's",
+      "conditions": ["E04", "E05"]
     }
   ],
   "existingEvidence": [
     "crates/verter_session/tests/cases/compile-fail/semantic_capability_row_struct_literal_forge.rs",
     "crates/verter_session/tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs"
   ],
-  "evidenceLimit": "Existing compile-fail fixtures protect core capability construction, not future guest isolation/ingress; producers execute these cases and XSDK10 qualifies both hosts."
+  "evidenceLimit": "Existing compile-fail fixtures protect core capability construction, not future guest isolation/ingress or rule-execution refusal; producers execute these cases and XSDK10 qualifies both hosts."
 }
