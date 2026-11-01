@@ -1,0 +1,31 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/typescript/expected/valid-tokens.txt",
+  "normalized_options": {
+    "semi": false,
+    "singleQuote": true,
+    "quoteProps": "consistent",
+    "trailingComma": "all",
+    "bracketSpacing": false,
+    "arrowParens": "avoid"
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      116
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    116
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/typescript/expected/valid-tokens.txt",
+    "edits": []
+  },
+  "divergence": null
+}

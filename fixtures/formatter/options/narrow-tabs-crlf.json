@@ -1,0 +1,9 @@
+{
+  "id": "narrow-tabs-crlf",
+  "values": {
+    "printWidth": 24,
+    "tabWidth": 4,
+    "useTabs": true,
+    "endOfLine": "crlf"
+  }
+}

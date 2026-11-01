@@ -1,0 +1,26 @@
+{
+  "outcome": "unsupported",
+  "reason": "UnsafeRecovery: no safe complete authored unit",
+  "output": null,
+  "normalized_options": {
+    "vueIndentScriptAndStyle": true
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      40
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    40
+  ],
+  "second_pass": {
+    "output": null,
+    "edits": []
+  },
+  "divergence": null
+}

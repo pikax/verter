@@ -1,0 +1,24 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/css/expected/valid-preserve-quotes.txt",
+  "normalized_options": {},
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      76
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    76
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/css/expected/valid-preserve-quotes.txt",
+    "edits": []
+  },
+  "divergence": null
+}

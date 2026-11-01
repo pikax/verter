@@ -29,3 +29,4 @@ pub mod encoding;
 pub mod identity;
 pub mod mapping;
 pub mod profile;
+pub mod successor;

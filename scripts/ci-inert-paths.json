@@ -1,5 +1,9 @@
 [
   {
+    "glob": ".github/patches/libfaketime-const.patch",
+    "reason": "Read only by the separate perturbation.yml workflow, which triggers on this exact patch; no ci.yml job reads it."
+  },
+  {
     "glob": "docs/**",
     "reason": "Prose. A page a lane reads (the audit footprint, the generated typeinfo counts, the signature-kernel page and evidence, docs/package.json) is owned by that lane's filter."
   },
@@ -92,6 +96,10 @@
     "reason": "Documentation products the local DOC verifiers and the docs deploy read."
   },
   {
+    "glob": "tests/engine-provisioning/EPR0/products/*.json",
+    "reason": "Provisioning contract data read by review and its receiving owners; no ci.yml job reads it."
+  },
+  {
     "glob": "tests/jetbrains-baseline/**",
     "reason": "Baseline products; the one the DX harness reads is owned by the dx filter."
   },
@@ -158,5 +166,13 @@
   {
     "glob": "test-results/**",
     "reason": "A tracked test report js-build-test overwrites before reading it."
+  },
+  {
+    "glob": "tests/web-compat/WBC0/contract.md",
+    "reason": "Compatibility authority contract prose; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/web-compat/evidence/WBC0/cases.md",
+    "reason": "Compatibility review case table; no ci.yml job reads its contents."
   }
 ]
