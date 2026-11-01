@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use imbl::{OrdMap, OrdSet};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use verter_session_query::retention::{ChargeClass, RetentionCharge, StoreAccount};
+use verter_session_query::retention::{RetentionCharge, StoreAccount};
 
 use super::delta::{
     CompletePartition, ContributionDelta, ExpectedPrior, ObservationOracle, PublishOutcome,
@@ -439,7 +439,7 @@ fn witness_current(witness: &ReadWitness, oracle: &dyn ObservationOracle) -> boo
 
 /// A delta that passed the fence, with idempotent replays removed.
 struct PublicationPlan {
-    upserts: Vec<CompletePartition>,
+    upserts: Vec<Box<CompletePartition>>,
     retirements: Vec<ContributionId>,
     coverage: Vec<CoverageRecord>,
 }
@@ -582,8 +582,7 @@ impl PublicationPlan {
             next.remove_contribution(id);
         }
         for partition in self.upserts {
-            let CompletePartition { draft, mut charge } = partition;
-            debug_assert_eq!(charge.class(), ChargeClass::Active);
+            let CompletePartition { draft, mut charge } = *partition;
             charge
                 .try_adopt_retained()
                 .map_err(|_| PublishRefusal::RetentionPressure)?;

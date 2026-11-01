@@ -13,8 +13,8 @@ use verter_identity::encoding::CanonicalDigest;
 use verter_session_query::retention::{RetentionCharge, SemanticRetentionAccount};
 
 use super::identity::{
-    ContributionId, ContributionKey, DemandEpoch, ExtensionId, ObservationKey, ReadSet,
-    ReadWitness, SelectionEpoch, SourceBasis, TableSchema,
+    ContributionId, ContributionKey, DemandEpoch, ExtensionId, ObservationKey, ObservationOwner,
+    ReadSet, ReadWitness, SelectionEpoch, SourceBasis, TableSchema,
 };
 use super::records::{ExtensionRow, FactQuality, IndexRecord, IndexRow, Provenance, RecordOrigin};
 use super::snapshot::{Contribution, CoverageRecord};
@@ -47,7 +47,8 @@ pub enum IngressRejection {
     UnattributedExtension,
     /// A registration names an operation its producer did not deliver.
     UndeliveredOperation(Arc<str>),
-    /// The read set has no evidence for the contribution's own source unit.
+    /// The read set has no source or project-model observation of the
+    /// contribution's own unit.
     MissingReadEvidence,
     /// A record has no origin, not even a typed unavailable one.
     MissingOrigin { slot_ordinal: u32 },
@@ -95,7 +96,10 @@ impl PartitionDraft {
         }
         if !self.read_set.0.iter().any(|witness| {
             witness.key.subject == self.basis.unit.digest()
-                && witness.key.owner == super::identity::ObservationOwner::Source
+                && matches!(
+                    witness.key.owner,
+                    ObservationOwner::Source | ObservationOwner::ProjectModel
+                )
         }) {
             return Err(IngressRejection::MissingReadEvidence);
         }
@@ -276,7 +280,7 @@ pub struct RetirementEvidence {
 #[derive(Debug)]
 pub enum SlotChange {
     Upsert {
-        partition: CompletePartition,
+        partition: Box<CompletePartition>,
         expected: ExpectedPrior,
     },
     Retire {
