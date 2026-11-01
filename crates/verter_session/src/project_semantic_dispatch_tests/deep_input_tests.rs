@@ -1166,6 +1166,75 @@ fn arrows_initializing_declarators_nested_deep_answer_on_a_small_stack() {
     answers_on(test_path!(), SMALL_STACK, source, ARROW_PROBE, "1");
 }
 
+/// Arrows nested 200 deep, each an arm of a conditional declarator's
+/// initializer the body returns, in `forms`, read on a small stack in a fresh
+/// process. TypeScript 7.0.2: `1`, under every setting.
+fn conditional_declarator_arrows_answer(test: &str, forms: [(&'static str, &'static str); 2]) {
+    in_a_fresh_process(test, || {
+        for (open, close) in forms {
+            assert_eq!(
+                on_a_stack(SMALL_STACK, move || mismatches(
+                    &returning(wrap(NESTED_FUNCTIONS, open, close)),
+                    &[(ARROW_PROBE, "1")]
+                )),
+                Vec::<String>::new(),
+                "{open}"
+            );
+        }
+    });
+}
+
+/// The arm walk suspends at a consequent's nested function value as a plain
+/// declarator does, beside a nullish or a literal arm. 480 KiB needed, so a
+/// level costing more than 0.8 KiB overflows.
+#[test]
+fn arrows_in_conditional_declarator_consequents_nested_deep_answer_on_a_small_stack() {
+    conditional_declarator_arrows_answer(
+        test_path!(),
+        [
+            ("() => { const f = b ? ", " : null; return f; }"),
+            ("() => { const f = b ? ", " : 0; return f; }"),
+        ],
+    );
+}
+
+/// The arm walk suspends at an alternate's nested function value too, behind
+/// a literal arm or a sibling that forks the flow with a write. 480 KiB
+/// needed, so a level costing more than 0.8 KiB overflows.
+#[test]
+fn arrows_in_conditional_declarator_alternates_nested_deep_answer_on_a_small_stack() {
+    conditional_declarator_arrows_answer(
+        test_path!(),
+        [
+            ("() => { const f = b ? 0 : ", "; return f; }"),
+            (
+                "() => { let w: unknown; const f = b ? (w = 0) : ",
+                "; return f; }",
+            ),
+        ],
+    );
+}
+
+/// Invoked arrows nested 200 deep in a conditional declarator's arms: the
+/// call suspends the arm's run at the function it evaluates. 480 KiB needed,
+/// so a level costing more than 0.8 KiB overflows. TypeScript 7.0.2:
+/// `number`, under every setting.
+#[test]
+fn invoked_arrows_in_conditional_declarators_nested_deep_answer_on_a_small_stack() {
+    let source = returning(wrap(
+        NESTED_FUNCTIONS,
+        "(() => { const f = b ? ",
+        " : 1; return f; })()",
+    ));
+    answers_on(
+        test_path!(),
+        SMALL_STACK,
+        source,
+        "ReturnType<typeof pf>",
+        "number",
+    );
+}
+
 /// A destructuring declarator nested 1,000 patterns deep lowers, binds and
 /// drops from explicit stacks: 416 KiB needed, so a level costing more
 /// than 0.22 KiB overflows. Every element of an `any` source is `any`:
