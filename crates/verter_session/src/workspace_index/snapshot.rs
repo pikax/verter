@@ -439,7 +439,7 @@ fn witness_current(witness: &ReadWitness, oracle: &dyn ObservationOracle) -> boo
 
 /// A delta that passed the fence, with idempotent replays removed.
 struct PublicationPlan {
-    upserts: Vec<Box<CompletePartition>>,
+    upserts: Vec<CompletePartition>,
     retirements: Vec<ContributionId>,
     coverage: Vec<CoverageRecord>,
 }
@@ -470,7 +470,7 @@ impl PublicationPlan {
                     expected,
                 } => {
                     if Self::fence_upsert(current, &partition, &expected, &retiring, oracle)? {
-                        plan.upserts.push(partition);
+                        plan.upserts.push(*partition);
                     }
                 }
                 SlotChange::Retire {
@@ -582,7 +582,7 @@ impl PublicationPlan {
             next.remove_contribution(id);
         }
         for partition in self.upserts {
-            let CompletePartition { draft, mut charge } = *partition;
+            let CompletePartition { draft, mut charge } = partition;
             charge
                 .try_adopt_retained()
                 .map_err(|_| PublishRefusal::RetentionPressure)?;
