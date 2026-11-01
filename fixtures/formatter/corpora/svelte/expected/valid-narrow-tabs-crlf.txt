@@ -1,0 +1,16 @@
+<script>
+	let greeting =
+		"hé🙂";
+</script>
+<button
+	title="hello"
+	disabled
+>
+	{greeting}
+</button>
+<style>
+	.box {
+		color: red;
+		margin: 0 1px;
+	}
+</style>

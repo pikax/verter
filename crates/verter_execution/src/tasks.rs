@@ -365,6 +365,8 @@ impl TaskRegistry {
             for waiter in state.waiters.remove(&task).unwrap_or_default() {
                 state.waits.remove(&waiter);
             }
+            #[cfg(any(test, feature = "test-support"))]
+            state.wait_registered.notify_all();
         });
     }
     fn remove_wait(&self, waiter: TaskId, producer: TaskId) {
@@ -441,6 +443,38 @@ impl TaskRegistry {
             let registered = state.wait_registered.clone();
             if registered.wait_until(&mut state, deadline).timed_out() {
                 return state.waits.len() >= edges;
+            }
+        }
+    }
+
+    /// Wait until no task is active in this authority: a background owner
+    /// can release its handle after the work it held has answered. Retirement
+    /// is announced under the same lock, so none is missed; the budget is a
+    /// hang guard only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wait_for_no_active_tasks_for_tests(&self, budget: std::time::Duration) -> bool {
+        let idle = |state: &RegistryState| {
+            !state
+                .pools
+                .values()
+                .flat_map(|pool| &pool.tasks)
+                .any(|slot| slot.active)
+        };
+        let deadline = std::time::Instant::now() + budget;
+        let mut graph = self.owner.graph.clone();
+        loop {
+            let mut state = graph.lock();
+            if let Some(parent) = state.parent.clone() {
+                drop(state);
+                graph = parent;
+                continue;
+            }
+            if idle(&state) {
+                return true;
+            }
+            let announced = state.wait_registered.clone();
+            if announced.wait_until(&mut state, deadline).timed_out() {
+                return idle(&state);
             }
         }
     }

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/compile-fail/successor_attachment_id_is_not_region_id.rs:32:20
+   |
+32 |     expects_region(attachment);
+   |     -------------- ^^^^^^^^^^ expected `RegionId`, found `AttachmentId`
+   |     |
+   |     arguments to this function are incorrect
+   |
+note: function defined here
+  --> tests/compile-fail/successor_attachment_id_is_not_region_id.rs:17:4
+   |
+17 | fn expects_region(_: RegionId) {}
+   |    ^^^^^^^^^^^^^^ -----------

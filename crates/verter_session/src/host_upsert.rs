@@ -218,7 +218,7 @@ impl UpsertBatchTxn {
         );
         let mut outcomes =
             Self::map_states(host, prepared, states, false, UpsertResultDemand::Full);
-        host.settle_injected_ambient_roots();
+        host.materialize_pending_declarations();
         host.materialize_upsert_carrier_routes(&mut outcomes);
         outcomes
     }
@@ -419,7 +419,7 @@ impl VerterHost {
         // Derived work can join an index producer whose source integration
         // needs the admission fence. Source and workspace publication above
         // are complete before any such dependency is awaited.
-        self.settle_injected_ambient_roots();
+        self.materialize_pending_declarations();
         self.materialize_upsert_carrier_routes(&mut outcomes);
         if !changed.is_empty() {
             self.ingest_changed_program_files(changed);
@@ -1121,7 +1121,7 @@ impl VerterHost {
                 )?)
             }
         };
-        self.ingest_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
+        self.note_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
         let pending_overlay =
             (crate::global_contributors::source_has_ambient_contribution(req.source.as_ref())
                 && !canonical_id.ends_with(".d.ts")

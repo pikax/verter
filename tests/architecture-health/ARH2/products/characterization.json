@@ -635,6 +635,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/raise_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/raised_shape_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/relation_depth_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/relation_name_disambiguation_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/relation_variance_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/relation_work_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/return_equation_tests.rs",

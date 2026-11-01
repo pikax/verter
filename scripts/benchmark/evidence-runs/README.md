@@ -191,3 +191,16 @@ proof (see `docs/contributing/semantic-benchmark.md#session-workloads`). The
 proof's figures are retention-account bytes and object counts, read on every
 worker; a missing session, a failed proof or a proof with nothing to compare
 fails the run.
+
+## Formatter contract registration
+
+`formatter-performance` is a parameterized `kind: formatter` manifest. It uses
+`--candidate <review-candidate identity>` and `--corpus <fixture id>` from
+`catalogs/formatter-performance-v1.toml`; both are mandatory. Its modes and latency/
+peak-RSS cells are validated against that catalog. A dry run emits unmeasured
+cells and records both identities and the catalog/fixture digests. The contract
+registration supplies no native formatter or benchmark: a non-dry invocation in
+this checkout records unavailable measurements explicitly. Timing and memory
+remain advisory under the standing measurement rule. See the
+[formatter artifact contract](../../../tests/formatter/README.md) for validation,
+fixtures, source geometry and successor evidence obligations.
