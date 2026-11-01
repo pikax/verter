@@ -647,6 +647,10 @@ fn namesake_mismatches(project: &Project<'_>, setting: Setting) -> Vec<String> {
     recovered_store_mismatches(project, setting, &NAMESAKE_STORE, namesake_diagnostics)
 }
 
+/// Each `(code, start, end)` the checker reports around a store, from the
+/// scenario's text and whether `noImplicitAny` is on.
+type DiagnosticsOf = fn(&str, bool) -> Vec<(u32, u32, u32)>;
+
 /// Every failure of an erroneous store to answer as the checker's recovery
 /// does, in one compiler setting: each member alone and in the whole store as
 /// `checker` lists them, the shared flow result of the store's initializer
@@ -655,7 +659,7 @@ fn recovered_store_mismatches(
     project: &Project<'_>,
     setting: Setting,
     checker: &[&str; 8],
-    diagnostics: fn(&str, bool) -> Vec<(u32, u32, u32)>,
+    diagnostics: DiagnosticsOf,
 ) -> Vec<String> {
     let probes: Vec<&str> = MEMBERS
         .iter()
@@ -970,12 +974,12 @@ fn assert_undeclared_marker_recovery(setting: Setting) {
         recovered_store_mismatches(&project, setting, &UNDECLARED_STORE, undeclared_diagnostics);
     let probes: Vec<&str> = MEMBERS.iter().map(|(probe, _)| *probe).collect();
     let host = project.host(setting.options, &probes);
-    for ordinal in 2..=5 {
+    for (ordinal, probe) in probes.iter().enumerate().take(6).skip(2) {
         let code = named_answer(&host, ordinal).checker_recovery_code();
         if code != Some(2339) {
             failures.push(format!(
-                "{}: `{}` carries {code:?}, not TS2339",
-                setting.label, probes[ordinal]
+                "{}: `{probe}` carries {code:?}, not TS2339",
+                setting.label
             ));
         }
     }
