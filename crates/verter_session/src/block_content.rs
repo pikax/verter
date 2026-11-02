@@ -172,6 +172,9 @@ const MAX_SEALED_TOKEN_BYTES: usize = 256;
 const MAX_SUPPLIED_CODE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SUPPLIED_MAP_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SUPPLIED_PROVENANCE_BYTES: usize = 4 * 1024;
+/// Per-entry diagnostic count. The provenance byte budget counts message bytes
+/// only, so empty-message diagnostics need their own bound.
+const MAX_SUPPLIED_DIAGNOSTICS: usize = 1_024;
 const MAX_SUPPLIED_ARTIFACTS: usize = 4_096;
 const MAX_SUPPLIED_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -458,71 +461,85 @@ fn valid_sealed_token(token: &str) -> bool {
         && !token.chars().any(char::is_control)
 }
 
-/// The 0-based UTF-8 byte range of 1-based `line` of `content`, excluding its
-/// terminator. Lines end at `\n`, `\r\n` or a lone `\r`; a trailing
-/// terminator starts one final empty line.
-fn line_text(content: &str, line: u32) -> Option<&str> {
-    let bytes = content.as_bytes();
-    let mut line_no = 1u32;
-    let mut start = 0usize;
-    loop {
-        let mut end = start;
-        while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
-            end += 1;
-        }
-        if line_no == line {
-            return Some(&content[start..end]);
-        }
-        if end >= bytes.len() {
-            return None;
-        }
-        end += if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
-            2
-        } else {
-            1
-        };
-        line_no += 1;
-        start = end;
-    }
+/// The exact text a preprocessor consumed, with its line boundaries indexed
+/// once. Lines end at `\n`, `\r\n` or a lone `\r`; a trailing terminator starts
+/// one final empty line. Every diagnostic of one override validates against the
+/// same index, so N positions cost one scan of the input plus N lookups, not N
+/// rescans from the start.
+pub(crate) struct PreprocessorInputIndex<'a> {
+    content: &'a str,
+    /// Byte range of each line, terminator excluded.
+    lines: Vec<(usize, usize)>,
 }
 
-/// Validate a preprocessor-reported 1-based `line` and 1-based UTF-16
-/// `column` against the exact `content` the tool consumed. Exact or refused:
-/// a zero base, a line past the last, a column past the end of its line, or a
-/// column without a line, or a line without a column (a position is the
-/// complete `(line, column)` pair) is [`CoordError::InvalidBoundary`]; a column inside
-/// a surrogate pair is [`CoordError::NotCharBoundary`]. `None`/`None` is an
-/// absent position and always valid.
-pub(crate) fn check_preprocessor_position(
-    content: &str,
-    line: Option<u32>,
-    column: Option<u32>,
-) -> Result<(), verter_span::CoordError> {
-    use verter_span::CoordError;
-    let (line, column) = match (line, column) {
-        (None, None) => return Ok(()),
-        (None, Some(_)) | (Some(_), None) => return Err(CoordError::InvalidBoundary),
-        (Some(line), Some(column)) => (line, column),
-    };
-    if line == 0 {
-        return Err(CoordError::InvalidBoundary);
+impl<'a> PreprocessorInputIndex<'a> {
+    pub(crate) fn new(content: &'a str) -> Self {
+        let bytes = content.as_bytes();
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\n' => {
+                    lines.push((start, cursor));
+                    start = cursor + 1;
+                }
+                b'\r' => {
+                    lines.push((start, cursor));
+                    if bytes.get(cursor + 1) == Some(&b'\n') {
+                        cursor += 1;
+                    }
+                    start = cursor + 1;
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        lines.push((start, bytes.len()));
+        Self { content, lines }
     }
-    let text = line_text(content, line).ok_or(CoordError::InvalidBoundary)?;
-    let target = u64::from(column.checked_sub(1).ok_or(CoordError::InvalidBoundary)?);
-    let mut units = 0u64;
-    for ch in text.chars() {
+
+    /// The text of 1-based `line`, excluding its terminator.
+    fn line_text(&self, line: u32) -> Option<&'a str> {
+        let (start, end) = *self.lines.get((line as usize).checked_sub(1)?)?;
+        Some(&self.content[start..end])
+    }
+
+    /// Validate a preprocessor-reported 1-based `line` and 1-based UTF-16
+    /// `column`. Exact or refused: a zero base, a line past the last, a column
+    /// past the end of its line, a column without a line, or a line without a
+    /// column (a position is the complete `(line, column)` pair) is
+    /// [`CoordError::InvalidBoundary`]; a column inside a surrogate pair is
+    /// [`CoordError::NotCharBoundary`]. `None`/`None` is an absent position and
+    /// always valid.
+    pub(crate) fn check(
+        &self,
+        line: Option<u32>,
+        column: Option<u32>,
+    ) -> Result<(), verter_span::CoordError> {
+        use verter_span::CoordError;
+        let (line, column) = match (line, column) {
+            (None, None) => return Ok(()),
+            (None, Some(_)) | (Some(_), None) => return Err(CoordError::InvalidBoundary),
+            (Some(line), Some(column)) => (line, column),
+        };
+        let text = self.line_text(line).ok_or(CoordError::InvalidBoundary)?;
+        let target = u64::from(column.checked_sub(1).ok_or(CoordError::InvalidBoundary)?);
+        let mut units = 0u64;
+        for ch in text.chars() {
+            if target == units {
+                return Ok(());
+            }
+            units += ch.len_utf16() as u64;
+            if target < units {
+                return Err(CoordError::NotCharBoundary);
+            }
+        }
         if target == units {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(CoordError::InvalidBoundary)
         }
-        units += ch.len_utf16() as u64;
-        if target < units {
-            return Err(CoordError::NotCharBoundary);
-        }
-    }
-    if target == units {
-        Ok(())
-    } else {
-        Err(CoordError::InvalidBoundary)
     }
 }
 
@@ -1802,6 +1819,7 @@ impl VerterHost {
                     .as_deref()
                     .is_some_and(|map| map.len() > MAX_SUPPLIED_MAP_BYTES)
                 || supplied_provenance_bytes > MAX_SUPPLIED_PROVENANCE_BYTES
+                || entry.diagnostics.len() > MAX_SUPPLIED_DIAGNOSTICS
             {
                 return Err(terminal_on_error(BlockContentRefusal::PayloadTooLarge));
             }
@@ -2016,11 +2034,16 @@ impl VerterHost {
                     // The tool reported against the bytes it consumed: validate
                     // each position against that exact input, keeping the
                     // message of any whose position is refused.
-                    diagnostics: entry
-                        .diagnostics
-                        .into_iter()
-                        .map(|diagnostic| diagnostic.validated_against(&pending.input_content))
-                        .collect(),
+                    diagnostics: if entry.diagnostics.is_empty() {
+                        entry.diagnostics
+                    } else {
+                        let input_index = PreprocessorInputIndex::new(&pending.input_content);
+                        entry
+                            .diagnostics
+                            .into_iter()
+                            .map(|diagnostic| diagnostic.validated_against(&input_index))
+                            .collect()
+                    },
                     processor_identity: entry.processor_identity,
                     processor_version: entry.processor_version,
                     config_fingerprint: entry.config_fingerprint,
@@ -2103,7 +2126,8 @@ mod tests {
     fn preprocessor_position_is_validated_against_the_tool_input() {
         // Lines: "a😀b" (cols 1..=5: a=1, 😀=2..3, b=4, end=5), "" , "x", "".
         let input = "a\u{1F600}b\r\n\rx\n";
-        let check = super::check_preprocessor_position;
+        let index = super::PreprocessorInputIndex::new(input);
+        let check = |_: &str, line, column| index.check(line, column);
         assert_eq!(check(input, None, None), Ok(()));
         assert_eq!(
             check(input, Some(1), None),
@@ -2452,6 +2476,36 @@ mod tests {
                 ),
             })
         );
+    }
+
+    /// Empty-message diagnostics cost no provenance bytes, so their number is
+    /// bounded on its own: an override cannot make admission validate an
+    /// unbounded diagnostic list while holding the admission fence.
+    #[test]
+    fn an_override_with_too_many_empty_diagnostics_is_refused() {
+        let (host, update, request) = pending_template("/workspace/ManyDiagnostics.vue");
+        let diagnostic = || PreprocessorDiagnostic {
+            severity: HostSeverity::Warning,
+            message: String::new(),
+            line: Some(1),
+            column: Some(1),
+            position_refusal: None,
+        };
+        let mut entry = BlockOverrideEntry::supplied_for_test(&request, "<p>supplied</p>");
+        entry.diagnostics = (0..=MAX_SUPPLIED_DIAGNOSTICS)
+            .map(|_| diagnostic())
+            .collect();
+        let error = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: update.canonical_id,
+                compile_profile: CompileProfile::default(),
+                overrides: vec![entry],
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            HostError::BlockContentRefused(BlockContentRefusal::PayloadTooLarge)
+        ));
     }
 
     fn pending_template(path: &str) -> (Arc<VerterHost>, HostUpdateResult, PreprocessorRequest) {

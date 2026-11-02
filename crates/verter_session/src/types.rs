@@ -2275,19 +2275,20 @@ pub struct PreprocessorDiagnostic {
 }
 
 impl PreprocessorDiagnostic {
-    /// Validate the reported position against `input`, the exact text the
-    /// tool consumed. An invalid position is dropped with a typed refusal;
+    /// Validate the reported position against the indexed `input`, the exact
+    /// text the tool consumed. An invalid position is dropped with a typed refusal;
     /// the message and severity are kept.
     #[must_use]
-    pub fn validated_against(mut self, input: &str) -> Self {
+    pub(crate) fn validated_against(
+        mut self,
+        input: &crate::block_content::PreprocessorInputIndex<'_>,
+    ) -> Self {
         if self.position_refusal.is_some() {
             self.line = None;
             self.column = None;
             return self;
         }
-        if let Err(error) =
-            crate::block_content::check_preprocessor_position(input, self.line, self.column)
-        {
+        if let Err(error) = input.check(self.line, self.column) {
             self.line = None;
             self.column = None;
             self.position_refusal = Some(PreprocessorPositionRefusal::Coord(error));
