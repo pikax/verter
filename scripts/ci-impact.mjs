@@ -320,6 +320,9 @@ export const PATH_FILTERS = Object.freeze({
   // rules. A script a lane executes is named in that lane's filter as well.
   scripts: [
     "scripts/**",
+    // The CLI contract tests run in js-build-test and read both JSON inputs.
+    "tests/cli/**",
+    "docs/arch/cli/*.json",
     "tests/formatter/**",
     "tests/kernel/LRA0/**",
     // The rule/action inventory's data test requires these row sources to exist.

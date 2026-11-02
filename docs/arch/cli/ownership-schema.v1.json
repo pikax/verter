@@ -1,0 +1,464 @@
+{
+  "owners": [
+    {
+      "id": "CLI1",
+      "path": ["CLI0", "CLI1"],
+      "targets": ["packages/verter/src/app"],
+      "acceptance": "CLI1-AC1"
+    },
+    {
+      "id": "CLI2",
+      "path": ["CLI0", "CLI1", "CLI2"],
+      "targets": ["packages/verter/src/commands/typecheck"],
+      "acceptance": "CLI2-AC1"
+    },
+    {
+      "id": "CLI3",
+      "path": ["CLI0", "CLI1", "CLI2", "CLI5", "CLI3"],
+      "targets": ["packages/verter/src/commands/check", "packages/verter/src/commands/fix"],
+      "acceptance": "CLI3-AC1"
+    },
+    {
+      "id": "CLI4",
+      "path": ["CLI0", "CLI1", "CLI4"],
+      "targets": [
+        "packages/verter/src/commands/type-info",
+        "packages/verter/src/commands/lsp",
+        "packages/verter/src/commands/mcp",
+        "crates/verter_mcp_server/src"
+      ],
+      "acceptance": "CLI4-AC1"
+    },
+    {
+      "id": "CLI5",
+      "path": ["CLI0", "CLI1", "CLI2", "CLI5"],
+      "targets": [
+        "packages/verter/package.json",
+        "packages/verter/bin",
+        "packages/binary-launcher",
+        "packages/verter-lsp",
+        "crates/verter_relay_shim"
+      ],
+      "acceptance": "CLI5-AC1"
+    },
+    {
+      "id": "CLI6",
+      "path": ["CLI0", "CLI1", "CLI2", "CLI5", "CLI6"],
+      "targets": ["packages/verter/bin"],
+      "acceptance": "CLI6-AC1"
+    },
+    {
+      "id": "CLIC0",
+      "path": ["CLI0", "CLI1", "CLIC0"],
+      "targets": ["packages/verter/src/commands/compile"],
+      "acceptance": "CLIC0-AC1"
+    },
+    {
+      "id": "CLIF0",
+      "path": ["CLI0", "CLI1", "CLIF0"],
+      "targets": ["packages/verter/src/commands/format"],
+      "acceptance": "CLIF0-AC1"
+    },
+    {
+      "id": "CLIL0",
+      "path": ["CLI0", "CLI1", "CLIL0"],
+      "targets": ["packages/verter/src/commands/lint"],
+      "acceptance": "CLIL0-AC1"
+    },
+    {
+      "id": "CLITS0",
+      "path": ["CLI0", "CLI1", "CLITS0"],
+      "targets": ["packages/verter/src/commands/tsc", "packages/verter-tsc"],
+      "acceptance": "CLITS0-AC1"
+    },
+    {
+      "id": "TSB7",
+      "path": ["CLI0", "CLI1", "TSB7"],
+      "targets": ["packages/verter/src/commands/build"],
+      "acceptance": "TSB7-AC1"
+    },
+    {
+      "id": "TSB8",
+      "path": ["CLI0", "CLI1", "CLITS0", "TSB7C", "TSB8"],
+      "targets": ["crates/verter_tsc/src"],
+      "acceptance": "TSB8-AC2"
+    }
+  ],
+  "inventory": [
+    {
+      "id": "ApplicationServices",
+      "owner": "CLI1",
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
+    },
+    {
+      "id": "SelectionPlan",
+      "owner": "CLI1",
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
+    },
+    {
+      "id": "Reporter",
+      "owner": "CLI1",
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
+    },
+    {
+      "id": "WriteTransaction",
+      "owner": "CLI1",
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
+    },
+    {
+      "id": "CommandCapability",
+      "owner": "CLI1",
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
+    },
+    {
+      "id": "typecheck",
+      "owner": "CLI2",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "tsc",
+      "owner": "CLITS0",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "compile",
+      "owner": "CLIC0",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "type-info",
+      "owner": "CLI4",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "lsp",
+      "owner": "CLI4",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "mcp",
+      "owner": "CLI4",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "format",
+      "owner": "CLIF0",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "lint",
+      "owner": "CLIL0",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "check",
+      "owner": "CLI3",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "fix",
+      "owner": "CLI3",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "build",
+      "owner": "TSB7",
+      "kind": "outcome",
+      "source": "no unified verter command"
+    },
+    {
+      "id": "package-and-bin",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "package.json (private verter root)"
+    },
+    {
+      "id": "shell-invocation",
+      "owner": "CLI1",
+      "kind": "consumer",
+      "source": "packages/binary-launcher/cli.js"
+    },
+    {
+      "id": "terminal-users",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "packages/verter-tsc/bin/run.js"
+    },
+    {
+      "id": "editor-hosts",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "packages/verter-lsp/index.js"
+    },
+    {
+      "id": "agent-hosts",
+      "owner": "CLI4",
+      "kind": "consumer",
+      "source": "crates/verter_mcp_server/src/main.rs"
+    },
+    {
+      "id": "tsc-wrapper",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "packages/verter-tsc/bin/run.js",
+      "converter": "CLI5"
+    },
+    {
+      "id": "lsp-wrapper",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "packages/verter-lsp/bin/run.js",
+      "converter": "CLI5"
+    },
+    {
+      "id": "mcp-wrapper",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "packages/verter-mcp/bin/run.js",
+      "converter": "CLI5"
+    },
+    {
+      "id": "native-mcp-alias",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_mcp_server/src/main.rs",
+      "converter": "CLI5"
+    },
+    {
+      "id": "native-mcp-shipped",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_mcp/src/main.rs",
+      "converter": "CLI5"
+    },
+    {
+      "id": "native-tsc-shipped",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_tsc/src/main.rs",
+      "converter": "CLI5"
+    },
+    {
+      "id": "native-lsp-shipped",
+      "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_lsp/src/main.rs",
+      "converter": "CLI5"
+    },
+    {
+      "id": "native-tsc-checker",
+      "owner": "TSB8",
+      "kind": "retained",
+      "source": "crates/verter_tsc/src/checker.rs and crates/verter_tsc/src/api_check.rs"
+    },
+    {
+      "id": "native-relay-shim",
+      "owner": "CLI5",
+      "kind": "retained",
+      "source": "crates/verter_relay_shim/src/main.rs"
+    },
+    {
+      "id": "command-local-semantic-engine",
+      "owner": "CLI1",
+      "kind": "route",
+      "source": "no application-level analysis exists; reject new command-local analysis"
+    },
+    {
+      "id": "non-atomic-multi-file-writes",
+      "owner": "CLI1",
+      "kind": "route",
+      "source": "no application transaction exists; reject direct multi-file command writes"
+    },
+    {
+      "id": "ambiguous-offset-encoding",
+      "owner": "CLI1",
+      "kind": "route",
+      "source": "new CLI selector ingress; reject untagged offsets"
+    },
+    {
+      "id": "watch-and-wrapper-conversion",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "packages/verter-lsp and packages/verter-tsc public bin names"
+    },
+    {
+      "id": "vscode-lsp-client",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "packages/vue-vscode/src/extension.ts"
+    },
+    {
+      "id": "vscode-mcp-client",
+      "owner": "CLI4",
+      "kind": "consumer",
+      "source": "packages/vue-vscode/src/mcpServer.ts"
+    },
+    {
+      "id": "lapce-native-client",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "extensions/lapce/src/lib.rs"
+    },
+    {
+      "id": "zed-native-client",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "extensions/zed/src/lib.rs"
+    },
+    {
+      "id": "benchmark-native-client",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "packages/benchmark/src/perf/lsp-driver.ts"
+    },
+    {
+      "id": "programmatic-resolvers",
+      "owner": "CLI5",
+      "kind": "consumer",
+      "source": "packages/verter-lsp/index.js and packages/verter-mcp/index.js"
+    },
+    {
+      "id": "helix-config-client",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "editors/helix/languages.toml"
+    },
+    {
+      "id": "neovim-config-client",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "editors/nvim/lua/verter/init.lua"
+    },
+    {
+      "id": "mcp-config-template",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "mcp/verter.mcp.json"
+    },
+    {
+      "id": "reference-command-manifest",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "examples/reference/cli/commands.json and examples/reference/manifest.json"
+    },
+    {
+      "id": "editor-launch-contract",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "crates/verter-editor-client/src/args.rs and crates/verter-editor-client/src/discovery.rs"
+    },
+    {
+      "id": "vscode-bundled-binaries",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "packages/vue-vscode/stage-bin.mjs"
+    },
+    {
+      "id": "release-publish-selection",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "scripts/lib/publish-set.mjs and scripts/lib/release-publish.mjs"
+    },
+    {
+      "id": "legacy-platform-packages",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "packages/verter-lsp/npm, packages/verter-mcp/npm and packages/verter-tsc/npm"
+    },
+    {
+      "id": "repo-harness-launchers",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "packages/dx-harness/src/corpus-gate/spawn.ts, scripts/dx/dx-lsp-smoke.mjs, scripts/integration-test/run.mjs and scripts/perf-breakdown.mjs"
+    },
+    {
+      "id": "published-install-guidance",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "docs/editor/other-editors.md, docs/editor/mcp-server.md, editors/helix/README.md, editors/nvim/README.md and mcp/README.md"
+    }
+  ],
+  "commands": [
+    {
+      "name": "typecheck",
+      "owner": "CLI2",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "tsc",
+      "owner": "CLITS0",
+      "effect": "explicit-emit",
+      "compilerDisposition": "Supported"
+    },
+    {
+      "name": "compile",
+      "owner": "CLIC0",
+      "effect": "explicit-emit",
+      "compilerDisposition": "Supported"
+    },
+    {
+      "name": "type-info",
+      "owner": "CLI4",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "lsp",
+      "owner": "CLI4",
+      "effect": "protocol",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "mcp",
+      "owner": "CLI4",
+      "effect": "protocol",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "format",
+      "owner": "CLIF0",
+      "effect": "explicit-write",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "lint",
+      "owner": "CLIL0",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "check",
+      "owner": "CLI3",
+      "effect": "read",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "fix",
+      "owner": "CLI3",
+      "effect": "explicit-write",
+      "compilerDisposition": "NotApplicable"
+    },
+    {
+      "name": "build",
+      "owner": "TSB7",
+      "effect": "explicit-emit",
+      "compilerDisposition": "FutureSeparateTrain"
+    }
+  ]
+}
