@@ -1,12 +1,13 @@
 # Repository cache fit
 
-Measured 2026-11-02, 02:19 to 08:09 UTC, on hosted runner caches for `pikax/verter`. **Outcome: undeclared. `all-fit` is ruled out; `partial-fit` is not established, and cache adoption stays held.** Occupancy and per-identity sizes below are service-recorded compressed bytes.
+Measured 2026-11-02 at about 21:11 and 21:16 UTC, on hosted runner caches for `pikax/verter`. **Outcome: undeclared. `all-fit` is ruled out; `partial-fit` is not established, and cache adoption stays held.** Occupancy and per-identity sizes are service-recorded compressed bytes.
 
-- The 26 candidate identities measured total 13,464,887,303 bytes (13.46 GB), more than the allowance before any other consumer is counted. 14 further declared identities have no recorded entry, so `all-fit` is ruled out twice over. This is the one firm result.
-- No subset is certified. Preserved occupancy (everything that stays regardless of keying) was sampled hourly, and the peak sample came from a listing cut short, so its listed figure is a lower bound. The service reported 11,878,088,196 bytes at that moment against 10,627,965,985 listed: 1,250,122,211 bytes were counted but never attributed to an entry. Preserved occupancy then was between 8,603,424,650 and 9,853,546,861 bytes.
-- Against the upper bound, the subset that held at every sampled moment is **one** identity at 10 GB (`detect-changes`, 81,333,794 bytes, 65,119,345 left) and four at 10 GiB. Against the lower bound the same rule admits six at 10 GB and eight at 10 GiB (1,331,965,445 and 1,905,809,562 bytes), but that is a ceiling on the space available, not headroom, so those identities are **provisional**. Neither subset covers a peak between samples, which stayed unobserved: sccache grew from 523 to more than 5,000 entries within four hours.
-- Occupancy was 9,838,709,590 bytes at the last complete listing, so headroom was 161,290,410 bytes as 10 GB, or 898,708,650 bytes as 10 GiB. It reached 11,878,088,196 bytes during the window, above both readings, so at that moment there was no headroom at all.
-- The largest consumer is not a target cache. sccache's all-ref exception held at least 7,292,045,956 bytes in one listing. That one exception is why so little budget remains for keyed targets.
+- The repository was over the allowance when measured: the service reported 13,808,024,452 bytes in use against 10 GB (or 10 GiB), and the same figure on both samples taken five minutes apart.
+- The 14 identities this listing attributed to a declared job total 7,723,467,624 bytes (7.72 GB). 25 further declared identities have no recorded entry in this listing, so `all-fit` is ruled out twice over. Absence is not a zero size.
+- The listing is not a complete picture of what is stored. It returned 155 entries and 10,029,182,344 bytes against a reported 1,358 entries and 13,808,024,452 bytes, so **3,778,842,108 bytes were counted by the service and never attributed to an entry**. Preserved occupancy (everything that stays regardless of keying) is therefore bounded, not measured: between 2,305,714,720 bytes (what the listing attributed) and 6,084,556,828 bytes (that plus every unattributed byte).
+- Against the upper bound on preserved occupancy, the subset that fits is the 11 Rust target identities at 10 GB (3,334,255,181 bytes, 581,187,991 left) and those plus `compile-contracts:session` at 10 GiB. Against the lower bound the same rule also admits `compile-contracts:session` and `compile-contracts:core` at 10 GB, and `compile-contracts:compiler` at 10 GiB, but that is a ceiling on the space available, not headroom, so those identities are **provisional**.
+- This is a single moment. No subset is certified: occupancy moves with every save. The unrecoverable [earlier observations](#earlier-observations) are context only.
+- Of the declared families, the largest consumer is not a target cache. The compile-contract groups alone hold 4,389,212,443 bytes in three entries.
 
 This measures the current job-scoped keys on the standard hosted runners. It changes no key, runner, permission or retention setting, and it buys no capacity or storage. A consolidated per-profile key is not one of these rows: its archive has no recorded size until it is built and saved, so an adopted shared identity must be measured again rather than estimated from these rows.
 
@@ -14,112 +15,103 @@ This measures the current job-scoped keys on the standard hosted runners. It cha
 
 [`scripts/ci-cache-fit.mjs`](https://github.com/pikax/verter/blob/main/scripts/ci-cache-fit.mjs) issues only GET requests to [GitHub's cache REST API](https://docs.github.com/en/rest/actions/cache) and classifies each key by consumer. Its `report` command derives the declared identities from `.github/workflows` rather than from a list kept here. `size_in_bytes` is the stored archive size, not an uncompressed target directory.
 
-This repository is public, so the listing and usage endpoints answered without a credential. That replaces the [inventory](README.md)'s receipts for those two endpoints, which came from a job token that GitHub refuses with HTTP 401. Other read access was refused:
+This repository is public, so the listing and usage endpoints answered without a credential. The worker's `GH_TOKEN` was refused with HTTP 401, so the collection ran anonymously. Other read access was refused:
 
 | Read-only request                                             | Result                        | Consequence                                                                         |
 | ------------------------------------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------- |
 | `actions/cache/usage`, anonymous                              | 200                           | Repository bytes and count                                                          |
-| `actions/caches`, anonymous                                   | 200, 60 requests an hour      | Every entry's key, ref, size and times                                              |
+| `actions/caches`, anonymous                                   | 200, 60 requests an hour      | Entry key, ref, size and times, but only part of what the service holds (see above) |
 | `actions/cache/storage-limit`, anonymous                      | 401                           | **The configured limit is unavailable.** Both readings of 10 GB are evaluated below |
 | `actions/jobs/<id>/logs`, `actions/runs/<id>/logs`, anonymous | 403, `Must have admin rights` | A save's log line cannot size an entry that eviction already removed                |
 
-The anonymous allowance is shared with everything else on the worker's address, and a repository listing can need more than 50 pages. Of 82 main-ref samples, 73 returned no complete listing, as did 2 of the 6 repository listings tabulated below (the command under [Reproduce](#reproduce) takes six). Each failure is recorded and retried only at the next scheduled sample. A listing cut short still records the size of every entry it read, but its total is only a lower bound, and it is never taken as current occupancy. The raw observation log from this window is not kept in the repository, so the tables below are the retained record of it; a rerun produces a fresh log and report.
+The collection took two repository listings, five minutes apart, with no failed request. Both reported `complete`, and both were identical: 155 entries, 10,029,182,344 listed bytes. A listing can read as complete while the bytes it attributes fall short of the reported usage, so a complete listing short of the usage is bounded the same way and never certifies a fit. No main-ref-only listing was taken, so per-ref figures below come from the repository listing's `ref` field.
 
-## Occupancy over the window
+The observations behind every figure here (the two raw listings and the `report` output derived from them) were retained with this change's recorded checks rather than committed, because raw machine-bound logs stay out of the tracked tree. Recompute every table from the retained observation file with the `report` command under [Reproduce](#reproduce).
 
-Times are UTC. "Preserved" is everything that stays regardless of keying: sccache, the VS Code host, package-manager caches, and any candidate saved on a non-main ref. The lower figure is what the listing attributed. The upper figure adds the usage the service counted but the listing never attributed (usage minus listed bytes, never below zero, since usage and listing are read moments apart); it equals the lower figure on a complete listing whose listed bytes reach the reported usage. A listing can read as complete while an entry was evicted and another saved between pages, so a complete listing short of the usage is bounded the same way and never certifies a fit. On every complete listing tabulated here, the listed sum equals the reported usage to the byte. The reported entry count ran 20 or 21 below the listed count on those listings (for example 514 against 534); the listing is used for counts.
+## Occupancy
 
-| Time  | Listing   | Usage bytes    | Listed bytes   | Entries | sccache GB | VS Code GB | Package GB | Candidates GB | Preserved bytes (lower) | Preserved bytes (upper) |
-| ----- | --------- | -------------- | -------------- | ------- | ---------- | ---------- | ---------- | ------------- | ----------------------- | ----------------------- |
-| 02:19 | complete  | 10,147,358,875 | 10,147,358,875 | 534     | 2.55       | 0.33       | 0.98       | 6.28          | 3,863,737,442           | 3,863,737,442           |
-| 03:19 | complete  | 10,736,546,249 | 10,736,546,249 | 2382    | 4.85       | 1.31       | 0.98       | 3.59          | 7,145,955,670           | 7,145,955,670           |
-| 04:20 | cut short | 11,023,928,697 | 11,058,052,234 | 1146    | 1.82       | 0.33       | 0.98       | 7.92          | 3,133,790,504           | 3,133,790,504           |
-| 05:20 | complete  | 10,472,634,721 | 10,472,634,721 | 2902    | 5.35       | 1.31       | 0.98       | 2.83          | 7,641,184,167           | 7,641,184,167           |
-| 06:20 | cut short | 11,878,088,196 | 10,627,965,985 | 4699    | 7.29       | 0.33       | 0.98       | 2.02          | 8,603,424,650           | 9,853,546,861           |
-| 07:20 | complete  | 9,838,709,590  | 9,838,709,590  | 1155    | 2.51       | 0.33       | 0.98       | 6.02          | 3,817,474,579           | 3,817,474,579           |
+"Preserved" is everything that stays regardless of keying: sccache, the VS Code host, package-manager caches, and any candidate saved on a non-main ref. The lower figure is what the listing attributed to those consumers. The upper figure adds the usage the service counted but the listing never attributed.
 
-Current occupancy by consumer, from the last complete listing, with each consumer's peak across all listings:
+| Quantity                                | Bytes          |
+| --------------------------------------- | -------------- |
+| Usage reported by the service           | 13,808,024,452 |
+| Listed bytes                            | 10,029,182,344 |
+| Unattributed (usage minus listed)       | 3,778,842,108  |
+| Preserved bytes (lower)                 | 2,305,714,720  |
+| Preserved bytes (upper)                 | 6,084,556,828  |
+| Headroom as 10 GB, from reported usage  | −3,808,024,452 |
+| Headroom as 10 GiB, from reported usage | −3,070,606,212 |
 
-| Consumer             | Bytes         | Entries | On main       | On other refs | Peak bytes    |
-| -------------------- | ------------- | ------- | ------------- | ------------- | ------------- |
-| compile-contracts    | 4,371,355,615 | 3       | 4,371,355,615 | 0             | 4,656,247,958 |
-| sccache              | 2,506,093,578 | 1145    | 1,229,569,717 | 1,276,523,861 | 7,292,045,956 |
-| rust-target          | 1,156,050,965 | 3       | 1,156,050,965 | 0             | 4,222,896,550 |
-| node-package-manager | 983,113,978   | 2       | 983,113,978   | 0             | 983,113,978   |
-| explicit-cargo       | 493,828,431   | 1       | 493,828,431   | 0             | 493,828,431   |
-| vscode-host          | 328,267,023   | 1       | 0             | 328,267,023   | 1,313,079,979 |
+Occupancy by consumer, from the listing:
 
-What this shows beyond the totals:
+| Consumer             | Bytes         | Entries |
+| -------------------- | ------------- | ------- |
+| compile-contracts    | 4,389,212,443 | 3       |
+| rust-target          | 3,334,255,181 | 11      |
+| sccache              | 994,296,307   | 138     |
+| node-package-manager | 983,153,278   | 2       |
+| vscode-host          | 328,265,135   | 1       |
 
-- **Occupancy is not held under the allowance.** The service reported 11,878,088,196 bytes at 06:20 and 9,838,709,590 at 07:20. Eviction runs after a save, so a momentary reading can exceed the limit.
-- **sccache sets the pace of eviction.** Its entries went from 523 to more than 5,000 in four hours, and at 07:20 the oldest surviving sccache entry was about an hour old. It writes from every ref, as the [CI cache policy](https://github.com/pikax/verter/blob/main/.github/workflows/ci.yml#L16) documents.
-- **The VS Code exception holds several copies.** One 328 MB entry is scoped to each ref, and four were resident together (1,313,079,979 bytes), rather than the single entry per pinned version the policy comment describes.
-- **Saved target caches do not stay long.** None of the Rust target entries resident at 02:19 was still resident at 05:20. Of the 26 measured identities, 8 were resident in the last complete listing. Fitting within the allowance does not by itself retain an entry, because eviction is by last access across all consumers.
+Every listed entry was saved on `refs/heads/main`. The listing attributes only 138 sccache entries and 994 MB to sccache, but sccache writes from every ref, and earlier observations (below) saw its entry count grow to more than 5,000 within hours, so the unattributed bytes are plausibly mostly sccache. That is an inference, not a measurement.
 
 ## Size per identity
 
-Sizes are each identity's newest save on main. "Env" is the rust-cache environment hash: the same job name under a different toolchain or environment is a different build, so `svelte-compiler-benchmark` appears twice. "Saves" counts distinct saves seen, and older ones are not added to the size. "Seen" counts samples that read it. "Resident" is its presence in the last complete main listing, at 07:40. Rows run smallest first, the order they are admitted. "Fit": `bounded` fits against the upper bound on preserved occupancy; `provisional` fits only against the lower bound, so it is a ceiling and not a demonstrated fit; "as 10 GiB" applies only under that allowance reading; `excluded` fits under neither bound.
+Sizes are each identity's newest save on main in the listing. "Saves" counts distinct saves seen and older ones are not added to the size. All 14 were resident in the listing. Rows run smallest first, the order they are admitted. "Fit": `bounded` fits against the upper bound on preserved occupancy; `provisional` fits only against the lower bound, so it is a ceiling and not a demonstrated fit; `excluded` fits under neither bound.
 
-| Identity                                                  | Producer                                              | Env      | Compressed bytes | Saves | Seen | Resident | Fit                   |
-| --------------------------------------------------------- | ----------------------------------------------------- | -------- | ---------------- | ----- | ---- | -------- | --------------------- |
-| `detect-changes-detect-changes`                           | ci / detect-changes                                   | 986f06eb | 81,333,794       | 2     | 3    | yes      | bounded               |
-| `sfc-projection-sfc-projection`                           | ci / sfc-projection                                   | 986f06eb | 211,108,601      | 1     | 2    | no       | bounded as 10 GiB     |
-| `svelte-compiler-benchmark-svelte-compiler-benchmark`     | ci / svelte-compiler-benchmark                        | 986f06eb | 227,198,208      | 1     | 2    | no       | bounded as 10 GiB     |
-| `wasm-observe-test-wasm-observe-test`                     | ci / wasm-observe-test                                | 986f06eb | 264,488,471      | 2     | 7    | no       | bounded as 10 GiB     |
-| `browser-host-browser-host`                               | ci / browser-host                                     | 60171389 | 272,915,014      | 1     | 5    | no       | provisional           |
-| `build-native-node-build-native-node`                     | ci / build-native-node                                | 986f06eb | 274,921,357      | 2     | 7    | no       | provisional           |
-| `transport-route-equivalence-transport-route-equivalence` | ci / transport-route-equivalence                      | b871065d | 285,848,275      | 1     | 3    | no       | provisional as 10 GiB |
-| `build-editor-lsp-build-editor-lsp`                       | ci / build-editor-lsp                                 | 986f06eb | 287,995,842      | 1     | 2    | no       | provisional as 10 GiB |
-| `bf2-authoritative-bf2-authoritative`                     | ci / bf2-authoritative                                | 986f06eb | 297,024,351      | 1     | 2    | no       | excluded              |
-| `rust-observe-smoke-rust-observe`                         | ci / rust-observe                                     | 986f06eb | 299,455,006      | 2     | 3    | no       | excluded              |
-| `native-observe-test-native-observe-test`                 | ci / native-observe-test                              | 986f06eb | 301,804,209      | 1     | 2    | no       | excluded              |
-| `rust-test-rust-test-build`                               | ci / rust-test-build                                  | 986f06eb | 378,535,015      | 2     | 7    | no       | excluded              |
-| `rust-scale-tier-rust-scale-tier`                         | nightly / rust-scale-tier                             | 986f06eb | 378,547,923      | 1     | 7    | yes      | excluded              |
-| `rust-coverage-rust-coverage-lane`                        | nightly / rust-coverage-lane                          | 986f06eb | 380,676,167      | 1     | 7    | yes      | excluded              |
-| `svelte-compiler-benchmark-svelte-compiler-benchmark`     | nightly / svelte-compiler-benchmark                   | 2f23cc0e | 396,826,875      | 1     | 7    | yes      | excluded              |
-| `validation-probe-observe`                                | validation-probe / observe                            | 986f06eb | 405,742,125      | 1     | 2    | no       | excluded              |
-| `editor-contracts-editor-contracts`                       | ci / editor-contracts                                 | 986f06eb | 419,045,086      | 1     | 1    | no       | excluded              |
-| `validation-probe-probe`                                  | validation-probe / probe                              | 986f06eb | 426,691,864      | 1     | 3    | no       | excluded              |
-| `wasm-build-wasm-build`                                   | ci / wasm-build                                       | 986f06eb | 436,369,782      | 2     | 7    | no       | excluded              |
-| `rust-providers-rust-providers-live`                      | ci / rust-providers-live                              | 986f06eb | 454,465,983      | 1     | 1    | no       | excluded              |
-| `cargo-wasm`                                              | nightly / build-and-deploy                            | —        | 493,828,431      | 1     | 7    | yes      | excluded              |
-| `rust-build-configs-rust-build-configs`                   | ci / rust-build-configs                               | 986f06eb | 824,926,166      | 1     | 5    | no       | excluded              |
-| `compile-contracts session`                               | ci / compiler-contracts, nightly / compiler-contracts | —        | 1,008,259,741    | 3     | 9    | yes      | excluded              |
-| `compile-contracts session-observe`                       | ci / compiler-contracts, nightly / compiler-contracts | —        | 1,293,984,249    | 2     | 8    | no       | excluded              |
-| `compile-contracts core`                                  | ci / compiler-contracts, nightly / compiler-contracts | —        | 1,399,883,384    | 3     | 12   | yes      | excluded              |
-| `compile-contracts compiler`                              | ci / compiler-contracts, nightly / compiler-contracts | —        | 1,963,011,384    | 2     | 12   | yes      | excluded              |
+| Identity                                                                                 | Compressed bytes | Saves | Fit as 10 GB | Fit as 10 GiB |
+| ---------------------------------------------------------------------------------------- | ---------------- | ----- | ------------ | ------------- |
+| `rust-target:sfc-projection-sfc-projection@Linux-x64#986f06eb`                           | 211,102,275      | 1     | bounded      | bounded       |
+| `rust-target:wasm-observe-test-wasm-observe-test@Linux-x64#986f06eb`                     | 264,539,208      | 1     | bounded      | bounded       |
+| `rust-target:browser-host-browser-host@Linux-x64#60171389`                               | 272,891,418      | 1     | bounded      | bounded       |
+| `rust-target:build-native-node-build-native-node@Linux-x64#986f06eb`                     | 274,987,066      | 1     | bounded      | bounded       |
+| `rust-target:transport-route-equivalence-transport-route-equivalence@Linux-x64#b871065d` | 286,015,202      | 1     | bounded      | bounded       |
+| `rust-target:build-editor-lsp-build-editor-lsp@Linux-x64#986f06eb`                       | 287,989,554      | 1     | bounded      | bounded       |
+| `rust-target:bf2-authoritative-bf2-authoritative@Linux-x64#986f06eb`                     | 297,002,392      | 1     | bounded      | bounded       |
+| `rust-target:native-observe-test-native-observe-test@Linux-x64#986f06eb`                 | 301,838,111      | 1     | bounded      | bounded       |
+| `rust-target:rust-clippy-rust-clippy@Linux-x64#986f06eb`                                 | 340,179,975      | 1     | bounded      | bounded       |
+| `rust-target:rust-test-rust-test-build@Linux-x64#986f06eb`                               | 378,571,743      | 1     | bounded      | bounded       |
+| `rust-target:editor-contracts-editor-contracts@Linux-x64#986f06eb`                       | 419,138,237      | 1     | bounded      | bounded       |
+| `compile-contracts:session@Linux-X64`                                                    | 1,011,108,310    | 1     | provisional  | bounded       |
+| `compile-contracts:core@Linux-X64`                                                       | 1,405,533,140    | 1     | provisional  | provisional   |
+| `compile-contracts:compiler@Linux-X64`                                                   | 1,972,570,993    | 1     | excluded     | provisional   |
 
-The compile-contract groups alone total 5,665,138,758 bytes. Their keys carry a revision suffix, so every main refresh adds a whole new archive beside the previous one until it is evicted.
+The compile-contract groups alone total 4,389,212,443 bytes. Their keys carry a revision suffix, so every main refresh adds a whole new archive beside the previous one until it is evicted.
 
 ## Fit evaluation
 
-The rule takes recorded bytes only, with no reserve and no assumed eviction. Measured identities are admitted smallest first, which retains the most identities, against a budget of the allowance minus the preserved occupancy. An identity without a recorded size cannot be admitted. Preserved occupancy is only ever sampled, and the largest sample came from a listing cut short, so two budgets follow from the 06:20 row:
+The rule takes recorded bytes only, with no reserve and no assumed eviction. Measured identities are admitted smallest first, which retains the most identities, against a budget of the allowance minus the preserved occupancy. An identity without a recorded size cannot be admitted. Because preserved occupancy is bracketed rather than measured, two budgets follow:
 
-- **Lower bound, 8,603,424,650 bytes.** This is what the cut-short listing attributed. Subtracting it from the allowance gives an upper bound on the space available. That is not demonstrated headroom: 1,250,122,211 bytes that the service counted at that moment were never attributed to an entry. The listing is sorted largest first, so the unread tail is small entries, which is where sccache's many small entries sit.
-- **Upper bound, 9,853,546,861 bytes.** The lower bound plus the unattributed bytes. If all of them were preserved, this is the occupancy. The subset that fits against this bound held at every sampled moment.
+| Allowance reading        | Bound       | Budget bytes  | Admitted | Admitted bytes | Budget left   |
+| ------------------------ | ----------- | ------------- | -------- | -------------- | ------------- |
+| 10 GB, used for adoption | bounded     | 3,915,443,172 | 11       | 3,334,255,181  | 581,187,991   |
+| 10 GB, used for adoption | provisional | 7,694,285,280 | 13       | 5,750,896,631  | 1,943,388,649 |
+| 10 GiB                   | bounded     | 4,652,861,412 | 12       | 4,345,363,491  | 307,497,921   |
+| 10 GiB                   | provisional | 8,431,703,520 | 14       | 7,723,467,624  | 708,235,896   |
 
-| Allowance reading        | Bound | Allowance bytes | Budget bytes  | Admitted | Admitted bytes | Budget left | Excluded (measured) | Unmeasured |
-| ------------------------ | ----- | --------------- | ------------- | -------- | -------------- | ----------- | ------------------- | ---------- |
-| 10 GB, used for adoption | upper | 10,000,000,000  | 146,453,139   | 1        | 81,333,794     | 65,119,345  | 25                  | 14         |
-| 10 GB, used for adoption | lower | 10,000,000,000  | 1,396,575,350 | 6        | 1,331,965,445  | 64,609,905  | 20                  | 14         |
-| 10 GiB                   | upper | 10,737,418,240  | 883,871,379   | 4        | 784,129,074    | 99,742,305  | 22                  | 14         |
-| 10 GiB                   | lower | 10,737,418,240  | 2,133,993,590 | 8        | 1,905,809,562  | 228,184,028 | 18                  | 14         |
+`all-fit` fails under every row: 25 declared identities are unmeasured and `compile-contracts:compiler` is excluded as 10 GB. `partial-fit` is not established, and the report's `outcome` reads `unestablished` for that reason:
 
-`all-fit` fails under every row, since 14 identities are unmeasured and 18 or more measured identities are excluded. `partial-fit` is not established, and the report's `outcome` reads `unestablished` for that reason:
+- The `provisional` rows are ceilings. They assume the unattributed bytes are not preserved, which the listing cannot show.
+- The `bounded` rows held against the worst case for this one listing. They do not cover a peak between samples, nor any other moment: there are two samples, five minutes apart, with identical content.
+- The service reported usage above the allowance on both samples. Eviction runs after a save, so a momentary reading can exceed the limit, but no reading of this window shows the repository under it.
+- The configured limit could not be read, so which allowance applies is unsettled.
 
-- The `lower` rows are ceilings. They admit identities that may not have fitted at the moment of the 06:20 reading, so the six (or eight) identities they name are provisional and are not a keying list.
-- The `upper` rows are the only rows that held at every sampled moment, and they are small: one identity as 10 GB, four as 10 GiB. They still do not cover a peak between hourly samples. sccache entries went from 523 to more than 5,000 within four hours, so an unobserved peak could use the whole allowance. Nothing here bounds that peak, and the live limit could not be read to settle which allowance applies.
-- Complete listings alone give a lower preserved peak (7,641,184,167 bytes at 05:20), but that peak is also a sample, taken before the 06:20 reading showed higher occupancy, so it is not a bound either.
-
-Every identity marked `excluded` needs more than the budget left under the lower bound: 64,609,905 bytes as 10 GB, 228,184,028 as 10 GiB. Any later key implementation should treat even the `bounded` rows as a floor for the current exceptions, not as a ranking of which builds matter most: smallest-first deliberately favours count, and it leaves out `rust-test` and every compile-contract group. Finishing the investigation as `partial-fit` needs evidence that bounds preserved occupancy, such as complete listings bracketing the peak or the configured limit read with a token (see [Reproduce](#reproduce)), or measures with sccache bounded. Until then the result is undeclared and adoption is held.
+Any later key implementation should treat even the `bounded` rows as a floor for the current exceptions, not as a ranking of which builds matter most: smallest-first deliberately favours count. Finishing the investigation as `partial-fit` needs evidence that bounds preserved occupancy over time, such as complete listings bracketing the peak, the configured limit read with a token (see [Reproduce](#reproduce)), or measures with sccache bounded. Until then the result is undeclared and adoption is held.
 
 ### Not measured
 
-No entry for these declared, automatically triggered identities was read in the window, so they have no size and do not fit by this rule: `perf-gate-cargo`, `build-build`, `build-lsp-debug-build-lsp-debug`, `corpus-sweep-dx-corpus-sweep-dx`, `external-corpus-dx-external-corpus-dx`, `js-build-test-js-build-test`, `lsp-release-<os-key>`, `meta-ui-benchmark-build`, `napi-release`, `perturbation-build`, `rust-clippy-rust-clippy`, `rust-observe-rust-observe`, `svelte-conformance-svelte-conformance`, `svelte-oracle-svelte-oracle`. Each saves only when its lane is selected and misses its key, and most of the window's samples were rate limited, so a save and its eviction could fall between samples. Absence is not a zero size.
+No entry for these declared, automatically triggered identities was read, so they have no size and do not fit by this rule: `perf-gate-cargo`, `build-build`, `build-lsp-debug-build-lsp-debug`, `corpus-sweep-dx-corpus-sweep-dx`, `detect-changes-detect-changes`, `external-corpus-dx-external-corpus-dx`, `js-build-test-js-build-test`, `lsp-release-<os-key>`, `meta-ui-benchmark-build`, `napi-release`, `perturbation-build`, `rust-build-configs-rust-build-configs`, `rust-coverage-rust-coverage-lane`, `rust-observe-rust-observe`, `rust-observe-smoke-rust-observe`, `rust-providers-rust-providers-live`, `rust-scale-tier-rust-scale-tier`, `svelte-compiler-benchmark-svelte-compiler-benchmark`, `svelte-conformance-svelte-conformance`, `svelte-oracle-svelte-oracle`, `validation-probe-observe`, `validation-probe-probe`, `wasm-build-wasm-build`, `compile-contracts:session-observe`, and `explicit-cargo:cargo-wasm`. Each saves only when its lane is selected and misses its key, so a save can be absent from any one listing, and part of the 3.78 GB unattributed here may belong to them.
 
 No Gradle, Playwright or explicit pnpm-store entry was read either. The [CI comment](https://github.com/pikax/verter/blob/main/.github/workflows/ci.yml#L2326) gives about 2.5 GB for Gradle. That is not a measurement here and is not used, but a Gradle save of anything like that size would exceed the budget left above on either reading, so it must be measured when that lane next saves.
 
 Workflows that main cannot trigger on its own, such as tag-triggered releases, are not main-saved identities and are outside this result.
+
+## Earlier observations
+
+An earlier collection ran for about six hours on the same day with hourly samples. Its raw log was lost, so it can be neither recomputed nor verified, and nothing above depends on it. It is recorded as context only, with figures that should not be reused as evidence:
+
+- Occupancy reached about 11.9 GB at one sample and about 9.8 GB at another, so it moved by roughly 2 GB within an hour.
+- sccache entries went from about 523 to more than 5,000 within four hours, which is why the ratio of unattributed bytes to listed bytes is expected to vary.
+- Several VS Code host entries were resident at once, one per ref.
 
 ## Reproduce
 
@@ -130,4 +122,4 @@ node scripts/ci-cache-fit.mjs collect --out cache-obs.jsonl --samples 88 --inter
 node scripts/ci-cache-fit.mjs report --in cache-obs.jsonl
 ```
 
-The figures will differ on a later run, because they describe a moving cache. A maintainer can pass `--token-env NAME` to raise the rate limit and read the configured limit, which settles which allowance reading applies. Run the same commands again once a consolidated identity has been saved from main.
+The figures will differ on a later run, because they describe a moving cache. To recompute the tables above, run `report --in` against the retained observation file rather than collecting again. A maintainer can pass `--token-env NAME` to raise the rate limit and read the configured limit, which settles which allowance reading applies. Run the same commands again once a consolidated identity has been saved from main.
