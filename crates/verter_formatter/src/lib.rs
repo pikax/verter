@@ -27,7 +27,7 @@ mod provenance_tests;
 // remain reserved for their respective owners.
 mod cursor;
 pub mod doc;
-pub mod edit;
+mod edit;
 mod embedded;
 mod explain;
 mod position_map;
@@ -43,9 +43,5 @@ mod view;
 #[cfg(test)]
 #[path = "../tests/unit/provenance_render.rs"]
 mod provenance_render_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/edit_geometry.rs"]
-mod edit_geometry_tests;
 
 mod width;
