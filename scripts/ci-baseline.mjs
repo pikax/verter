@@ -255,6 +255,10 @@ class Session {
   }
 }
 
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+/** A query value must not carry `+`: it decodes as a space. Zone offsets become UTC. */
+const utc = (timestamp) => new Date(timestamp).toISOString().replace(/\.000Z$/, "Z");
+
 /** Collect raw records. Access failures become receipts; only misuse throws. */
 export async function collect({
   out,
@@ -274,7 +278,8 @@ export async function collect({
     ["--since", since],
     ["--until", until],
   ]) {
-    if (!Number.isFinite(Date.parse(value))) fail(`${flag} must be an ISO timestamp`);
+    if (!ISO_TIMESTAMP.test(value ?? "") || !Number.isFinite(Date.parse(value)))
+      fail(`${flag} must be an ISO 8601 timestamp with a zone`);
   }
   if (Date.parse(until) <= Date.parse(since)) fail("--until must follow --since");
   if (existsSync(out) && readdirSync(out).length > 0) fail(`${out} already holds a collection`);
@@ -363,7 +368,7 @@ export async function collect({
 
   const runPages = await session.get(
     "runs",
-    `repos/${repo}/actions/runs?created=${since}..${until}&per_page=100`,
+    `repos/${repo}/actions/runs?created=${utc(since)}..${utc(until)}&per_page=100`,
   );
   const runs = (runPages ?? []).flatMap((page) => page?.workflow_runs ?? []);
   if (!runPages) session.skip("jobs", "unreachable without run records");
@@ -1175,7 +1180,7 @@ export function buildReport({ manifest, receipts, read, corpus }) {
   if (Number.isFinite(declared) && declared > runs.length) {
     gaps.push(`runs read in part: the window declares ${declared}, ${runs.length} were read`);
   }
-  for (const { id, repetitions, unavailable, unsampledPullRequests } of [
+  for (const { id, repetitions, unavailable, unsampledPullRequests, metrics } of [
     ...scenarios,
     ...concurrent,
   ]) {
@@ -1185,6 +1190,12 @@ export function buildReport({ manifest, receipts, read, corpus }) {
       gaps.push(
         `${id} pull request(s) ${unsampledPullRequests.join(", ")} reach no push-to-green sample`,
       );
+    }
+    // A bound row owes queue and execution separately, not only push-to-green.
+    for (const name of ["queueExecutionSplit", "jobQueue"]) {
+      if (metrics?.[name].status === "unavailable") {
+        gaps.push(`${id} has no ${name} sample: ${metrics[name].reason}`);
+      }
     }
   }
   for (const { reason, scenario, sample, stream } of rejected) {

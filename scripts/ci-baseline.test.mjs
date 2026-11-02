@@ -557,6 +557,35 @@ test("a run whose API record names no pull request still counts through its head
   });
 });
 
+test("jobs with no recorded eligibility keep the baseline missing but the observations usable", async () => {
+  await withTempDir(async (dir) => {
+    const { exports, transport: base } = completeCollection(dir);
+    const transport = (path) => {
+      const reply = base(path);
+      if (!/\/actions\/runs\/\d+\/.*jobs/.test(path)) return reply;
+      return {
+        ...reply,
+        pages: reply.pages.map((page) => ({
+          ...page,
+          jobs: page.jobs.map(({ created_at: _dropped, ...rest }) => rest),
+        })),
+      };
+    };
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    const { baseline, scenarios } = reportFromDirectory(out);
+    assert.equal(baseline.status, "missing-data");
+    assert.equal(baseline.satisfiesComparisons, false);
+    assert.ok(
+      baseline.gaps.some((gap) => /CH01\/docs has no queueExecutionSplit sample/.test(gap)),
+    );
+    assert.ok(baseline.gaps.some((gap) => /CH01\/docs has no jobQueue sample/.test(gap)));
+    const docs = scenarios.find(({ id }) => id === "CH01/docs");
+    assert.equal(docs.metrics.pushToGreen.n, 5);
+    assert.equal(docs.metrics.jobExecution.status, "measured");
+  });
+});
+
 test("collection skips job reads for skipped runs and stops paging past its window", async () => {
   await withTempDir(async (dir) => {
     const out = join(dir, "run");
@@ -954,6 +983,32 @@ test("a rerun's copied jobs add no runner time, and a head's push time is its ow
     corpus,
   });
   assert.equal(report.observational.populations["pull-request"].pushToGreen.p50, 180);
+});
+
+test("a zone-offset window is queried in UTC and a non-ISO window is refused", async () => {
+  await withTempDir(async (dir) => {
+    const { transport, seen } = tableTransport({});
+    await collect({
+      out: join(dir, "run"),
+      repo: "o/r",
+      since: "2026-10-01T01:00:00+01:00",
+      until: "2026-10-08T00:00:00Z",
+      transport,
+    });
+    const runsRead = seen.find((path) => path.includes("/actions/runs?"));
+    assert.ok(runsRead.includes("created=2026-10-01T00:00:00Z..2026-10-08T00:00:00Z"), runsRead);
+    assert.ok(!runsRead.includes("+"), runsRead);
+    await assert.rejects(
+      collect({
+        out: join(dir, "other"),
+        repo: "o/r",
+        since: "October 1 2026",
+        until: WINDOW.until,
+        transport,
+      }),
+      /--since must be an ISO 8601 timestamp/,
+    );
+  });
 });
 
 test("malformed flags are misuse", async () => {
