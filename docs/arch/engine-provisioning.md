@@ -355,9 +355,13 @@ IDs and without relying on anyone minting a new one.
 `EngineIntegrityEvidence` lists every file in the execution closure: executable,
 interpreter, scripts, libraries, worker code and critical sidecars. It names the one
 `entryPoint` a launch starts from, which must be a listed runnable file, and the digest
-of the compatibility declaration. The closure digest binds all three, and it is the
-artifact's content digest, so forging a declaration or dropping the executable changes
-the key and invalidates every signature, receipt and origin receipt over it. An archive
+of the compatibility declaration. The closure digest binds all three together with the
+identity axes compatibility decides on (engine, version, flavor, platform, ABI,
+protocol and build), and it is the artifact's content digest, so forging a declaration,
+claiming another version or platform, or dropping the executable changes the key and
+invalidates every signature, receipt and origin receipt over it. An old signed release
+cannot present as current, nor one platform's bytes as another's. The origin stays
+outside the manifest because its own receipt and authorization bind it. An archive
 digest or package metadata alone proves nothing about installed bytes. Registry SHA-512
 additionally binds an archive. Paths must be relative, portable and free of traversal,
 reserved names, alternate streams and case collisions. `EngineSignatureEvidence` and
@@ -399,7 +403,10 @@ typed rejection and never lowers a trust class. No source lacks evidence for its
 authorized class, because each class above names evidence that source can produce.
 
 What must be present comes from this table and captured policy, which may add a
-signature or provenance requirement. The descriptor has no field that can waive one.
+signature or provenance requirement. The captured source policy rows that
+`EngineProvisioningPolicy.sourcePolicies` names carry those additions as
+`EnginePolicyEvidence` values; a required token that no obligation row names fails
+closed as `InvalidSchema` rather than being silently satisfied. The descriptor has no field that can waive one.
 The product's `obligations` table assigns each kind of evidence to the trust check, and
 so the rejection, that reports its absence.
 
@@ -439,12 +446,17 @@ licenses breaking a live writer; recovery first establishes owner death, and unk
 liveness or any unlisted state waits or fails closed. The holder that finds a READY-less
 entry quarantines the leftover and retries, so a crashed install cannot block the key.
 
-Each supported platform has the required primitives, so no install abort condition
-applies. The `platformPrimitives` table cites the operating system's own documentation
-for each and names them: `openat` with `O_NOFOLLOW` on
-Linux and macOS and `FILE_FLAG_OPEN_REPARSE_POINT` on Windows; exclusive private
-creation; `RENAME_NOREPLACE`, `RENAME_EXCL` or `MoveFileExW` without replacement;
-and the durable flush each one requires. A filesystem refusing no-replace fails
+The `platformPrimitives` table cites the operating system's own documentation for each
+primitive and names them: `openat` with `O_NOFOLLOW` on Linux and macOS and
+`FILE_FLAG_OPEN_REPARSE_POINT` on Windows; exclusive private creation;
+`RENAME_NOREPLACE`, `RENAME_EXCL` or a `FILE_RENAME_INFORMATION` rename with
+`ReplaceIfExists` false; and the durable flush each one requires. Where the cited
+pages do not state a behaviour the layout relies on, the row's `ownerVerified` list
+records it as an assumption with the population members whose runtime tests must
+verify it: on Windows, that the no-replace rename is atomic and that a crash after it
+returns leaves the renamed entry or none. No install abort condition applies on the
+documented primitives; if a receiving owner's test refutes an assumption, the abort
+condition for that platform applies there. A filesystem refusing no-replace fails
 closed and never degrades to check-then-rename. Extraction stops at 16,384 entries,
 512 MiB expanded, 200:1 compression or 64 path components, and refuses link, device
 and traversal entries.
@@ -484,7 +496,8 @@ key, an origin or signer by its ID, a trust root by its `EngineTrustRootId`. It 
 reason, issuer and epoch. `EngineRevocationCatalog` is signed over a domain digest of its
 issuer, epoch, freshness limit and entries. A catalog that is absent, altered, signed
 under an unapproved root, from an unknown issuer, past its limit, or older than the last
-epoch seen fails closed as `RevocationDataUnavailable`, so replaying an older signed
+epoch seen, signed by a signer captured policy does not name for its issuer, or carrying
+an entry from another issuer or a later epoch fails closed as `RevocationDataUnavailable`, so replaying an older signed
 catalog cannot hide a revocation. The product lists these cases and which entries match
 a descriptor. The product has one action for each stage and event: validation rejects; selection
 publication cancels; pending activation cancels; an active provider withdraws its

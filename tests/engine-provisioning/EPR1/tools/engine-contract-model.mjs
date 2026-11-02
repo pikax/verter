@@ -145,12 +145,28 @@ export const requirementDigest = (requirement) =>
   domainDigest("verter.engine-compatibility-requirement.v1", requirement);
 
 /**
- * Binds the declaration, the file a launch starts from and every file in the execution
- * closure, independent of enumeration order. This one digest is the artifact's content
- * digest, so a signature, origin receipt, key or receipt over it covers all of them.
+ * The identity axes compatibility decides on. The origin is bound by its own receipt and
+ * authorization, and the content digest is this manifest's own digest, so neither is here.
  */
-export const closureManifestDigest = ({ declarationDigest: declared, entryPoint, files }) =>
+export const MANIFEST_IDENTITY_AXES = [
+  "engine",
+  "version",
+  "flavor",
+  "platform",
+  "abi",
+  "protocol",
+  "build",
+];
+
+/**
+ * Binds the identity axes, the declaration, the file a launch starts from and every file
+ * in the execution closure, independent of enumeration order. This one digest is the
+ * artifact's content digest, so a signature, origin receipt, key or receipt over it covers
+ * all of them: no version, platform or build claim stands apart from the signed bytes.
+ */
+export const closureManifestDigest = (id, { declarationDigest: declared, entryPoint, files }) =>
   domainDigest("verter.engine-closure-manifest.v1", {
+    artifact: Object.fromEntries(MANIFEST_IDENTITY_AXES.map((axis) => [axis, id[axis]])),
     declarationDigest: declared,
     entryPoint,
     files: sortedClosureFiles(files),
@@ -387,17 +403,29 @@ export const revocationCatalogDigest = ({ schema, issuerId, revocationEpoch, not
     entries,
   });
 
-/** Why a revocation catalog cannot be used, or null. Every reason fails closed. */
+/**
+ * Why a revocation catalog cannot be used, or null. Every reason fails closed. Captured
+ * policy names each issuer with the signers that may speak for it, so a signer under an
+ * approved root cannot issue in another issuer's name, and every entry belongs to the
+ * catalog that carries it.
+ */
 export function revocationCatalogHazard(view) {
   if (view === null) return "catalog-absent";
   const { catalog, issuers, approvedRoots, lastSeenEpoch, now } = view;
-  if (!issuers.includes(catalog.issuerId)) return "issuer-unknown";
+  const issuer = issuers.filter((row) => row.issuerId === catalog.issuerId);
+  if (issuer.length !== 1) return "issuer-unknown";
   if (catalog.signature.manifestDigest !== revocationCatalogDigest(catalog)) {
     return "signature-other-content";
   }
+  if (!issuer[0].signerIds.includes(catalog.signature.signerId)) return "signer-not-issuer";
   if (!approvedRoots.some((root) => sameRoot(root, catalog.signature.trustRoot))) {
     return "root-not-approved";
   }
+  const foreign = catalog.entries.some(
+    (entry) =>
+      entry.issuerId !== catalog.issuerId || entry.revocationEpoch > catalog.revocationEpoch,
+  );
+  if (foreign) return "entry-not-from-catalog";
   if (catalog.revocationEpoch < lastSeenEpoch) return "epoch-regressed";
   if (now > catalog.notAfter) return "expired";
   return null;
@@ -445,10 +473,16 @@ const EVIDENCE_HOLDS = {
   "development-policy": (_, context) => context.developmentPermitted === true,
 };
 
-/** Every obligation assigned to one trust row holds for every origin the descriptor names. */
+/**
+ * Every obligation assigned to one trust row holds for every origin the descriptor names.
+ * A required token no obligation row names cannot be proved by any check, so it fails
+ * closed at the first check that reads obligations instead of being silently satisfied.
+ */
 const obligationsHold = (check, descriptor, context) =>
   descriptor.originReceipts.every((receipt) => {
     const required = requiredEvidence(receipt, context);
+    const named = new Set(context.evidenceObligations.map(({ evidence }) => evidence));
+    if ([...required].some((token) => !named.has(token))) return false;
     return context.evidenceObligations.every(({ evidence, check: owner, proof }) => {
       if (owner !== check || !required.has(evidence) || proof === "structural") return true;
       const holds = EVIDENCE_HOLDS[evidence];
@@ -507,7 +541,7 @@ const EVIDENCE_CHECKS = {
   },
   bytesMatch: (descriptor, context) => {
     const { id, integrity, declaration } = descriptor;
-    const recomputed = closureManifestDigest(integrity);
+    const recomputed = closureManifestDigest(id, integrity);
     return (
       integrity.files.every((file) => context.observedClosure[file.path] === file.digest) &&
       declarationDigest(declaration) === integrity.declarationDigest &&

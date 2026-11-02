@@ -285,6 +285,9 @@
         }
       }
     },
+    "EnginePolicyEvidence": {
+      "enum": ["signature", "provenance"]
+    },
     "EngineClosureFile": {
       "type": "object",
       "required": ["path", "digest", "size", "role"],

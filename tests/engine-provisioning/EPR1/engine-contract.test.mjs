@@ -22,6 +22,7 @@ import {
   requirementDigest,
   reuseVerdict,
   revocationCatalogDigest,
+  MANIFEST_IDENTITY_AXES,
   revocationCatalogHazard,
   sortedClosureFiles,
   transitionAllowed,
@@ -304,14 +305,24 @@ test("byte, origin, signature and manifest mutations are refused before executio
   const { descriptor, mutations } = contract.evidence;
   conforms(descriptor, "EngineArtifactDescriptor");
   assert.equal(verdictOf(descriptor, evidenceContext()), null);
-  assert.equal(closureManifestDigest(descriptor.integrity), descriptor.id.contentDigest);
   assert.equal(
-    closureManifestDigest({
+    closureManifestDigest(descriptor.id, descriptor.integrity),
+    descriptor.id.contentDigest,
+  );
+  assert.equal(
+    closureManifestDigest(descriptor.id, {
       ...descriptor.integrity,
       files: [...descriptor.integrity.files].reverse(),
     }),
     descriptor.id.contentDigest,
   );
+  // Every identity axis compatibility reads is a mutation the evidence refuses.
+  const claimed = new Set(
+    mutations
+      .filter((row) => row.id.startsWith("identity-"))
+      .flatMap((row) => Object.keys(row.set)),
+  );
+  assert.deepEqual([...claimed].sort(), MANIFEST_IDENTITY_AXES.map((axis) => `id.${axis}`).sort());
   for (const mutation of mutations) {
     const changed = clone(descriptor);
     for (const [path, value] of Object.entries(mutation.set ?? {})) setPath(changed, path, value);
@@ -326,8 +337,9 @@ test("a declaration recomputed over signed bytes loses the signature and the key
   const { descriptor } = contract.evidence;
   const forged = clone(descriptor);
   forged.declaration.api = "tsgo-api-v9";
+  forged.id.version = "7.1.9";
   forged.integrity.declarationDigest = declarationDigest(forged.declaration);
-  const digest = closureManifestDigest(forged.integrity);
+  const digest = closureManifestDigest(forged.id, forged.integrity);
   assert.notEqual(digest, descriptor.id.contentDigest);
   forged.integrity.closureManifestDigest = digest;
   forged.id.contentDigest = digest;
@@ -428,6 +440,20 @@ test("each source's own required evidence is demanded, and only policy can add t
   const proved = contract.evidence.obligations.filter((item) => item.proof !== "structural");
   assert.ok(exercised >= proved.length, `only ${exercised} evidence cases ran`);
 
+  for (const demanded of [
+    contract.evidence.policyRequiredEvidence,
+    contract.evidence.browser.policyRequiredEvidence,
+  ]) {
+    for (const token of demanded) conforms(token, "EnginePolicyEvidence");
+  }
+  for (const token of schema.$defs.EnginePolicyEvidence.enum) {
+    assert.ok(
+      contract.evidence.obligations.some((row) => row.evidence === token),
+      `${token} has no obligation row`,
+    );
+  }
+  refuses("sbom-not-a-token", "EnginePolicyEvidence");
+
   const unsigned = clone(contract.evidence.descriptor);
   unsigned.signature.signatures = [];
   assert.equal(verdictOf(unsigned, evidenceContext()), "SignatureFailure");
@@ -444,8 +470,11 @@ test("a browser development artifact can never present as a published one", () =
   const { published, development, vectors, authorizedOrigins } = contract.evidence.browser;
   conforms(published, "EngineArtifactDescriptor");
   conforms(development, "EngineArtifactDescriptor");
-  // One set of bytes under two origins, each authorized for exactly one class, never one key.
-  assert.equal(published.id.contentDigest, development.id.contentDigest);
+  // One set of files under two origins, each authorized for exactly one class, never one key.
+  // The local build is its own identity, so the manifest over it is a different digest.
+  assert.deepEqual(published.integrity.files, development.integrity.files);
+  assert.notEqual(published.id.build, development.id.build);
+  assert.notEqual(published.id.contentDigest, development.id.contentDigest);
   assert.notEqual(artifactKey(published.id), artifactKey(development.id));
   const ids = authorizedOrigins.map((row) => row.originId);
   assert.equal(new Set(ids).size, ids.length);
@@ -475,9 +504,9 @@ test("closure order is UTF-8 bytes, so another implementation's digest agrees", 
   );
   // JavaScript's default string order places the supplementary-plane path first.
   assert.deepEqual([...golden.utf8Order].sort(), [...golden.utf8Order].reverse());
-  assert.equal(closureManifestDigest(golden), golden.digest);
+  assert.equal(closureManifestDigest(golden.artifact, golden), golden.digest);
   assert.equal(
-    closureManifestDigest({ ...golden, files: [...golden.files].reverse() }),
+    closureManifestDigest(golden.artifact, { ...golden, files: [...golden.files].reverse() }),
     golden.digest,
   );
 });
@@ -601,7 +630,7 @@ test("concurrent writers converge without overwriting or breaking a live lock", 
     "AdoptWinnerDiscardOwnTemp",
     "RejectWinnerDiscardOwnTemp",
   ]);
-  for (const ownsTemp of [true, false]) {
+  for (const ownsTemp of [true, false, undefined]) {
     for (const holdsLock of [true, false, undefined]) {
       for (const lockOwnerAlive of [true, false, undefined]) {
         for (const winnerState of machine.states) {
@@ -610,7 +639,7 @@ test("concurrent writers converge without overwriting or breaking a live lock", 
             const verdict = firstMatch(writers, facts);
             const label = JSON.stringify(facts);
             assert.notEqual(verdict, undefined, label);
-            if (mutating.has(verdict)) assert.ok(ownsTemp && holdsLock === true, label);
+            if (mutating.has(verdict)) assert.ok(ownsTemp === true && holdsLock === true, label);
             if (holdsLock !== true && lockOwnerAlive !== false) {
               assert.ok(["DoNotMutate", "WaitOrFailClosed"].includes(verdict), label);
             }
@@ -647,6 +676,16 @@ test("each supported operating system has private no-follow atomic primitives", 
       for (const citation of row.citations[column]) {
         assert.match(citation, /^https:\/\/\S+$/u, `${row.os} ${column}`);
       }
+    }
+  }
+  // A behaviour no cited page states is an assumption a runtime owner's test must verify.
+  const members = new Set(population.map((member) => member.id));
+  for (const row of rows) {
+    for (const assumption of row.ownerVerified) {
+      assert.ok(Object.hasOwn(row.citations, assumption.column), `${row.os} ${assumption.column}`);
+      assert.ok(assumption.claim.length > 0, `${row.os} ${assumption.column}`);
+      assert.ok(assumption.members.length > 0, `${row.os} ${assumption.column} has no owner`);
+      for (const member of assumption.members) assert.ok(members.has(member), member);
     }
   }
   const natives = contract.platforms.filter((row) => row.family === "native");
@@ -747,7 +786,7 @@ test("a key derived from content misses when a requirement or host changes under
   const forged = clone(contract.evidence.descriptor);
   forged.declaration.features = [...forged.declaration.features, "claimed"];
   forged.integrity.declarationDigest = declarationDigest(forged.declaration);
-  forged.integrity.closureManifestDigest = closureManifestDigest(forged.integrity);
+  forged.integrity.closureManifestDigest = closureManifestDigest(forged.id, forged.integrity);
   forged.id.contentDigest = forged.integrity.closureManifestDigest;
   assert.equal(
     reuseVerdict(reuse, key, cacheKeyFor({ ...facts, descriptor: forged }), warm),
@@ -791,6 +830,9 @@ test("a revocation catalog is verified before use and names each target by its o
   for (const vector of hazards) {
     const catalog = { ...clone(body), ...vector.catalog };
     if (vector.root !== undefined) catalog.signature.trustRoot = vector.root;
+    if (vector.signer !== undefined) catalog.signature.signerId = vector.signer;
+    if (vector.entries !== undefined) catalog.entries = clone(vector.entries);
+    if (vector.resign === true) catalog.signature.manifestDigest = revocationCatalogDigest(catalog);
     const view = revocationView({ catalog, ...vector.view });
     assert.equal(revocationCatalogHazard(view), vector.expected, vector.id);
     if (vector.expected !== null) {

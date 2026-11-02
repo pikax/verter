@@ -14,9 +14,18 @@
     "revocationCatalogDomain": "verter.engine-revocation-catalog.v1",
     "receiptDomain": "verter.engine-validation-receipt.v1",
     "digest": "sha256 over the domain, one NUL byte and the canonical JSON",
-    "closureManifest": "The canonical object of declarationDigest, entryPoint and files, with files ascending by the UTF-8 bytes of their path. RFC 8785 orders object members, not this array, and JavaScript string order differs from UTF-8 order outside the basic plane.",
+    "closureManifest": "The canonical object of artifact (the identity axes engine, version, flavor, platform, abi, protocol and build), declarationDigest, entryPoint and files, with files ascending by the UTF-8 bytes of their path. The origin is bound by its own receipt and authorization, and the content digest is this digest. RFC 8785 orders object members, not this array, and JavaScript string order differs from UTF-8 order outside the basic plane.",
     "schemaDialect": "Schemas are draft 2020-12 and close every object with additionalProperties: false, so a standard validator refuses an added field. Refusing non-NFC text is the one rule the dialect cannot state; it belongs to the canonical encoding above.",
     "closureOrderGolden": {
+      "artifact": {
+        "engine": "typescript",
+        "version": "7.1.0-beta",
+        "flavor": "native-tsgo",
+        "platform": "aarch64-apple-darwin",
+        "abi": "darwin-arm64-v1",
+        "protocol": "lsp-3.17",
+        "build": "publisher-build-1"
+      },
       "declarationDigest": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896",
       "entryPoint": "lib/～",
       "files": [
@@ -34,7 +43,7 @@
         }
       ],
       "utf8Order": ["lib/～", "lib/😀"],
-      "digest": "sha256:27a4af3aa162c41005707c2030399d4a85b6cd260b2a2737670dc6bc9c52c6c0"
+      "digest": "sha256:0128156f0b7f87cc652f0a5270a57552449aba5d754ea065b4e4c3e131287db2"
     }
   },
   "identity": {
@@ -47,9 +56,9 @@
       "protocol": "lsp-3.17",
       "build": "publisher-build-1",
       "origin": "npm-typescript-darwin-arm64",
-      "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+      "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
     },
-    "baseKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+    "baseKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
     "axisMutations": [
       {
         "field": "engine",
@@ -146,7 +155,7 @@
           "rootSetRevision": 3,
           "policyEpoch": 7
         },
-        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+        "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
       },
       "second": {
         "receiptId": "origin-receipt-2",
@@ -163,7 +172,7 @@
           "rootSetRevision": 3,
           "policyEpoch": 7
         },
-        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+        "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
       },
       "law": "Two locators of one verified artifact share one key and keep two origin receipts."
     }
@@ -294,7 +303,7 @@
       "protocol": "lsp-3.17",
       "build": "publisher-build-1",
       "origin": "npm-typescript-darwin-arm64",
-      "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+      "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
     },
     "hostFeatures": [],
     "verdicts": [
@@ -689,7 +698,7 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+        "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
       },
       "originReceipts": [
         {
@@ -707,7 +716,7 @@
             "rootSetRevision": 3,
             "policyEpoch": 7
           },
-          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+          "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         }
       ],
       "locators": [
@@ -718,7 +727,7 @@
       ],
       "integrity": {
         "algorithm": "sha256",
-        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
         "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
         "entryPoint": "lib/tsc",
         "files": [
@@ -740,7 +749,7 @@
       "signature": {
         "signatures": [
           {
-            "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+            "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -757,12 +766,12 @@
           {
             "kind": "sbom",
             "referenceId": "sbom-1",
-            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           },
           {
             "kind": "license",
             "referenceId": "license-1",
-            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ]
       },
@@ -1048,6 +1057,55 @@
         "expected": "IntegrityFailure"
       },
       {
+        "id": "identity-engine-claimed",
+        "set": {
+          "id.engine": "typescript-next"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "identity-version-claimed",
+        "set": {
+          "id.version": "7.1.9"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "identity-flavor-claimed",
+        "set": {
+          "id.flavor": "node-tsserver"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "identity-platform-claimed",
+        "set": {
+          "id.platform": "x86_64-unknown-linux-gnu"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "identity-abi-claimed",
+        "set": {
+          "id.abi": "darwin-arm64-v2"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "identity-protocol-claimed",
+        "set": {
+          "id.protocol": "lsp-3.18"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "identity-build-claimed",
+        "set": {
+          "id.build": "publisher-build-2"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
         "id": "signature-waiver-claimed",
         "set": {
           "signature": {
@@ -1148,6 +1206,13 @@
           "revocation": null
         },
         "expected": "RevocationDataUnavailable"
+      },
+      {
+        "id": "policy-demands-unknown-evidence",
+        "context": {
+          "policyRequiredEvidence": ["sbom-not-a-token"]
+        },
+        "expected": "InvalidSchema"
       }
     ],
     "closurePathHazards": [
@@ -1177,7 +1242,7 @@
           "protocol": "lsp-3.17",
           "build": "publisher-build-1",
           "origin": "browser-cdn-1",
-          "contentDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+          "contentDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
         },
         "originReceipts": [
           {
@@ -1195,7 +1260,7 @@
               "rootSetRevision": 3,
               "policyEpoch": 7
             },
-            "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+            "closureManifestDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
           }
         ],
         "locators": [
@@ -1222,12 +1287,12 @@
               "role": "worker-js"
             }
           ],
-          "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+          "closureManifestDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
         },
         "signature": {
           "signatures": [
             {
-              "manifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb",
+              "manifestDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb",
               "scheme": "policy-approved-scheme",
               "signerId": "signer-1",
               "trustRoot": {
@@ -1244,7 +1309,7 @@
             {
               "kind": "attestation",
               "referenceId": "attestation-1",
-              "subjectDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+              "subjectDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
             }
           ]
         },
@@ -1272,7 +1337,7 @@
           "protocol": "lsp-3.17",
           "build": "local-development-1",
           "origin": "local-dev-server-1",
-          "contentDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+          "contentDigest": "sha256:f2177553813a19d8a4677aa5a0aee4bc2e9d3ee7279ec59d6b3d893b34b5d2d0"
         },
         "originReceipts": [
           {
@@ -1290,7 +1355,7 @@
               "rootSetRevision": 3,
               "policyEpoch": 7
             },
-            "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+            "closureManifestDigest": "sha256:f2177553813a19d8a4677aa5a0aee4bc2e9d3ee7279ec59d6b3d893b34b5d2d0"
           }
         ],
         "locators": [
@@ -1317,7 +1382,7 @@
               "role": "worker-js"
             }
           ],
-          "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+          "closureManifestDigest": "sha256:f2177553813a19d8a4677aa5a0aee4bc2e9d3ee7279ec59d6b3d893b34b5d2d0"
         },
         "signature": {
           "signatures": []
@@ -1387,6 +1452,17 @@
             "developmentPermitted": true
           },
           "expected": "OriginMismatch"
+        },
+        {
+          "id": "development-claims-the-published-build",
+          "descriptor": "development",
+          "set": {
+            "id.build": "publisher-build-1"
+          },
+          "context": {
+            "developmentPermitted": true
+          },
+          "expected": "IntegrityFailure"
         },
         {
           "id": "development-bytes-under-the-published-origin",
@@ -1965,6 +2041,7 @@
       },
       {
         "when": {
+          "ownsTemp": true,
           "holdsLock": true,
           "winnerState": "Ready",
           "winnerSameIdentity": true,
@@ -1974,6 +2051,7 @@
       },
       {
         "when": {
+          "ownsTemp": true,
           "holdsLock": true,
           "winnerState": "Ready"
         },
@@ -1981,6 +2059,7 @@
       },
       {
         "when": {
+          "ownsTemp": true,
           "holdsLock": true,
           "winnerState": "Renamed"
         },
@@ -1988,6 +2067,7 @@
       },
       {
         "when": {
+          "ownsTemp": true,
           "holdsLock": true,
           "winnerState": "Absent"
         },
@@ -1995,6 +2075,7 @@
       },
       {
         "when": {
+          "ownsTemp": true,
           "holdsLock": true,
           "winnerState": "Quarantined"
         },
@@ -2117,6 +2198,15 @@
           "ownsTemp": true,
           "holdsLock": true,
           "winnerState": "PrivateTemp"
+        },
+        "expected": "WaitOrFailClosed"
+      },
+      {
+        "id": "temp-ownership-unknown",
+        "facts": {
+          "lockOwnerAlive": false,
+          "holdsLock": true,
+          "winnerState": "Absent"
         },
         "expected": "WaitOrFailClosed"
       }
@@ -2253,7 +2343,8 @@
           "atomicNoReplace": ["https://man7.org/linux/man-pages/man2/rename.2.html"],
           "privateRoot": ["https://man7.org/linux/man-pages/man2/stat.2.html"],
           "durability": ["https://man7.org/linux/man-pages/man2/fsync.2.html"]
-        }
+        },
+        "ownerVerified": []
       },
       {
         "os": "darwin",
@@ -2280,15 +2371,16 @@
           "durability": [
             "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/fcntl.2"
           ]
-        }
+        },
+        "ownerVerified": []
       },
       {
         "os": "windows",
         "noFollowOpen": "CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT and FILE_FLAG_BACKUP_SEMANTICS, refusing FILE_ATTRIBUTE_REPARSE_POINT",
         "exclusiveCreate": "CreateDirectoryW and CREATE_NEW with an owner-only protected DACL",
-        "atomicNoReplace": "MoveFileExW without MOVEFILE_REPLACE_EXISTING on one volume",
+        "atomicNoReplace": "Rename through the temp handle with FILE_RENAME_INFORMATION ReplaceIfExists FALSE on one volume, which fails if the target exists",
         "privateRoot": "owner is the current user or an administrator and the DACL grants nobody else write",
-        "durability": "FlushFileBuffers on files and directory handles",
+        "durability": "FlushFileBuffers on every file handle before the rename",
         "citations": {
           "noFollowOpen": [
             "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew",
@@ -2299,7 +2391,7 @@
             "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew"
           ],
           "atomicNoReplace": [
-            "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw"
+            "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information"
           ],
           "privateRoot": [
             "https://learn.microsoft.com/en-us/windows/win32/secauthz/access-control-lists"
@@ -2307,7 +2399,19 @@
           "durability": [
             "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers"
           ]
-        }
+        },
+        "ownerVerified": [
+          {
+            "column": "atomicNoReplace",
+            "claim": "No reader observes a partially renamed entry: the no-replace rename is atomic on NTFS and ReFS",
+            "members": ["managed-atomic-install", "readonly-ready-validation"]
+          },
+          {
+            "column": "durability",
+            "claim": "A crash after the rename returns leaves the renamed entry or none, without a directory-handle flush",
+            "members": ["managed-atomic-install", "readonly-ready-validation"]
+          }
+        ]
       }
     ],
     "corruption": [
@@ -2363,8 +2467,8 @@
   },
   "cache": {
     "key": {
-      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
-      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+      "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+      "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
       "originReceiptId": "origin-receipt-1",
       "locatorStatIdentity": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d",
       "project": "project-1",
@@ -2620,7 +2724,12 @@
         }
       },
       "view": {
-        "issuers": ["issuer-1"],
+        "issuers": [
+          {
+            "issuerId": "issuer-1",
+            "signerIds": ["signer-1"]
+          }
+        ],
         "lastSeenEpoch": 2,
         "now": 1893456000
       },
@@ -2672,6 +2781,45 @@
             "policyEpoch": 7
           },
           "expected": "root-not-approved"
+        },
+        {
+          "id": "signed-by-a-signer-the-issuer-does-not-name",
+          "signer": "some-other-signer",
+          "expected": "signer-not-issuer"
+        },
+        {
+          "id": "entry-in-another-issuers-name",
+          "entries": [
+            {
+              "entryId": "revocation-1",
+              "target": {
+                "kind": "artifact",
+                "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+              },
+              "reasonId": "advisory-1",
+              "issuerId": "stranger",
+              "revocationEpoch": 2
+            }
+          ],
+          "resign": true,
+          "expected": "entry-not-from-catalog"
+        },
+        {
+          "id": "entry-epoch-ahead-of-its-catalog",
+          "entries": [
+            {
+              "entryId": "revocation-1",
+              "target": {
+                "kind": "artifact",
+                "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+              },
+              "reasonId": "advisory-1",
+              "issuerId": "issuer-1",
+              "revocationEpoch": 99
+            }
+          ],
+          "resign": true,
+          "expected": "entry-not-from-catalog"
         }
       ]
     },
@@ -2680,7 +2828,7 @@
         "id": "this-artifact",
         "target": {
           "kind": "artifact",
-          "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686"
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c"
         },
         "matches": true
       },
@@ -2770,7 +2918,7 @@
           "state": "IntegrityFailure",
           "reason": "IntegrityFailure",
           "remediation": "repair-input",
-          "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
           "completion": "Complete",
           "privateRoot": "/Users/private/.cache/verter/v1",
           "diagnostic": "digest mismatch at C:\\Users\\private\\engine.exe",
@@ -2784,7 +2932,7 @@
           "state": "IntegrityFailure",
           "reason": "IntegrityFailure",
           "remediation": "repair-input",
-          "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
           "completion": "Complete"
         }
       },
@@ -2830,7 +2978,7 @@
       "ManagedCache",
       "IntegrityFailure",
       "repair-input",
-      "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686"
+      "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c"
     ]
   },
   "work": {
@@ -3011,7 +3159,7 @@
       "protocol": "lsp-3.17",
       "build": "publisher-build-1",
       "origin": "npm-typescript-darwin-arm64",
-      "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+      "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
     },
     "EngineVersion": "7.1.0-beta",
     "EngineFlavor": "native-tsgo",
@@ -3019,7 +3167,7 @@
     "EngineSourceKind": "ManagedCache",
     "EngineTrustClass": "registry-integrity",
     "EngineLocatorMutability": "immutable-ready",
-    "Digest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+    "Digest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
     "OpaqueId": "opaque-1",
     "OpaqueIdList": ["opaque-1"],
     "EngineTrustRootId": {
@@ -3061,8 +3209,9 @@
         "rootSetRevision": 3,
         "policyEpoch": 7
       },
-      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+      "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
     },
+    "EnginePolicyEvidence": "signature",
     "EngineClosureFile": {
       "path": "lib/tsc",
       "digest": "sha256:c66243794e2df3a6f1aa3845aebf84fd38b0fb66c12525c5768727237bab22d0",
@@ -3071,7 +3220,7 @@
     },
     "EngineIntegrityEvidence": {
       "algorithm": "sha256",
-      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+      "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
       "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
       "entryPoint": "lib/tsc",
       "files": [
@@ -3091,7 +3240,7 @@
       "archiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw=="
     },
     "EngineSignature": {
-      "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+      "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
       "scheme": "policy-approved-scheme",
       "signerId": "signer-1",
       "trustRoot": {
@@ -3104,7 +3253,7 @@
     "EngineSignatureEvidence": {
       "signatures": [
         {
-          "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+          "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
           "scheme": "policy-approved-scheme",
           "signerId": "signer-1",
           "trustRoot": {
@@ -3121,12 +3270,12 @@
         {
           "kind": "sbom",
           "referenceId": "sbom-1",
-          "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         },
         {
           "kind": "license",
           "referenceId": "license-1",
-          "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         }
       ]
     },
@@ -3158,7 +3307,7 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+        "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
       },
       "originReceipts": [
         {
@@ -3176,7 +3325,7 @@
             "rootSetRevision": 3,
             "policyEpoch": 7
           },
-          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+          "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         }
       ],
       "locators": [
@@ -3187,7 +3336,7 @@
       ],
       "integrity": {
         "algorithm": "sha256",
-        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
         "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
         "entryPoint": "lib/tsc",
         "files": [
@@ -3209,7 +3358,7 @@
       "signature": {
         "signatures": [
           {
-            "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+            "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -3226,12 +3375,12 @@
           {
             "kind": "sbom",
             "referenceId": "sbom-1",
-            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           },
           {
             "kind": "license",
             "referenceId": "license-1",
-            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ]
       },
@@ -3281,7 +3430,7 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+        "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
       },
       "originReceipts": [
         {
@@ -3299,12 +3448,12 @@
             "rootSetRevision": 3,
             "policyEpoch": 7
           },
-          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+          "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         }
       ],
       "integrity": {
         "algorithm": "sha256",
-        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
         "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
         "entryPoint": "lib/tsc",
         "files": [
@@ -3326,7 +3475,7 @@
       "signature": {
         "signatures": [
           {
-            "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+            "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -3343,12 +3492,12 @@
           {
             "kind": "sbom",
             "referenceId": "sbom-1",
-            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           },
           {
             "kind": "license",
             "referenceId": "license-1",
-            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ]
       },
@@ -3377,7 +3526,7 @@
       "layoutVersion": 1,
       "rootClass": "managed-private-root",
       "platform": "aarch64-apple-darwin",
-      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+      "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
       "entries": ["manifest.json", "closure", "validation", "READY.json"]
     },
     "EngineReadyMarker": {
@@ -3391,14 +3540,14 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+        "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
       },
-      "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+      "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
       "installGeneration": 1
     },
     "EngineCacheKey": {
-      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
-      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+      "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+      "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
       "originReceiptId": "origin-receipt-1",
       "locatorStatIdentity": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d",
       "project": "project-1",
@@ -3415,8 +3564,8 @@
     },
     "EngineCacheEntry": {
       "key": {
-        "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
-        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+        "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
         "originReceiptId": "origin-receipt-1",
         "locatorStatIdentity": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d",
         "project": "project-1",
@@ -3442,7 +3591,7 @@
           "protocol": "lsp-3.17",
           "build": "publisher-build-1",
           "origin": "npm-typescript-darwin-arm64",
-          "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+          "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         },
         "originReceipts": [
           {
@@ -3460,12 +3609,12 @@
               "rootSetRevision": 3,
               "policyEpoch": 7
             },
-            "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+            "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+          "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
           "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
           "entryPoint": "lib/tsc",
           "files": [
@@ -3487,7 +3636,7 @@
         "signature": {
           "signatures": [
             {
-              "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+              "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
               "scheme": "policy-approved-scheme",
               "signerId": "signer-1",
               "trustRoot": {
@@ -3504,12 +3653,12 @@
             {
               "kind": "sbom",
               "referenceId": "sbom-1",
-              "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+              "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
             },
             {
               "kind": "license",
               "referenceId": "license-1",
-              "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
+              "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
             }
           ]
         },
@@ -3544,7 +3693,7 @@
       "state": "IntegrityFailure",
       "source": "ManagedCache",
       "stage": "validate",
-      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+      "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
       "completion": "Complete",
       "remediation": "repair-input"
     },
@@ -3564,7 +3713,7 @@
       "state": "IntegrityFailure",
       "reason": "IntegrityFailure",
       "remediation": "repair-input",
-      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+      "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
       "completion": "Complete"
     },
     "EngineValidationWorkCounters": {
@@ -3625,7 +3774,7 @@
     }
   },
   "receiptGolden": {
-    "digest": "sha256:a170092116201e2e00ff639af458ca3bab71a47d9992cad2fe997ea245ad660d",
+    "digest": "sha256:2d8fbed85362d180d19649c80b12f07d8d98bf6f90f83ada5db044f946c070b9",
     "mutations": [
       {
         "id": "other-policy-epoch",
@@ -4206,9 +4355,9 @@
       "notCoveredBecause": "The controller checks node dependencies, not this contract's obligation population"
     },
     {
-      "condition": "The declaration and entry point are inside the signed manifest digest",
+      "condition": "The identity axes, declaration and entry point are inside the signed manifest digest",
       "concern": "security",
-      "prevents": "A producer claiming any API or feature over signed bytes, or a receipt for a closure that omits what a locator launches, both reproduced by review",
+      "prevents": "A producer claiming any API, feature, version, platform, ABI, protocol or build over signed bytes, so an old signed release presents as current or wrong-platform bytes as native, or a receipt for a closure that omits what a locator launches, all reproduced by review",
       "notCoveredBecause": "Nothing else reads a declaration before selection, and later execution checks run too late to refuse it"
     },
     {
@@ -4234,6 +4383,18 @@
       "concern": "security",
       "prevents": "Replaying an older signed catalog to hide a revocation",
       "notCoveredBecause": "The epoch alone only forces fresh validation against the stale data"
+    },
+    {
+      "condition": "Captured source policy adds only typed EnginePolicyEvidence, and a required token no obligation row names fails closed",
+      "concern": "security",
+      "prevents": "A policy demand being silently dropped when its vocabulary drifts, reproduced by review with an unknown token accepted",
+      "notCoveredBecause": "Every other vector uses known tokens, and no shared validator exists yet to refuse one"
+    },
+    {
+      "condition": "Captured policy names the signers of each revocation issuer, and every catalog entry carries that catalog's issuer and no later epoch",
+      "concern": "security",
+      "prevents": "A signer under an approved root issuing a catalog in a trusted issuer's name, suppressing or adding revocations, reproduced by review",
+      "notCoveredBecause": "Runtime cryptography verifies a signature, not a binding between signer and issuer the contract never states"
     }
   ]
 }
