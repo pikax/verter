@@ -523,6 +523,7 @@
         "engine",
         "allowedFlavors",
         "platform",
+        "allowedAbis",
         "versionFloor",
         "versionCeilingExclusive",
         "prereleaseChannels",
@@ -554,6 +555,14 @@
         },
         "platform": {
           "$ref": "#/$defs/EnginePlatform"
+        },
+        "allowedAbis": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          },
+          "uniqueItems": true
         },
         "exactPin": {
           "$ref": "#/$defs/EngineVersion"
@@ -603,6 +612,7 @@
         "TooNew",
         "Unsupported",
         "WrongPlatform",
+        "WrongAbi",
         "WrongFlavor",
         "UnsupportedProtocol",
         "UnsupportedApi",
@@ -891,6 +901,7 @@
         "Unsupported",
         "WrongEngine",
         "WrongPlatform",
+        "WrongAbi",
         "WrongFlavor",
         "UnsupportedProtocol",
         "UnsupportedApi",

@@ -284,6 +284,7 @@
       "engine": "typescript",
       "allowedFlavors": ["native-tsgo"],
       "platform": "aarch64-apple-darwin",
+      "allowedAbis": ["darwin-arm64-v1"],
       "versionFloor": "7.1.0-beta",
       "versionCeilingExclusive": "7.2.0",
       "prereleaseChannels": ["beta", "rc"],
@@ -329,6 +330,45 @@
           "platform": "x86_64-apple-darwin"
         },
         "expected": "WrongPlatform"
+      },
+      {
+        "id": "other-abi",
+        "artifact": {
+          "abi": "unsupported-abi-v999"
+        },
+        "expected": "WrongAbi"
+      },
+      {
+        "id": "requirement-admits-a-second-abi",
+        "requirement": {
+          "allowedAbis": ["darwin-arm64-v1", "darwin-arm64-v2"]
+        },
+        "artifact": {
+          "abi": "darwin-arm64-v2"
+        },
+        "expected": "Compatible"
+      },
+      {
+        "id": "browser-worker-abi-revision",
+        "requirement": {
+          "platform": "wasm32-browser",
+          "allowedAbis": ["browser-worker-v1"],
+          "allowedFlavors": ["wasm-single"]
+        },
+        "artifact": {
+          "flavor": "wasm-single",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v2"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "wasm",
+            "requiredHostFeatures": []
+          }
+        },
+        "hostFeatures": [],
+        "expected": "WrongAbi"
       },
       {
         "id": "other-flavor",
@@ -429,6 +469,7 @@
         "id": "threaded-without-isolation",
         "requirement": {
           "platform": "wasm32-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["wasm-threaded"]
         },
         "artifact": {
@@ -450,6 +491,7 @@
         "id": "threaded-with-isolation",
         "requirement": {
           "platform": "wasm32-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["wasm-threaded"]
         },
         "artifact": {
@@ -471,6 +513,7 @@
         "id": "threaded-cannot-drop-its-host-features",
         "requirement": {
           "platform": "wasm32-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["wasm-threaded"]
         },
         "artifact": {
@@ -492,6 +535,7 @@
         "id": "single-threaded-needs-no-shared-memory",
         "requirement": {
           "platform": "wasm32-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["wasm-single"]
         },
         "artifact": {
@@ -513,6 +557,7 @@
         "id": "js-worker-on-a-browser",
         "requirement": {
           "platform": "js-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["js-worker"]
         },
         "artifact": {
@@ -534,6 +579,7 @@
         "id": "wasm-flavor-on-the-js-platform",
         "requirement": {
           "platform": "js-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["wasm-single"]
         },
         "artifact": {
@@ -555,6 +601,7 @@
         "id": "wasm-flavor-declaring-a-script-module",
         "requirement": {
           "platform": "wasm32-browser",
+          "allowedAbis": ["browser-worker-v1"],
           "allowedFlavors": ["wasm-single"]
         },
         "artifact": {
@@ -721,6 +768,21 @@
         ["7.1.0-rc.1", "Unsupported"],
         ["7.0.9", "TooOld"],
         ["7.1.0", "Compatible"]
+      ]
+    },
+    "namedFloorLineBoundaries": {
+      "window": {
+        "floor": "7.1.0-beta.5",
+        "ceilingExclusive": "7.2.0",
+        "prereleaseChannels": ["beta", "rc"],
+        "prereleaseCores": ["7.1.0"]
+      },
+      "cases": [
+        ["7.1.0-beta.1", "Unsupported"],
+        ["7.1.0-beta.5", "Compatible"],
+        ["7.1.0-rc.1", "Compatible"],
+        ["7.1.0", "Compatible"],
+        ["7.0.9", "TooOld"]
       ]
     },
     "policyChange": {
@@ -2398,6 +2460,12 @@
       "remediation": "choose-compatible"
     },
     {
+      "reason": "WrongAbi",
+      "state": "Incompatible",
+      "selection": "AdvanceIfPolicyPermits",
+      "remediation": "choose-compatible"
+    },
+    {
       "reason": "WrongFlavor",
       "state": "Incompatible",
       "selection": "AdvanceIfPolicyPermits",
@@ -3156,7 +3224,7 @@
       "host": "host-1",
       "hostFeatures": [],
       "requirementId": "tsgo-lsp-api",
-      "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
+      "requirementDigest": "sha256:4f4958f574517d02ca60cdc5f2bb7c7fe4cace2408512bdd938205e4b52ec04c",
       "compatibilityPolicyId": "ts7.1",
       "validationSchema": 1,
       "policyEpoch": 7,
@@ -3728,7 +3796,7 @@
           "state": "Resolved",
           "remediation": "none",
           "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
-          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "receiptDigest": "sha256:32535a3627522b303fe29eb5c662f10574d837ede5b2af00291f944f2d5a0d58",
           "completion": "Complete",
           "privateRoot": "/Users/private/.cache/verter/v1"
         },
@@ -3738,7 +3806,7 @@
           "state": "Resolved",
           "remediation": "none",
           "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
-          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "receiptDigest": "sha256:32535a3627522b303fe29eb5c662f10574d837ede5b2af00291f944f2d5a0d58",
           "completion": "Complete"
         }
       },
@@ -3750,7 +3818,7 @@
           "state": "Selected",
           "remediation": "none",
           "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
-          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "receiptDigest": "sha256:32535a3627522b303fe29eb5c662f10574d837ede5b2af00291f944f2d5a0d58",
           "completion": "Complete",
           "diagnostic": "selected from C:\\Users\\private\\engine.exe"
         },
@@ -3760,7 +3828,7 @@
           "state": "Selected",
           "remediation": "none",
           "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
-          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "receiptDigest": "sha256:32535a3627522b303fe29eb5c662f10574d837ede5b2af00291f944f2d5a0d58",
           "completion": "Complete"
         }
       }
@@ -4298,6 +4366,7 @@
       "engine": "typescript",
       "allowedFlavors": ["native-tsgo"],
       "platform": "aarch64-apple-darwin",
+      "allowedAbis": ["darwin-arm64-v1"],
       "versionFloor": "7.1.0-beta",
       "versionCeilingExclusive": "7.2.0",
       "prereleaseChannels": ["beta", "rc"],
@@ -4404,7 +4473,7 @@
       },
       "hostFeatures": [],
       "requirementId": "tsgo-lsp-api",
-      "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
+      "requirementDigest": "sha256:4f4958f574517d02ca60cdc5f2bb7c7fe4cace2408512bdd938205e4b52ec04c",
       "compatibilityPolicyId": "ts7.1",
       "compatibilityVerdict": "Compatible",
       "project": "project-1",
@@ -4456,7 +4525,7 @@
       "host": "host-1",
       "hostFeatures": [],
       "requirementId": "tsgo-lsp-api",
-      "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
+      "requirementDigest": "sha256:4f4958f574517d02ca60cdc5f2bb7c7fe4cace2408512bdd938205e4b52ec04c",
       "compatibilityPolicyId": "ts7.1",
       "validationSchema": 1,
       "policyEpoch": 7,
@@ -4474,7 +4543,7 @@
         "host": "host-1",
         "hostFeatures": [],
         "requirementId": "tsgo-lsp-api",
-        "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
+        "requirementDigest": "sha256:4f4958f574517d02ca60cdc5f2bb7c7fe4cace2408512bdd938205e4b52ec04c",
         "compatibilityPolicyId": "ts7.1",
         "validationSchema": 1,
         "policyEpoch": 7,
@@ -4571,7 +4640,7 @@
         },
         "hostFeatures": [],
         "requirementId": "tsgo-lsp-api",
-        "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
+        "requirementDigest": "sha256:4f4958f574517d02ca60cdc5f2bb7c7fe4cace2408512bdd938205e4b52ec04c",
         "compatibilityPolicyId": "ts7.1",
         "compatibilityVerdict": "Compatible",
         "project": "project-1",
@@ -4834,7 +4903,7 @@
     }
   },
   "receiptGolden": {
-    "digest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+    "digest": "sha256:32535a3627522b303fe29eb5c662f10574d837ede5b2af00291f944f2d5a0d58",
     "mutations": [
       {
         "id": "other-policy-epoch",
@@ -4991,7 +5060,7 @@
           ]
         }
       },
-      "digest": "sha256:7608213e8aafc1fb649f810123fd9a4af1d502e89fe979ea40f12b990a5439e5"
+      "digest": "sha256:f28f8909da881fa269ef4118118cdfddc79f9e7be733ad25d61943bf56409d0b"
     }
   },
   "ownership": {

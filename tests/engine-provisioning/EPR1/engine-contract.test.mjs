@@ -222,8 +222,13 @@ test("compatibility mutations each reach a distinct typed verdict", () => {
   for (const flavor of schema.$defs.EngineFlavor.enum) {
     assert.ok(compatibleFlavors.has(flavor), `no positive vector runs ${flavor}`);
   }
-  const { versionWindow, versionBoundaries, stableFloorBoundaries, prereleaseLineBoundaries } =
-    contract.compatibility;
+  const {
+    versionWindow,
+    versionBoundaries,
+    stableFloorBoundaries,
+    prereleaseLineBoundaries,
+    namedFloorLineBoundaries,
+  } = contract.compatibility;
   for (const [version, expected] of prereleaseLineBoundaries.cases) {
     assert.equal(versionVerdict(version, prereleaseLineBoundaries.window), expected, version);
   }
@@ -233,8 +238,17 @@ test("compatibility mutations each reach a distinct typed verdict", () => {
     assert.equal(versionVerdict(version, versionWindow), expected, String(version));
     reached.add(expected);
   }
+  // Naming the floor's own line admits nothing below the inclusive floor on that line.
+  const namedStable = {
+    ...stableFloorBoundaries.window,
+    prereleaseCores: [stableFloorBoundaries.window.floor],
+  };
   for (const [version, expected] of stableFloorBoundaries.cases) {
     assert.equal(versionVerdict(version, stableFloorBoundaries.window), expected, version);
+    assert.equal(versionVerdict(version, namedStable), expected, `${version} on a named line`);
+  }
+  for (const [version, expected] of namedFloorLineBoundaries.cases) {
+    assert.equal(versionVerdict(version, namedFloorLineBoundaries.window), expected, version);
   }
   assert.deepEqual([...reached].sort(), [...schema.$defs.EngineCompatibilityVerdict.enum].sort());
   for (const field of contract.compatibility.policyChange.keyFields) {

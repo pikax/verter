@@ -277,12 +277,15 @@ export function versionVerdict(text, policy) {
   const [floor, ceiling] = [parseVersion(policy.floor), parseVersion(policy.ceilingExclusive)];
   if (compareCore(version, ceiling) >= 0) return "TooNew";
   if (version.pre !== null) {
-    // A prerelease is served at the floor's own line, or on a line the requirement names.
-    const atFloor = compareCore(version, floor) === 0 && comparePrecedence(version, floor) >= 0;
-    const onNamedLine =
-      compareCore(version, floor) >= 0 &&
+    // A prerelease is served on the floor's own line or on a line the requirement names, and
+    // never below the inclusive floor: naming a line cannot undo a raised minimum on it.
+    const servedLine =
+      compareCore(version, floor) === 0 ||
       (policy.prereleaseCores ?? []).some((core) => compareCore(version, parseVersion(core)) === 0);
-    const admitted = policy.prereleaseChannels.includes(version.pre[0]) && (atFloor || onNamedLine);
+    const admitted =
+      policy.prereleaseChannels.includes(version.pre[0]) &&
+      servedLine &&
+      comparePrecedence(version, floor) >= 0;
     return admitted ? "Compatible" : "Unsupported";
   }
   return comparePrecedence(version, floor) < 0 ? "TooOld" : "Compatible";
@@ -393,6 +396,7 @@ const missing = (required, declared) => required.some((item) => !declared.includ
 export function compatibilityVerdict(rules, requirement, declaration, artifact, hostFeatures) {
   if (artifact.engine !== requirement.engine) return "WrongEngine";
   if (artifact.platform !== requirement.platform) return "WrongPlatform";
+  if (!requirement.allowedAbis.includes(artifact.abi)) return "WrongAbi";
   if (!requirement.allowedFlavors.includes(artifact.flavor)) return "WrongFlavor";
   const flavor = rules.flavorHosts[artifact.flavor];
   if (!flavor.platforms.includes(artifact.platform)) return "WrongFlavor";

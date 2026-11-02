@@ -333,12 +333,15 @@ refused rather than guessed.
 ### Compatibility contract
 
 `EngineCompatibilityRequirement` binds requirement and compatibility-policy IDs,
-engine, allowed flavors, platform, version window, optional exact pin, protocol,
-API, commands, features, toolchain family and host features. The verdict compares
-it with declarations and never executes a candidate; the bounded handshake stays
-with activation. Checks run engine, platform, flavor, host, protocol, API, command,
-feature, toolchain, version window, then pin, so a structural mismatch is never
-reported as a version problem and a pin cannot override the window.
+engine, allowed flavors, platform, allowed ABIs, version window, optional exact pin,
+protocol, API, commands, features, toolchain family and host features. The verdict
+compares it with declarations and never executes a candidate; the bounded handshake
+stays with activation. An artifact whose ABI the requirement does not list is
+`WrongAbi`, so a same-platform build for another ABI, or a browser-worker ABI revision
+under an unchanged protocol and API, is never Compatible. Checks run engine, platform,
+ABI, flavor, host, protocol, API, command, feature, toolchain, version window, then pin,
+so a structural mismatch is never reported as a version problem and a pin cannot
+override the window.
 
 The product's `flavorHosts` table says where each flavor runs: its platforms, host and
 module formats, plus the host features it always needs. A declaration cannot move an
@@ -347,14 +350,17 @@ declaration and the requirement name, and both the artifact's identity and its
 declaration must state the required protocol.
 
 `EngineCompatibilityVerdict` is `Compatible`, `TooOld`, `TooNew`, `Unsupported`,
-`WrongEngine`, `WrongPlatform`, `WrongFlavor`, `UnsupportedProtocol`, `UnsupportedApi`,
-`MissingCommand`, `MissingFeature`, `ToolchainIncompatible`, `HostUnsupported` or
+`WrongEngine`, `WrongPlatform`, `WrongAbi`, `WrongFlavor`, `UnsupportedProtocol`,
+`UnsupportedApi`, `MissingCommand`, `MissingFeature`, `ToolchainIncompatible`, `HostUnsupported` or
 `UnknownCompatibility`. Unknown is ineligible, including an unreadable version.
 Version boundaries restate the current tsgo line law without moving a pin or floor: a
 prerelease is served only on its floor's own line. A requirement may also name further
 lines in `prereleaseCores`, which is how the managed tsserver requirement serves
 `6.0.0-beta.1` from a window that starts at `5.8.0`; a line below the floor or outside
-the window stays refused, and every other prerelease line stays `Unsupported`. The
+the window stays refused, and every other prerelease line stays `Unsupported`. The floor
+is inclusive by full precedence on every line: naming a line never admits a prerelease
+below the floor, so a floor of `7.1.0-beta.5` refuses `7.1.0-beta.1` even when `7.1.0` is
+named. The
 serving tier itself remains a separately identified requirement input. The cache key
 and receipt carry a digest of the whole requirement and the host's features, so a
 raised bound or a host losing isolation cannot reuse a receipt, even under unchanged
