@@ -36,6 +36,10 @@ mod registry;
 
 pub mod carrier_grammar;
 pub mod carrier_versions;
+// Reserved homes for the per-language formatter views. The module is
+// declaration-only until each language's formatter implementation fills its
+// own submodule; nothing here registers a formatter or a capability.
+pub mod formatter;
 pub mod registered_source_authority;
 pub mod svelte_rune_ambient;
 
