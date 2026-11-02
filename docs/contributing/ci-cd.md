@@ -653,3 +653,5 @@ The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightl
 ## Representative change comparisons
 
 Before/after CI comparisons read the versioned [CI change corpus](ci-change-corpus.v1.md): its passing and failing change inputs, platform and cache cells, and concurrent supersession streams. The [collection protocol](ci-change-corpus-collection.v1.md) defines the replay commands, paired repetitions and the queue, execution, resource and landing metrics. Consumers keep their results outside the repository. The corpus claims no measured savings and replaces no exact-tree required check.
+
+No measured baseline exists yet. The [current CI baseline](ci-baseline.v1.md) records what can and cannot be read today, the driver that collects it, and what stays held until a collection reports `measured`.
