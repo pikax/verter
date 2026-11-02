@@ -67,7 +67,8 @@ test("a release-built native entry without an inventory row is rejected", () => 
   assert.throws(() => validate(contract, "steps: []"), /no native build/);
   for (const spelling of [
     "cargo build --release --package=verter_new_tool",
-    "cargo build --release \\n          --package verter_new_tool",
+    "cargo build --release \\\n          --package verter_new_tool",
+    "cargo build --release \\\r\n          --package verter_new_tool",
     "cross build --release -p verter_new_tool",
   ]) {
     assert.throws(
