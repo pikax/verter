@@ -930,6 +930,54 @@ fn a_lookup_outside_the_demand_returns_no_row_and_is_never_complete() {
 }
 
 #[test]
+fn a_resumed_page_of_a_lookup_reaching_outside_the_demand_is_never_complete() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for id in ["/src/A.vue", "/src/B.vue"] {
+        upsert_file(&host, id, &vue_source("--brand"), FileLanguage::vue());
+    }
+    let demand = css_demand();
+    let mixed = || {
+        Lookup::Keys(vec![
+            PostingKey::exact(PartitionFamily::StyleSelectors, "klass"),
+            PostingKey::exact(PartitionFamily::CssVariables, "--brand"),
+        ])
+    };
+    let outside = PartialCause::OutsideDemand;
+    let tight = QueryBudgets {
+        postings: 1,
+        records: 1,
+    };
+
+    let (whole, _) = host.workspace_index_candidates(&demand, mixed(), WIDE, None, &never());
+    assert!(is_partial_with(&whole, &outside));
+
+    let mut seen = Vec::new();
+    let mut resume = None;
+    let mut pages = 0;
+    let last = loop {
+        let (page, _) =
+            host.workspace_index_candidates(&demand, mixed(), tight, resume.take(), &never());
+        pages += 1;
+        seen.extend(fingerprint(&page));
+        match &page.status {
+            EnumerationStatus::Partial {
+                cause: PartialCause::BudgetExhausted,
+                continuation: Some(next),
+                ..
+            } => resume = Some(next.clone()),
+            _ => break page,
+        }
+    };
+    assert!(pages > 1, "the lookup was paged");
+    assert_eq!(seen, fingerprint(&whole), "every in-demand candidate once");
+    assert!(
+        is_partial_with(&last, &outside),
+        "the final page keeps the whole lookup's cause, got {:?}",
+        last.status
+    );
+}
+
+#[test]
 fn a_partition_the_analysis_scope_does_not_compute_is_unsupported_and_uncovered() {
     use verter_semantic::analysis::AnalysisScope;
 

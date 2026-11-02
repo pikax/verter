@@ -55,6 +55,15 @@ impl Lookup {
         }
     }
 
+    /// Whether any key of the whole lookup, not only the part one page walks,
+    /// reads a partition `scope` does not.
+    fn reaches_outside(&self, scope: &DeclaredScope) -> bool {
+        match self {
+            Self::Keys(keys) => keys.iter().any(|key| !scope.reads_family(key.partition())),
+            Self::Prefix { partition, .. } => !scope.reads_family(*partition),
+        }
+    }
+
     fn encode(&self, encoder: &mut CanonicalEncoder) {
         let mut key_fields =
             |partition: PartitionFamily, family: KeyFamily, version, text: &str| {
@@ -233,7 +242,6 @@ struct Walk<'a> {
     work: QueryWork,
     keys_exhausted: u32,
     saw_stale: bool,
-    saw_outside: bool,
     /// The requested key being walked.
     position: u32,
 }
@@ -250,10 +258,8 @@ enum Stop {
 impl Walk<'_> {
     /// `false` for a key that reads outside the declared population. Without a
     /// declared population nothing is outside, and nothing is certified either.
-    fn admits_key(&mut self, partition: PartitionFamily) -> bool {
-        let admitted = self.scope.is_none_or(|scope| scope.reads_family(partition));
-        self.saw_outside |= !admitted;
-        admitted
+    fn admits_key(&self, partition: PartitionFamily) -> bool {
+        self.scope.is_none_or(|scope| scope.reads_family(partition))
     }
 
     /// Visit one key's postings from `resume` on.
@@ -357,7 +363,6 @@ pub fn query_candidates(
         work: QueryWork::default(),
         keys_exhausted: 0,
         saw_stale: false,
-        saw_outside: false,
         position: 0,
     };
     if let Some(continuation) = &query.continuation {
@@ -448,12 +453,14 @@ fn exhausted_status(walk: &Walk<'_>, lookup: &Lookup) -> EnumerationStatus {
     if walk.saw_stale {
         return partial(PartialCause::Stale);
     }
-    if walk.saw_outside {
-        return partial(PartialCause::OutsideDemand);
-    }
     let Some(scope) = walk.scope else {
         return partial(PartialCause::OpenDiscovery);
     };
+    // Judged on the whole lookup: a resumed page never walks the keys before
+    // its continuation, so what it walked cannot say what the lookup reads.
+    if lookup.reaches_outside(scope) {
+        return partial(PartialCause::OutsideDemand);
+    }
     let Some(record) = walk.snapshot.coverage(&scope.id) else {
         return partial(PartialCause::OpenDiscovery);
     };
