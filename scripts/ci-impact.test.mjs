@@ -583,6 +583,7 @@ test("matchPathFilters reports every filter and owns exactly the files some filt
     "catalogs/formatter-compatibility-yaml-v1.toml",
     "fixtures/formatter/corpora/vue/valid.txt",
     "tests/formatter/verify.mjs",
+    "tests/kernel/LRA0/products/rules-actions-inventory.v1.json",
   ]);
   assert.deepEqual(Object.keys(hits).sort(), Object.keys(PATH_FILTERS).sort());
   assert.equal(hits.jetbrains, true);
@@ -597,6 +598,7 @@ test("matchPathFilters reports every filter and owns exactly the files some filt
     "packages/vue-vscode/src/extension.ts",
     "scripts/jetbrains-gate.mjs",
     "tests/formatter/verify.mjs",
+    "tests/kernel/LRA0/products/rules-actions-inventory.v1.json",
   ]);
 });
 
@@ -1012,5 +1014,16 @@ test("formatter catalog changes reach validation in the configured CI script lan
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.ok(
     pkg.scripts["test:scripts:ci"].includes("node --test scripts/benchmark/evidence-run.test.mjs"),
+  );
+});
+
+test("a rule/action inventory change reaches its data test in the configured CI script lane", () => {
+  const { hits } = matchPathFilters(["tests/kernel/LRA0/products/rules-actions-inventory.v1.json"]);
+  assert.equal(hits.scripts, true);
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(
+    pkg.scripts["test:scripts:ci"].includes(
+      "node --test tests/kernel/LRA0/rules-actions-inventory.test.mjs",
+    ),
   );
 });

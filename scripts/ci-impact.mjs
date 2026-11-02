@@ -86,6 +86,7 @@ export const COMPILE_CONTRACT_OWNER_CRATES = Object.freeze({
   audit: "verter_audit",
   "compiler-default": "verter_compiler",
   "css-syntax": "verter_css_syntax",
+  formatter: "verter_formatter",
   identity: "verter_identity",
   language: "verter_language",
   semantic: "verter_semantic",
@@ -320,6 +321,19 @@ export const PATH_FILTERS = Object.freeze({
   scripts: [
     "scripts/**",
     "tests/formatter/**",
+    "tests/kernel/LRA0/**",
+    // The rule/action inventory's data test requires these row sources to exist.
+    "crates/verter_actions/src/engine.rs",
+    "crates/verter_actions/src/types.rs",
+    "crates/verter_lsp/src/features/action_utils.rs",
+    "crates/verter_lsp/src/features/component_actions.rs",
+    "crates/verter_lsp/src/features/diagnostics_bridge.rs",
+    "crates/verter_lsp/src/features/event_type_hints.rs",
+    "crates/verter_lsp/src/features/extract_component.rs",
+    "crates/verter_lsp/src/features/macro_actions.rs",
+    "crates/verter_lsp/src/features/organize_imports.rs",
+    "crates/verter_lsp/src/server/aux_features.rs",
+    "crates/verter_lsp/src/type_provider/merge/feature_merges.rs",
     "catalogs/formatter-*.toml",
     "fixtures/formatter/**",
     ".github/workflows/nightly.yml",
@@ -905,7 +919,7 @@ const COMPILED_CI_INERT_PATHS = INERT.compiled;
  * filter may be missing paths or an inert path may force the fallback, so the
  * gates run every lane and the audit fails, naming the file.
  */
-const SELECTION_CONFIG_ERRORS = Object.freeze(
+export const SELECTION_CONFIG_ERRORS = Object.freeze(
   [STP1.error, INERT.error].filter(Boolean).map(({ file, message }) => ({
     file,
     message: `${file}: ${message}`,
@@ -1167,7 +1181,7 @@ function summaryMarkdown(changedFiles, filterHits, impact, gates) {
   return lines.join("\n");
 }
 
-function loadCargoMetadata(cwd) {
+export function loadCargoMetadata(cwd) {
   const raw = execFileSync(
     "cargo",
     ["metadata", "--format-version=1", "--all-features", "--locked"],

@@ -10807,7 +10807,7 @@ async fn promoting_a_rootless_receipt_releases_the_publication_a_scan_held() {
         .expect("the fixture publishes a resolver snapshot");
     server
         .import_sync
-        .record_delivered_with_rootless(id.clone(), key, true);
+        .record_delivered_with_rootless(id.clone(), key, true, Vec::new());
 
     let unrelated_uri = workspace_uri(&fixture.root, "src/Unrelated.vue");
     super::super::lifecycle::handle_did_change(

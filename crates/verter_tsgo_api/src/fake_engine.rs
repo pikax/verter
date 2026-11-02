@@ -296,7 +296,10 @@ fn record_mode_pid(mode: &str) {
         let _ = std::fs::write(dir.join(format!("{mode}-{pid}.pid")), pid.to_string());
     }
     if std::env::var_os(STDERR_ENV).is_some() {
-        eprintln!("verter-fake-engine: {mode} started");
+        // One write: the two engines of a run share this stderr, and `eprintln!`
+        // writes each formatted piece separately, so concurrent starts interleave.
+        let line = format!("verter-fake-engine: {mode} started\n");
+        let _ = std::io::stderr().write_all(line.as_bytes());
     }
 }
 

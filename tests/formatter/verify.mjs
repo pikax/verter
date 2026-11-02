@@ -40,6 +40,46 @@ const nonempty = (v) => typeof v === "string" && v.length > 0;
 const list = (v) => Array.isArray(v) && v.length > 0;
 const unique = (rows) => new Set(rows).size === rows.length;
 
+// Rust comments (block comments nest) and string, raw-string and char literal
+// bodies are blanked, keeping line breaks, so a route pattern only sees code.
+// A quote that does not open a char literal is a lifetime or label and stays.
+const RUST_NON_CODE_START = /\/\/|\/\*|(?<!\w)[bc]?r(#*)"|(?<!\w)[bc]?"|(?<!\w)b?'/g;
+const RUST_CHAR_LITERAL = /'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,8}\}|.)|[^'\\\r\n])'/uy;
+function rustCode(source) {
+  let code = "";
+  let copied = 0;
+  RUST_NON_CODE_START.lastIndex = 0;
+  for (let m; (m = RUST_NON_CODE_START.exec(source)); ) {
+    const start = m.index;
+    let end = start + m[0].length;
+    if (m[0] === "//") {
+      end = source.indexOf("\n", start);
+      if (end < 0) end = source.length;
+    } else if (m[0] === "/*") {
+      for (let depth = 1; depth > 0 && end < source.length; ) {
+        const pair = source.slice(end, end + 2);
+        depth += pair === "/*" ? 1 : pair === "*/" ? -1 : 0;
+        end += pair === "/*" || pair === "*/" ? 2 : 1;
+      }
+    } else if (m[1] !== undefined) {
+      const close = source.indexOf(`"${m[1]}`, end);
+      end = close < 0 ? source.length : close + 1 + m[1].length;
+    } else if (m[0].endsWith('"')) {
+      while (end < source.length && source[end] !== '"') end += source[end] === "\\" ? 2 : 1;
+      end = Math.min(end + 1, source.length);
+    } else {
+      RUST_CHAR_LITERAL.lastIndex = end - 1;
+      const literal = RUST_CHAR_LITERAL.exec(source);
+      if (!literal) continue;
+      end = RUST_CHAR_LITERAL.lastIndex;
+    }
+    code += source.slice(copied, start) + source.slice(start, end).replace(/[^\r\n]/g, " ");
+    copied = end;
+    RUST_NON_CODE_START.lastIndex = end;
+  }
+  return code + source.slice(copied);
+}
+
 // Catalogs use a deliberately restricted TOML subset: single-line JSON-compatible
 // scalars/arrays, tables and arrays of tables. Unknown syntax and duplicate keys
 // fail, rather than leaving an unvalidated portion of the authority document.
@@ -588,26 +628,44 @@ export function validateFormatterLock(lock) {
     "cancellation",
   ])
     check(actionKinds.has(kind), `missing churn action ${kind}`);
-  const routeKeys = inventory.routes.map((r) => `${r.path}::${r.symbol}`);
-  check(unique(routeKeys), "duplicate route owner");
+  // A route has one owner per symbol, and both inventories bind it to the same
+  // file: the one that carries it in the current tree.
+  const routeKey = (r) => `${r.path}::${r.symbol}`;
+  check(unique(inventory.routes.map((r) => r.symbol)), "duplicate route owner");
   const sourceRoutes = lock.sourceInventory.currentRoutes;
+  check(unique(sourceRoutes.map((r) => r.symbol)), "duplicate reviewed route symbol");
   check(
-    same([...routeKeys].sort(), sourceRoutes.map((r) => `${r.path}::${r.symbol}`).sort()),
+    same(inventory.routes.map(routeKey).sort(), sourceRoutes.map(routeKey).sort()),
     "incomplete route inventory",
   );
   for (const route of inventory.routes) {
-    const prior = sourceRoutes.find((r) => r.path === route.path && r.symbol === route.symbol);
-    const expectedOwner = prior?.deletionOwner ?? prior?.integrationOwner ?? "markup-auto-close";
+    const prior = sourceRoutes.find((r) => routeKey(r) === routeKey(route));
+    // Only a route kept outside the formatter falls to the markup auto-close
+    // owner; every other reviewed route must name its own owner.
+    const expectedOwner =
+      prior?.deletionOwner ??
+      prior?.integrationOwner ??
+      (prior?.disposition === "retain-outside-formatter" ? "markup-auto-close" : undefined);
     check(
-      route.disposition === prior?.disposition && route.owner === expectedOwner,
+      route.disposition === prior?.disposition &&
+        nonempty(expectedOwner) &&
+        route.owner === expectedOwner,
       `route ownership ${route.symbol}`,
     );
+    // A textual presence check over the file's code (comments and literals
+    // blanked): a provider is registered by a statement assigning it on the
+    // capability set, or by a struct-literal field. A comparison or a `None`
+    // value advertises nothing. The advertised value itself is the LSP
+    // capability wire test's to prove.
     const symbol = route.symbol.split("::").at(-1);
     const pattern = symbol.endsWith("provider")
-      ? new RegExp(`\\b${symbol}\\s*:`)
+      ? new RegExp(
+          `^\\s*(?:[A-Za-z_][\\w.]*\\.${symbol}\\s*=(?![=>])|${symbol}\\s*:(?!:))(?!\\s*None\\b)`,
+          "m",
+        )
       : new RegExp(`\\bfn\\s+${symbol}\\s*\\(`);
     check(
-      pattern.test(lock.routeSources[route.path] ?? ""),
+      pattern.test(rustCode(lock.routeSources[route.path] ?? "")),
       `missing route symbol ${route.symbol}`,
     );
   }
