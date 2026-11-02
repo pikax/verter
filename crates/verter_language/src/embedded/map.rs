@@ -7,7 +7,7 @@ use verter_span::{
     SourceByteOffset, SourceByteRange,
 };
 
-use super::chain::MapBasis;
+use super::chain::{BasisText, MapBasis};
 use super::lineage::BaseUri;
 
 /// The byte coordinate domains a stage endpoint can live in.
@@ -273,6 +273,14 @@ pub enum MapStageError {
     EmptyProvenance,
     /// An empty-output anchor on an output that has bytes.
     AnchorOnNonEmptyOutput,
+    /// An endpoint is not a scalar boundary of the text its side indexes: an
+    /// answer through it would land inside a scalar.
+    InvalidBoundary(CoordError),
+    /// A verbatim segment's two sides are not the same bytes.
+    VerbatimBytesDiffer,
+    /// A foreign origin names a unit whose authored text was not supplied, or
+    /// was supplied as two different texts, so its range cannot be proven.
+    UnprovenForeignOrigin,
 }
 
 /// Authored origins of a query, in output order.
@@ -332,30 +340,47 @@ pub struct MapStage {
 }
 
 impl MapStage {
-    /// Build a stage. Segments sort by output range; coincident ones keep their
-    /// declared order, collapsing when they agree and becoming
-    /// [`SegmentOrigin::Conflicting`] when they do not.
+    /// Build a stage over the exact texts its bases name. Segments sort by
+    /// output range; coincident ones keep their declared order, collapsing
+    /// when they agree and becoming [`SegmentOrigin::Conflicting`] when they do
+    /// not.
+    ///
+    /// Every endpoint is proven a scalar boundary of the text it indexes, and
+    /// every verbatim segment's two sides proven the same bytes, so a position
+    /// carried through an admitted stage is a scalar boundary on both sides.
+    /// A foreign origin indexes another unit's authored bytes, so `foreign`
+    /// supplies the proven source text of every unit a foreign origin names;
+    /// an origin whose unit has no text there is refused, never admitted
+    /// unproven. The output extent is the output text's length.
     pub fn new(
         kind: StageKind,
         certification: EditCertification,
-        input: MapBasis,
-        output: MapBasis,
-        output_extent: u32,
+        input: BasisText<'_>,
+        output: BasisText<'_>,
         parts: StageSegments,
+        foreign: &[BasisText<'_>],
     ) -> Result<Self, MapStageError> {
-        validate_parts(&input, &output, output_extent, &parts)?;
+        let output_extent =
+            u32::try_from(output.text().len()).map_err(|_| MapStageError::OutOfExtent)?;
+        validate_parts(input.basis(), output.basis(), output_extent, &parts)?;
         let StageSegments {
             segments,
             mut elisions,
             empty_anchor,
         } = parts;
         let segments = canonical_segments(segments)?;
+        let texts = StageTexts {
+            input: input.text(),
+            output: output.text(),
+            foreign,
+        };
+        prove_geometry(&texts, &segments, &elisions, empty_anchor)?;
         elisions.sort_by_key(|elision| elision.at.raw());
         Ok(Self {
             kind,
             certification,
-            input,
-            output,
+            input: input.basis().clone(),
+            output: output.basis().clone(),
             output_extent,
             map: StageMap::Mapped(StageSegments {
                 segments,
@@ -710,6 +735,99 @@ fn validate_origin(
         }
     }
     Ok(())
+}
+
+/// The proven texts a stage's endpoints index.
+struct StageTexts<'a> {
+    input: &'a str,
+    output: &'a str,
+    foreign: &'a [BasisText<'a>],
+}
+
+impl StageTexts<'_> {
+    /// The one authored text supplied for `unit`. Two different texts for one
+    /// unit prove nothing about which one an origin indexes.
+    fn foreign_text(&self, unit: &SourceUnitId) -> Result<&str, MapStageError> {
+        let mut found: Option<&BasisText<'_>> = None;
+        for text in self.foreign.iter().filter(|text| {
+            text.basis().unit == *unit && text.basis().domain == CoordinateDomain::Source
+        }) {
+            match found {
+                Some(seen) if seen.basis().content != text.basis().content => {
+                    return Err(MapStageError::UnprovenForeignOrigin);
+                }
+                Some(_) => {}
+                None => found = Some(text),
+            }
+        }
+        found
+            .map(|text| text.text())
+            .ok_or(MapStageError::UnprovenForeignOrigin)
+    }
+}
+
+/// Prove every endpoint against the text it indexes, and every verbatim pair
+/// byte-identical.
+fn prove_geometry(
+    texts: &StageTexts<'_>,
+    segments: &[MapSegment],
+    elisions: &[Elision],
+    empty_anchor: Option<DomainOffset>,
+) -> Result<(), MapStageError> {
+    let boundary = MapStageError::InvalidBoundary;
+    for segment in segments {
+        segment.output.validate(texts.output).map_err(boundary)?;
+        prove_origin(&segment.origin, segment.output, texts)?;
+    }
+    for elision in elisions {
+        elision.at.validate(texts.output).map_err(boundary)?;
+        elision.input.validate(texts.input).map_err(boundary)?;
+    }
+    if let Some(anchor) = empty_anchor {
+        anchor.validate(texts.input).map_err(boundary)?;
+    }
+    Ok(())
+}
+
+fn prove_origin(
+    origin: &SegmentOrigin,
+    output_range: DomainRange,
+    texts: &StageTexts<'_>,
+) -> Result<(), MapStageError> {
+    let boundary = MapStageError::InvalidBoundary;
+    let (input, output) = (texts.input, texts.output);
+    match origin {
+        SegmentOrigin::Verbatim { input: range } => {
+            range.validate(input).map_err(boundary)?;
+            if range_bytes(input, *range) != range_bytes(output, output_range) {
+                return Err(MapStageError::VerbatimBytesDiffer);
+            }
+        }
+        SegmentOrigin::Whole { input: range, .. } => range.validate(input).map_err(boundary)?,
+        SegmentOrigin::Provenance { origins } => {
+            for origin in origins.iter() {
+                match origin {
+                    OriginRef::Input(range) => range.validate(input).map_err(boundary)?,
+                    OriginRef::Foreign(foreign) => {
+                        let text = texts.foreign_text(&foreign.unit)?;
+                        foreign.range.validate(text).map_err(boundary)?;
+                    }
+                }
+            }
+        }
+        SegmentOrigin::Synthetic { .. } => {}
+        SegmentOrigin::Conflicting { origins } => {
+            for origin in origins.iter() {
+                prove_origin(origin, output_range, texts)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The bytes of a range already proven within `text`.
+fn range_bytes(text: &str, range: DomainRange) -> &[u8] {
+    &text.as_bytes()[range.start() as usize..range.end() as usize]
 }
 
 fn canonical_segments(mut segments: Vec<MapSegment>) -> Result<Vec<MapSegment>, MapStageError> {

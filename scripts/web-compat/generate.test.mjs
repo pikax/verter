@@ -200,6 +200,38 @@ describe("compatibility snapshot generation", () => {
     const upgraded = structuredClone(header.datasets);
     upgraded[0].release = "fixture-2";
     assert.notEqual(deriveSnapshotId({ ...header, datasets: upgraded }), header.snapshot_id);
+
+    // Provenance and counts are header facts, so each is bound by the identity.
+    for (const index of header.datasets.keys()) {
+      for (const field of ["package", "artifact_url", "license", "license_file", "attribution"]) {
+        const datasets = structuredClone(header.datasets);
+        datasets[index][field] = `${datasets[index][field]}-edited`;
+        assert.notEqual(
+          deriveSnapshotId({ ...header, datasets }),
+          header.snapshot_id,
+          `datasets[${index}].${field}`,
+        );
+      }
+    }
+    for (const count of [
+      "bcd_rejected_features",
+      "bcd_rejected_families",
+      "web_features_rejected",
+    ]) {
+      const counts = { ...header.counts, [count]: header.counts[count] + 1 };
+      assert.notEqual(deriveSnapshotId({ ...header, counts }), header.snapshot_id, count);
+    }
+
+    // Moving a separator between adjacent fields is a different identity.
+    const last = header.datasets.length - 1;
+    const sealed = { ...header, recipe_digest: `shift\0${header.recipe_digest}` };
+    const shiftedDatasets = structuredClone(header.datasets);
+    shiftedDatasets[last].license_digest = `${shiftedDatasets[last].license_digest}\0shift`;
+    const shifted = { ...header, datasets: shiftedDatasets };
+    assert.notEqual(deriveSnapshotId(shifted), deriveSnapshotId(sealed));
+
+    // The written header is the canonical one the identity is derived over.
+    assert.equal(bytes.subarray(0, bytes.indexOf(10)).toString("utf8"), canonicalJson(header));
   });
 
   it("rejects a dataset whose release is not the admitted one", () => {

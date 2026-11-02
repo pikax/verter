@@ -23,13 +23,14 @@ use super::WorkKind;
 
 /// Admission-time capacity budget, split into two resource classes.
 ///
-/// `cpu` covers CPU-bound work (Parse / Analysis / Artifact / CacheNode);
-/// `io` covers I/O-bound work (Load). The DAG admits at most `cpu`
-/// concurrent CPU jobs and at most `io` concurrent I/O jobs. Defaults
-/// mirror the scheduler's CPU / IO pool sizing.
+/// `cpu` covers CPU-bound stages (Parse / Analysis / Artifact) and, on a
+/// ledger of its own, CacheNode producers; `io` covers I/O-bound work (Load).
+/// The DAG admits at most `cpu` concurrent stages, at most `cpu` concurrent
+/// producers and at most `io` concurrent I/O jobs. Defaults mirror the
+/// scheduler's CPU / IO pool sizing.
 #[derive(Clone, Copy, Debug)]
 pub struct DagCapacityBudget {
-    /// Maximum concurrent CPU-bound jobs.
+    /// Maximum concurrent CPU-bound stages, and separately of producers.
     pub cpu: u32,
     /// Maximum concurrent I/O-bound jobs.
     pub io: u32,
@@ -44,10 +45,14 @@ impl Default for DagCapacityBudget {
 /// Resource class a `WorkKind` consumes for admission accounting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ResourceClass {
-    /// CPU-bound: Parse, Analysis, Artifact, CacheNode.
+    /// CPU-bound stages: Parse, Analysis, Artifact.
     Cpu,
     /// I/O-bound: Load.
     Io,
+    /// CacheNode producers. A producer may block on a dependency, a flight or
+    /// a host lock whose holder is waiting for a stage. Stages block on none
+    /// of those, so a producer never holds a permit a stage needs.
+    Producer,
 }
 
 impl ResourceClass {
@@ -55,9 +60,8 @@ impl ResourceClass {
     pub fn for_work_kind(kind: WorkKind) -> Self {
         match kind {
             WorkKind::Load => ResourceClass::Io,
-            WorkKind::Parse | WorkKind::Analysis | WorkKind::Artifact | WorkKind::CacheNode => {
-                ResourceClass::Cpu
-            }
+            WorkKind::Parse | WorkKind::Analysis | WorkKind::Artifact => ResourceClass::Cpu,
+            WorkKind::CacheNode => ResourceClass::Producer,
         }
     }
 }
@@ -178,7 +182,11 @@ mod tests {
 
     #[test]
     fn a_release_selected_before_reset_debits_only_its_original_ledger() {
-        for class in [ResourceClass::Cpu, ResourceClass::Io] {
+        for class in [
+            ResourceClass::Cpu,
+            ResourceClass::Io,
+            ResourceClass::Producer,
+        ] {
             for loan in [false, true] {
                 let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 2, io: 2 });
                 let probe = Arc::new(Progress(AtomicUsize::new(0)));
@@ -199,6 +207,7 @@ mod tests {
                 let in_flight = |dag: &SchedulerDag| match class {
                     ResourceClass::Cpu => dag.in_flight_cpu_permits(),
                     ResourceClass::Io => dag.in_flight_io_permits(),
+                    ResourceClass::Producer => dag.in_flight_producer_permits(),
                 };
                 assert_eq!(in_flight(&dag), 1);
 

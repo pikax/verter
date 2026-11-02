@@ -46,7 +46,16 @@ exit, retained-handle recovery, startup, and same-driver reset/restart.
 `ScopedCacheNodeHandoff<T>`. Admission/result waits yield; dispatch transfers
 exactly one `ScopedCacheNodeProducer<T>` for the external driver to run before
 resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
-the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
+the same state, on the CPU pool's producer workers. Producers never share a
+worker with a stage: a producer may block on a dependency, a flight or a host
+lock whose holder is waiting for a stage, and stages block on none of those, so
+a queued stage always reaches a worker. Producer workers register
+`CallerKind::ProducerWorker`: with a live driver they park in `wait_or_drive`
+and never inline-run a file stage, and when parked they may borrow only a
+producer permit (for the nested producer they wait on), never a stage permit.
+Without a driver thread (`new_sync`) a producer worker's
+`dispatch_for_pending_dependency` drives stages itself, as nothing else would.
+Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
 Aggregate cancellation uses that same rail, including last-owner teardown,
 token probes and DAG cancellation; its latch changes immediately but callbacks
@@ -681,9 +690,10 @@ separate channel-backed I/O pool preserves source-load isolation.
   `cpu_pool.try_submit(OwnerCommand::cpu(...))`. Construct with
   `SchedulerCpuPool::new(threads, transport_capacity)` (floored at
   `threads * 4`); transport capacity must dominate `dag_budget.cpu`.
-  Workers register
+  Stage workers register
   `CallerKind::CpuWorker` so `wait_or_drive` routes them to the
-  cooperative-pump branch. The host likewise constructs and injects the
+  cooperative-pump branch; the lazily built producer workers behind
+  `SchedulerCpuPool::install` register `CallerKind::ProducerWorker`. The host likewise constructs and injects the
   bounded `Arc<SchedulerIoPool>` (`SchedulerConfig::io_threads`) for the
   pure-I/O step of `TaskKind::Source` (reading bytes off disk). Its transport
   capacity must dominate the same scheduler DAG's resolved I/O budget.
