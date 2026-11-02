@@ -5,13 +5,16 @@ This directory holds the guide structure for building with the Verter SDK
 official extensions (VS Code extension, `verter-lsp`, `verter-mcp`,
 `verter-tsc`). It is part of the published example home validated by the
 [docs reference harness](../../../docs/scripts/reference-harness.mjs) via
-[`../manifest.json`](../manifest.json).
+the metadata header [`../manifest.json`](../manifest.json) and topic fragments
+in `../sdk-guides/<id>.json`.
 
 Each topic below is a structure contract: it fixes what the finished guide
 must cover, which existing shipped page owns related truth, and the
 executable example slot the topic requires. Until the producing nodes land,
-every slot is recorded as **pending** in the manifest — no topic claims a
-working example it does not have.
+each slot lives in `sdk-guides/<id>.json` and is **pending** until supplied.
+The producer binds its example ids and updates status in that fragment;
+example rows register in `<id>/example.json`. Keep the header unchanged.
+No topic claims a working example it does not have.
 
 - [Contribution](./contribution.md) — authoring and reviewing SDK and extension changes
 - [Isolation](./isolation.md) — process, workspace and analysis isolation boundaries

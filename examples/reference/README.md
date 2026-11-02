@@ -5,12 +5,15 @@ These examples are the published user-facing example home. The docs build
 reference harness: every import must resolve to a shipped package export,
 and every command must be a bin of a public package.
 
-The example index is [`manifest.json`](./manifest.json). The
+The example index resolves the metadata header [`manifest.json`](./manifest.json)
+with fragments: `<id>/example.json` for examples, `sdk-guides/<id>.json`
+and `recipes/<id>.json` for topic slots, and `journeys/<id>.json` for journeys.
+Add or update the owning fragment; keep row arrays out of the header. The
 [SDK and official-extension guide structure](./sdk/README.md) declares the
 six guide topics and their executable example slots. The
 [web-product guide recipes](./guides/README.md) declare the eight recipe
 topics (CSS, compatibility, debug, tests, runtime, accessibility,
 performance, security) with executable example slots and capability
-links, plus the executable journeys recorded in the manifest.
+links, plus the executable journeys registered under `journeys/`.
 Contributor sandboxes (`examples/`, `packages/example`) are not this home
 and are not treated as executed user evidence.

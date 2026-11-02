@@ -116,7 +116,23 @@ pnpm --filter verter-vscode build:dev
 pnpm --filter verter-vscode exec tsc -p tsconfig.test.json
 ```
 
-### Step 4: Run Fixtures
+#### `shared-tsgo` routes: `DONT_PROMPT_WSL_INSTALL=1`
+
+Routes whose fixture uses the shared tsgo topology (`multi-root-parity@shared-tsgo`,
+`mixed-parity@shared-tsgo`, `ecosystem-parity@shared-tsgo`) provision the
+`TypeScriptTeam.native-preview` extension through the VS Code CLI before the suite
+starts. Inside WSL that CLI prints its "please install VS Code in Windows" advisory
+and prompts `[y/N]`; the suite's provisioning runs it with no stdin, the prompt reads
+EOF, answers `N`, and the route fails with
+`Failed to provision VS Code extension TypeScriptTeam.native-preview@1.0.1 (exit 1)`.
+Export `DONT_PROMPT_WSL_INSTALL=1` for the whole session (CI's real Ubuntu runners
+never see the prompt, so they need nothing):
+
+```bash
+export DONT_PROMPT_WSL_INSTALL=1
+```
+
+## Step 4: Run Fixtures
 
 Run fixtures **sequentially** (never in parallel — VS Code instances conflict):
 
