@@ -174,5 +174,13 @@
   {
     "glob": "tests/web-compat/evidence/WBC0/cases.md",
     "reason": "Compatibility review case table; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/web-compat/WBC1/contract.md",
+    "reason": "Compatibility data ingestion contract prose; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/web-compat/evidence/WBC1/cases.md",
+    "reason": "Compatibility data ingestion evidence map; no ci.yml job reads its contents."
   }
 ]

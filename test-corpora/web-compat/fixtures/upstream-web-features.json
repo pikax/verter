@@ -1,0 +1,89 @@
+{
+  "browsers": {},
+  "groups": {},
+  "snapshots": {},
+  "features": {
+    "widely-available": {
+      "kind": "feature",
+      "name": "Widely available",
+      "description": "A widely available feature.",
+      "description_html": "A widely available feature.",
+      "spec": ["https://example.test/spec#widely"],
+      "group": ["fixture-group"],
+      "compat_features": ["api.WidelyAvailable"],
+      "status": {
+        "baseline": "high",
+        "baseline_low_date": "2015-07-29",
+        "baseline_high_date": "2018-01-29",
+        "support": { "chrome": "1", "firefox": "1", "safari": "1" },
+        "by_compat_key": {
+          "api.WidelyAvailable": {
+            "baseline": "high",
+            "baseline_low_date": "2015-07-29",
+            "baseline_high_date": "2018-01-29",
+            "support": { "chrome": "1", "firefox": "1", "safari": "1" }
+          }
+        }
+      }
+    },
+    "newly-available": {
+      "kind": "feature",
+      "name": "Newly available",
+      "description": "A newly available feature.",
+      "description_html": "A newly available feature.",
+      "spec": ["https://example.test/spec#newly-a", "https://example.test/spec#newly-b"],
+      "group": ["fixture-group", "other-group"],
+      "compat_features": ["api.Boundary", "api.Boundary.alternatives"],
+      "status": {
+        "baseline": "low",
+        "baseline_low_date": "2025-01-01",
+        "support": { "chrome": "10" }
+      }
+    },
+    "limited-availability": {
+      "kind": "feature",
+      "name": "Limited availability",
+      "description": "A limited feature.",
+      "description_html": "A limited feature.",
+      "spec": ["https://example.test/spec#limited"],
+      "compat_features": ["api.Boundary"],
+      "status": { "baseline": false, "support": {} }
+    },
+    "baseline-without-mapping": {
+      "kind": "feature",
+      "name": "Baseline without a mapping",
+      "description": "Widely available, with no support records named.",
+      "description_html": "Widely available, with no support records named.",
+      "spec": ["https://example.test/spec#unmapped"],
+      "status": {
+        "baseline": "high",
+        "baseline_low_date": "2015-07-29",
+        "baseline_high_date": "2018-01-29",
+        "support": { "chrome": "1" }
+      }
+    },
+    "baseline-missing-record": {
+      "kind": "feature",
+      "name": "Baseline with a record the dataset lacks",
+      "description": "Widely available, naming a key this dataset does not carry.",
+      "description_html": "Widely available, naming a key this dataset does not carry.",
+      "spec": ["https://example.test/spec#missing"],
+      "compat_features": ["api.NotInThisDataset"],
+      "status": {
+        "baseline": "high",
+        "baseline_low_date": "2015-07-29",
+        "baseline_high_date": "2018-01-29",
+        "support": { "chrome": "1" }
+      }
+    },
+    "moved-feature": { "kind": "moved", "redirect_target": "widely-available" },
+    "split-feature": {
+      "kind": "split",
+      "redirect_targets": ["widely-available", "newly-available"]
+    },
+    "malformed-feature": {
+      "kind": "feature",
+      "name": "Missing every other required field"
+    }
+  }
+}
