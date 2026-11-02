@@ -545,6 +545,16 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 }
             }
         }
+        for input in site.input_sites.iter() {
+            edges.push((
+                node,
+                site_node(*input),
+                FlowEdgeKind::ReadProjection {
+                    path: OwnedSlice::default(),
+                    kind: FlowReadKind::Input,
+                },
+            ));
+        }
         for call in site.calls.iter() {
             let locals = local_target(call.binding.as_ref()).into_iter();
             let captured = match &call.binding {
