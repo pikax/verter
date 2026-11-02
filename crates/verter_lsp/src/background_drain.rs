@@ -433,9 +433,9 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
         }
         // The pass above advanced this carrier's diagnostics generation before
         // re-syncing it. An open document whose last publication that outdated
-        // — a complete receipt, or an owed one that landed incomplete because
-        // this very commit had not happened yet — is re-armed here, since no
-        // publication is in flight to notice and no editor signal follows. A
+        // — a complete receipt, or an owed one that captured its provider
+        // surface before this very commit — is re-armed here, since no editor
+        // signal follows. A
         // TERMINAL settle (no usable provider membership: no owner, or the
         // owning project excludes the generated units) owes the SAME re-arm:
         // native analysis remains available and the `verter(project)`
@@ -446,7 +446,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             outcome,
             SyncOutcome::FullyReconciled | SyncOutcome::Terminal
         ) {
-            documents.refresh_owed_diagnostics(&canonical_id);
+            documents.settle_provider_surface(&canonical_id);
         }
     }
     carrier_coordinator.note_pending_sync_progress();

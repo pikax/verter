@@ -710,7 +710,8 @@ impl Drop for PullSlot {
 /// surface at pull time, a refused commit, a surface superseded mid-flight —
 /// leaves the open document owed a publication. The tick re-syncs it ONCE, so
 /// the receipt lands once the commit does; a second incomplete landing is left
-/// to the drain's re-arm rather than retried blindly. A cancelled or panicked
+/// to the commit's own settlement (`DocumentRegistry::settle_provider_surface`)
+/// rather than retried blindly. A cancelled or panicked
 /// pull owes nothing here: the abort path already armed its replacement.
 fn reap_finished_pulls(
     deps: &SyncCoordinatorDeps,
@@ -2460,6 +2461,8 @@ async fn preserve_open_unresolved_carrier(
             .insert(canonical_id.to_string());
         return false;
     }
+    // Outside the document guard the commit held: settlement reads the registry.
+    deps.documents.settle_provider_surface(canonical_id);
     if let Some(dropped) = commit.dropped_api {
         close_stale_provider_paths_with(
             project_sync,
@@ -2686,6 +2689,10 @@ async fn publish_merged_diagnostics(
     if native_only {
         return true;
     }
+    // The batch reads the committed provider surface exactly once, below. A
+    // commit landing after that read settles through the registry against
+    // this observation, so it can never strand an incomplete receipt.
+    deps.documents.observe_provider_surface(&uri, &publication);
     let batch = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
     let complete = batch.complete;
     deps.documents

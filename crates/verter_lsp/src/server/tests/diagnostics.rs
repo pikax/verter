@@ -3124,6 +3124,86 @@ async fn a_scan_parked_on_unrelated_work_does_not_delay_an_open_documents_diagno
     assert!(!server.sync_coordinator.workspace_scan_in_progress());
 }
 
+/// A sibling document's did_open commit is a per-canonical content
+/// transition on the SIBLING: it advances the workspace's global content
+/// generation without touching the target's delivered import closure, so a
+/// demanded entry's DependencyReady receipt must survive it — while a
+/// workspace scan is running, which is exactly the window a restarted
+/// session's replay burst lands in. Retiring the receipt on the global bump
+/// is what parked the entry's first publication behind the scan for the
+/// scan's whole duration.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrelated_open_does_not_retire_a_demanded_entrys_receipt_during_the_scan() {
+    let fixture = scan_publication_fixture_with_unrelated(true, 600, 1).await;
+    let server = fixture.server();
+    let target = fixture.open("src/Target.vue").await;
+
+    demand_workspace_scan(server);
+    server.spawn_background_init(None, "unrelated open").await;
+    fixture.await_ready_announced().await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    // The init's snapshot publication retires the open's receipt by key; the
+    // entry re-mints at the live key while the scan runs (the post-init sweep
+    // plus the by-name demand both drive the pass).
+    fixture
+        .await_while_polling(
+            &target,
+            || server.dependency_readiness_capture(&target).is_ready(),
+            "precondition: the entry's receipt must deliver during the scan",
+        )
+        .await;
+    let minted_at = server.import_sync_freshness_key();
+
+    fixture.open("sib/Sibling0.vue").await;
+    assert!(
+        server.dependency_readiness_capture(&target).is_ready(),
+        "a sibling's did_open commit advanced the global content generation \
+         (minted at {minted_at:?}, now {:?}); the entry's delivered closure is \
+         untouched and its receipt must hold",
+        server.import_sync_freshness_key()
+    );
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+}
+
+/// The restart wedge as an end-to-end server contract: a demanded entry, a
+/// large store-fill scan, and the restarted client's replay burst of sibling
+/// did_open commits landing while the scan runs. The entry must be CERTIFIED
+/// (first diagnostics publication released from the dependency hold) while
+/// the scan is still in progress — not parked behind it until the scan ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demanded_entry_certifies_during_a_loaded_store_fill_scan_with_a_replay_burst() {
+    let fixture = scan_publication_fixture_with_unrelated(true, 600, 20).await;
+    let server = fixture.server();
+    let target = fixture.open("src/Target.vue").await;
+
+    demand_workspace_scan(server);
+    server
+        .spawn_background_init(None, "loaded scan replay")
+        .await;
+    fixture.await_ready_announced().await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+
+    for index in 0..20 {
+        fixture.open(&format!("sib/Sibling{index}.vue")).await;
+    }
+
+    fixture
+        .await_while_polling(
+            &target,
+            || {
+                server.documents.diagnostics_ready(&target)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            "the demanded entry must certify while the loaded scan is still running",
+        )
+        .await;
+    assert!(
+        server.sync_coordinator.workspace_scan_in_progress(),
+        "the entry certified before the scan settled: the dependency hold \
+         released mid-scan, not at scan end"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn watched_ts_delete_republishes_only_open_importers() {
     use verter_workspace::WorkspaceRead;
