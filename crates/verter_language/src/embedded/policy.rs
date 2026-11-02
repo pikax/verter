@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncoder};
 
+use super::decode::{scan_escape, EscapeScan};
+
 /// One escape whose spelling after the introducer is a fixed character.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleEscape {
@@ -166,11 +168,18 @@ pub enum UnencodableReplacement {
     /// The spelling and the authored bytes around it would form a closer, a
     /// hole opener or a contracted terminator neither side spells alone.
     FormsSyntaxWithNeighbours,
+    /// An escape at an edge of the edit, authored or spelled, would read
+    /// differently in its new context: the character now after it is one the
+    /// escape forbids, or the text across the seam extends it into a longer
+    /// escape.
+    ChangesAdjacentEscape,
 }
 
 /// The authored bytes around an edit. Slices of the source reaching to its ends
 /// are always enough, and the delimiters count: a replacement ending in the
-/// start of a closer means something else beside it.
+/// start of a closer means something else beside it. An escape's meaning can
+/// depend on what follows it, so `before` must reach back past the escape
+/// introducers immediately preceding the edit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AuthoredNeighbours<'a> {
     pub before: &'a str,
@@ -234,6 +243,8 @@ impl EmbeddedTextCodec {
             }
         };
         let mut spelled = String::with_capacity(cooked.len());
+        // Where each spelled escape's marker starts, and what it must cook to.
+        let mut escapes = Vec::new();
         for (index, ch) in cooked.char_indices() {
             let rest = &cooked[index..];
             let spells_syntax = (!self.delimiters.close.is_empty()
@@ -252,6 +263,7 @@ impl EmbeddedTextCodec {
                 return Err(UnencodableReplacement::Character(ch));
             };
             spelled.push(introducer);
+            escapes.push((spelled.len(), ch));
             spelled.push(escape_marker(&policy.escapes, ch)?);
         }
         let contracts_terminators = cooked_policy
@@ -267,8 +279,135 @@ impl EmbeddedTextCodec {
         if formed {
             return Err(UnencodableReplacement::FormsSyntaxWithNeighbours);
         }
+        if let (Some(policy), Some(introducer)) = (cooked_policy, self.delimiters.escape_introducer)
+        {
+            let seams = EscapeSeams {
+                escapes: &policy.escapes,
+                introducer,
+                lookahead: escape_lookahead(&policy.escapes),
+            };
+            if !seams.authored_escape_reads_alike(neighbours, &spelled) {
+                return Err(UnencodableReplacement::ChangesAdjacentEscape);
+            }
+            seams.check_spelled_escapes(&spelled, &escapes, neighbours.after)?;
+        }
         Ok(spelled)
     }
+}
+
+/// The bytes after an introducer that can decide what its escape means: a
+/// marker and the character after it, or the longest declared continuation.
+/// A numeric escape ends where its own digits or closer do, whatever follows.
+fn escape_lookahead(escapes: &EscapePolicy) -> usize {
+    const SCALAR: usize = 4;
+    let continuation = escapes
+        .continuations
+        .iter()
+        .map(|spelling| spelling.len())
+        .max()
+        .unwrap_or(0);
+    continuation.max(SCALAR) + SCALAR
+}
+
+/// Re-reads the escapes on either side of an edit with the decoder's own
+/// scanner, so the profile's escape table stays the only authority on what an
+/// escape means beside other text.
+struct EscapeSeams<'a> {
+    escapes: &'a EscapePolicy,
+    introducer: char,
+    lookahead: usize,
+}
+
+impl EscapeSeams<'_> {
+    /// Whether every escape `before` ends with still reads as it did alone once
+    /// the spelling and `after` follow it. Only an escape starting within the
+    /// lookahead of the seam can reach it.
+    fn authored_escape_reads_alike(
+        &self,
+        neighbours: AuthoredNeighbours<'_>,
+        spelled: &str,
+    ) -> bool {
+        let before = neighbours.before;
+        let reach = self.lookahead + self.introducer.len_utf8();
+        let window = floor_boundary(before, before.len().saturating_sub(reach));
+        let head = prefix(spelled, self.lookahead);
+        let head = if head.len() == spelled.len() {
+            [
+                head,
+                prefix(neighbours.after, self.lookahead.saturating_sub(head.len())),
+            ]
+            .concat()
+        } else {
+            head.to_owned()
+        };
+        before[window..]
+            .char_indices()
+            .map(|(offset, ch)| (window + offset, ch))
+            .filter(|&(at, ch)| ch == self.introducer && self.starts_escape(before, at))
+            .all(|(at, _)| {
+                let body = &before[at + self.introducer.len_utf8()..];
+                scan_escape(self.escapes, body)
+                    == scan_escape(self.escapes, &[body, &head].concat())
+            })
+    }
+
+    /// Whether each escape the spelling wrote reads as the scalar it spells:
+    /// first among the spelled text after it, then, near the end of the
+    /// spelling, with the authored text after the edit too.
+    fn check_spelled_escapes(
+        &self,
+        spelled: &str,
+        escapes: &[(usize, char)],
+        after: &str,
+    ) -> Result<(), UnencodableReplacement> {
+        for &(marker_at, cooked) in escapes {
+            let rest = &spelled[marker_at..];
+            let len = rest.chars().next().map_or(0, char::len_utf8);
+            let expected = EscapeScan::Scalar { cooked, len };
+            if scan_escape(self.escapes, rest) != expected {
+                return Err(UnencodableReplacement::Character(cooked));
+            }
+            if rest.len() <= self.lookahead
+                && scan_escape(
+                    self.escapes,
+                    &[rest, prefix(after, self.lookahead)].concat(),
+                ) != expected
+            {
+                return Err(UnencodableReplacement::ChangesAdjacentEscape);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the introducer at `at` starts an escape. An introducer is an
+    /// escape's marker only right after another one, so a run of them pairs
+    /// from its start: an even number before `at` leaves it opening an escape.
+    fn starts_escape(&self, text: &str, at: usize) -> bool {
+        text[..at]
+            .chars()
+            .rev()
+            .take_while(|&ch| ch == self.introducer)
+            .count()
+            % 2
+            == 0
+    }
+}
+
+/// The largest scalar boundary of `text` at or before `at`.
+fn floor_boundary(text: &str, mut at: usize) -> usize {
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// At least `bytes` of `text`, or all of it, ending on a scalar boundary.
+fn prefix(text: &str, bytes: usize) -> &str {
+    let mut end = bytes.min(text.len());
+    while !text.is_char_boundary(end) {
+        end += 1;
+    }
+    &text[..end]
 }
 
 /// Whether `syntax` occurs in `before + spelled + after` across either seam.

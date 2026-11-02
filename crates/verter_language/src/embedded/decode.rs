@@ -569,7 +569,8 @@ impl EmbeddedTextCodec {
             ..
         } = assembly;
         work.segments_emitted = segments.len() as u64;
-        let output_extent = offset_of(text.len())?.get();
+        // The output extent must fit the coordinate domain before it is mapped.
+        offset_of(text.len())?;
         let body = request.geometry.body();
         let empty_anchor =
             (body.is_empty() && text.is_empty()).then_some(DomainOffset::Source(body.start()));
@@ -596,9 +597,8 @@ impl EmbeddedTextCodec {
         let stage = MapStage::new(
             StageKind::Syntax,
             certification,
-            input.clone(),
-            output,
-            output_extent,
+            request.input,
+            BasisText::already_proven(&output, &text),
             StageSegments {
                 segments,
                 elisions,
@@ -1026,7 +1026,8 @@ fn check_syntax_at(
     Ok(())
 }
 
-enum EscapeScan {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EscapeScan {
     Invalid { len: usize },
     Continuation { len: usize },
     Scalar { cooked: char, len: usize },
@@ -1034,7 +1035,7 @@ enum EscapeScan {
 }
 
 /// Classify the text after an introducer. `len` counts bytes after it.
-fn scan_escape(escapes: &EscapePolicy, rest: &str) -> EscapeScan {
+pub(super) fn scan_escape(escapes: &EscapePolicy, rest: &str) -> EscapeScan {
     let Some(marker) = rest.chars().next() else {
         return EscapeScan::Invalid { len: 0 };
     };

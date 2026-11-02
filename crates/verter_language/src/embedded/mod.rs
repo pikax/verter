@@ -16,7 +16,9 @@
 //! - [`MapStage`] and [`AuthoredMapChain`] answer every query with exact
 //!   authored UTF-8 geometry or a typed [`Unmappable`]. Syntax, preprocessor,
 //!   compiler, runtime-build and code-generation stages stay distinct, and a
-//!   stage joins only an exactly matching [`MapBasis`].
+//!   stage joins only an exactly matching [`MapBasis`]. A mapped stage is
+//!   admitted only over the proven texts of both its bases, with every
+//!   endpoint a scalar boundary and every verbatim run byte-identical.
 //! - [`BasisText`] proves text against the basis naming it, once per text: a
 //!   decode reads only proven source, and a chain query answers only for a scalar
 //!   boundary of its proven output.
