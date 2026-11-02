@@ -1,0 +1,303 @@
+{
+  "owner": "baseline",
+  "tests": [
+    {
+      "runner": "vitest",
+      "file": "scripts/sccache-env.test.mjs",
+      "ci": true,
+      "ciIndex": 2
+    },
+    {
+      "runner": "vitest",
+      "file": "scripts/wasm-opt-cache.test.mjs",
+      "ci": true,
+      "ciIndex": 4
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/lib/publish-set.spec.mjs",
+      "ci": true,
+      "ciIndex": 5
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/release-lanes.spec.mjs",
+      "ci": true,
+      "ciIndex": 6
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/release-proof.spec.mjs",
+      "ci": true,
+      "ciIndex": 7
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/lib/release-publish.spec.mjs",
+      "ci": true,
+      "ciIndex": 8
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/lib/crate-graph.spec.mjs",
+      "ci": true,
+      "ciIndex": 9
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/ci-impact.test.mjs",
+      "ci": true,
+      "ciIndex": 10
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/editor-contracts/plenary-outcome-guard.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/validate-performance-gates.test.mjs",
+      "ci": true,
+      "ciIndex": 11
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/benchmark/signature-kernel-perf.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/benchmark/semantic-perf/semantic-perf.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/benchmark/evidence-run.test.mjs",
+      "ci": true,
+      "ciIndex": 1
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/probe-bundler-route-isolation.test.mjs",
+      "ci": true,
+      "ciIndex": 12
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/affected-tests.test.mjs",
+      "ci": true,
+      "ciIndex": 13
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/gate-telemetry-selftest.mjs",
+      "ci": true,
+      "ciIndex": 14
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/bf2-ci-lane-selftest.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/compiler-ci-lane-selftest.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/provider-ci-lane-selftest.mjs",
+      "ci": true,
+      "ciIndex": 15
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/gate-wasm-lane-selftest.mjs",
+      "ci": true,
+      "ciIndex": 16
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/check-integration-test-layout.test.mjs",
+      "ci": true,
+      "ciIndex": 17
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/check-ci-aggregate.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/ci-junit-metadata.test.mjs",
+      "ci": true,
+      "ciIndex": 18
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/perturbation.test.mjs",
+      "ci": true,
+      "ciIndex": 19
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/observe-lane.test.mjs",
+      "ci": true,
+      "ciIndex": 3
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/githubctl/tests/protection.test.mjs",
+      "ci": true,
+      "ciIndex": 20
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/sfc-projection/verify-node.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/jetbrains-gate.test.mjs",
+      "ci": true,
+      "ciIndex": 21
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/browser-host-gate.test.mjs",
+      "ci": true,
+      "ciIndex": 22
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP5/mapper.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP6/packed.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP7/framework-boundary.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP8/abi-ratify.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP9/plan.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP10/emission.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP11/script-setup.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STP14/binder-capture.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/sfc-projection/STS0/svelte-lock.spec.ts",
+      "nodeFlags": [
+        "--experimental-strip-types"
+      ],
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/architecture-health/ARH0/arh0.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/architecture-health/ARH1/arh1.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/architecture-health/ARH2/arh2.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/architecture-health/ARH4/arh4.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/architecture-health/ARH5/arh5.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "tests/architecture-health/ARH7/arh7.test.mjs",
+      "ci": false
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/check-test-relocation.test.mjs",
+      "ci": true,
+      "ciIndex": 23
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/compile-fixture-artifacts.test.mjs",
+      "ci": true,
+      "ciIndex": 24
+    },
+    {
+      "runner": "pnpm",
+      "script": "test:generic-interface-identity-oracle",
+      "ci": true,
+      "ciIndex": 25
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/typescript-pin.test.mjs",
+      "ci": true,
+      "ciIndex": 26
+    },
+    {
+      "runner": "node-test",
+      "file": "scripts/run-script-tests.test.mjs",
+      "ci": false
+    }
+  ]
+}

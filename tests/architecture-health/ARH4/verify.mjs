@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveScriptTests } from "../../../scripts/run-script-tests.mjs";
 import { loadProducts as loadArh1Products, validate as validateArh1 } from "../ARH1/verify.mjs";
 import { loadProducts as loadArh2Products, validate as validateArh2 } from "../ARH2/verify.mjs";
 
@@ -204,9 +205,10 @@ function validateRatification(cut, manifest, errors) {
   if (cut?.schema !== "ARH4LifecycleCutover" || cut?.contractNode !== "ARH4") {
     err(errors, caseId, "product-schema-drift", `schema=${cut?.schema} node=${cut?.contractNode}`);
   }
-  const pkg = JSON.parse(readRel("package.json"));
   if (
-    !(pkg.scripts?.["test:scripts"] ?? "").includes("tests/architecture-health/ARH4/arh4.test.mjs")
+    !resolveScriptTests({ ci: false }).some(
+      (entry) => entry.file === "tests/architecture-health/ARH4/arh4.test.mjs",
+    )
   ) {
     err(errors, caseId, "test-scripts-missing", "test:scripts");
   }

@@ -21,6 +21,7 @@ import {
   runProviderLane,
   verifyArchive,
 } from "./provider-ci.mjs";
+import { resolveScriptTests } from "./run-script-tests.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -354,8 +355,12 @@ test("native-only TypeScript plugin specs run after a native build in the tsserv
   assert.ok(build !== -1 && specs !== -1 && build < specs, "src/tsc specs run after build:native");
   assert.doesNotMatch(plugin, /pnpm --filter @verter\/typescript-plugin test/);
 
-  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
-  assert.match(pkg.scripts["test:scripts"], /provider-ci-lane-selftest\.mjs/);
+  assert.ok(
+    resolveScriptTests({ ci: false }).some(
+      (entry) => entry.file === "scripts/provider-ci-lane-selftest.mjs",
+    ),
+    "provider-ci-lane-selftest.mjs stays registered in test:scripts",
+  );
 });
 
 test("nightly coverage instruments every CI lane after its prerequisites", () => {
