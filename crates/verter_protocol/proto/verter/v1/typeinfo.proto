@@ -1114,10 +1114,13 @@ message FrameworkSurfaceMemberDeclaration {
   uint32 resolved_name_id = 2;
   uint32 canonical_source_id = 3;
   // UTF-8 byte offsets, 0-based half-open, in the file `canonical_source_id`
-  // names (schema 9 unit contract).
+  // names (schema 9 unit contract). Meaningful only when `has_span` is true;
+  // a producer sets it only for an exact range (`span_start <= span_end`) and
+  // otherwise leaves both offsets 0 with `has_span` false.
   uint32 span_start = 4;
   uint32 span_end = 5;
   FrameworkSurfaceDeclarationKind kind = 6;
+  bool has_span = 7;
 }
 
 // One hop in a framework-surface member's origin chain (schema 4).

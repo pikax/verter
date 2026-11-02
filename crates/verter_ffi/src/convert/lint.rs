@@ -154,7 +154,7 @@ pub fn lint_diagnostics_to_wire_utf16(
     diagnostics
         .into_iter()
         .map(|diagnostic| {
-            let span = spans.diagnostic_span(diagnostic.span.start, diagnostic.span.end);
+            let span = spans.diagnostic_span(diagnostic.span);
             WireLintDiagnostic { diagnostic, span }
         })
         .collect()

@@ -219,15 +219,17 @@ fn destructured_bindings_convert_exactly_and_share_one_index() {
             };
             for block_end in [3, 6, tsx.len() as u32, 999] {
                 for &offset in &offsets {
-                    let bindings = [DestructuredBindingInput {
-                        name: "x",
-                        source_start: offset,
-                        source_end: sfc.len() as u32,
-                    }];
+                    // A start past the source end makes the range inverted, which
+                    // is refused where the typed range is built.
+                    let Ok(source) = source_range(verter_span::Span::new(offset, sfc.len() as u32))
+                    else {
+                        assert!(offset > sfc.len() as u32);
+                        continue;
+                    };
+                    let bindings = [DestructuredBindingInput { name: "x", source }];
                     let meta = convert_destructured_block_meta(
                         &bindings,
-                        1,
-                        block_end,
+                        generated_range(verter_span::Span::new(1, block_end)).expect("ordered"),
                         Some(sfc),
                         tsx,
                         encoding,
@@ -269,11 +271,16 @@ fn destructured_bindings_convert_exactly_and_share_one_index() {
     // convert, never zero offsets.
     let one = [DestructuredBindingInput {
         name: "x",
-        source_start: 0,
-        source_end: 1,
+        source: source_range(verter_span::Span::new(0, 1)).expect("ordered"),
     }];
     assert!(matches!(
-        convert_destructured_block_meta(&one, 0, 0, None, "", SpanEncodingTag::Utf16),
+        convert_destructured_block_meta(
+            &one,
+            generated_range(verter_span::Span::new(0, 0)).expect("ordered"),
+            None,
+            "",
+            SpanEncodingTag::Utf16
+        ),
         Err(SpanConversionError::SourceUnavailable)
     ));
 
@@ -286,15 +293,13 @@ fn destructured_bindings_convert_exactly_and_share_one_index() {
             let bindings: Vec<DestructuredBindingInput<'_>> = (0..count)
                 .map(|_| DestructuredBindingInput {
                     name: "x",
-                    source_start: end - 1,
-                    source_end: end,
+                    source: source_range(verter_span::Span::new(end - 1, end)).expect("ordered"),
                 })
                 .collect();
             visits(|| {
                 let _ = convert_destructured_block_meta(
                     &bindings,
-                    0,
-                    0,
+                    generated_range(verter_span::Span::new(0, 0)).expect("ordered"),
                     Some(&sfc),
                     "",
                     SpanEncodingTag::Utf16,

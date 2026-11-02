@@ -920,7 +920,8 @@ fn convert_analysis_spans_with_index(
                 {
                     let byte_offset = u32::try_from(byte_offset)
                         .map_err(|_| verter_span::CoordError::Overflow)?;
-                    let converted = index.convert(byte_offset, encoding)?;
+                    let converted =
+                        index.convert(verter_span::SourceByteOffset::new(byte_offset), encoding)?;
                     *val = serde_json::Value::Number(serde_json::Number::from(converted));
                 } else {
                     convert_analysis_spans_with_index(val, index, encoding)?;

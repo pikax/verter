@@ -120,8 +120,8 @@ pub fn projection_mode_tag(mode: ProjectionMode) -> &'static str {
 pub fn host_to_ffi_symbol_entry(entry: SymbolEntry) -> FfiSymbolEntry {
     let kind = symbol_kind_tag(entry.kind);
     let (span_start, span_end, has_span) = match entry.span {
-        Some(span) => (span.start, span.end, true),
-        None => (0, 0, false),
+        Some(span) if span.start <= span.end => (span.start, span.end, true),
+        _ => (0, 0, false),
     };
     FfiSymbolEntry {
         name: entry.name,

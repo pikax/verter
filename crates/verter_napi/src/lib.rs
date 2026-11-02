@@ -1972,9 +1972,8 @@ fn host_module_reference_to_napi(
     input: host::ScriptModuleReference,
     spans: &verter_ffi::convert::SpanConverter<'_>,
 ) -> std::result::Result<NapiModuleReference, verter_ffi::convert::SpanConversionError> {
-    let (span_start, span_end) = spans.utf16_range(input.span.start, input.span.end)?;
-    let (expr_span_start, expr_span_end) =
-        spans.utf16_range(input.expr_span.start, input.expr_span.end)?;
+    let (span_start, span_end) = spans.utf16_span(input.span)?;
+    let (expr_span_start, expr_span_end) = spans.utf16_span(input.expr_span)?;
     Ok(NapiModuleReference {
         syntax: host_module_reference_syntax_to_str(input.syntax).to_string(),
         semantics: host_module_reference_semantics_to_str(input.semantics).to_string(),

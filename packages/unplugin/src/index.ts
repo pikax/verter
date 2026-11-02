@@ -600,6 +600,11 @@ function styleEntriesFromStructure(
   for (const block of structure.blocks) {
     const section = block.kind === "section" ? block.section : undefined;
     if (section?.role.kind !== "style") continue;
+    if (section.contentRange.start > section.contentRange.end) {
+      throw new Error(
+        `document structure content range ${section.contentRange.start}..${section.contentRange.end} is inverted`,
+      );
+    }
     const start = structureOffsetToUtf16(source, section.contentRange, section.contentRange.start);
     const end = structureOffsetToUtf16(source, section.contentRange, section.contentRange.end);
     const attribute = (name: string) =>

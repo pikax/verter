@@ -57,7 +57,7 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 14, found 7/);
+    ).toThrow(/expected 15, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -658,7 +658,7 @@ describe("typed property keys", () => {
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 14, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 15, found 4/);
   });
 });
 
@@ -766,6 +766,7 @@ describe("surface partial reason taxonomy parity", () => {
       // Those readers accept 12 and 13, then throw on a reason they do not
       // know: the only clean failure for them is the version mismatch.
       expect([12, 13]).not.toContain(GRAPH_FORMAT_VERSION);
+      expect(GRAPH_FORMAT_VERSION).toBeGreaterThan(14);
       expect(
         decodeTypedComponentMetaPayload(payloadAt(GRAPH_FORMAT_VERSION, fanout)).resultCompleteness,
       ).toEqual({ kind: "partial", reasons: ["fanoutLimit"] });
@@ -781,6 +782,13 @@ describe("surface partial reason taxonomy parity", () => {
       expect(() => decodeTypedComponentMetaPayload(toBinary(FactPayloadSchema, newer))).toThrow(
         /version mismatch/,
       );
+    });
+
+    it("keeps decoding schema 14 payloads", () => {
+      expect(decodeTypedComponentMetaPayload(payloadAt(14, fanout)).resultCompleteness).toEqual({
+        kind: "partial",
+        reasons: ["fanoutLimit"],
+      });
     });
 
     it("keeps decoding schema 13 payloads", () => {

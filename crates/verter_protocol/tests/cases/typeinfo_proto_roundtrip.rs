@@ -355,6 +355,7 @@ fn framework_surface_origin_hop_presence_roundtrips() {
             span_start: 0,
             span_end: 0,
             kind: g::FrameworkSurfaceDeclarationKind::TypeAlias as i32,
+            has_span: false,
         }),
         chain: hops,
     };

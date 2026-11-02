@@ -13,7 +13,9 @@ use std::fmt;
 use verter_protocol::types::SpanEncodingTag;
 use verter_span::CoordError;
 
-use super::offset::OffsetIndex;
+use verter_span::{SourceByteOffset, SourceByteRange};
+
+use super::offset::{OffsetEncoding, OffsetIndex};
 
 /// Why a span could not be converted to its wire encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,22 +94,30 @@ impl<'a> SpanConverter<'a> {
         Ok(self.index.get_or_init(|| OffsetIndex::new(source)))
     }
 
-    /// UTF-8 byte offset → UTF-16 code-unit offset.
-    pub fn utf16_offset(&self, byte_offset: u32) -> Result<u32, SpanConversionError> {
-        Ok(self.index()?.to_utf16(byte_offset)?)
+    /// Source-domain UTF-8 byte offset → UTF-16 code-unit offset.
+    pub fn utf16_offset(&self, offset: SourceByteOffset) -> Result<u32, SpanConversionError> {
+        Ok(self.index()?.to_utf16(offset)?)
     }
 
-    /// Half-open UTF-8 byte range → UTF-16 code-unit range.
-    pub fn utf16_range(&self, start: u32, end: u32) -> Result<(u32, u32), SpanConversionError> {
-        Ok(self
-            .index()?
-            .convert_range(start, end, super::offset::OffsetEncoding::Utf16)?)
+    /// Source-domain half-open UTF-8 byte range → UTF-16 code-unit range.
+    pub fn utf16_range(&self, range: SourceByteRange) -> Result<(u32, u32), SpanConversionError> {
+        Ok(self.index()?.convert_range(range, OffsetEncoding::Utf16)?)
     }
 
-    /// The diagnostic-shaped wire span for a byte range.
+    /// A native source span → UTF-16 code-unit range. An inverted span is
+    /// refused where it becomes a source-domain range.
+    pub fn utf16_span(&self, span: verter_span::Span) -> Result<(u32, u32), SpanConversionError> {
+        // Source availability is checked first: with no snapshot the span is
+        // unconvertible whatever its shape.
+        let index = self.index()?;
+        let range = super::offset::source_range(span)?;
+        Ok(index.convert_range(range, OffsetEncoding::Utf16)?)
+    }
+
+    /// The diagnostic-shaped wire span for a native source span.
     #[must_use]
-    pub fn diagnostic_span(&self, start: u32, end: u32) -> DiagnosticWireSpan {
-        match self.utf16_range(start, end) {
+    pub fn diagnostic_span(&self, span: verter_span::Span) -> DiagnosticWireSpan {
+        match self.utf16_span(span) {
             Ok((start, end)) => DiagnosticWireSpan {
                 start: Some(start),
                 end: Some(end),

@@ -2283,11 +2283,11 @@ fn utf16_out_of_bounds_is_refused_not_clamped() {
         Err(CoordError::InvalidBoundary)
     );
     assert_eq!(
-        OffsetIndex::new(source).to_utf16(6),
+        OffsetIndex::new(source).to_utf16(verter_span::SourceByteOffset::new(6)),
         Err(CoordError::InvalidBoundary)
     );
     assert_eq!(
-        OffsetIndex::new(source).to_utf32(6),
+        OffsetIndex::new(source).to_utf32(verter_span::SourceByteOffset::new(6)),
         Err(CoordError::InvalidBoundary)
     );
 }
@@ -2321,7 +2321,7 @@ fn utf16_mid_char_4byte_is_refused_not_snapped() {
             "byte offset {mid} inside 😀 is not a boundary"
         );
         assert_eq!(
-            OffsetIndex::new(source).to_utf16(mid),
+            OffsetIndex::new(source).to_utf16(verter_span::SourceByteOffset::new(mid)),
             Err(CoordError::NotCharBoundary)
         );
         assert_eq!(
@@ -3539,12 +3539,12 @@ fn offset_index_matches_prefix_rescan_for_every_byte_offset() {
         // including continuation bytes.
         for byte_offset in 0..=(source.len() as u32 + 4) {
             assert_eq!(
-                index.to_utf16(byte_offset),
+                index.to_utf16(verter_span::SourceByteOffset::new(byte_offset)),
                 reference_utf16(source, byte_offset),
                 "utf16 mismatch at byte offset {byte_offset} of {source:?}"
             );
             assert_eq!(
-                index.to_utf32(byte_offset),
+                index.to_utf32(verter_span::SourceByteOffset::new(byte_offset)),
                 reference_utf32(source, byte_offset),
                 "utf32 mismatch at byte offset {byte_offset} of {source:?}"
             );
@@ -3580,37 +3580,62 @@ fn offset_index_astral_and_combining_hand_computed() {
     let source = "a\u{1F600}\u{00E9}";
     assert_eq!(source.len(), 7);
     let index = OffsetIndex::new(source);
-    assert_eq!(index.to_utf16(0), Ok(0));
-    assert_eq!(index.to_utf16(1), Ok(1));
+    assert_eq!(index.to_utf16(verter_span::SourceByteOffset::new(0)), Ok(0));
+    assert_eq!(index.to_utf16(verter_span::SourceByteOffset::new(1)), Ok(1));
     // Offsets 2..=4 land inside the emoji and are refused, never snapped.
     for inside in 2..=4 {
-        assert_eq!(index.to_utf16(inside), Err(CoordError::NotCharBoundary));
-        assert_eq!(index.to_utf32(inside), Err(CoordError::NotCharBoundary));
+        assert_eq!(
+            index.to_utf16(verter_span::SourceByteOffset::new(inside)),
+            Err(CoordError::NotCharBoundary)
+        );
+        assert_eq!(
+            index.to_utf32(verter_span::SourceByteOffset::new(inside)),
+            Err(CoordError::NotCharBoundary)
+        );
     }
-    assert_eq!(index.to_utf16(5), Ok(3), "after the surrogate pair");
     assert_eq!(
-        index.to_utf16(6),
+        index.to_utf16(verter_span::SourceByteOffset::new(5)),
+        Ok(3),
+        "after the surrogate pair"
+    );
+    assert_eq!(
+        index.to_utf16(verter_span::SourceByteOffset::new(6)),
         Err(CoordError::NotCharBoundary),
         "continuation byte of é is refused"
     );
-    assert_eq!(index.to_utf16(7), Ok(4));
-    assert_eq!(index.to_utf32(5), Ok(2), "two scalars precede é");
-    assert_eq!(index.to_utf32(7), Ok(3));
-    assert_eq!(index.to_utf16(8), Err(CoordError::InvalidBoundary));
+    assert_eq!(index.to_utf16(verter_span::SourceByteOffset::new(7)), Ok(4));
+    assert_eq!(
+        index.to_utf32(verter_span::SourceByteOffset::new(5)),
+        Ok(2),
+        "two scalars precede é"
+    );
+    assert_eq!(index.to_utf32(verter_span::SourceByteOffset::new(7)), Ok(3));
+    assert_eq!(
+        index.to_utf16(verter_span::SourceByteOffset::new(8)),
+        Err(CoordError::InvalidBoundary)
+    );
 
     // Combining mark: 'e' + U+0301. Three bytes, two UTF-16 units, two
     // scalars — the combining mark is NOT folded into the base character.
     let combining = "e\u{0301}";
     assert_eq!(combining.len(), 3);
     let index = OffsetIndex::new(combining);
-    assert_eq!(index.to_utf16(1), Ok(1), "after the base 'e'");
     assert_eq!(
-        index.to_utf16(2),
+        index.to_utf16(verter_span::SourceByteOffset::new(1)),
+        Ok(1),
+        "after the base 'e'"
+    );
+    assert_eq!(
+        index.to_utf16(verter_span::SourceByteOffset::new(2)),
         Err(CoordError::NotCharBoundary),
         "inside the combining mark"
     );
-    assert_eq!(index.to_utf16(3), Ok(2), "base plus combining mark");
-    assert_eq!(index.to_utf32(3), Ok(2));
+    assert_eq!(
+        index.to_utf16(verter_span::SourceByteOffset::new(3)),
+        Ok(2),
+        "base plus combining mark"
+    );
+    assert_eq!(index.to_utf32(verter_span::SourceByteOffset::new(3)), Ok(2));
 }
 
 #[test]
@@ -3619,11 +3644,23 @@ fn offset_index_pure_ascii_is_checked_identity() {
     let source = "hello world";
     let index = OffsetIndex::new(source);
     for byte_offset in 0..=(source.len() as u32) {
-        assert_eq!(index.to_utf16(byte_offset), Ok(byte_offset));
-        assert_eq!(index.to_utf32(byte_offset), Ok(byte_offset));
+        assert_eq!(
+            index.to_utf16(verter_span::SourceByteOffset::new(byte_offset)),
+            Ok(byte_offset)
+        );
+        assert_eq!(
+            index.to_utf32(verter_span::SourceByteOffset::new(byte_offset)),
+            Ok(byte_offset)
+        );
     }
-    assert_eq!(index.to_utf16(999), Err(CoordError::InvalidBoundary));
-    assert_eq!(index.to_utf32(999), Err(CoordError::InvalidBoundary));
+    assert_eq!(
+        index.to_utf16(verter_span::SourceByteOffset::new(999)),
+        Err(CoordError::InvalidBoundary)
+    );
+    assert_eq!(
+        index.to_utf32(verter_span::SourceByteOffset::new(999)),
+        Err(CoordError::InvalidBoundary)
+    );
 }
 
 #[test]
@@ -3632,25 +3669,47 @@ fn offset_index_convert_validates_every_encoding() {
     let source = "a\u{1F600}b";
     let index = OffsetIndex::new(source);
     // UTF-8 is validated against the source, not passed through blind.
-    assert_eq!(index.convert(1, OffsetEncoding::Utf8), Ok(1));
     assert_eq!(
-        index.convert(3, OffsetEncoding::Utf8),
+        index.convert(verter_span::SourceByteOffset::new(1), OffsetEncoding::Utf8),
+        Ok(1)
+    );
+    assert_eq!(
+        index.convert(verter_span::SourceByteOffset::new(3), OffsetEncoding::Utf8),
         Err(CoordError::NotCharBoundary)
     );
     assert_eq!(
-        index.convert(999, OffsetEncoding::Utf8),
+        index.convert(
+            verter_span::SourceByteOffset::new(999),
+            OffsetEncoding::Utf8
+        ),
         Err(CoordError::InvalidBoundary)
     );
-    assert_eq!(index.convert(5, OffsetEncoding::Utf16), Ok(3));
-    assert_eq!(index.convert(5, OffsetEncoding::Utf32), Ok(2));
+    assert_eq!(
+        index.convert(verter_span::SourceByteOffset::new(5), OffsetEncoding::Utf16),
+        Ok(3)
+    );
+    assert_eq!(
+        index.convert(verter_span::SourceByteOffset::new(5), OffsetEncoding::Utf32),
+        Ok(2)
+    );
     // Ranges: both endpoints are validated and an inverted range is refused.
-    assert_eq!(index.convert_range(1, 5, OffsetEncoding::Utf16), Ok((1, 3)));
     assert_eq!(
-        index.convert_range(5, 1, OffsetEncoding::Utf16),
-        Err(CoordError::InvalidBoundary)
+        index.convert_range(
+            source_range(verter_span::Span::new(1, 5)).unwrap(),
+            OffsetEncoding::Utf16
+        ),
+        Ok((1, 3))
     );
     assert_eq!(
-        index.convert_range(0, 3, OffsetEncoding::Utf16),
+        source_range(verter_span::Span::new(5, 1)),
+        Err(CoordError::InvalidBoundary),
+        "an inverted native span is refused where it becomes a range"
+    );
+    assert_eq!(
+        index.convert_range(
+            source_range(verter_span::Span::new(0, 3)).unwrap(),
+            OffsetEncoding::Utf16
+        ),
         Err(CoordError::NotCharBoundary)
     );
 }

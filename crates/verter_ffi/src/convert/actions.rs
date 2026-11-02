@@ -26,8 +26,10 @@ pub fn code_action_to_ffi(
             .edits
             .iter()
             .map(|edit| {
-                let (span_start, span_end) =
-                    index.convert_range(edit.span.start, edit.span.end, OffsetEncoding::Utf16)?;
+                let (span_start, span_end) = index.convert_range(
+                    super::offset::source_range(edit.span)?,
+                    OffsetEncoding::Utf16,
+                )?;
                 Ok(FfiTextEdit {
                     span_start,
                     span_end,

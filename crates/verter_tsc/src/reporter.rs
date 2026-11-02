@@ -164,6 +164,9 @@ pub struct PositionRenderer {
     encoding: crate::position::ColumnEncoding,
     /// The VFS boundary every file read goes through.
     fs: verter_workspace::native_fs::NativeFs,
+    /// In-memory files (public-API stubs, ambient shims) that diagnostics are
+    /// positioned in; they are not on disk, so their exact text is supplied.
+    virtual_sources: std::collections::HashMap<String, std::rc::Rc<str>>,
     files: std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<str>>>>,
 }
 
@@ -173,11 +176,28 @@ impl PositionRenderer {
         Self {
             encoding,
             fs: verter_workspace::native_fs::NativeFs::new(),
+            virtual_sources: std::collections::HashMap::new(),
             files: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
+    /// Supply the exact text of in-memory files diagnostics may name.
+    #[must_use]
+    pub fn with_virtual_sources(
+        mut self,
+        sources: &std::collections::HashMap<String, std::sync::Arc<str>>,
+    ) -> Self {
+        self.virtual_sources = sources
+            .iter()
+            .map(|(path, text)| (path.clone(), std::rc::Rc::from(&**text)))
+            .collect();
+        self
+    }
+
     fn text(&self, file: &str) -> Option<std::rc::Rc<str>> {
+        if let Some(text) = self.virtual_sources.get(&file.replace('\\', "/")) {
+            return Some(text.clone());
+        }
         self.files
             .borrow_mut()
             .entry(file.to_string())

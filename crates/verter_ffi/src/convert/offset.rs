@@ -4,7 +4,78 @@
 use super::error::FfiConversionError;
 use super::wire_span::SpanConversionError;
 use crate::types::*;
-use verter_span::CoordError;
+use std::marker::PhantomData;
+use verter_span::{
+    CoordError, GeneratedByteOffset, GeneratedByteRange, SourceByteOffset, SourceByteRange,
+};
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// The coordinate domain an [`OffsetIndex`] indexes: authored source bytes
+/// (`CD1`, [`SourceDomain`]) or generated-surface bytes (`CD3`,
+/// [`GeneratedDomain`]). An index of one domain accepts only that domain's
+/// newtypes, so a source range cannot be converted against a generated
+/// surface, or the reverse, by passing raw integers in the wrong order.
+pub trait IndexDomain: sealed::Sealed {
+    /// The domain's byte-offset newtype.
+    type Offset: Copy;
+    /// The domain's half-open byte-range newtype.
+    type Range: Copy;
+    #[doc(hidden)]
+    fn offset(offset: Self::Offset) -> u32;
+    #[doc(hidden)]
+    fn range(range: Self::Range) -> (u32, u32);
+}
+
+/// Authored source bytes (`CD1`).
+pub struct SourceDomain;
+/// Generated-surface bytes (`CD3`).
+pub struct GeneratedDomain;
+
+impl sealed::Sealed for SourceDomain {}
+impl sealed::Sealed for GeneratedDomain {}
+
+impl IndexDomain for SourceDomain {
+    type Offset = SourceByteOffset;
+    type Range = SourceByteRange;
+    fn offset(offset: SourceByteOffset) -> u32 {
+        offset.get()
+    }
+    fn range(range: SourceByteRange) -> (u32, u32) {
+        (range.start().get(), range.end().get())
+    }
+}
+
+impl IndexDomain for GeneratedDomain {
+    type Offset = GeneratedByteOffset;
+    type Range = GeneratedByteRange;
+    fn offset(offset: GeneratedByteOffset) -> u32 {
+        offset.get()
+    }
+    fn range(range: GeneratedByteRange) -> (u32, u32) {
+        (range.start().get(), range.end().get())
+    }
+}
+
+/// A native source span as a checked source-domain range; an inverted span is
+/// [`CoordError::InvalidBoundary`], never swapped or emptied.
+pub fn source_range(span: verter_span::Span) -> Result<SourceByteRange, CoordError> {
+    SourceByteRange::checked_new(
+        SourceByteOffset::new(span.start),
+        SourceByteOffset::new(span.end),
+    )
+}
+
+/// A native generated-surface span as a checked generated-domain range; an
+/// inverted span is [`CoordError::InvalidBoundary`].
+pub fn generated_range(span: verter_span::Span) -> Result<GeneratedByteRange, CoordError> {
+    GeneratedByteRange::checked_new(
+        GeneratedByteOffset::new(span.start),
+        GeneratedByteOffset::new(span.end),
+    )
+}
 
 /// Source bytes visited by offset conversion on the current thread.
 ///
@@ -86,11 +157,12 @@ pub fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> Result<u32, Coord
 /// clamped byte offset. Build the index once per source and reuse it for
 /// every span; a lone conversion is better served by
 /// [`byte_offset_to_utf16`].
-pub struct OffsetIndex<'a> {
+pub struct OffsetIndex<'a, D: IndexDomain = SourceDomain> {
     source: &'a str,
     /// One entry per non-ASCII character, in ascending byte order. Empty for
     /// a pure-ASCII source.
     marks: Vec<OffsetMark>,
+    domain: PhantomData<fn() -> D>,
 }
 
 #[derive(Clone, Copy)]
@@ -103,14 +175,30 @@ struct OffsetMark {
     utf32_deficit: u32,
 }
 
-impl<'a> OffsetIndex<'a> {
+impl<'a> OffsetIndex<'a, SourceDomain> {
+    /// Index an authored source (`CD1`).
     #[must_use]
     pub fn new(source: &'a str) -> Self {
+        Self::build(source)
+    }
+}
+
+impl<'a> OffsetIndex<'a, GeneratedDomain> {
+    /// Index a generated surface (`CD3`).
+    #[must_use]
+    pub fn new_generated(source: &'a str) -> Self {
+        Self::build(source)
+    }
+}
+
+impl<'a, D: IndexDomain> OffsetIndex<'a, D> {
+    fn build(source: &'a str) -> Self {
         record_source_visit(source.len());
         if source.is_ascii() {
             return Self {
                 source,
                 marks: Vec::new(),
+                domain: PhantomData,
             };
         }
         record_source_visit(source.len());
@@ -130,7 +218,11 @@ impl<'a> OffsetIndex<'a> {
                 utf32_deficit,
             });
         }
-        Self { source, marks }
+        Self {
+            source,
+            marks,
+            domain: PhantomData,
+        }
     }
 
     /// Deficits accumulated by every character that ends at or before
@@ -145,7 +237,8 @@ impl<'a> OffsetIndex<'a> {
     }
 
     /// UTF-8 byte offset → UTF-16 code-unit offset, exact or refused.
-    pub fn to_utf16(&self, byte_offset: u32) -> Result<u32, CoordError> {
+    pub fn to_utf16(&self, offset: D::Offset) -> Result<u32, CoordError> {
+        let byte_offset = D::offset(offset);
         checked_boundary(self.source, byte_offset)?;
         if self.marks.is_empty() {
             return Ok(byte_offset);
@@ -154,7 +247,8 @@ impl<'a> OffsetIndex<'a> {
     }
 
     /// UTF-8 byte offset → UTF-32 (Unicode scalar) offset, exact or refused.
-    pub fn to_utf32(&self, byte_offset: u32) -> Result<u32, CoordError> {
+    pub fn to_utf32(&self, offset: D::Offset) -> Result<u32, CoordError> {
+        let byte_offset = D::offset(offset);
         checked_boundary(self.source, byte_offset)?;
         if self.marks.is_empty() {
             return Ok(byte_offset);
@@ -163,30 +257,54 @@ impl<'a> OffsetIndex<'a> {
     }
 
     /// UTF-8 byte offset → the target encoding's offset, exact or refused.
-    pub fn convert(&self, byte_offset: u32, encoding: OffsetEncoding) -> Result<u32, CoordError> {
+    pub fn convert(&self, offset: D::Offset, encoding: OffsetEncoding) -> Result<u32, CoordError> {
+        match encoding {
+            OffsetEncoding::Utf8 => {
+                let byte_offset = D::offset(offset);
+                checked_boundary(self.source, byte_offset)?;
+                Ok(byte_offset)
+            }
+            OffsetEncoding::Utf16 => self.to_utf16(offset),
+            OffsetEncoding::Utf32 => self.to_utf32(offset),
+        }
+    }
+
+    /// Half-open byte range → the target encoding's range. Both endpoints are
+    /// validated against the source; the range newtype cannot be inverted, so
+    /// an inverted native span is refused where it becomes a range
+    /// ([`source_range`], [`generated_range`]).
+    pub fn convert_range(
+        &self,
+        range: D::Range,
+        encoding: OffsetEncoding,
+    ) -> Result<(u32, u32), CoordError> {
+        let (start, end) = D::range(range);
+        Ok((
+            self.convert_raw(start, encoding)?,
+            self.convert_raw(end, encoding)?,
+        ))
+    }
+
+    fn convert_raw(&self, byte_offset: u32, encoding: OffsetEncoding) -> Result<u32, CoordError> {
         match encoding {
             OffsetEncoding::Utf8 => {
                 checked_boundary(self.source, byte_offset)?;
                 Ok(byte_offset)
             }
-            OffsetEncoding::Utf16 => self.to_utf16(byte_offset),
-            OffsetEncoding::Utf32 => self.to_utf32(byte_offset),
+            OffsetEncoding::Utf16 | OffsetEncoding::Utf32 => {
+                checked_boundary(self.source, byte_offset)?;
+                if self.marks.is_empty() {
+                    return Ok(byte_offset);
+                }
+                let (utf16, utf32) = self.deficits_before(byte_offset);
+                let deficit = if encoding == OffsetEncoding::Utf16 {
+                    utf16
+                } else {
+                    utf32
+                };
+                Ok(byte_offset - deficit)
+            }
         }
-    }
-
-    /// Half-open byte range → the target encoding's range. Both endpoints are
-    /// validated against the source and an inverted range is
-    /// [`CoordError::InvalidBoundary`], never swapped or emptied.
-    pub fn convert_range(
-        &self,
-        start: u32,
-        end: u32,
-        encoding: OffsetEncoding,
-    ) -> Result<(u32, u32), CoordError> {
-        if start > end {
-            return Err(CoordError::InvalidBoundary);
-        }
-        Ok((self.convert(start, encoding)?, self.convert(end, encoding)?))
     }
 }
 
@@ -294,8 +412,8 @@ pub(super) fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> Result<u32, 
 /// Input for a single binding's source span conversion.
 pub struct DestructuredBindingInput<'a> {
     pub name: &'a str,
-    pub source_start: u32,
-    pub source_end: u32,
+    /// The binding's authored-source range (`CD1`).
+    pub source: SourceByteRange,
 }
 
 /// Convert destructured block metadata from UTF-8 to the tagged wire encoding.
@@ -309,8 +427,7 @@ pub struct DestructuredBindingInput<'a> {
 /// range refuses the whole conversion.
 pub fn convert_destructured_block_meta(
     bindings: &[DestructuredBindingInput<'_>],
-    block_start: u32,
-    block_end: u32,
+    block: GeneratedByteRange,
     sfc_source: Option<&str>,
     tsx_code: &str,
     encoding: SpanEncodingTag,
@@ -319,9 +436,8 @@ pub fn convert_destructured_block_meta(
         SpanEncodingTag::Utf8 => OffsetEncoding::Utf8,
         SpanEncodingTag::Utf16 => OffsetEncoding::Utf16,
     };
-    let tsx_index = OffsetIndex::new(tsx_code);
-    let (block_start, block_end) =
-        tsx_index.convert_range(block_start, block_end, offset_encoding)?;
+    let tsx_index = OffsetIndex::new_generated(tsx_code);
+    let (block_start, block_end) = tsx_index.convert_range(block, offset_encoding)?;
     // One index per source, built only when there is a binding to convert.
     let sfc_index = if bindings.is_empty() {
         None
@@ -336,8 +452,7 @@ pub fn convert_destructured_block_meta(
             let index = sfc_index
                 .as_ref()
                 .ok_or(SpanConversionError::SourceUnavailable)?;
-            let (source_start, source_end) =
-                index.convert_range(b.source_start, b.source_end, offset_encoding)?;
+            let (source_start, source_end) = index.convert_range(b.source, offset_encoding)?;
             Ok(FfiDestructuredBinding {
                 name: b.name.to_string(),
                 source_start,

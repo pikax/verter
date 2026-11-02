@@ -258,7 +258,8 @@ fn main() {
     );
 
     let selector = cli.at.clone().or_else(|| cli.offset.clone());
-    let positions = reporter::PositionRenderer::new(cli.position_encoding);
+    let positions = reporter::PositionRenderer::new(cli.position_encoding)
+        .with_virtual_sources(&result.virtual_sources);
     let selected_position = match selector.as_ref().map(|s| positions.resolve_selector(s)) {
         None => None,
         Some(Ok(position)) => Some(position),

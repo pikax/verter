@@ -78,6 +78,7 @@ export class TypeInfoSession {
     return raw.map<SymbolEntry>((r) => ({
       name: r.name,
       kind: r.kind as SymbolEntry["kind"],
+      spanEncoding: "utf8.v1" as const,
       span: r.hasSpan ? { start: r.spanStart, end: r.spanEnd } : undefined,
       isExported: r.isExported,
     }));

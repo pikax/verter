@@ -100,9 +100,8 @@ pub(super) fn host_module_reference_to_ffi(
     input: host::ScriptModuleReference,
     spans: &SpanConverter<'_>,
 ) -> Result<FfiModuleReference, SpanConversionError> {
-    let (span_start, span_end) = spans.utf16_range(input.span.start, input.span.end)?;
-    let (expr_span_start, expr_span_end) =
-        spans.utf16_range(input.expr_span.start, input.expr_span.end)?;
+    let (span_start, span_end) = spans.utf16_span(input.span)?;
+    let (expr_span_start, expr_span_end) = spans.utf16_span(input.expr_span)?;
     Ok(FfiModuleReference {
         syntax: host_module_reference_syntax_to_string(input.syntax),
         semantics: host_module_reference_semantics_to_string(input.semantics),
@@ -165,7 +164,7 @@ pub fn host_diagnostic_to_ffi_with(
     diagnostic: &host::HostDiagnostic,
     spans: &SpanConverter<'_>,
 ) -> FfiDiagnostic {
-    let span = spans.diagnostic_span(diagnostic.span.start, diagnostic.span.end);
+    let span = spans.diagnostic_span(diagnostic.span);
     FfiDiagnostic {
         severity: match diagnostic.severity {
             host::HostSeverity::Error => "error".to_string(),

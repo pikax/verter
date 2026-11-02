@@ -83,16 +83,31 @@ pub(crate) fn host_ide_to_napi(input: host::IdeResponse, source: &str) -> Result
             let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
                 .bindings
                 .iter()
-                .map(|binding| verter_ffi::convert::DestructuredBindingInput {
-                    name: &binding.name,
-                    source_start: binding.source_span.start,
-                    source_end: binding.source_span.end,
+                .map(|binding| {
+                    Ok(verter_ffi::convert::DestructuredBindingInput {
+                        name: &binding.name,
+                        source: verter_ffi::convert::source_range(binding.source_span)?,
+                    })
                 })
-                .collect();
+                .collect::<std::result::Result<_, verter_span::CoordError>>()
+                .map_err(|error| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("destructured binding span cannot be converted exactly: {error}"),
+                    )
+                })?;
             let ffi = verter_ffi::convert::convert_destructured_block_meta(
                 &bindings,
-                meta.block_start,
-                meta.block_end,
+                verter_ffi::convert::generated_range(verter_span::Span::new(
+                    meta.block_start,
+                    meta.block_end,
+                ))
+                .map_err(|error| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("destructured block span cannot be converted exactly: {error}"),
+                    )
+                })?,
                 Some(source),
                 &input.code,
                 SpanEncodingTag::Utf16,

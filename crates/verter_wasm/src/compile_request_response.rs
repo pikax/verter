@@ -115,19 +115,28 @@ fn destructured_block_to_ffi(
     let Some(meta) = response.destructured_block.as_ref() else {
         return Ok(None);
     };
-    let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
+    let refused = |error: verter_span::CoordError| {
+        format!("destructured block span cannot be converted exactly: {error}")
+    };
+    let bindings = meta
         .bindings
         .iter()
-        .map(|binding| verter_ffi::convert::DestructuredBindingInput {
-            name: &binding.name,
-            source_start: binding.source_span.start,
-            source_end: binding.source_span.end,
+        .map(|binding| {
+            Ok(verter_ffi::convert::DestructuredBindingInput {
+                name: &binding.name,
+                source: verter_ffi::convert::source_range(binding.source_span)?,
+            })
         })
-        .collect();
-    verter_ffi::convert::convert_destructured_block_meta(
-        &bindings,
+        .collect::<Result<Vec<_>, verter_span::CoordError>>()
+        .map_err(refused)?;
+    let block = verter_ffi::convert::generated_range(verter_span::Span::new(
         meta.block_start,
         meta.block_end,
+    ))
+    .map_err(refused)?;
+    verter_ffi::convert::convert_destructured_block_meta(
+        &bindings,
+        block,
         sfc_source,
         &response.code,
         verter_protocol::types::SpanEncodingTag::Utf16,
