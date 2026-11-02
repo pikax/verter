@@ -15,7 +15,8 @@
  * `report` attributes those observations to the cache identities the workflows
  * declare and evaluates them against the allowance. It prints JSON, reads only
  * local files and never estimates: an identity without a recorded entry stays
- * unmeasured, and an incomplete listing contributes no occupancy.
+ * unmeasured. An incomplete listing still records the size of each entry it read,
+ * but its total is only a lower bound and never stands as the current occupancy.
  *
  *   node scripts/ci-cache-fit.mjs report --in obs.jsonl [--workflows dir]
  */
@@ -31,6 +32,7 @@ const API_ROOT = "https://api.github.com";
 const PAGE_SIZE = 100;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAIN_REF = "refs/heads/main";
+const CANDIDATE_FAMILIES = new Set(["rust-target", "compile-contracts", "explicit-cargo"]);
 
 /** The documented allowance in both byte readings; neither is assumed to be the live value. */
 export const ALLOWANCE_READINGS = Object.freeze({
@@ -66,16 +68,19 @@ export function createApi({ repo, token, fetchImpl = fetch }) {
 }
 
 /**
- * Read every page of one listing. `complete` holds only when the distinct
- * entries read equal the count the service reported on every page, so an entry
- * saved or evicted between pages never passes as a whole listing.
+ * Read every page of one listing, largest entries first so a listing cut short
+ * by rate limiting still holds most of the bytes. `complete` holds only when the
+ * distinct entries read equal the count the service reported on every page, so
+ * an entry saved or evicted between pages never passes as a whole listing.
  */
 export async function listCaches(get, { ref } = {}) {
   const byId = new Map();
   const reported = new Set();
   const filter = ref ? `&ref=${encodeURIComponent(ref)}` : "";
   for (let page = 1; ; page += 1) {
-    const result = await get(`actions/caches?per_page=${PAGE_SIZE}&page=${page}${filter}`);
+    const result = await get(
+      `actions/caches?per_page=${PAGE_SIZE}&page=${page}&sort=size_in_bytes&direction=desc${filter}`,
+    );
     if (!result.ok) {
       return {
         complete: false,
@@ -123,15 +128,18 @@ export async function collect(get, { samples, intervalMs, fullEvery, emit, wait 
  * Name the consumer behind a service key. `candidate` marks a Rust build
  * identity that keying could retain; every other family is occupancy that must
  * be preserved. A key no rule recognises keeps its normalised spelling, so it
- * still counts in occupancy rather than disappearing.
+ * still counts in occupancy rather than disappearing. A rust-cache identity keeps
+ * its environment hash, because the same job name built under a different
+ * toolchain or environment is not the same build, while its lock hash only marks
+ * a newer generation of that build.
  */
 export function classifyKey(key) {
-  const rust = /^v\d+-rust-(.+)-(Linux|macOS|Windows)-(\w+)-[0-9a-f]{8}-[0-9a-f]{8}$/.exec(key);
+  const rust = /^v\d+-rust-(.+)-(Linux|macOS|Windows)-(\w+)-([0-9a-f]{8})-[0-9a-f]{8}$/.exec(key);
   if (rust) {
     return {
       family: "rust-target",
       candidate: true,
-      identity: `rust-target:${rust[1]}@${rust[2]}-${rust[3]}`,
+      identity: `rust-target:${rust[1]}@${rust[2]}-${rust[3]}#${rust[4]}`,
     };
   }
   const contract = /^(\w+)-(\w+)-compiler-contracts-v\d+-([a-z-]+?)-[0-9a-f]{64}/.exec(key);
@@ -310,9 +318,16 @@ function occupancyOf(record) {
     row[entry.ref === MAIN_REF ? "mainBytes" : "otherRefBytes"] += entry.size_in_bytes;
     listedBytes += entry.size_in_bytes;
   }
+  const preservedBytes = Object.entries(byFamily).reduce(
+    (total, [family, row]) =>
+      total + (CANDIDATE_FAMILIES.has(family) ? row.otherRefBytes : row.bytes),
+    0,
+  );
   return {
     at: record.at,
+    complete: record.listing.complete,
     listedBytes,
+    preservedBytes,
     listedCount: record.listing.entries.length,
     usageBytes: record.usage?.bytes ?? null,
     usageCount: record.usage?.count ?? null,
@@ -321,13 +336,16 @@ function occupancyOf(record) {
 }
 
 /**
- * Attribute every main-saved entry seen in a complete listing to its identity.
- * The size of an identity is its newest save; older generations stay visible
- * through `generations` and in occupancy, and are never added to that size.
+ * Attribute every main-saved entry any listing read to its identity: the service
+ * reported that entry's size even when the listing around it was cut short. The
+ * size of an identity is its newest save; older generations stay visible through
+ * `generations` and in occupancy, and are never added to that size. Only a
+ * complete listing can say an identity is no longer resident.
  */
 function attributeMainEntries(observations) {
   const samples = observations.map((record) => ({
     at: record.at,
+    complete: record.listing.complete,
     entries: record.listing.entries.filter((entry) => entry.ref === MAIN_REF),
   }));
   const identities = new Map();
@@ -340,7 +358,7 @@ function attributeMainEntries(observations) {
       identities.set(identity, row);
     }
   }
-  const last = samples.at(-1);
+  const last = samples.findLast((sample) => sample.complete);
   return [...identities.values()]
     .map(({ identity, family, byId }) => {
       const saves = [...byId.values()].sort(
@@ -357,7 +375,7 @@ function attributeMainEntries(observations) {
         samplesSeen: seen.length,
         firstSeen: seen[0].at,
         lastSeen: seen.at(-1).at,
-        residentAtEnd: last.entries.some((entry) => byId.has(entry.id)),
+        residentAtEnd: last ? last.entries.some((entry) => byId.has(entry.id)) : null,
       };
     })
     .sort((a, b) => a.bytes - b.bytes || a.identity.localeCompare(b.identity));
@@ -374,9 +392,10 @@ function matchesDeclaration(declaredIdentity, measuredIdentity) {
 
 /**
  * Evaluate fit from recorded bytes only. The budget is the allowance minus the
- * peak occupancy of everything that stays as it is. Measured candidates are
- * admitted smallest first, which retains the most identities; no reserve is
- * added, no eviction is assumed, and an unmeasured identity rules out `all-fit`.
+ * largest occupancy observed at one moment from everything that stays as it is.
+ * Measured candidates are admitted smallest first, which retains the most
+ * identities; no reserve is added, no eviction is assumed, and an unmeasured
+ * identity rules out `all-fit`.
  */
 export function evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeasured }) {
   const budgetBytes = allowanceBytes - preservedBytes;
@@ -409,8 +428,8 @@ export function evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeas
 }
 
 export function summarize(observations, declarations) {
-  const complete = observations.filter((record) => record.listing.complete);
-  const repository = complete.filter((record) => record.scope === "repository");
+  const repository = observations.filter((record) => record.scope === "repository");
+  const completeRepository = repository.filter((record) => record.listing.complete);
   const failures = observations.flatMap((record) => {
     const found = [];
     if (!record.listing.complete) {
@@ -425,27 +444,28 @@ export function summarize(observations, declarations) {
       first: observations[0]?.at ?? null,
       last: observations.at(-1)?.at ?? null,
       observations: observations.length,
-      completeRepositoryListings: repository.length,
+      completeRepositoryListings: completeRepository.length,
+      repositoryListings: repository.length,
+      completeMainListings: observations.filter(
+        (record) => record.scope === "main" && record.listing.complete,
+      ).length,
+      mainListings: observations.filter((record) => record.scope === "main").length,
     },
     failures,
     limit: observations.findLast((record) => record.limit)?.limit ?? null,
   };
-  if (repository.length === 0) return { ...summary, available: false };
+  if (completeRepository.length === 0) return { ...summary, available: false };
 
+  // An incomplete listing is a lower bound on what it read, so it can only raise a peak.
   const occupancies = repository.map(occupancyOf);
-  const latest = occupancies.at(-1);
+  const latest = occupancies.findLast((occupancy) => occupancy.complete);
   const peakByFamily = {};
-  const peakPreservedCandidateRefs = { bytes: 0 };
-  const candidateFamilies = new Set(["rust-target", "compile-contracts", "explicit-cargo"]);
   for (const { byFamily } of occupancies) {
-    let otherRefBytes = 0;
     for (const [family, row] of Object.entries(byFamily)) {
       peakByFamily[family] = Math.max(peakByFamily[family] ?? 0, row.bytes);
-      if (candidateFamilies.has(family)) otherRefBytes += row.otherRefBytes;
     }
-    peakPreservedCandidateRefs.bytes = Math.max(peakPreservedCandidateRefs.bytes, otherRefBytes);
   }
-  const identities = attributeMainEntries(complete);
+  const identities = attributeMainEntries(observations);
   const isPreserved = ({ identity }) => identity.startsWith("preserved:");
   const declared = declarations.map((row) => {
     const family = row.identity.slice("preserved:".length);
@@ -468,12 +488,12 @@ export function summarize(observations, declarations) {
   ];
   const unmeasured = unmeasuredOf((row) => !isPreserved(row)).sort();
   const unmeasuredPreserved = unmeasuredOf(isPreserved).sort();
-  const preservedBytes =
-    Object.entries(peakByFamily)
-      .filter(([family]) => !candidateFamilies.has(family))
-      .reduce((total, [, bytes]) => total + bytes, 0) + peakPreservedCandidateRefs.bytes;
+  const preservedBytes = Math.max(...occupancies.map((occupancy) => occupancy.preservedBytes));
   const candidates = identities.map(({ identity, bytes }) => ({ identity, bytes }));
-  const listed = occupancies.map(({ listedBytes }) => listedBytes);
+  const listed = occupancies
+    .filter(({ complete }) => complete)
+    .map(({ listedBytes }) => listedBytes);
+  const reportedUsage = occupancies.flatMap(({ usageBytes }) => usageBytes ?? []);
   return {
     ...summary,
     available: true,
@@ -481,8 +501,15 @@ export function summarize(observations, declarations) {
       latest,
       minListedBytes: Math.min(...listed),
       peakListedBytes: Math.max(...listed),
+      peakUsageBytes: Math.max(...reportedUsage),
+      peakPreservedBytes: preservedBytes,
       peakByFamily,
-      peakCandidateBytesOnOtherRefs: peakPreservedCandidateRefs.bytes,
+      series: occupancies.map(({ byFamily, ...row }) => ({
+        ...row,
+        familyBytes: Object.fromEntries(
+          Object.entries(byFamily).map(([family, { bytes }]) => [family, bytes]),
+        ),
+      })),
       headroomAtLatest: Object.fromEntries(
         Object.entries(ALLOWANCE_READINGS).map(([name, bytes]) => [
           name,

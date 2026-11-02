@@ -31,7 +31,7 @@ function repositoryRecord(entries, at = "2026-01-02T00:00:00Z") {
 
 test("classifyKey names every consumer and keeps an unknown key countable", () => {
   const table = [
-    [RUST_KEY, "rust-target", true, "rust-target:rust-test-rust-test-build@Linux-x64"],
+    [RUST_KEY, "rust-target", true, "rust-target:rust-test-rust-test-build@Linux-x64#986f06eb"],
     [CONTRACT_KEY, "compile-contracts", true, "compile-contracts:session-observe@Linux-X64"],
     [
       `Linux-perf-gate-cargo-${HASH}`,
@@ -176,7 +176,7 @@ test("createApi only reads, sends a token only when given and turns failures int
 test("listCaches pages to the end and refuses a listing that moved or failed", async () => {
   const full = Array.from({ length: 100 }, (_, index) => entry(index, "k", 1));
   const pages = (bodies) => async (path) => {
-    const page = Number(/page=(\d+)/.exec(path.replace("per_page", ""))[1]);
+    const page = Number(/[?&]page=(\d+)/.exec(path)[1]);
     return bodies[page - 1];
   };
   const ok = (total, items) => ({
@@ -228,7 +228,9 @@ test("observe records an unavailable endpoint by status, and main samples stay c
   paths.length = 0;
   const main = await observe(get, { full: false, now });
   assert.equal(main.scope, "main");
-  assert.deepEqual(paths, ["actions/caches?per_page=100&page=1&ref=refs%2Fheads%2Fmain"]);
+  assert.deepEqual(paths, [
+    "actions/caches?per_page=100&page=1&sort=size_in_bytes&direction=desc&ref=refs%2Fheads%2Fmain",
+  ]);
 });
 
 test("collect takes full observations on its cadence and waits only between samples", async () => {
@@ -297,29 +299,37 @@ test("summarize refuses to report occupancy without a complete repository listin
 
 test("summarize attributes newest saves, counts everything in occupancy and leaves gaps unmeasured", () => {
   const sccache = (id, bytes) => entry(id, `sccache/${id}`, bytes, { ref: "refs/pull/1/merge" });
-  const older = entry(1, RUST_KEY.replace("986f06eb", "11111111"), 500, {
+  const older = entry(1, RUST_KEY.replace("ea442a38", "11111111"), 500, {
     created: "2026-01-01T00:00:00Z",
   });
   const newer = entry(2, RUST_KEY, 300, { created: "2026-01-02T00:00:00Z" });
+  const otherEnvironment = entry(6, RUST_KEY.replace("986f06eb", "22222222"), 40);
   const transient = entry(3, `Linux-X64-compiler-contracts-v2-core-${HASH}-${HASH}`, 700);
   const unknown = entry(4, `something-new-${HASH}`, 11);
   const prTarget = entry(5, RUST_KEY.replace("rust-test-rust-test-build", "other-job"), 13, {
     ref: "refs/pull/1/merge",
   });
+  const cutShort = entry(99, `Linux-X64-compiler-contracts-v2-session-${HASH}-${HASH}`, 5);
 
   const observations = [
     repositoryRecord(
-      [older, newer, transient, sccache(10, 2000), unknown, prTarget],
+      [older, newer, otherEnvironment, transient, sccache(10, 2000), unknown, prTarget],
       "2026-01-02T00:00:00Z",
     ),
     { at: "2026-01-02T01:00:00Z", scope: "main", listing: { complete: true, entries: [newer] } },
     {
       at: "2026-01-02T02:00:00Z",
       scope: "main",
+      listing: { complete: false, reportedTotals: [1, 2], entries: [cutShort] },
+    },
+    {
+      at: "2026-01-02T02:30:00Z",
+      scope: "repository",
+      usage: { bytes: 90_000, count: 3 },
       listing: {
         complete: false,
-        reportedTotals: [1, 2],
-        entries: [entry(99, `Linux-X64-compiler-contracts-v2-session-${HASH}-${HASH}`, 5)],
+        error: { page: 2, status: 403, message: "rate limit" },
+        entries: [sccache(12, 3000)],
       },
     },
     repositoryRecord([older, newer, sccache(11, 1000), unknown], "2026-01-02T03:00:00Z"),
@@ -336,6 +346,7 @@ test("summarize attributes newest saves, counts everything in occupancy and leav
       identity: "rust-target:missing-${{ matrix.target }}-matrix",
     },
     { savePolicy: "main-only", mainReach: "automatic", identity: "compile-contracts:session" },
+    { savePolicy: "main-only", mainReach: "automatic", identity: "compile-contracts:absent" },
     { savePolicy: "never", mainReach: "automatic", identity: "rust-target:off-off" },
     { savePolicy: "any-ref", mainReach: "none", identity: "rust-target:tag-only-release" },
     { savePolicy: "main-only", mainReach: "automatic", identity: "preserved:gradle" },
@@ -352,41 +363,68 @@ test("summarize attributes newest saves, counts everything in occupancy and leav
       samplesSeen,
     ]),
     [
-      ["rust-target:rust-test-rust-test-build@Linux-x64", 300, 2, true, 3],
+      ["compile-contracts:session@Linux-X64", 5, 1, false, 1],
+      ["rust-target:rust-test-rust-test-build@Linux-x64#22222222", 40, 1, false, 1],
+      ["rust-target:rust-test-rust-test-build@Linux-x64#986f06eb", 300, 2, true, 3],
       ["compile-contracts:core@Linux-X64", 700, 1, false, 1],
     ],
-    "an older generation never adds to the identity, and an incomplete listing attributes nothing",
+    "an older generation never adds to its identity, another environment is another identity, and a listing cut short still records the sizes it read",
   );
 
-  const { occupancy } = summary;
+  const { occupancy, window } = summary;
+  assert.deepEqual(
+    [window.completeRepositoryListings, window.repositoryListings, window.completeMainListings],
+    [2, 3, 1],
+  );
+  assert.equal(occupancy.latest.at, "2026-01-02T03:00:00Z");
   assert.equal(occupancy.latest.listedBytes, 500 + 300 + 1000 + 11);
-  assert.equal(occupancy.peakListedBytes, 500 + 300 + 700 + 2000 + 11 + 13);
+  assert.equal(occupancy.peakListedBytes, 500 + 300 + 40 + 700 + 2000 + 11 + 13);
+  assert.equal(occupancy.peakUsageBytes, 90_000, "reported usage survives an incomplete listing");
   assert.equal(occupancy.latest.byFamily.unclassified.bytes, 11);
   assert.equal(occupancy.latest.byFamily.sccache.otherRefBytes, 1000);
   assert.equal(occupancy.latest.byFamily["rust-target"].oldestSave, "2026-01-01T00:00:00Z");
   assert.equal(occupancy.latest.byFamily["rust-target"].newestSave, "2026-01-02T00:00:00Z");
   assert.equal(
     occupancy.peakByFamily.sccache,
-    2000,
-    "the preserved peak is kept across observations",
+    3000,
+    "a listing cut short is a lower bound, so it can raise a peak",
   );
-  assert.equal(occupancy.peakCandidateBytesOnOtherRefs, 13);
+  assert.equal(
+    occupancy.minListedBytes,
+    1811,
+    "a listing cut short never lowers the listed occupancy",
+  );
+  assert.deepEqual(
+    occupancy.series.map(({ at, complete, preservedBytes }) => [
+      at.slice(11, 16),
+      complete,
+      preservedBytes,
+    ]),
+    [
+      ["00:00", true, 2000 + 11 + 13],
+      ["02:30", false, 3000],
+      ["03:00", true, 1000 + 11],
+    ],
+    "preserved occupancy is taken one moment at a time and counts a candidate saved on another ref",
+  );
   assert.equal(
     occupancy.headroomAtLatest["10 GB (decimal)"],
     ALLOWANCE_READINGS["10 GB (decimal)"] - 1811,
   );
 
   assert.deepEqual(summary.unmeasured, [
-    "compile-contracts:session",
+    "compile-contracts:absent",
     "rust-target:missing-${{ matrix.target }}-matrix",
   ]);
   assert.deepEqual(summary.unmeasuredPreserved, ["preserved:gradle"]);
 
   const fit = summary.fit["10 GB (decimal)"];
-  assert.equal(fit.preservedBytes, 2000 + 11 + 13);
+  assert.equal(fit.preservedBytes, 3000, "the peaks of different moments are never added together");
   assert.equal(fit.outcome, "partial-fit");
   assert.deepEqual(fit.fitting, [
-    "rust-target:rust-test-rust-test-build@Linux-x64",
+    "compile-contracts:session@Linux-X64",
+    "rust-target:rust-test-rust-test-build@Linux-x64#22222222",
+    "rust-target:rust-test-rust-test-build@Linux-x64#986f06eb",
     "compile-contracts:core@Linux-X64",
   ]);
 });
