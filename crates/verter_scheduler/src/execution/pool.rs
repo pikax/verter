@@ -289,6 +289,7 @@ impl SchedulerCpuPool {
         let pool = Self::build_workers(
             threads,
             |i| format!("verter-cpu-{i}"),
+            crate::caller_kind::CallerKind::CpuWorker,
             #[cfg(any(test, feature = "test-support"))]
             pool_id,
         );
@@ -309,22 +310,22 @@ impl SchedulerCpuPool {
     fn build_workers(
         threads: usize,
         name: fn(usize) -> String,
+        caller_kind: crate::caller_kind::CallerKind,
         #[cfg(any(test, feature = "test-support"))] pool_id: usize,
     ) -> rayon::ThreadPool {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(name)
             .start_handler(move |_| {
-                // Mark every rayon worker as a scheduler CPU worker so
-                // cooperative-pump callers reached via the session-side
-                // `wait_or_drive` entry can detect that they are running
-                // inside the scheduler's owned pool. `dispatch_ready_job`
-                // inline-executes only `CpuWorker`×non-Source and
-                // `IoWorker`×Source — `External` is excluded, so host
-                // workers never run scheduler CPU work (dual-pool
-                // isolation invariant).
-                let _ =
-                    crate::caller_kind::CallerKind::set(crate::caller_kind::CallerKind::CpuWorker);
+                // Mark every rayon worker with its role so cooperative-pump
+                // callers reached via the session-side `wait_or_drive` entry
+                // can detect that they are running inside the scheduler's
+                // owned pool. `dispatch_ready_job` inline-executes only
+                // `CpuWorker`×non-Source and `IoWorker`×Source — `External`
+                // and `ProducerWorker` are excluded, so host workers never
+                // run scheduler CPU work (dual-pool isolation invariant) and
+                // producer workers never run file stages.
+                let _ = crate::caller_kind::CallerKind::set(caller_kind);
                 #[cfg(any(test, feature = "test-support"))]
                 SCHEDULER_CPU_POOL_TOKEN.with(|c| c.set(Some(pool_id)));
             })
@@ -390,6 +391,7 @@ impl SchedulerCpuPool {
                 Self::build_workers(
                     self.threads,
                     |i| format!("verter-producer-{i}"),
+                    crate::caller_kind::CallerKind::ProducerWorker,
                     #[cfg(any(test, feature = "test-support"))]
                     self.pool_id,
                 )
@@ -632,6 +634,29 @@ mod tests {
         tracker.wait_before(boundary);
         newer();
         assert!(tracker.ledger.lock().in_flight.is_empty());
+    }
+
+    /// Stage workers and producer workers report distinct roles: a producer
+    /// worker that reported `CpuWorker` would inline-run the file stages its
+    /// producer waits on, putting stage work on a worker a blocked producer
+    /// can hold.
+    #[test]
+    fn producer_workers_report_a_role_apart_from_stage_workers() {
+        use crate::caller_kind::CallerKind;
+        let pool = SchedulerCpuPool::new(1, 0);
+        let (stage_tx, stage_rx) = crossbeam_channel::bounded(1);
+        pool.try_submit(cpu(Box::new(move || {
+            let _ = stage_tx.send(CallerKind::current());
+        })))
+        .expect("the stage worker accepts the task");
+        assert_eq!(
+            stage_rx.recv().expect("the stage worker ran the task"),
+            CallerKind::CpuWorker
+        );
+        assert_eq!(
+            pool.install(CallerKind::current),
+            CallerKind::ProducerWorker
+        );
     }
 
     #[test]

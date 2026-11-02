@@ -625,6 +625,60 @@ fn loan_does_not_fire_for_cross_class_parked_worker() {
     );
 }
 
+/// A producer worker parked on its producer borrows a producer permit for the
+/// nested producer it waits on (else every producer slot held by a parked
+/// producer starves the nested one), but never a CPU permit: the stages it
+/// waits on run on the stage workers once a stage permit frees.
+#[test]
+fn parked_producer_worker_loans_only_producer_capacity() {
+    let budget = DagCapacityBudget { cpu: 1, io: 8 };
+    let cache_node = |key: u8| WorkNodeIdentity::CacheNode {
+        cache_id: crate::cache_id::SchedulerCacheId(1),
+        key_hash: [key; 16],
+        view_epoch: 1,
+        snapshot_pin_id: PinId(1),
+    };
+    let mut dag = SchedulerDag::with_budget(budget);
+    let parked_id = cache_node(1);
+    let _parked = dag.submit_expect(
+        parked_id.clone(),
+        WorkKind::CacheNode,
+        Priority::Interactive,
+        Vec::new(),
+        None,
+    );
+    let _parked_job = dag.next_ready().expect("the parked producer dispatches");
+    let busy = submit_cpu(&mut dag, "/busy.ts", Priority::Interactive);
+    let busy_job = dag.next_ready().expect("the busy stage dispatches");
+    assert_eq!(busy_job.token, busy);
+    assert_eq!(dag.in_flight_producer_permits(), 1);
+    assert_eq!(dag.in_flight_cpu_permits(), 1);
+
+    let active_path = [parked_id];
+    let _stage = submit_cpu(&mut dag, "/stage.ts", Priority::Critical);
+    assert!(
+        dag.next_ready_for_pump(CallerKind::ProducerWorker, &active_path)
+            .is_none(),
+        "a producer worker must not borrow a stage permit"
+    );
+    assert_eq!(dag.in_flight_cpu_permits(), 1);
+
+    let nested_id = cache_node(2);
+    let _nested = dag.submit_expect(
+        nested_id.clone(),
+        WorkKind::CacheNode,
+        Priority::Critical,
+        Vec::new(),
+        None,
+    );
+    let nested_job = dag
+        .next_ready_for_pump(CallerKind::ProducerWorker, &active_path)
+        .expect("a parked producer worker borrows a producer permit for its nested producer");
+    assert_eq!(nested_job.identity, nested_id);
+    assert_eq!(dag.in_flight_producer_permits(), 2);
+    assert_eq!(dag.in_flight_cpu_permits(), 1);
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Active-path skip + caller-class preference (preserved)
 // ──────────────────────────────────────────────────────────────────

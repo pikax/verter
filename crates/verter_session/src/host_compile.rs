@@ -792,6 +792,7 @@ impl VerterHost {
                 verter_scheduler::caller_kind::CallerKind::CpuWorker => 3,
                 verter_scheduler::caller_kind::CallerKind::IoWorker => 4,
                 verter_scheduler::caller_kind::CallerKind::Inline => 5,
+                verter_scheduler::caller_kind::CallerKind::ProducerWorker => 6,
             };
             self.test_force
                 .compile_one_caller_kind_tag

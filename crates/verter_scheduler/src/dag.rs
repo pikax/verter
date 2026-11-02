@@ -1796,7 +1796,8 @@ impl SchedulerDag {
     ///
     /// Every class is loanable. A CPU worker loans a CPU or producer
     /// permit to inline-execute a CPU dep; an I/O worker loans an I/O permit to inline-execute an I/O
-    /// dep (a Source-stage load). The caller's
+    /// dep (a Source-stage load); a producer worker loans only a producer
+    /// permit, for the nested producer it is parked on. The caller's
     /// [`next_ready_for_pump`] only routes a loan when the
     /// `caller_kind` matches the class — IoWorker × Cpu is NOT
     /// routed to a loan (the IoWorker has no business running
@@ -2659,8 +2660,10 @@ impl SchedulerDag {
         // class to inline-run a transitive dep.
 
         // Whether this caller may over-admit `class` when parked: Cpu and
-        // Producer for CpuWorker|Inline, Io for IoWorker, and only when the
-        // caller is actually parked (active_path non-empty).
+        // Producer for CpuWorker|Inline, Io for IoWorker, Producer alone for
+        // ProducerWorker (a nested producer it is parked on; the stages it
+        // waits on never need a loan because no stage waits for a producer),
+        // and only when the caller is actually parked (active_path non-empty).
         let may_loan = |class: ResourceClass| {
             !active_path.is_empty()
                 && match caller_kind {
@@ -2669,7 +2672,11 @@ impl SchedulerDag {
                         matches!(class, ResourceClass::Cpu | ResourceClass::Producer)
                     }
                     crate::caller_kind::CallerKind::IoWorker => class == ResourceClass::Io,
-                    _ => false,
+                    crate::caller_kind::CallerKind::ProducerWorker => {
+                        class == ResourceClass::Producer
+                    }
+                    crate::caller_kind::CallerKind::Driver
+                    | crate::caller_kind::CallerKind::External => false,
                 }
         };
 

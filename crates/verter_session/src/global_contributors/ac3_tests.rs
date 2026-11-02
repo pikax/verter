@@ -225,7 +225,9 @@ fn contributor_ingestion_waits_for_its_index_producer_outside_admission() {
                 let _ = host.ensure_indexed_ready_serve("/producer.d.ts");
             })
         };
-        at_seam_rx.recv().expect("the producer reached the seam");
+        at_seam_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the producer reached the seam within 10 seconds");
 
         // Ingestion owns admission when this fires, so the resumed producer
         // queues behind it; the producer's flight is still in progress.
@@ -259,8 +261,6 @@ fn contributor_ingestion_waits_for_its_index_producer_outside_admission() {
                 .is_ok(),
             "{route:?} ingestion must not hold admission across the producer it joined"
         );
-        ingestion.join().expect("ingestion finished");
-        producer.join().expect("the producer finished");
         assert!(
             host.project_type_store()
                 .indexed()
@@ -268,6 +268,8 @@ fn contributor_ingestion_waits_for_its_index_producer_outside_admission() {
                 .is_some(),
             "{route:?} ingestion returns only once its contributor is IndexedReady"
         );
+        ingestion.join().expect("ingestion finished");
+        producer.join().expect("the producer finished");
     }
 }
 

@@ -959,13 +959,21 @@ impl Scheduler {
     /// wakes the computation.
     pub fn dispatch_for_pending_dependency(self: &Arc<Self>) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        let progress = self
-            .pump_ready_with_path(
-                PumpReason::WaitOrDrive,
-                caller_kind::CallerKind::current(),
-                &caller_kind::snapshot_active_path(),
-            )
-            .made_progress();
+        let progress = match caller_kind::CallerKind::current() {
+            // A producer worker leaves stages to the stage workers while a
+            // driver delivers their completions; without one it is the only
+            // thread that can run them.
+            caller_kind::CallerKind::ProducerWorker if !self.has_driver_thread() => {
+                self.drive_one()
+            }
+            caller => self
+                .pump_ready_with_path(
+                    PumpReason::WaitOrDrive,
+                    caller,
+                    &caller_kind::snapshot_active_path(),
+                )
+                .made_progress(),
+        };
         #[cfg(target_arch = "wasm32")]
         let progress = self.drive_one();
         progress
@@ -2493,9 +2501,10 @@ impl Scheduler {
     ///
     /// Behaviour by caller kind:
     ///
-    /// - **`Driver` / `External`** with a live driver thread: park
-    ///   on the condvar. The driver pumps; the waiter has no work
-    ///   to share.
+    /// - **`Driver` / `External` / `ProducerWorker`** with a live
+    ///   driver thread: park on the condvar. The driver pumps; the
+    ///   waiter has no work to share, and a producer worker never
+    ///   runs a file stage.
     /// - **`CpuWorker` / `IoWorker`**: enter the cooperative pump.
     ///   Each iteration runs `pump_ready_with_path` (so the DAG
     ///   never returns an identity the calling worker is itself
@@ -2574,8 +2583,14 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let has_driver = self.driver_handle.lock().is_some();
-            if has_driver && matches!(caller_kind, CallerKind::Driver | CallerKind::External) {
-                // No work to share — park on the condvar.
+            if has_driver
+                && matches!(
+                    caller_kind,
+                    CallerKind::Driver | CallerKind::External | CallerKind::ProducerWorker
+                )
+            {
+                // No work to share — park on the condvar. A producer worker
+                // parks too: the driver hands the stage to a stage worker.
                 return handle.wait();
             }
             if has_driver && matches!(caller_kind, CallerKind::CpuWorker | CallerKind::IoWorker) {
@@ -16244,6 +16259,7 @@ mod tests {
                     crate::caller_kind::CallerKind::CpuWorker => 3,
                     crate::caller_kind::CallerKind::IoWorker => 4,
                     crate::caller_kind::CallerKind::Inline => 5,
+                    crate::caller_kind::CallerKind::ProducerWorker => 6,
                 }
             }
             impl crate::execution::executor::StageExecutor for CallerKindProbe {
@@ -16370,6 +16386,28 @@ mod tests {
                 analysis_cpu_token.load(AtomOrd::SeqCst),
                 sched.cpu_pool.pool_id(),
                 "Analysis worker must carry THIS scheduler CPU pool's identity token"
+            );
+
+            // A producer worker waiting on a stage leaves it to a stage
+            // worker: the stage never runs on the producer (code 6).
+            analysis_kind.store(0, AtomOrd::SeqCst);
+            let handle = sched.submit_request(Request {
+                file_id: "/y.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("<template>y</template>")),
+                file_language: None,
+                request_context: None,
+            });
+            let state = sched.cpu_pool.install(|| sched.wait_or_drive(&handle));
+            assert!(
+                matches!(state, CompletionState::Ready(_)),
+                "request must complete: {state:?}"
+            );
+            assert_eq!(
+                analysis_kind.load(AtomOrd::SeqCst),
+                3,
+                "a stage a producer worker waits on must run on a stage worker"
             );
         }
 
