@@ -324,7 +324,7 @@
       "operationsOwner": "CSS6",
       "formatOwner": "FMTCS0",
       "transform": {
-        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: preprocessBlock -> preprocessStyle optional Sass -> applyBlockOverrides. Separate configured worker route: core/style-preprocess-worker.{ts,mjs}.",
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: preprocessBlock -> preprocessStyle optional Sass -> applyBlockOverrides. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
         "engine": "sass / sass-embedded",
         "version": "1.106.1",
         "versionReason": "Both exact lock entries; workspace-resolved engines still require actual version evidence.",
@@ -585,7 +585,7 @@
         "syntaxProfile": "scss authored style",
         "grammarVersion": "No full language release conformance qualified",
         "parserEpoch": 1,
-        "epochBasis": "currentNativeSource"
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
       },
       "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
       "fullAuthoredIntelligence": false
@@ -606,7 +606,7 @@
       "operationsOwner": "CSS6",
       "formatOwner": "FMTCL0",
       "transform": {
-        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in less preprocessStyle compiler branch. Separate configured worker route: core/style-preprocess-worker.{ts,mjs}.",
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in less preprocessStyle compiler branch. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
         "engine": "less",
         "version": "4.9.1",
         "versionReason": "pnpm lock entry; not a Verter grammar support declaration.",
@@ -867,7 +867,7 @@
         "syntaxProfile": "less authored style",
         "grammarVersion": "No full language release conformance qualified",
         "parserEpoch": 1,
-        "epochBasis": "currentNativeSource"
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
       },
       "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
       "fullAuthoredIntelligence": false
@@ -888,7 +888,7 @@
       "operationsOwner": "CSS6",
       "formatOwner": "FMTSA0",
       "transform": {
-        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: preprocessBlock -> preprocessStyle optional Sass -> applyBlockOverrides. Separate configured worker route: core/style-preprocess-worker.{ts,mjs}.",
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: preprocessBlock -> preprocessStyle optional Sass -> applyBlockOverrides. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
         "engine": "sass / sass-embedded",
         "version": "1.106.1",
         "versionReason": "Locked build tools; VS Code resolves workspace sass and records its banner version separately.",
@@ -1149,7 +1149,7 @@
         "syntaxProfile": "sass-indented authored style",
         "grammarVersion": "No full language release conformance qualified",
         "parserEpoch": 1,
-        "epochBasis": "currentNativeSource"
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
       },
       "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
       "fullAuthoredIntelligence": false
@@ -1170,7 +1170,7 @@
       "operationsOwner": "CSS6",
       "formatOwner": "FMTST0",
       "transform": {
-        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in stylus preprocessStyle compiler branch. Separate configured worker route: core/style-preprocess-worker.{ts,mjs}.",
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in stylus preprocessStyle compiler branch. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
         "engine": "stylus",
         "version": null,
         "versionReason": "No stylus lock entry; workspace version is observed, not assumed.",
@@ -1431,7 +1431,7 @@
         "syntaxProfile": "stylus authored style",
         "grammarVersion": "No full language release conformance qualified",
         "parserEpoch": 1,
-        "epochBasis": "currentNativeSource"
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
       },
       "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
       "fullAuthoredIntelligence": false
@@ -1452,7 +1452,7 @@
       "operationsOwner": "CSS6",
       "formatOwner": null,
       "transform": {
-        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in custom-postcss preprocessStyle compiler branch. Separate configured worker route: core/style-preprocess-worker.{ts,mjs}.",
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in custom-postcss preprocessStyle compiler branch. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
         "engine": "postcss plus explicit provider/plugin chain",
         "version": "8.5.31",
         "versionReason": "Vite 8.3.5 lock dependency; 8.5.20 also exists transitively. Neither pins arbitrary custom syntax.",
@@ -1478,10 +1478,12 @@
         {
           "hostProfile": "rust-lsp",
           "operations": ["completion"],
-          "resultClass": "unsupported",
-          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "resultClass": "unqualified",
+          "detail": "Compatibility route, not authored dialect completion: css_completions selects the block by tag with no lang check, and class_extraction_dialect reads PostCss/Unknown as CSS for CSS-module class names. No exact grammar evidence",
           "evidence": [
             "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_lsp/src/css/mod.rs",
+            "crates/verter_compiler/src/compile/mod.rs",
             "crates/verter_session/tests/cases/style_dialect_admission.rs"
           ]
         },
@@ -1719,17 +1721,31 @@
     "format": "DIAL4 Pug; FMTCS0 SCSS; FMTCL0 Less; FMTSA0 indented Sass; FMTST0 Stylus. DIAL8 owns consumer handoff and per-provider custom format admission; arbitrary custom grammars stay unsupported.",
     "lint": "DIAL4L Pug; LCS8 SCSS/Less semantic correctness; no new dialect lint service here",
     "transformIdentity": "STP38; DIAL7 adapters",
-    "publicDelivery": "each producer AC4: VIM/DX exact cells, DOC1-tested examples/reference, permissions/uncertainty/migration; product terminal audits real evidence",
-    "hostAdmission": "Existing VerterHost block_content admission with native/WASM bindings survives; STP38 transform identity and DIAL7 adapters integrate this boundary, using EMB0I map composition"
+    "publicDelivery": "each producer AC4: VIM/DX exact cells, DOC1-tested examples/reference, permissions/uncertainty/migration; DIAL10 checks real completed artifacts, not templates or screenshots",
+    "hostAdmission": "Existing VerterHost block_content admission with its NAPI binding survives; STP38 transform identity and DIAL7 adapters integrate this boundary, using EMB0I map composition. WASM exports no admission today; DIAL7 owns adding one thin binding over this boundary or recording it unsupported"
   },
   "deletionSet": [],
   "deletionRationale": "Additive contract data only; current runtime routes are retained. README assigns concrete later reconciliation/cutover owners.",
   "conditions": [
     "Formatter or generated-output evidence alone cannot qualify full authored language intelligence.",
     "Authored automatic edits require an exact reversible current origin chain.",
-    "Runtime compilation requires explicit trust and actual producer/config/build/session evidence."
+    "Runtime compilation requires explicit trust and actual producer/config/build/session evidence.",
+    "DIAL1 retains the neutral Pug home H09 and proves its dependency boundary with a discriminating executable check.",
+    "Custom provider formatting requires an exact native grammar/view owner; DIAL8 rejects wrong-grammar and transform-only admission with a discriminating executable integration check."
   ],
   "conditionJustifications": [
+    {
+      "condition": "DIAL1 retains the neutral Pug home H09 and proves its dependency boundary with a discriminating executable check.",
+      "concern": "correctness",
+      "prevents": "The planned neutral parser entering the vertical carrier or parser-free dependency closure.",
+      "notCoveredBecause": "Ordinary parse fixtures cannot enforce PAR PD08/CL09/H09 placement."
+    },
+    {
+      "condition": "Custom provider formatting requires an exact native grammar/view owner; DIAL8 rejects wrong-grammar and transform-only admission with a discriminating executable integration check.",
+      "concern": "correctness",
+      "prevents": "Plausible false formatting support inferred from a successful PostCSS transform/stringifier.",
+      "notCoveredBecause": "Compilation evidence does not prove the lossless view and edit provenance required by FD06/FD08/FD09."
+    },
     {
       "condition": "Formatter or generated-output evidence alone cannot qualify full authored language intelligence.",
       "concern": "correctness",
@@ -1749,7 +1765,7 @@
       "notCoveredBecause": "Static syntax CI does not establish permission or identify the actual workspace compiler."
     }
   ],
-  "cellEncoding": "Each row expands operations into separate cells. Dialect grammarIdentity plus hostProfiles[hostProfile] supply the grammar/version, parser epoch, syntax profile, host/profile and source/config/build basis; each expanded cell has one resultClass, detail and evidence. Every listed operation occurs exactly once per host per dialect. Evidence is static current-source inspection and named existing tests, not a claim those tests or external engines ran in DIAL0.",
+  "cellEncoding": "Each row expands operations into separate cells. Dialect grammarIdentity plus hostProfiles[hostProfile] supply the grammar/version, parser epoch, syntax profile, host/profile and source/config/build basis, with the parser epoch applying only where the host profile's engine runs that parser; each expanded cell has one resultClass, detail and evidence. Every listed operation occurs exactly once per host per dialect. Evidence is static current-source inspection and named existing tests, not a claim those tests or external engines ran in DIAL0.",
   "requiredOperations": [
     "authoredParse",
     "recovery",
@@ -1797,12 +1813,13 @@
       "buildBasis": "Current route source only; optional workspace engines unqualified"
     },
     "host-overrides": {
-      "host": "VerterHost via native/WASM bindings",
+      "host": "VerterHost via the NAPI binding; WASM surfaces requests but exports no admission",
       "profile": "HostPreprocessorRequest / applyBlockOverrides admission, independent of producer availability",
       "engine": "No compiler or authored language service in this boundary",
       "sourceBasis": "Host-captured owner/artifact/block/basis identity and supplied code/map",
       "configBasis": "Captured expected language and current source-map validation",
-      "buildBasis": "crates/verter_session/src/block_content.rs; crates/verter_napi/src/lib.rs; crates/verter_wasm/src/lib.rs"
+      "buildBasis": "crates/verter_session/src/block_content.rs; crates/verter_napi/src/lib.rs",
+      "bindingScope": "applyBlockOverrides is exported by crates/verter_napi/src/lib.rs only, so these cells resolve for that binding alone. WasmVerterHost::upsert returns preprocessorRequests through crates/verter_ffi/src/convert/output.rs, but crates/verter_wasm/src/lib.rs lists the handshake as NAPI-only, so a WASM caller cannot supply code or a map for a processed block. DIAL7 owns the disposition: add one thin binding over this same boundary or record WASM admission unsupported."
     }
   }
 }
