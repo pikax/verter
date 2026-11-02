@@ -1296,7 +1296,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// [`Self::absent_read_answer`] as one operation of this dispatcher, for a
-    /// request whose own builder owns what it constructs.
+    /// request whose own builder owns what it constructs. The request's answer
+    /// is the end of the chain, so an access the walk kept as a shell for want
+    /// of an object it could read is decided here too.
     pub fn published_absent_read_answer(
         &self,
         origin: crate::semantic_query::IndexedAccessOrigin,
@@ -1306,6 +1308,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
         let _operation = self.enter_operation(false);
+        if matches!(
+            self.graph().node_data(value).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) {
+            return self.absent_access_answer(origin, object, index, context);
+        }
         self.absent_read_answer(origin, value, object, index, context)
     }
 
@@ -1326,15 +1334,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether the read `value` of an access found nothing for a key: the
-    /// typed miss, whole or as an arm of a union index's answer, or the access
-    /// kept as a shell for want of an object the walk could read.
+    /// typed miss, whole or as an arm of a union index's answer.
     fn read_holds_miss(&self, value: SemanticNodeId) -> bool {
         let miss = |data: Option<&SemanticNodeData>| {
             matches!(data, Some(SemanticNodeData::Opaque(QueryError::Miss)))
         };
         let data = self.graph().node_data(value);
         match data.as_deref() {
-            Some(SemanticNodeData::IndexedAccess { .. }) => true,
             Some(SemanticNodeData::Union(arms)) => arms
                 .iter()
                 .any(|arm| miss(self.graph().node_data(*arm).as_deref())),

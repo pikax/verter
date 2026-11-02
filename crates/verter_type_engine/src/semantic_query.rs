@@ -4621,7 +4621,7 @@ pub struct SurfaceView {
     has_index_signature: bool,
     /// Names this surface leaves out although the declarations behind it may
     /// well answer them: a missing member proves nothing about these.
-    withheld_keys: Arc<[verter_type_expr::OwnedStr]>,
+    withheld_keys: Option<Arc<[verter_type_expr::OwnedStr]>>,
 }
 
 impl SurfaceView {
@@ -5223,7 +5223,7 @@ impl SurfaceView {
             index_signatures,
             keyspace,
             has_index_signature,
-            withheld_keys: Arc::from([]),
+            withheld_keys: None,
         }
     }
 
@@ -5256,27 +5256,30 @@ impl SurfaceView {
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace,
             has_index_signature,
-            withheld_keys: Arc::from([]),
+            withheld_keys: None,
         }
     }
 
     /// This surface, leaving out the names `withheld`.
     #[must_use]
     pub(crate) fn withholding_keys(mut self, withheld: Vec<verter_type_expr::OwnedStr>) -> Self {
-        self.withheld_keys = Arc::from(withheld.into_boxed_slice());
+        self.withheld_keys = (!withheld.is_empty()).then(|| Arc::from(withheld.into_boxed_slice()));
         self
     }
 
     /// Hand each name this surface withholds to `encode`, in order.
     pub(crate) fn encode_withheld_keys(&self, mut encode: impl FnMut(&str)) {
-        for key in self.withheld_keys.iter() {
+        for key in self.withheld_keys.iter().flat_map(|keys| keys.iter()) {
             encode(key.as_ref());
         }
     }
 
     /// Whether this surface leaves `name` out without proving it absent.
     pub(crate) fn withholds_key(&self, name: &str) -> bool {
-        self.withheld_keys.iter().any(|key| key.as_ref() == name)
+        self.withheld_keys
+            .iter()
+            .flat_map(|keys| keys.iter())
+            .any(|key| key.as_ref() == name)
     }
 
     pub fn from_init(init: SurfaceViewInit) -> Self {

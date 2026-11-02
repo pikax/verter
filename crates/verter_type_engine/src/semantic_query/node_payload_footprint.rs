@@ -456,7 +456,9 @@ impl PayloadHeap for SurfaceView {
         visit_arc_slice(index_signatures, visitor);
         keyspace.visit_payload_heap(visitor);
         has_index_signature.visit_payload_heap(visitor);
-        visit_arc_slice(withheld_keys, visitor);
+        if let Some(withheld_keys) = withheld_keys {
+            visit_arc_slice(withheld_keys, visitor);
+        }
     }
 }
 
