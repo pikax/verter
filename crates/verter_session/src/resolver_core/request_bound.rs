@@ -29,9 +29,10 @@ use verter_type_engine::request_context::{ObserveExec, Uncaptured};
 
 fn observe_availability(
     canonical: &str,
-    serve: &crate::host_manage::prepared_decl::IndexedReadyServe,
+    store_published: bool,
+    route_interface_hash: verter_session_query::analysis::types::Hash16,
 ) {
-    if !serve.store_published {
+    if !store_published {
         note_non_cacheable_read_fan_out(NonCacheableReadReason::FencedServe);
     }
     // This port exposes only availability, not the source payload or its
@@ -41,9 +42,7 @@ fn observe_availability(
         canonical_id: canonical.into(),
         key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
         lane: verter_session_query::facts::FactLane::Semantic,
-        expected_hash: crate::resolver_store::syntactic_route_interface_hash(
-            &serve.indexed.shallow_state,
-        ),
+        expected_hash: route_interface_hash,
     }));
 }
 
@@ -199,6 +198,12 @@ impl IndexedInputs for crate::VerterHost {
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        if let Some(serve) = retained_indexed_input(self, canonical_id) {
+            return Some(serve);
+        }
+        if consumed_load_ended(self, canonical_id) {
+            return None;
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id).map(|serve| {
             super::owned_lowering_port::observe_whole_content(
                 canonical_id,
@@ -209,8 +214,15 @@ impl IndexedInputs for crate::VerterHost {
     }
 
     fn source_is_available(&self, canonical: &str) -> bool {
+        if let Some(available) = consumed_availability(self, canonical) {
+            return available;
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical).is_some_and(|serve| {
-            observe_availability(canonical, &serve);
+            observe_availability(
+                canonical,
+                serve.store_published,
+                crate::resolver_store::syntactic_route_interface_hash(&serve.indexed.shallow_state),
+            );
             true
         })
     }
@@ -707,7 +719,11 @@ pub(crate) trait RequestBoundLifecycle: Sync {
         &self,
         canonical_id: &str,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
-        crate::VerterHost::begin_indexed_ready_load(self.host(), canonical_id)
+        crate::VerterHost::begin_indexed_ready_load_for(
+            self.host(),
+            canonical_id,
+            &self.request_view().overlay().input_artifacts,
+        )
     }
 
     fn shallow_file_state(
@@ -969,6 +985,13 @@ where
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        if let Some(serve) = retained_indexed_input(self.0.host(), canonical_id) {
+            self.0.complete_canonical(canonical_id);
+            return Some(serve);
+        }
+        if consumed_load_ended(self.0.host(), canonical_id) {
+            return None;
+        }
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::ensure_indexed_ready_serve"
         );
@@ -991,11 +1014,23 @@ where
     }
 
     fn source_is_available(&self, canonical: &str) -> bool {
+        if let Some(available) = consumed_availability(self.0.host(), canonical) {
+            if available {
+                self.0.complete_canonical(canonical);
+            }
+            return available;
+        }
         self.0
             .materialize_indexed_ready_serve(canonical)
             .is_some_and(|serve| {
                 self.0.complete_canonical(canonical);
-                observe_availability(canonical, &serve);
+                observe_availability(
+                    canonical,
+                    serve.store_published,
+                    crate::resolver_store::syntactic_route_interface_hash(
+                        &serve.indexed.shallow_state,
+                    ),
+                );
                 true
             })
     }
@@ -1897,6 +1932,75 @@ where
             .request_view()
             .promote_route_completion(canonical, whole_hash, route_hash)
     }
+}
+
+/// Whether this reader already waited on a load of `canonical` that ended
+/// without a delivery. The reader answers with that outcome, as after a
+/// synchronous load that ended the same way, and never materializes the file
+/// again on the polling thread.
+fn consumed_load_ended(host: &crate::VerterHost, canonical: &str) -> bool {
+    let canonical = host.normalized_analysis_canonical(canonical);
+    verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
+        host.normalized_analysis_canonical(file) == canonical
+    })
+    .is_some()
+}
+
+/// The load delivery this reader already consumed for `canonical`.
+fn consumed_delivery(host: &crate::VerterHost, canonical: &str) -> Option<IndexedInputServe> {
+    let canonical = host.normalized_analysis_canonical(canonical);
+    verter_type_engine::resolver_core::request_ports::consumed_indexed_input(|file| {
+        host.normalized_analysis_canonical(file) == canonical
+    })
+}
+
+/// A file's availability as this reader's consumed load already answered it:
+/// present through its delivery, absent through a load that ended without
+/// one. `None` leaves the question to a live serve.
+fn consumed_availability(host: &crate::VerterHost, canonical: &str) -> Option<bool> {
+    if let Some(serve) = consumed_delivery(host, canonical) {
+        observe_availability(
+            canonical,
+            serve.store_published,
+            verter_session_query::inputs::route_surface::syntactic_route_interface_hash(
+                &serve.indexed.shallow_state,
+            ),
+        );
+        return Some(true);
+    }
+    consumed_load_ended(host, canonical).then_some(false)
+}
+
+/// Consume a load delivery through the same input observations as a live
+/// serve, preserving its ReturnOnly status without rematerializing it.
+fn retained_indexed_input(host: &crate::VerterHost, canonical: &str) -> Option<IndexedInputServe> {
+    let serve = consumed_delivery(host, canonical)?;
+    let canonical = host.normalized_analysis_canonical(canonical);
+    super::owned_lowering_port::observe_whole_content(&canonical, serve.indexed.whole_hash);
+    if serve.store_published
+        && verter_type_engine::resolver_core::resolver_context::fact_tracer_installed()
+    {
+        if let Some(artifacts) = host.current_content_pinned_artifacts(&canonical) {
+            if Arc::ptr_eq(&artifacts.indexed.input_record(), &serve.indexed)
+                && host.indexed_surface_is_current(&canonical, &artifacts.indexed)
+            {
+                if let Some(fact) = crate::VerterHost::syntactic_route_interface_fact_of(
+                    Arc::from(canonical.as_ref()),
+                    &artifacts,
+                ) {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
+                    );
+                }
+            }
+        }
+    }
+    if !serve.store_published {
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+        );
+    }
+    Some(serve)
 }
 
 #[cfg(test)]

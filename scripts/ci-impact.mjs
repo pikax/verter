@@ -319,6 +319,9 @@ export const PATH_FILTERS = Object.freeze({
   // rules. A script a lane executes is named in that lane's filter as well.
   scripts: [
     "scripts/**",
+    "tests/formatter/**",
+    "catalogs/formatter-*.toml",
+    "fixtures/formatter/**",
     ".github/workflows/nightly.yml",
     ".github/workflows/tsserver-nightly.yml",
     ".github/workflows/release-check.yml",

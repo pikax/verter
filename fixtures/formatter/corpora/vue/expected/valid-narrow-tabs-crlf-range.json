@@ -1,0 +1,29 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/vue/expected/valid-narrow-tabs-crlf.txt",
+  "normalized_options": {
+    "printWidth": 24,
+    "tabWidth": 4,
+    "useTabs": true,
+    "endOfLine": "crlf"
+  },
+  "request": {
+    "mode": "range",
+    "range": [
+      0,
+      227
+    ],
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": [
+    0,
+    227
+  ],
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/vue/expected/valid-narrow-tabs-crlf.txt",
+    "edits": []
+  },
+  "divergence": null
+}

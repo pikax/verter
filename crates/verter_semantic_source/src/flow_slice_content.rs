@@ -2954,6 +2954,7 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
 /// [`SliceFreshness`] for the alignment contract with `lower_expr`.
 fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
     match expression {
+        Expression::TSAsExpression(_) | Expression::TSTypeAssertion(_) => SliceFreshness::Asserted,
         Expression::ParenthesizedExpression(paren) => expression_freshness(&paren.expression),
         // An `await x` publishes its OPERAND's value through the lib
         // `Awaited` surface, which passes a settled literal through

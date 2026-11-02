@@ -1,0 +1,18 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/css/expected/valid-markup-strict.txt",
+  "normalized_options": {},
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 10
+  },
+  "formatted_cursor": 10,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/css/expected/valid-markup-strict.txt",
+    "edits": []
+  },
+  "divergence": null
+}

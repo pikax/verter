@@ -1,0 +1,1160 @@
+{
+  "sources": [
+    {
+      "fixture_id": "project-source-000",
+      "canonical_source": "memory:///formatter/project/source-000.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-001",
+      "canonical_source": "memory:///formatter/project/source-001.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-002",
+      "canonical_source": "memory:///formatter/project/source-002.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-003",
+      "canonical_source": "memory:///formatter/project/source-003.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-004",
+      "canonical_source": "memory:///formatter/project/source-004.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-005",
+      "canonical_source": "memory:///formatter/project/source-005.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-006",
+      "canonical_source": "memory:///formatter/project/source-006.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-007",
+      "canonical_source": "memory:///formatter/project/source-007.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-008",
+      "canonical_source": "memory:///formatter/project/source-008.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-009",
+      "canonical_source": "memory:///formatter/project/source-009.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-010",
+      "canonical_source": "memory:///formatter/project/source-010.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-011",
+      "canonical_source": "memory:///formatter/project/source-011.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-012",
+      "canonical_source": "memory:///formatter/project/source-012.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-013",
+      "canonical_source": "memory:///formatter/project/source-013.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-014",
+      "canonical_source": "memory:///formatter/project/source-014.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-015",
+      "canonical_source": "memory:///formatter/project/source-015.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-016",
+      "canonical_source": "memory:///formatter/project/source-016.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-017",
+      "canonical_source": "memory:///formatter/project/source-017.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-018",
+      "canonical_source": "memory:///formatter/project/source-018.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-019",
+      "canonical_source": "memory:///formatter/project/source-019.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-020",
+      "canonical_source": "memory:///formatter/project/source-020.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-021",
+      "canonical_source": "memory:///formatter/project/source-021.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-022",
+      "canonical_source": "memory:///formatter/project/source-022.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-023",
+      "canonical_source": "memory:///formatter/project/source-023.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-024",
+      "canonical_source": "memory:///formatter/project/source-024.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-025",
+      "canonical_source": "memory:///formatter/project/source-025.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-026",
+      "canonical_source": "memory:///formatter/project/source-026.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-027",
+      "canonical_source": "memory:///formatter/project/source-027.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-028",
+      "canonical_source": "memory:///formatter/project/source-028.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-029",
+      "canonical_source": "memory:///formatter/project/source-029.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-030",
+      "canonical_source": "memory:///formatter/project/source-030.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-031",
+      "canonical_source": "memory:///formatter/project/source-031.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-032",
+      "canonical_source": "memory:///formatter/project/source-032.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-033",
+      "canonical_source": "memory:///formatter/project/source-033.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-034",
+      "canonical_source": "memory:///formatter/project/source-034.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-035",
+      "canonical_source": "memory:///formatter/project/source-035.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-036",
+      "canonical_source": "memory:///formatter/project/source-036.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-037",
+      "canonical_source": "memory:///formatter/project/source-037.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-038",
+      "canonical_source": "memory:///formatter/project/source-038.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-039",
+      "canonical_source": "memory:///formatter/project/source-039.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-040",
+      "canonical_source": "memory:///formatter/project/source-040.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-041",
+      "canonical_source": "memory:///formatter/project/source-041.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-042",
+      "canonical_source": "memory:///formatter/project/source-042.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-043",
+      "canonical_source": "memory:///formatter/project/source-043.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-044",
+      "canonical_source": "memory:///formatter/project/source-044.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-045",
+      "canonical_source": "memory:///formatter/project/source-045.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-046",
+      "canonical_source": "memory:///formatter/project/source-046.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-047",
+      "canonical_source": "memory:///formatter/project/source-047.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-048",
+      "canonical_source": "memory:///formatter/project/source-048.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-049",
+      "canonical_source": "memory:///formatter/project/source-049.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-050",
+      "canonical_source": "memory:///formatter/project/source-050.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-051",
+      "canonical_source": "memory:///formatter/project/source-051.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-052",
+      "canonical_source": "memory:///formatter/project/source-052.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-053",
+      "canonical_source": "memory:///formatter/project/source-053.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-054",
+      "canonical_source": "memory:///formatter/project/source-054.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-055",
+      "canonical_source": "memory:///formatter/project/source-055.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-056",
+      "canonical_source": "memory:///formatter/project/source-056.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-057",
+      "canonical_source": "memory:///formatter/project/source-057.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-058",
+      "canonical_source": "memory:///formatter/project/source-058.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-059",
+      "canonical_source": "memory:///formatter/project/source-059.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-060",
+      "canonical_source": "memory:///formatter/project/source-060.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-061",
+      "canonical_source": "memory:///formatter/project/source-061.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-062",
+      "canonical_source": "memory:///formatter/project/source-062.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-063",
+      "canonical_source": "memory:///formatter/project/source-063.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-064",
+      "canonical_source": "memory:///formatter/project/source-064.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-065",
+      "canonical_source": "memory:///formatter/project/source-065.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-066",
+      "canonical_source": "memory:///formatter/project/source-066.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-067",
+      "canonical_source": "memory:///formatter/project/source-067.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-068",
+      "canonical_source": "memory:///formatter/project/source-068.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-069",
+      "canonical_source": "memory:///formatter/project/source-069.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-070",
+      "canonical_source": "memory:///formatter/project/source-070.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-071",
+      "canonical_source": "memory:///formatter/project/source-071.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-072",
+      "canonical_source": "memory:///formatter/project/source-072.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-073",
+      "canonical_source": "memory:///formatter/project/source-073.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-074",
+      "canonical_source": "memory:///formatter/project/source-074.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-075",
+      "canonical_source": "memory:///formatter/project/source-075.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-076",
+      "canonical_source": "memory:///formatter/project/source-076.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-077",
+      "canonical_source": "memory:///formatter/project/source-077.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-078",
+      "canonical_source": "memory:///formatter/project/source-078.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-079",
+      "canonical_source": "memory:///formatter/project/source-079.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-080",
+      "canonical_source": "memory:///formatter/project/source-080.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-081",
+      "canonical_source": "memory:///formatter/project/source-081.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-082",
+      "canonical_source": "memory:///formatter/project/source-082.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-083",
+      "canonical_source": "memory:///formatter/project/source-083.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-084",
+      "canonical_source": "memory:///formatter/project/source-084.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-085",
+      "canonical_source": "memory:///formatter/project/source-085.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-086",
+      "canonical_source": "memory:///formatter/project/source-086.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-087",
+      "canonical_source": "memory:///formatter/project/source-087.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-088",
+      "canonical_source": "memory:///formatter/project/source-088.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-089",
+      "canonical_source": "memory:///formatter/project/source-089.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-090",
+      "canonical_source": "memory:///formatter/project/source-090.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-091",
+      "canonical_source": "memory:///formatter/project/source-091.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-092",
+      "canonical_source": "memory:///formatter/project/source-092.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-093",
+      "canonical_source": "memory:///formatter/project/source-093.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-094",
+      "canonical_source": "memory:///formatter/project/source-094.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-095",
+      "canonical_source": "memory:///formatter/project/source-095.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-096",
+      "canonical_source": "memory:///formatter/project/source-096.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-097",
+      "canonical_source": "memory:///formatter/project/source-097.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-098",
+      "canonical_source": "memory:///formatter/project/source-098.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-099",
+      "canonical_source": "memory:///formatter/project/source-099.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-100",
+      "canonical_source": "memory:///formatter/project/source-100.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-101",
+      "canonical_source": "memory:///formatter/project/source-101.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-102",
+      "canonical_source": "memory:///formatter/project/source-102.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-103",
+      "canonical_source": "memory:///formatter/project/source-103.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-104",
+      "canonical_source": "memory:///formatter/project/source-104.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-105",
+      "canonical_source": "memory:///formatter/project/source-105.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-106",
+      "canonical_source": "memory:///formatter/project/source-106.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-107",
+      "canonical_source": "memory:///formatter/project/source-107.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-108",
+      "canonical_source": "memory:///formatter/project/source-108.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-109",
+      "canonical_source": "memory:///formatter/project/source-109.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-110",
+      "canonical_source": "memory:///formatter/project/source-110.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-111",
+      "canonical_source": "memory:///formatter/project/source-111.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-112",
+      "canonical_source": "memory:///formatter/project/source-112.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-113",
+      "canonical_source": "memory:///formatter/project/source-113.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-114",
+      "canonical_source": "memory:///formatter/project/source-114.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-115",
+      "canonical_source": "memory:///formatter/project/source-115.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-116",
+      "canonical_source": "memory:///formatter/project/source-116.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-117",
+      "canonical_source": "memory:///formatter/project/source-117.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-118",
+      "canonical_source": "memory:///formatter/project/source-118.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-119",
+      "canonical_source": "memory:///formatter/project/source-119.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-120",
+      "canonical_source": "memory:///formatter/project/source-120.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-121",
+      "canonical_source": "memory:///formatter/project/source-121.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-122",
+      "canonical_source": "memory:///formatter/project/source-122.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-123",
+      "canonical_source": "memory:///formatter/project/source-123.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-124",
+      "canonical_source": "memory:///formatter/project/source-124.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-125",
+      "canonical_source": "memory:///formatter/project/source-125.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-126",
+      "canonical_source": "memory:///formatter/project/source-126.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    },
+    {
+      "fixture_id": "project-source-127",
+      "canonical_source": "memory:///formatter/project/source-127.vue",
+      "open_revision": 0,
+      "close_initial_revisions": [
+        0,
+        1
+      ]
+    }
+  ],
+  "open": "cache-empty; no pipeline work",
+  "close": "admit revisions in source order then revision order under all global/source caps; close all sources",
+  "close_max_lookups": 128,
+  "close_max_removals": 64
+}

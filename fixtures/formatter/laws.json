@@ -1,0 +1,266 @@
+{
+  "schema": 1,
+  "coordinates": {
+    "input": "AuthoredFormatByteOffset/AuthoredFormatByteRange, complete authored UTF-8 carrier",
+    "output": "FormattedByteOffset/FormattedByteRange, rendered UTF-8",
+    "implicit_conversion": false,
+    "generated_tsx_reuse": false,
+    "invalid_scalar_or_surrogate_boundary": "reject; never clamp"
+  },
+  "renderer": {
+    "group": "try flat using pinned Prettier string-width semantics: ANSI controls and combining U+0300-U+036F width 0, East Asian fullwidth and emoji width 2, other scalars width 1; tabs advance to next tabWidth stop; first hardline forces break; suffixes flush in source order before newline",
+    "newline": "configured LF/CRLF/CR, auto uses first source line ending; literal/raw/recovery bytes never normalized",
+    "final_newline": "one configured final newline for nonempty formatted syntax; empty stays empty; retained islands unchanged",
+    "width_cases": [
+      {
+        "text": "é🙂",
+        "columns": 3
+      },
+      {
+        "text": "é",
+        "columns": 1
+      },
+      {
+        "text": "\tX",
+        "tabWidth": 4,
+        "columns": 5
+      }
+    ],
+    "order": "source order, independent of registration and scheduling"
+  },
+  "edits": {
+    "algorithm": "Use ordered retained provenance units as stable anchors. In each changed gap, strip the maximal equal Unicode-scalar prefix, then nonoverlapping maximal equal scalar suffix. Emit the remaining replacement only. Adjacent gaps coalesce only when no retained authored unit or byte separates them. Insertions at an equal boundary follow rendered source order. No global quadratic diff or whole-file fallback.",
+    "examples": [
+      {
+        "source": "a =1;\r\nb =2;\r\n",
+        "formatted": "a = 1;\r\nb = 2;\r\n",
+        "edits": [
+          {
+            "start": 3,
+            "end": 3,
+            "text": " "
+          },
+          {
+            "start": 10,
+            "end": 10,
+            "text": " "
+          }
+        ]
+      },
+      {
+        "source": "é🙂",
+        "formatted": "é 🙂",
+        "edits": [
+          {
+            "start": 2,
+            "end": 2,
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "second_pass": "identical output and zero edits"
+  },
+  "maps": {
+    "retained": "exact byte correspondence at scalar boundaries",
+    "inserted": "no authored preimage; return typed inserted with left/right boundary anchor",
+    "deleted": "no formatted interior; left affinity chooses preceding retained endpoint, right chooses following endpoint",
+    "replaced": "interior is typed ambiguous unless proven by retained provenance; never interpolate",
+    "shared_boundary": "left picks preceding segment, right following segment",
+    "crlf": "never split CRLF for edits/range expansion; query inside pair is typed invalid boundary",
+    "eof": "source EOF maps to formatted EOF with right affinity; left uses preceding endpoint",
+    "bom": "retained BOM has exact source-backed identity",
+    "examples": [
+      {
+        "source": "é🙂",
+        "formatted": "é 🙂",
+        "retained": [
+          [
+            0,
+            2,
+            0,
+            2
+          ],
+          [
+            2,
+            6,
+            3,
+            7
+          ]
+        ],
+        "inserted": [
+          [
+            2,
+            2,
+            2,
+            3
+          ]
+        ],
+        "queries": [
+          {
+            "authored": 2,
+            "bias": "left",
+            "formatted": 2
+          },
+          {
+            "authored": 2,
+            "bias": "right",
+            "formatted": 3
+          },
+          {
+            "authored": 6,
+            "bias": "right",
+            "formatted": 7
+          },
+          {
+            "authored": 3,
+            "bias": "right",
+            "outcome": "invalid-scalar-boundary"
+          }
+        ]
+      },
+      {
+        "source": "a  b",
+        "formatted": "a b",
+        "retained": [
+          [
+            0,
+            2,
+            0,
+            2
+          ],
+          [
+            3,
+            4,
+            2,
+            3
+          ]
+        ],
+        "deleted": [
+          [
+            2,
+            3,
+            2,
+            2
+          ]
+        ],
+        "queries": [
+          {
+            "authored": 2,
+            "bias": "left",
+            "formatted": 2
+          },
+          {
+            "authored": 3,
+            "bias": "right",
+            "formatted": 2
+          }
+        ]
+      },
+      {
+        "source": "﻿x\r\n",
+        "formatted": "﻿x\r\n",
+        "retained": [
+          [
+            0,
+            6,
+            0,
+            6
+          ]
+        ],
+        "queries": [
+          {
+            "authored": 0,
+            "bias": "right",
+            "formatted": 0
+          },
+          {
+            "authored": 5,
+            "bias": "left",
+            "outcome": "invalid-crlf-boundary"
+          },
+          {
+            "authored": 6,
+            "bias": "right",
+            "formatted": 6
+          }
+        ]
+      }
+    ]
+  },
+  "range": {
+    "algorithm": "Expand to the smallest complete source-backed statement/declaration, markup element, style rule or carrier block containing the selection. Empty range selects its containing safe unit; EOF selects the preceding complete unit. Repeatedly include required delimiter/trivia ownership, without splitting tokens, holes, literal/raw/recovery islands or CRLF. Refuse unowned regions and non-unique codec preimages. Only unit-owned leading indentation and trailing newline may expand boundary whitespace; outside bytes remain unchanged.",
+    "cases": [
+      {
+        "source": "const a=1;\nconst b=2;\n",
+        "selection": [
+          17,
+          18
+        ],
+        "expanded": [
+          11,
+          22
+        ],
+        "formatted_slice": "const b = 2;\n"
+      },
+      {
+        "source": "<p>hé🙂</p>\r\n",
+        "selection": [
+          4,
+          10
+        ],
+        "expanded": [
+          0,
+          16
+        ],
+        "formatted_slice": "<p>hé🙂</p>\r\n"
+      },
+      {
+        "source": "<broken",
+        "selection": [
+          1,
+          2
+        ],
+        "outcome": "unsafe-recovery"
+      }
+    ]
+  },
+  "cursor": {
+    "affinity": "explicit left/right; default right; retained exact, inserted/deleted anchored, replaced ambiguous",
+    "examples": [
+      {
+        "source": "é🙂",
+        "formatted": "é 🙂",
+        "authored": 2,
+        "left": 2,
+        "right": 3
+      },
+      {
+        "source": "a  b",
+        "formatted": "a b",
+        "authored": 3,
+        "left": 2,
+        "right": 2
+      }
+    ]
+  },
+  "stability": {
+    "idempotence": "F(F(source)) = F(source), second pass has zero edits",
+    "schedule": "registration/discovery/scheduling permutation yields identical bytes, ordered edits and maps",
+    "incremental": "same final exact basis yields same cold/incremental bytes, ordered edits and maps",
+    "cache_identity": [
+      "canonical-source",
+      "source-revision",
+      "carrier/profile",
+      "configuration-provenance",
+      "formatter-policy-provenance"
+    ],
+    "no_admission": [
+      "cancelled",
+      "stale",
+      "partial",
+      "unsupported",
+      "mismatched-basis"
+    ]
+  }
+}

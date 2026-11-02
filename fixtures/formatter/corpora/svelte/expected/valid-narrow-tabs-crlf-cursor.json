@@ -1,0 +1,23 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/svelte/expected/valid-narrow-tabs-crlf.txt",
+  "normalized_options": {
+    "printWidth": 24,
+    "tabWidth": 4,
+    "useTabs": true,
+    "endOfLine": "crlf"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 29
+  },
+  "formatted_cursor": 37,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/svelte/expected/valid-narrow-tabs-crlf.txt",
+    "edits": []
+  },
+  "divergence": "native-svelte-basic-carrier"
+}

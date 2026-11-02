@@ -1,0 +1,21 @@
+{
+  "outcome": "complete",
+  "reason": null,
+  "output": "fixtures/formatter/corpora/html/expected/valid-markup-ignore.txt",
+  "normalized_options": {
+    "htmlWhitespaceSensitivity": "ignore",
+    "embeddedLanguageFormatting": "off"
+  },
+  "request": {
+    "mode": "cursor",
+    "range": null,
+    "cursor": 36
+  },
+  "formatted_cursor": 35,
+  "expanded_range": null,
+  "second_pass": {
+    "output": "fixtures/formatter/corpora/html/expected/valid-markup-ignore.txt",
+    "edits": []
+  },
+  "divergence": null
+}

@@ -1,0 +1,3 @@
+// hé🙂
+const record = {'alpha': 1, 'beta-key': 2}
+const arrow = x => ({value: x + 1})

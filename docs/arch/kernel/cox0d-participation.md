@@ -151,7 +151,8 @@ method retain separate catalog cells when their producers differ. COX0 owns
 participation admission and replacement of the current gates in every row;
 it does not replace the listed semantic producers.
 
-Source abbreviations: **CAP** = `crates/verter_lsp/src/capabilities.rs`;
+Source abbreviations: **CAP** = `crates/verter_lsp/src/capabilities.rs` and its
+per-slot contributors in `crates/verter_lsp/src/capabilities/<slot>.rs`;
 **NAV** = `crates/verter_lsp/src/server/nav_features.rs` and its navigation/
 completion-resolve modules; **AUX** = `crates/verter_lsp/src/server/aux_features.rs`;
 **CLIENT** = `packages/vue-vscode/src/extension.ts`; **CUSTOM** =

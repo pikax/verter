@@ -1,0 +1,22 @@
+{
+  "outcome": "unsupported",
+  "reason": "UnsupportedPlugin: production formatter never loads executable plugins",
+  "output": null,
+  "normalized_options": {
+    "plugins": [
+      "external-formatter"
+    ]
+  },
+  "request": {
+    "mode": "full",
+    "range": null,
+    "cursor": null
+  },
+  "formatted_cursor": null,
+  "expanded_range": null,
+  "second_pass": {
+    "output": null,
+    "edits": []
+  },
+  "divergence": null
+}

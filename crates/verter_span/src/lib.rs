@@ -39,6 +39,12 @@ pub use diag_source::{
     DiagnosticContentSource, DiagnosticSourceCache, OverlayThenFallback, SourceFile,
 };
 
+pub mod coord;
+pub use coord::{
+    CoordError, EmbeddedByteOffset, EmbeddedByteRange, GeneratedByteLen, GeneratedByteOffset,
+    GeneratedByteRange, SourceByteOffset, SourceByteRange,
+};
+
 // ======================== Span (SFC-absolute) ========================
 
 /// SFC-absolute byte offset span. `[start, end)` half-open.
@@ -286,9 +292,13 @@ pub mod serde_helpers {
 
 // ======================== Typed LSP / generated-TSX coordinate wrappers ========================
 //
-// Intra-process boundary types for the LSP `PositionMapper` and the cross-file
-// navigation stack. They carry NO serde (they never cross a serialization
-// boundary — `Span` is the only serde span type, rule 1 above).
+// The byte-coordinate domain newtypes (`SourceByteOffset`, `GeneratedByteOffset`,
+// `EmbeddedByteOffset` and their ranges) live in [`coord`] and are re-exported
+// above at their historical paths. What stays here are the requester-encoding
+// boundary wrappers that the coordinate constitution (`docs/arch/kernel/
+// coordinates.md`) keeps adapter-local (`CD5`/`CD6`): UTF-16 offsets and the
+// line/column position pairs. They carry NO serde (they never cross a
+// serialization boundary — `Span` is the only serde span type, rule 1 above).
 //
 // The point of these newtypes is the SAME rule that governs the span types:
 // there is no `From` between a source-side type and a generated-side type, so a
@@ -304,18 +314,6 @@ pub mod serde_helpers {
 // is deliberately no byte<->utf16 conversion here: that requires the source
 // text and belongs to the `LineIndex`, not to a plain newtype.
 
-/// Byte offset into the original `.vue` source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SourceByteOffset(pub u32);
-
-/// Byte offset into the generated TSX output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GeneratedByteOffset(pub u32);
-
-/// Length (in bytes) of a generated-TSX content region (the `content_offset` domain).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GeneratedByteLen(pub u32);
-
 /// UTF-16 code-unit offset into the original `.vue` source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceUtf16Offset(pub u32);
@@ -323,54 +321,6 @@ pub struct SourceUtf16Offset(pub u32);
 /// UTF-16 code-unit offset into the generated TSX output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GeneratedUtf16Offset(pub u32);
-
-/// Byte range `[start, end)` in the original `.vue` source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SourceByteRange {
-    pub start: SourceByteOffset,
-    pub end: SourceByteOffset,
-}
-
-impl SourceByteRange {
-    #[inline]
-    pub const fn new(start: SourceByteOffset, end: SourceByteOffset) -> Self {
-        Self { start, end }
-    }
-
-    #[inline]
-    pub fn len(&self) -> u32 {
-        self.end.0.saturating_sub(self.start.0)
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.start.0 >= self.end.0
-    }
-}
-
-/// Byte range `[start, end)` in the generated TSX output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GeneratedByteRange {
-    pub start: GeneratedByteOffset,
-    pub end: GeneratedByteOffset,
-}
-
-impl GeneratedByteRange {
-    #[inline]
-    pub const fn new(start: GeneratedByteOffset, end: GeneratedByteOffset) -> Self {
-        Self { start, end }
-    }
-
-    #[inline]
-    pub fn len(&self) -> u32 {
-        self.end.0.saturating_sub(self.start.0)
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.start.0 >= self.end.0
-    }
-}
 
 /// A 0-based position in the original `.vue` source, in the LSP-negotiated encoding
 /// (UTF-16 columns in the default Verter configuration). The Vue side of the mapper.
@@ -555,33 +505,13 @@ mod tests {
         assert_eq!(std::mem::size_of::<RelativeSpan>(), 8);
         assert_eq!(std::mem::size_of::<PartialGeneratedSpan>(), 8);
         assert_eq!(std::mem::size_of::<GeneratedSpan>(), 16);
-    }
-
-    #[test]
-    fn typed_coord_sizes_are_minimal() {
-        // Newtype offsets are zero-cost wrappers over u32.
-        assert_eq!(std::mem::size_of::<SourceByteOffset>(), 4);
-        assert_eq!(std::mem::size_of::<GeneratedByteOffset>(), 4);
-        assert_eq!(std::mem::size_of::<GeneratedByteLen>(), 4);
+        // The byte-domain newtypes' layout (including every coord re-export)
+        // is pinned by coord's baseline-cost tests; the adapter-local
+        // requester-encoding wrappers stay pinned here.
         assert_eq!(std::mem::size_of::<SourceUtf16Offset>(), 4);
         assert_eq!(std::mem::size_of::<GeneratedUtf16Offset>(), 4);
-        assert_eq!(std::mem::size_of::<SourceByteRange>(), 8);
-        assert_eq!(std::mem::size_of::<GeneratedByteRange>(), 8);
         assert_eq!(std::mem::size_of::<LspPosition>(), 8);
         assert_eq!(std::mem::size_of::<TsPosition>(), 8);
-    }
-
-    #[test]
-    fn typed_ranges_len_and_empty() {
-        let s = SourceByteRange::new(SourceByteOffset(10), SourceByteOffset(20));
-        assert_eq!(s.len(), 10);
-        assert!(!s.is_empty());
-        assert!(SourceByteRange::new(SourceByteOffset(5), SourceByteOffset(5)).is_empty());
-
-        let g = GeneratedByteRange::new(GeneratedByteOffset(3), GeneratedByteOffset(9));
-        assert_eq!(g.len(), 6);
-        assert!(!g.is_empty());
-        assert!(GeneratedByteRange::new(GeneratedByteOffset(7), GeneratedByteOffset(7)).is_empty());
     }
 
     #[test]

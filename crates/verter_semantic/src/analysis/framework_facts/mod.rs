@@ -32,6 +32,31 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 
 pub mod svelte;
 
+// Reserved homes for planned framework-contribution modules. Each module
+// below is declaration-only: each of its doc lines names exactly one owning
+// node, so a parent shared by several contributions carries one line per
+// owner, and contribution nodes write inside their own reserved module only.
+// The whole
+// reserved tree (these homes and each contribution home inside them) is
+// `pub(crate)` so the sibling fact families under `analysis` can address a
+// contribution without editing this shared parent.
+pub(crate) mod alpine;
+pub(crate) mod angular;
+pub(crate) mod astro;
+pub(crate) mod ember;
+pub(crate) mod lit;
+pub(crate) mod marko;
+pub(crate) mod mdx;
+pub(crate) mod next;
+pub(crate) mod nuxt;
+pub(crate) mod preact;
+pub(crate) mod qwik;
+pub(crate) mod react;
+pub(crate) mod solid;
+pub(crate) mod stencil;
+pub(crate) mod sveltekit;
+pub(crate) mod vue;
+
 mod negative_evidence_seal {
     pub trait Sealed {}
 }

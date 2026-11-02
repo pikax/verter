@@ -1,0 +1,8 @@
+{
+  "id": "plugins-rejected",
+  "values": {
+    "plugins": [
+      "external-formatter"
+    ]
+  }
+}

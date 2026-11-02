@@ -1,0 +1,8 @@
+{
+  "id": "preserve-quotes",
+  "values": {
+    "quoteProps": "preserve",
+    "trailingComma": "none",
+    "arrowParens": "always"
+  }
+}

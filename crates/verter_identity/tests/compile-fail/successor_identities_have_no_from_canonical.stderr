@@ -1,0 +1,95 @@
+error[E0599]: no associated function or constant named `from_canonical` found for struct `ProfileSchemaEpoch` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:19:33
+   |
+19 |     let _ = ProfileSchemaEpoch::from_canonical(&Descriptor);
+   |                                 ^^^^^^^^^^^^^^ associated function or constant not found in `ProfileSchemaEpoch`
+   |
+note: if you're trying to build a new `ProfileSchemaEpoch`, consider using `ProfileSchemaEpoch::for_schema_family` which returns `ProfileSchemaEpoch`
+  --> src/successor/mod.rs
+   |
+   |     pub fn for_schema_family(schema_family: &str, epoch: u32) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `from_canonical` found for struct `CarrierProfileId` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:20:31
+   |
+20 |     let _ = CarrierProfileId::from_canonical(&Descriptor);
+   |                               ^^^^^^^^^^^^^^ associated function or constant not found in `CarrierProfileId`
+   |
+note: if you're trying to build a new `CarrierProfileId`, consider using `CarrierProfileId::from_carrier` which returns `CarrierProfileId`
+  --> src/successor/mod.rs
+   |
+   |     pub fn from_carrier(carrier_family: &str, syntax_schema: &ProfileSchemaEpoch) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `from_canonical` found for struct `FrameworkProfileId` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:21:33
+   |
+21 |     let _ = FrameworkProfileId::from_canonical(&Descriptor);
+   |                                 ^^^^^^^^^^^^^^ associated function or constant not found in `FrameworkProfileId`
+   |
+note: if you're trying to build a new `FrameworkProfileId`, consider using `FrameworkProfileId::from_release_and_carriers` which returns `FrameworkProfileId`
+  --> src/successor/mod.rs
+   |
+   | /     pub fn from_release_and_carriers(
+   | |         release: &ReleaseId,
+   | |         claimed_carriers: &[CarrierProfileId],
+   | |         schema: &ProfileSchemaEpoch,
+   | |     ) -> Self {
+   | |_____________^
+
+error[E0599]: no associated function or constant named `from_canonical` found for struct `ProjectProfileId` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:22:31
+   |
+22 |     let _ = ProjectProfileId::from_canonical(&Descriptor);
+   |                               ^^^^^^^^^^^^^^ associated function or constant not found in `ProjectProfileId`
+   |
+note: if you're trying to build a new `ProjectProfileId`, consider using `ProjectProfileId::from_project_release` which returns `ProjectProfileId`
+  --> src/successor/mod.rs
+   |
+   | /     pub fn from_project_release(
+   | |         project_family: &str,
+   | |         release: &ReleaseId,
+   | |         schema: &ProfileSchemaEpoch,
+   | |     ) -> Self {
+   | |_____________^
+
+error[E0599]: no associated function or constant named `from_canonical` found for struct `ReleaseId` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:23:24
+   |
+23 |     let _ = ReleaseId::from_canonical(&Descriptor);
+   |                        ^^^^^^^^^^^^^^ associated function or constant not found in `ReleaseId`
+   |
+note: if you're trying to build a new `ReleaseId`, consider using `ReleaseId::from_coordinates` which returns `ReleaseId`
+  --> src/successor/release.rs
+   |
+   |     pub fn from_coordinates(coordinates: &ReleaseCoordinates, schema: &ProfileSchemaEpoch) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `from_canonical` found for struct `RegionId` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:24:23
+   |
+24 |     let _ = RegionId::from_canonical(&Descriptor);
+   |                       ^^^^^^^^^^^^^^ associated function or constant not found in `RegionId`
+   |
+note: if you're trying to build a new `RegionId`, consider using `RegionId::from_region_role` which returns `RegionId`
+  --> src/successor/mod.rs
+   |
+   |     pub fn from_region_role(unit: &SourceUnitId, region_role: &str) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `from_canonical` found for struct `AttachmentId` in the current scope
+  --> tests/compile-fail/successor_identities_have_no_from_canonical.rs:25:27
+   |
+25 |     let _ = AttachmentId::from_canonical(&Descriptor);
+   |                           ^^^^^^^^^^^^^^ associated function or constant not found in `AttachmentId`
+   |
+note: if you're trying to build a new `AttachmentId`, consider using `AttachmentId::from_claim` which returns `AttachmentId`
+  --> src/successor/mod.rs
+   |
+   | /     pub fn from_claim(
+   | |         unit: &SourceUnitId,
+   | |         region: &RegionId,
+   | |         profile: &FrameworkProfileId,
+   | |     ) -> Self {
+   | |_____________^
