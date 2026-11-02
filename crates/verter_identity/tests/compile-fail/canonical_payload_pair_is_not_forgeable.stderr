@@ -1,0 +1,7 @@
+error[E0451]: fields `digest` and `bytes` of struct `Canonical` are private
+  --> tests/compile-fail/canonical_payload_pair_is_not_forgeable.rs:15:31
+   |
+15 |     let _forged = Canonical { digest, bytes };
+   |                               ^^^^^^  ^^^^^ private field
+   |                               |
+   |                               private field

@@ -2210,6 +2210,170 @@ async fn queued_generation_refresh_cannot_displace_a_newer_complete_publication(
     );
 }
 
+/// Where a provider-surface commit lands relative to the incomplete
+/// publication that missed it.
+#[derive(Clone, Copy, Debug)]
+enum SurfaceCommitOrder {
+    /// The publication's incomplete receipt is recorded, then the surface commits.
+    AfterReceipt,
+    /// The publication has captured (and missed) the surface and is suspended
+    /// on its final send when the surface commits; its receipt never lands first.
+    BeforeReceipt,
+}
+
+/// An open carrier whose diagnostics publication captured NO committed provider
+/// surface must become ready once that surface commits, with no edit, no
+/// compiler-generation or workspace change, and no second editor signal.
+///
+/// The publication is stepped by hand (never by a sleep): each poll runs it to
+/// its next client send, and the test reads that send off the wire. The commit
+/// is the production coordinator sync (`sync_file` → `admit_owned_fenced`). The
+/// only path from that commit to a complete receipt is the settlement handoff it
+/// reports to the registry: the publication under test is not a coordinator pull,
+/// so the coordinator's one-shot incomplete re-sync never sees it, and the
+/// coordinator runs provider-neutral so the replacement it schedules writes
+/// nothing to the provider.
+///
+/// Discriminating: without the handoff the commit leaves no refresh behind
+/// (`refreshes.try_recv()` fails at once) and the document stays uncertified.
+async fn assert_surface_commit_settles_owed_diagnostics(order: SurfaceCommitOrder) {
+    use futures_util::FutureExt as _;
+
+    let (documents, states, provider, canonical_id, _ide_path, deps) =
+        carrier_diagnostics_fixture(false).await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let mut wire = deps.client.wire();
+    // An open carrier whose provider surface has not committed yet.
+    states
+        .remove(&canonical_id)
+        .expect("the fixture committed a provider state");
+    let generation = documents.host().get_diagnostics_generation(&canonical_id);
+    let snapshot = documents.snapshot_identity(&uri).expect("open document");
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    let handle = spawn_sync_coordinator(SyncCoordinatorDeps {
+        type_provider_kind: crate::TypeProviderKind::None,
+        ..deps.clone()
+    });
+
+    let publish_uri = uri.to_string();
+    let mut publication = Box::pin(publish_merged_diagnostics(
+        &deps,
+        &canonical_id,
+        &publish_uri,
+    ));
+    assert!(
+        (&mut publication).now_or_never().is_none(),
+        "{order:?}: the staged batch waits for the client"
+    );
+    wire.next()
+        .await
+        .expect("the staged Verter batch is offered");
+    assert!(
+        (&mut publication).now_or_never().is_none(),
+        "{order:?}: the provider batch waits for the client"
+    );
+    assert!(
+        documents.outbound_send_in_flight(&uri),
+        "{order:?}: the publication has captured its provider surface and is sending"
+    );
+    if let SurfaceCommitOrder::AfterReceipt = order {
+        wire.next().await.expect("the provider batch is offered");
+        assert_eq!(
+            (&mut publication).now_or_never(),
+            Some(false),
+            "{order:?}: no committed surface means an incomplete publication"
+        );
+    }
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "{order:?}: a publication without its provider surface certifies nothing"
+    );
+
+    // A failed delivery commits nothing and so settles nothing.
+    provider.set_fail_file_ops(true);
+    sync_file(&deps, &canonical_id, uri.as_str()).await;
+    provider.set_fail_file_ops(false);
+    assert!(
+        states
+            .get(&canonical_id)
+            .is_none_or(|state| !state.ide_background_loaded),
+        "{order:?}: a failed delivery must not commit a live IDE surface"
+    );
+    assert!(
+        refreshes.try_recv().is_err(),
+        "{order:?}: a failed delivery owes no replacement"
+    );
+    assert!(!documents.diagnostics_ready(&uri));
+
+    sync_file(&deps, &canonical_id, uri.as_str()).await;
+    assert!(
+        states
+            .get(&canonical_id)
+            .is_some_and(|state| state.ide_background_loaded),
+        "{order:?}: the coordinator sync commits the IDE surface"
+    );
+    assert_eq!(
+        documents.host().get_diagnostics_generation(&canonical_id),
+        generation,
+        "{order:?}: the commit must not reach readiness through a generation advance"
+    );
+    assert!(
+        documents.snapshot_identity_is_current(&uri, &snapshot),
+        "{order:?}: the commit must not reach readiness through an edit"
+    );
+    let refresh = refreshes
+        .try_recv()
+        .unwrap_or_else(|error| panic!("{order:?}: the commit must owe a replacement: {error:?}"));
+    assert_eq!(refresh.uri, uri);
+    if let SurfaceCommitOrder::BeforeReceipt = order {
+        assert_eq!(
+            (&mut publication).now_or_never(),
+            Some(false),
+            "{order:?}: the superseded publication abandons its send"
+        );
+        assert!(
+            !documents.diagnostics_ready(&uri),
+            "{order:?}: the superseded publication must not leave a receipt behind"
+        );
+    }
+    drop(publication);
+
+    provider.clear_calls();
+    tokio::spawn(async move { while wire.next().await.is_some() {} });
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&uri),
+            || panic!("{order:?}: the owed publication must complete after its surface commits"),
+        )
+        .await;
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "{order:?}: the replacement publication writes nothing to the provider"
+    );
+    assert!(
+        refreshes.try_recv().is_err(),
+        "{order:?}: exactly one replacement is owed"
+    );
+
+    // A complete receipt is not re-armed by further commits: no polling loop.
+    documents.settle_provider_surface(&canonical_id);
+    assert!(
+        refreshes.try_recv().is_err(),
+        "{order:?}: a complete receipt owes nothing to a later commit"
+    );
+    assert!(documents.diagnostics_ready(&uri));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incomplete_receipt_settles_when_its_provider_surface_commits_afterwards() {
+    assert_surface_commit_settles_owed_diagnostics(SurfaceCommitOrder::AfterReceipt).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn surface_commit_before_the_incomplete_receipt_lands_is_not_lost() {
+    assert_surface_commit_settles_owed_diagnostics(SurfaceCommitOrder::BeforeReceipt).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_diagnostics_invalidate_completion_before_debounce() {
     let (_, _, _, canonical_id, _, deps) = make_carrier_diagnostics_fixture().await;

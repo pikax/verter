@@ -1548,7 +1548,7 @@ impl CarrierTransactionCoordinator {
             &crate::documents::DocumentSnapshotIdentity,
         )>,
     ) -> AdmitOutcome {
-        match (documents, open_pin) {
+        let outcome = match (documents, open_pin) {
             (Some(documents), Some((uri, identity))) => documents
                 .with_current_snapshot_identity(uri, identity, |_| {
                     self.admit_owned(host, states, source, state, receipt)
@@ -1559,7 +1559,14 @@ impl CarrierTransactionCoordinator {
             }
             (_, Some(_)) => AdmitOutcome::Superseded,
             (_, None) => self.admit_owned(host, states, source, state, receipt),
+        };
+        // The admitted surface is now capturable. Settle the open document's
+        // owed diagnostics only after the document guard above is released:
+        // settlement reads the registry.
+        if let (AdmitOutcome::Admitted, Some(documents)) = (outcome, documents) {
+            documents.settle_provider_surface(source);
         }
+        outcome
     }
 
     /// API-only admission patches the live map entry so IDE or declaration
