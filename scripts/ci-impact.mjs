@@ -86,6 +86,7 @@ export const COMPILE_CONTRACT_OWNER_CRATES = Object.freeze({
   audit: "verter_audit",
   "compiler-default": "verter_compiler",
   "css-syntax": "verter_css_syntax",
+  formatter: "verter_formatter",
   identity: "verter_identity",
   language: "verter_language",
   semantic: "verter_semantic",
