@@ -604,7 +604,7 @@ export function validateFormatterLock(lock) {
     );
     const symbol = route.symbol.split("::").at(-1);
     const pattern = symbol.endsWith("provider")
-      ? new RegExp(`\\b${symbol}\\s*[:=]`)
+      ? new RegExp(`\\b${symbol}\\s*:`)
       : new RegExp(`\\bfn\\s+${symbol}\\s*\\(`);
     check(
       pattern.test(lock.routeSources[route.path] ?? ""),
