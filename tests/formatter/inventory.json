@@ -21,7 +21,7 @@
       "owner": "FMT3"
     },
     {
-      "path": "crates/verter_lsp/src/capabilities.rs",
+      "path": "crates/verter_lsp/src/capabilities/formatting.rs",
       "symbol": "document_formatting_provider",
       "disposition": "retain-continuously",
       "owner": "FMT3"
@@ -39,7 +39,7 @@
       "owner": "markup-auto-close"
     },
     {
-      "path": "crates/verter_lsp/src/capabilities.rs",
+      "path": "crates/verter_lsp/src/capabilities/on_type_formatting.rs",
       "symbol": "document_on_type_formatting_provider",
       "disposition": "retain-outside-formatter",
       "owner": "markup-auto-close"
