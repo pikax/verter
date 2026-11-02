@@ -32,11 +32,23 @@ inputs, and each has a distinct outcome:
 | `NotSupplied` | `NeedInputs` | `Err(NeedSnapshotInput)` |
 
 Admission verifies, in order: the format and version, the strict header shape,
-the payload SHA-256, the `snapshot_id` derived from the ordered dataset
-identities plus recipe and payload digests, and the caller's exact `SnapshotPin`.
-It then checks record layout and counts and parses browser release data. Feature
-records are not parsed until asked for, so one malformed record answers unknown
-and leaves its neighbours untouched.
+that the header line is its own canonical JSON spelling (keys sorted, no
+whitespace, shortest escapes), the payload SHA-256, the `snapshot_id`, and the
+caller's exact `SnapshotPin`. It then checks record layout and counts and parses
+browser release data. Feature records are not parsed until asked for, so one
+malformed record answers unknown and leaves its neighbours untouched.
+
+`snapshot_id` is the SHA-256 of the canonical JSON of the header without
+`snapshot_id`, derived identically by `deriveSnapshotId` in
+`snapshot-builder.mjs` and by the loader. It therefore binds every other header
+field: each dataset's name, package, release, artifact URL, integrity, license,
+license digest, license file, attribution and schema digest, the recipe and
+payload digests, and every count, rejected counts included. Canonical JSON quotes
+and escapes every string, so moving bytes from one field into its neighbour is a
+different preimage and a different id, and requiring the canonical spelling
+means one header value has exactly one admissible byte string. A header edit
+under its old id fails as `IdentityMismatch`; re-minted, it is other data and
+fails the pin as `UnpinnedSnapshot`.
 
 ## Generation
 
@@ -125,7 +137,8 @@ exist in the admitted data.
 
 | Standing | Forms |
 | --- | --- |
-| Admitted | Exact version, range, comparison, last N (browser/major) versions, `firefox esr`, unreleased (browser) versions, `since`, composition |
+| Admitted (family-scoped) | Exact version, range, comparison, `last N <browser> versions`, `last N <browser> major versions`, `firefox esr`, `unreleased <browser> versions`, composition (each operand keeps its own standing) |
+| All families (`AllFamilies`) | `last N versions`, `last N major versions`, `unreleased versions`, `since` |
 | Usage statistic not carried | `defaults`, global usage, `cover` |
 | Regional statistic not carried | Regional usage |
 | Dead list not carried | `dead` |
@@ -136,8 +149,21 @@ exist in the admitted data.
 | Resolved by the project model | `extends` |
 
 `browserslist_family` maps Browserslist family names to dataset browser ids. A
-name with no dataset family returns `None`. Parsing query text and expanding
-targets are not implemented here.
+name with no dataset family returns `None`, and a family-scoped form naming it
+answers unknown for that family.
+
+An all-family form ranges over every Browserslist family (`BROWSERSLIST_FAMILIES`,
+the 19 caniuse agents), which the release data cannot fully answer, so it is not
+plainly admitted. `all_family_coverage` partitions a snapshot's families for it:
+
+| Part | Meaning | Admitted snapshot |
+| --- | --- | --- |
+| Carried | A Browserslist family and the dataset family whose releases answer it | `and_chr`, `and_ff`, `android`, `chrome`, `edge`, `firefox`, `ie`, `ios_saf`, `op_mob`, `opera`, `safari`, `samsung` |
+| Uncarried | Must stand in the expansion as an unknown entry, never be dropped. Typed `NoDatasetFamily`, or `ReleaseDataAbsent` for a mapped family the snapshot has no record of | `and_qq`, `and_uc`, `baidu`, `bb`, `ie_mob`, `kaios`, `op_mini` (all `NoDatasetFamily`) |
+| Excluded | Dataset families no Browserslist name denotes; Browserslist never ranges over them | `deno`, `nodejs`, `oculus`, `webview_ios` |
+
+An expansion over only the carried families is never a complete answer. Parsing
+query text and expanding targets are not implemented here.
 
 ## Permissions, uncertainty and migration
 
