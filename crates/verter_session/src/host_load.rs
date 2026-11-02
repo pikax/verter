@@ -275,11 +275,25 @@ impl VerterHost {
 
 /// A file's load the semantic runtime waits on instead of driving it: the
 /// owned scheduler handoff, integrated on this host once Analysis is ready,
-/// exactly as [`VerterHost::ensure_loaded`] integrates it. Its terminal
-/// outcome is kept and answered again to a later poll.
+/// exactly as [`VerterHost::ensure_loaded`] integrates it, followed by the
+/// existing pollable indexed materialization. Source presence alone is not
+/// readiness. Its terminal outcome is kept and answered again to a later poll.
+type IndexedMaterialization<'h> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+            > + Send
+            + 'h,
+    >,
+>;
+
 struct HostIndexedLoad<'h> {
     host: &'h VerterHost,
     load: Option<HostLoadHandoff>,
+    indexing: Option<IndexedMaterialization<'h>>,
+    indexed: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+    task: ExecutionTask,
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
     outcome: Option<verter_type_engine::resolver_core::request_ports::IndexedLoadOutcome>,
 }
 
@@ -292,25 +306,75 @@ impl verter_type_engine::resolver_core::request_ports::IndexedLoad for HostIndex
         if let Some(outcome) = self.outcome {
             return Poll::Ready(outcome);
         }
-        let Some(load) = self.load.as_mut() else {
-            unreachable!("a load without its handoff has ended with an outcome")
-        };
-        let ended = match load.poll(waker) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(ended) => ended,
-        };
-        self.load = None;
+        if self
+            .stop
+            .as_mut()
+            .expect("live cancellation wait")
+            .poll(waker)
+            .is_ready()
+        {
+            self.load = None;
+            self.indexing = None;
+            self.stop = None;
+            let outcome = IndexedLoadOutcome::NotIntegrated(
+                verter_type_engine::resolver_core::request_ports::IndexedLoadEnd::Cancelled,
+            );
+            self.outcome = Some(outcome);
+            return Poll::Ready(outcome);
+        }
+        let _task =
+            verter_execution::tasks::ExecutionScope::install(&self.host.task_registry, &self.task);
         // A failed, stopped or superseded load integrates nothing; its
         // reader then answers as after a synchronous load that failed.
-        let outcome = match ended.and_then(|commit| commit.apply(self.host)) {
-            Ok(true) => IndexedLoadOutcome::Integrated,
-            Ok(false) => IndexedLoadOutcome::NotIntegrated(
+        if let Some(load) = self.load.as_mut() {
+            let ended = match load.poll(waker) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(ended) => ended,
+            };
+            self.load = None;
+            match ended.and_then(|commit| commit.apply(self.host)) {
+                Ok(true) => {}
+                ended => {
+                    let outcome = IndexedLoadOutcome::NotIntegrated(match ended {
+                        Err(error) => error.load_end(),
+                        Ok(false) => {
+                            verter_type_engine::resolver_core::request_ports::IndexedLoadEnd::Absent
+                        }
+                        Ok(true) => unreachable!(),
+                    });
+                    self.outcome = Some(outcome);
+                    self.indexing = None;
+                    self.stop = None;
+                    return Poll::Ready(outcome);
+                }
+            }
+        }
+        let outcome = match self
+            .indexing
+            .as_mut()
+            .expect("live indexed computation")
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(waker))
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(serve)) => {
+                self.indexed = Some(serve);
+                IndexedLoadOutcome::Integrated
+            }
+            Poll::Ready(None) => IndexedLoadOutcome::NotIntegrated(
                 verter_type_engine::resolver_core::request_ports::IndexedLoadEnd::Absent,
             ),
-            Err(error) => IndexedLoadOutcome::NotIntegrated(error.load_end()),
         };
+        self.indexing = None;
+        self.stop = None;
         self.outcome = Some(outcome);
         Poll::Ready(outcome)
+    }
+
+    fn take_indexed_input(
+        &mut self,
+    ) -> Option<verter_session_query::inputs::indexed::IndexedInputServe> {
+        self.indexed.take()
     }
 }
 
@@ -334,16 +398,27 @@ impl VerterHost {
     /// Whether `canonical_id`'s indexed input is servable without loading
     /// it, or the owned load to wait on first
     /// ([`verter_type_engine::resolver_core::request_ports::IndexedInputs::begin_indexed_load`]).
-    /// A load is begun exactly where the synchronous serve would load: a
-    /// loadable canonical the scheduler holds no source for and no retained
-    /// artifact serves. A scheduler without a driver thread (every wasm32
+    /// A cold index retains its pollable materialization even when its source
+    /// is present. Missing source first joins the scheduler load, and a source
+    /// that goes missing after this check is another owned load of the same
+    /// materialization, never a load driven inside its poll. A scheduler
+    /// without a driver thread (every wasm32
     /// host) has no executor but the caller, so nothing would advance a load
     /// begun here: the serve performs it in place, executing its stages on
     /// this thread, as the synchronous load does.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn begin_indexed_ready_load(
         &self,
         canonical_id: &str,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        self.begin_indexed_ready_load_for(canonical_id, &self.source_input_leases)
+    }
+
+    pub(crate) fn begin_indexed_ready_load_for<'h>(
+        &'h self,
+        canonical_id: &str,
+        leases: &'h crate::resolver_core::request_inputs::InputArtifactLeases,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'h> {
         use verter_type_engine::resolver_core::request_ports::IndexedReadiness;
         if !self.scheduler.has_driver_thread() {
             return IndexedReadiness::Settled;
@@ -351,10 +426,7 @@ impl VerterHost {
         let canonical = self
             .normalized_analysis_canonical(canonical_id)
             .into_owned();
-        if canonical.is_empty()
-            || crate::host_manage::is_raw_import_specifier_id(&canonical)
-            || self.scheduler.try_get_source(&canonical).is_some()
-        {
+        if canonical.is_empty() || crate::host_manage::is_raw_import_specifier_id(&canonical) {
             return IndexedReadiness::Settled;
         }
         let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
@@ -370,14 +442,27 @@ impl VerterHost {
             return IndexedReadiness::Settled;
         }
         let scope = self.scheduler.enter_execution_scope();
-        let load = self.begin_load(
-            &canonical,
-            scope.task().clone(),
-            self.cooperative_drive.cancellation().clone(),
-        );
+        let stop = self.cooperative_drive.cancellation().clone();
+        let load = self
+            .scheduler
+            .try_get_source(&canonical)
+            .is_none()
+            .then(|| self.begin_load(&canonical, scope.task().clone(), stop.clone()));
+        let owned_load = crate::host_manage::prepared_decl::OwnedSourceLoad {
+            task: scope.task().clone(),
+            stop: stop.clone(),
+        };
         IndexedReadiness::Loading(Box::new(HostIndexedLoad {
             host: self,
-            load: Some(load),
+            load,
+            indexing: Some(Box::pin(async move {
+                self.ensure_indexed_ready_serve_owning_loads(&canonical, owned_load)
+                    .await
+                    .map(|serve| leases.retain(serve))
+            })),
+            indexed: None,
+            task: scope.task().clone(),
+            stop: Some(stop.subscribe()),
             outcome: None,
         }))
     }

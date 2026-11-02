@@ -2909,6 +2909,94 @@ mod locator_only_macro_replay {
         );
     }
 
+    /// Every address form reaches its authored node directly, wherever the
+    /// macro call and its member lists sit in the program.
+    #[test]
+    fn every_address_form_replays_its_authored_payload() {
+        for (source, macro_index, field_index) in [
+            (
+                "const p = withDefaults(defineProps<{ a: string }>(), {});",
+                0,
+                0,
+            ),
+            ("const x = 1, p = defineProps<{ a: string }>();", 0, 0),
+            ("defineProps<{ z: number } & { a: string }>();", 0, 1),
+            (
+                "export type P = { z: number } & { a: string };\ndefineProps<P>();",
+                0,
+                1,
+            ),
+            (
+                "export interface P { z: number; a: string }\ndefineProps<P>();",
+                0,
+                1,
+            ),
+            (
+                "defineProps({ a: { type: Object as PropType<string> } });",
+                0,
+                0,
+            ),
+            ("const a = defineModel<string>();", 0, 0),
+        ] {
+            let alloc = Allocator::new();
+            let parsed = parse_source(&alloc, source);
+            let lowering =
+                lower_macro_field_payload_at(&parsed.program, source, macro_index, field_index);
+            let MacroFieldPayloadLowering::Payload(expr) = lowering else {
+                panic!("{source}: must lower to its payload, got {lowering:?}");
+            };
+            let printed = format!("{expr:?}");
+            assert!(printed.contains("String"), "{source}: got {printed}");
+        }
+    }
+
+    /// A table is only valid over the program it was built from: every
+    /// address re-checks the node it reaches, so one replayed over another
+    /// program answers `NoField`, never a neighbouring payload.
+    #[test]
+    fn a_table_replayed_over_another_program_fails_closed() {
+        let work = verter_audit::observe::ObservedU64::default();
+        for (built_from, replayed_over) in [
+            (
+                "defineProps<{ a: string }>();",
+                "defineProps<{ bb: string }>();",
+            ),
+            ("defineProps<{ a: string }>();", "let unrelated = 1;"),
+            (
+                "type P = { a: string };\ndefineProps<P>();",
+                "type P = 1;\ndefineProps<P>();",
+            ),
+            (
+                "defineProps({ a: { type: Object as PropType<string> } });",
+                "defineProps({ bb: 1 });",
+            ),
+            (
+                "const a = defineModel<string>();",
+                "const a = defineModel<string>('longer');",
+            ),
+        ] {
+            let alloc = Allocator::new();
+            let built = parse_source(&alloc, built_from);
+            let owners = TopLevelOwnerTable::ordinary_file(built.program.body.len());
+            let table = MacroFieldAddressTable::build(&built.program, built_from, &owners, &work);
+            let alloc = Allocator::new();
+            let replayed = parse_source(&alloc, replayed_over);
+            let lowering = lower_macro_field_payload_at_with_owners(
+                &replayed.program,
+                replayed_over,
+                &table,
+                TopLevelOwnerId::ordinary_file(),
+                0,
+                0,
+                &work,
+            );
+            assert!(
+                matches!(lowering, MacroFieldPayloadLowering::NoField),
+                "{built_from} over {replayed_over}: got {lowering:?}"
+            );
+        }
+    }
+
     #[test]
     fn field_payload_replay_entry_does_not_build_binding_index() {
         let source = "defineProps<{ count: number }>();";

@@ -1,5 +1,11 @@
 //! Flat, single-owner document algebra. Nodes may be attached once, so neither
 //! traversal nor destruction recurses and a shared subtree cannot expand work.
+//!
+//! The algebra is framework-neutral: text (generated or source-backed),
+//! concatenation, groups, indentation and alignment, conditional flat/broken
+//! content, soft/space/hard lines and ordered line suffixes. Source-backed
+//! content carries the foundation's unchanged [`AuthoredProvenance`] binding;
+//! this module mints no identity and assigns no authored range.
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::provenance::{AuthoredProvenance, FormatProvenanceId, Provenanced};
@@ -12,7 +18,7 @@ mod sealed {
 /// Connects the document's identity parameter to the sole provenance binding.
 /// Sealed: another token cannot stand in for a formatter identity.
 pub trait DocProvenance: sealed::Sealed {
-    type Binding: Copy + std::fmt::Debug;
+    type Binding: Clone + std::fmt::Debug;
 }
 impl DocProvenance for FormatProvenanceId {
     type Binding = AuthoredProvenance;

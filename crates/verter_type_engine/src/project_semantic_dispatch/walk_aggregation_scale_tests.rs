@@ -223,7 +223,7 @@ fn declaration_merges_fold_numeric_spellings_and_keep_the_first_authored_member(
             .collect();
         let core = super::merge_declaration_surfaces_core(&surfaces);
         assert_eq!(core.members.len(), 1);
-        assert_eq!(core.members[0].member.key, keys[0]);
+        assert_eq!(core.members.entries()[0].1.member.key, keys[0]);
         let surface = super::merge_declaration_surfaces(
             crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &surfaces,

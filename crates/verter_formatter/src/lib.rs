@@ -6,27 +6,32 @@
 //! formatter output — plus the provenance identity, carrier and table contract
 //! that joins authored views to rendered segments. These are formatter-internal
 //! domains, not a public capability: nothing here crosses a serialization
-//! boundary. Its only external dependency is a regular-expression engine for
-//! pinned text-width tables; it cannot parse carrier source, analyze semantics,
-//! route or serialize a request.
+//! boundary. The document algebra ([`doc`]) and its bounded renderer
+//! ([`render`]) are framework-neutral; the crate's only external dependency is
+//! a regular-expression engine for the pinned text-width tables, so nothing
+//! here can parse carrier source, analyze semantics, route or serialize a
+//! request.
 //!
-//! The coordinate and provenance wrappers implement no parser, printer, map,
-//! range/cursor, route or protocol policy; the modules below are reserved
-//! homes for that later formatter work. See
+//! The coordinate, provenance, document and renderer modules implement no
+//! parser, printer, edit, map, range/cursor, route or protocol policy; the
+//! private modules below are reserved homes for that later formatter work. See
 //! `docs/arch/kernel/formatter.md` for the owning architecture contract.
 
 pub mod coordinates;
+pub mod doc;
 pub mod provenance;
+pub mod render;
+mod width;
 
 #[cfg(test)]
 mod coordinates_tests;
 #[cfg(test)]
 mod provenance_tests;
 
-// Document construction and rendering are framework-neutral. Other modules
-// remain reserved for their respective owners.
+// Reserved homes for the planned formatter modules. Each module below is
+// declaration-only: its doc line names the work that fills it, and each
+// owning implementation writes inside its own reserved module only.
 mod cursor;
-pub mod doc;
 mod edit;
 mod embedded;
 mod explain;
@@ -35,13 +40,6 @@ mod pragma;
 mod printers;
 mod range;
 mod recovery;
-pub mod render;
 mod service;
 mod suppression;
 mod view;
-
-#[cfg(test)]
-#[path = "../tests/unit/provenance_render.rs"]
-mod provenance_render_tests;
-
-mod width;

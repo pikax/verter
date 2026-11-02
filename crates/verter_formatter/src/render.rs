@@ -1,8 +1,8 @@
 //! Deterministic two-pass renderer. Flat widths are composed once in postorder;
 //! each selected node is then emitted once, with no speculative subtree search.
-use crate::coordinates::FormattedByteRange;
+use crate::coordinates::{FormattedByteOffset, FormattedByteRange};
 use crate::doc::{Doc, DocId, Line, Node};
-use crate::provenance::Provenanced;
+use crate::provenance::{AuthoredProvenance, Provenanced};
 use crate::width::{columns, strip_ansi};
 
 #[derive(Debug, Clone, Copy)]
@@ -200,45 +200,32 @@ struct Sink {
     summaries: Vec<Summary>,
 }
 impl Sink {
+    /// Append `text` as one segment. A zero-width source-backed unit still
+    /// yields an (empty) segment so its binding is never dropped; empty
+    /// generated text yields nothing and never triggers pending indentation.
     fn append(
         &mut self,
         text: &str,
-        binding: Option<crate::provenance::AuthoredProvenance>,
+        binding: Option<&AuthoredProvenance>,
         measured: Option<Width>,
     ) -> Result<(), RenderError> {
         if text.is_empty() {
+            if let Some(binding) = binding {
+                let at = self.output.text.len();
+                self.segment(at, Some(binding));
+            }
             return Ok(());
         }
         if let Some(indent) = self.pending_indent.take() {
             if !text.starts_with(['\r', '\n']) {
-                let tabs = if self.options.use_tabs {
-                    indent / self.options.tab_width
-                } else {
-                    0
-                };
-                let spaces = indent - tabs * self.options.tab_width;
-                if indent > u32::MAX as usize {
-                    return Err(RenderError::OutputTooLarge);
-                }
-                let padding = "\t".repeat(tabs) + &" ".repeat(spaces);
-                self.append(&padding, None, None)?;
+                self.pad(indent)?;
             }
         }
+        self.reserve(text.len())?;
         let start = self.output.text.len();
-        let end = start
-            .checked_add(text.len())
-            .filter(|&n| n <= u32::MAX as usize)
-            .ok_or(RenderError::OutputTooLarge)?;
         self.output.text.push_str(text);
         self.output.work.emitted_bytes += text.len();
-        let segment = RenderedSegment {
-            range: FormattedByteRange::for_emitted(&self.output.text, start as u32, end as u32)
-                .expect("ordered output offsets"),
-        };
-        self.output.segments.push(match binding {
-            Some(binding) => Segment::Source(Provenanced::new(segment, binding)),
-            None => Segment::Generated(segment),
-        });
+        self.segment(start, binding);
         let measure = measured.unwrap_or_else(|| width(text, self.options.tab_width));
         if measure.hard {
             self.column = 0;
@@ -246,14 +233,63 @@ impl Sink {
         self.column = measure.apply(self.column, self.options.tab_width);
         Ok(())
     }
+
+    /// Emit indentation at the start of a line (column 0), refusing before
+    /// allocation when it cannot fit the formatted offset domain.
+    fn pad(&mut self, indent: usize) -> Result<(), RenderError> {
+        let tab = self.options.tab_width;
+        let tabs = if self.options.use_tabs {
+            indent / tab
+        } else {
+            0
+        };
+        let spaces = indent - tabs * tab;
+        let bytes = tabs + spaces;
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.reserve(bytes)?;
+        let start = self.output.text.len();
+        self.output
+            .text
+            .extend(std::iter::repeat_n('\t', tabs).chain(std::iter::repeat_n(' ', spaces)));
+        self.output.work.emitted_bytes += bytes;
+        self.segment(start, None);
+        self.column = indent;
+        Ok(())
+    }
+
+    fn reserve(&self, bytes: usize) -> Result<(), RenderError> {
+        match self.output.text.len().checked_add(bytes) {
+            Some(end) if end <= u32::MAX as usize => Ok(()),
+            _ => Err(RenderError::OutputTooLarge),
+        }
+    }
+
+    /// Record `[start, sink end)` against the emitted UTF-8 sink. Offsets are
+    /// minted through the public checked path against the exact sink text.
+    fn segment(&mut self, start: usize, binding: Option<&AuthoredProvenance>) {
+        let sink = &self.output.text;
+        let offset = |at| FormattedByteOffset::for_source(sink, at).expect("sink scalar boundary");
+        let range = FormattedByteRange::for_source(sink, offset(start), offset(sink.len()))
+            .expect("ordered sink range");
+        let segment = RenderedSegment { range };
+        self.output.segments.push(match binding {
+            Some(binding) => Segment::Source(Provenanced::new(segment, binding.clone())),
+            None => Segment::Generated(segment),
+        });
+    }
+
     fn column(&self) -> usize {
         self.pending_indent.unwrap_or(self.column)
     }
 }
 
-/// Render a root in its owning arena. Top-level lines break; groups flatten
-/// only when their body and all pending suffixes fit. Nested groups inherit a
-/// flat parent, otherwise decide independently. Raw text is never normalized.
+/// Render a root in its owning arena. Top-level lines break; a group flattens
+/// only when its complete flat body plus the pending suffix queue fits from the
+/// current column. Ordinary following siblings are not measured, so
+/// `print_width` is not a guaranteed maximum line length. Nested groups inherit
+/// a flat parent, otherwise decide independently. Raw text is never normalized.
 /// No final newline is invented: syntax printers express it as a Hard line.
 pub fn render(doc: &Doc, root: DocId, options: RenderOptions) -> Result<RenderedDoc, RenderError> {
     if !doc.contains(root) {
@@ -296,12 +332,14 @@ pub fn render(doc: &Doc, root: DocId, options: RenderOptions) -> Result<Rendered
                 // Flush suffixes before the first raw newline as well. Split at
                 // that boundary only; the remaining literal stays one segment.
                 if let Some(at) = text.find(['\r', '\n']).filter(|_| !suffixes.is_empty()) {
-                    sink.append(&text[..at], *binding, None)?;
+                    sink.append(&text[..at], binding.as_ref(), None)?;
                     flush(doc, &mut suffixes, &mut sink)?;
                     pending_width = Width::default();
-                    sink.append(&text[at..], *binding, Some(sink.summaries[cmd.id].body))?;
+                    let measured = sink.summaries[cmd.id].body;
+                    sink.append(&text[at..], binding.as_ref(), Some(measured))?;
                 } else {
-                    sink.append(text, *binding, Some(sink.summaries[cmd.id].body))?;
+                    let measured = sink.summaries[cmd.id].body;
+                    sink.append(text, binding.as_ref(), Some(measured))?;
                 }
             }
             Node::Concat(children) => {
@@ -366,7 +404,8 @@ fn flush(doc: &Doc, suffixes: &mut Vec<usize>, sink: &mut Sink) -> Result<(), Re
     for id in suffixes.drain(..) {
         if let Node::Suffix(text, binding) = &doc.nodes[id] {
             sink.output.work.doc_visits += 1;
-            sink.append(text, *binding, Some(sink.summaries[id].suffix))?;
+            let measured = sink.summaries[id].suffix;
+            sink.append(text, binding.as_ref(), Some(measured))?;
         }
     }
     Ok(())

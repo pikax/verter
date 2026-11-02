@@ -2,6 +2,18 @@ use serde_json::json;
 use tower_lsp_server::ls_types::*;
 use verter_session::framework::HostLanguageClassifier;
 
+mod code_actions;
+mod code_lens;
+mod color;
+mod diagnostics;
+mod document_links;
+mod file_operations;
+mod formatting;
+mod navigation;
+mod on_type_formatting;
+mod semantic_tokens;
+mod workspace;
+
 /// Build the server capabilities to advertise during initialization.
 ///
 /// `encoding` is the negotiated position encoding to announce to the client.
@@ -39,32 +51,49 @@ fn glob_for_extensions(extensions: &[&str]) -> String {
     }
 }
 
+/// The inputs of the advertised capability surface: everything
+/// [`server_capabilities`] itself and the per-slot contributors fold from.
+/// New fields are added only when a capability cell actually needs them.
+pub(crate) struct CapabilityContext<'a> {
+    /// The negotiated position encoding to announce to the client.
+    pub(crate) encoding: &'a PositionEncodingKind,
+    /// The HONEST completion-resolve capability: it must reflect whether the
+    /// active type provider actually implements `completionItem/resolve`
+    /// (auto-import / lazy detail), not be hard-coded.
+    pub(crate) resolve_provider: bool,
+    /// The serving host's composed classification authority, read for the
+    /// watcher globs (e.g. `**/*.{svelte,vue}`). Carrier rows without a
+    /// registered carrier implementation widen the glob too — their watched
+    /// events are inert (no virtual-file wiring exists for them), so watching
+    /// is harmless and the glob stays registry-derived rather than
+    /// hand-enumerated.
+    pub(crate) framework: &'a HostLanguageClassifier,
+}
+
 /// Build the advertised server capabilities.
 ///
-/// `resolve_provider` is the HONEST completion-resolve capability: it must
-/// reflect whether the active type provider actually implements
-/// `completionItem/resolve` (auto-import / lazy detail), not be hard-coded. A
-/// session with no provider, or a provider without resolve support, advertises
-/// `resolve_provider: false` so the client never sends resolve requests the
-/// server would silently no-op.
-///
-/// `framework` is the serving host's composed classification authority, read
-/// for the watcher globs (e.g. `**/*.{svelte,vue}`). Carrier rows without a
-/// registered carrier implementation widen the glob too — their watched
-/// events are inert (no virtual-file wiring exists for them), so watching is
-/// harmless and the glob stays registry-derived rather than hand-enumerated.
+/// Cells without an owning slot module are set in the literal below; every
+/// slot-owned cell is written only by its slot's `contribute`, folded in the
+/// fixed order. The serialized result is the server's wire contract, so a
+/// move must never change a cell's value —
+/// `capabilities_tests.rs` pins it.
 pub fn server_capabilities(
     encoding: &PositionEncodingKind,
     resolve_provider: bool,
     framework: &HostLanguageClassifier,
 ) -> ServerCapabilities {
-    ServerCapabilities {
-        position_encoding: Some(encoding.clone()),
+    let ctx = CapabilityContext {
+        encoding,
+        resolve_provider,
+        framework,
+    };
+    let mut caps = ServerCapabilities {
+        position_encoding: Some(ctx.encoding.clone()),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::INCREMENTAL,
         )),
         completion_provider: Some(CompletionOptions {
-            resolve_provider: Some(resolve_provider),
+            resolve_provider: Some(ctx.resolve_provider),
             trigger_characters: Some(vec![
                 ".".into(),
                 "@".into(),
@@ -88,70 +117,17 @@ pub fn server_capabilities(
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
         })),
-        // Pull diagnostics removed — we use push diagnostics exclusively.
-        // Push diagnostics stay visible during typing (VS Code adjusts their positions
-        // as the document changes), eliminating the flickering caused by pull diagnostics
-        // returning stale/incomplete results during typing cooldown.
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
-        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
-        linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(true)),
-        document_link_provider: Some(DocumentLinkOptions {
-            resolve_provider: Some(false),
-            work_done_progress_options: Default::default(),
-        }),
         document_highlight_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".into(), ",".into()]),
             retrigger_characters: Some(vec![",".into()]),
             work_done_progress_options: Default::default(),
         }),
-        color_provider: Some(ColorProviderCapability::Simple(true)),
-        document_formatting_provider: Some(OneOf::Left(true)),
-        // Proactive tag auto-close fires on the `>` that closes an open tag.
-        // The handler (`auto_close_tag`) requires a `>` immediately before the
-        // cursor, so `>` is the only trigger it can act on — no `/` more-trigger.
-        document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
-            first_trigger_character: ">".to_string(),
-            more_trigger_character: None,
-        }),
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
-        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![
-                CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
-                CodeActionKind::QUICKFIX,
-                CodeActionKind::REFACTOR,
-                CodeActionKind::REFACTOR_EXTRACT,
-            ]),
-            ..Default::default()
-        })),
-        code_lens_provider: Some(CodeLensOptions {
-            resolve_provider: Some(false),
-        }),
         inlay_hint_provider: Some(OneOf::Left(true)),
-        // The advertised legend IS the shared mapping owner's published
-        // vocabulary (`verter_type_runtime::semantic_tokens`): every provider
-        // lane remaps its own token space into these exact indices/bits, so the
-        // wire legend must be BUILT from the same arrays — a hand-maintained
-        // copy here would silently re-introduce the index-space mismatch the
-        // shared owner exists to prevent.
-        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
-            SemanticTokensOptions {
-                full: Some(SemanticTokensFullOptions::Bool(true)),
-                legend: SemanticTokensLegend {
-                    token_types: verter_type_runtime::semantic_tokens::VERTER_TOKEN_TYPES
-                        .iter()
-                        .map(|name| SemanticTokenType::new(name))
-                        .collect(),
-                    token_modifiers: verter_type_runtime::semantic_tokens::VERTER_TOKEN_MODIFIERS
-                        .iter()
-                        .map(|name| SemanticTokenModifier::new(name))
-                        .collect(),
-                },
-                ..Default::default()
-            },
-        )),
         // Verter audit producer capability — surfaces the per-method
         // budgets and trace-output env-var so clients can opt in to
         // observability tooling. The shape is intentionally narrow;
@@ -200,35 +176,22 @@ pub fn server_capabilities(
                 "clientStagesOwner": "WSP1L",
             }
         })),
-        workspace: Some(WorkspaceServerCapabilities {
-            workspace_folders: Some(WorkspaceFoldersServerCapabilities {
-                supported: Some(true),
-                change_notifications: Some(OneOf::Left(true)),
-            }),
-            file_operations: Some(WorkspaceFileOperationsServerCapabilities {
-                did_create: Some(FileOperationRegistrationOptions {
-                    filters: vec![FileOperationFilter {
-                        scheme: Some("file".to_string()),
-                        pattern: FileOperationPattern {
-                            glob: carrier_watch_glob(framework),
-                            matches: None,
-                            options: None,
-                        },
-                    }],
-                }),
-                did_delete: Some(FileOperationRegistrationOptions {
-                    filters: vec![FileOperationFilter {
-                        scheme: Some("file".to_string()),
-                        pattern: FileOperationPattern {
-                            glob: carrier_watch_glob(framework),
-                            matches: None,
-                            options: None,
-                        },
-                    }],
-                }),
-                ..Default::default()
-            }),
-        }),
         ..Default::default()
-    }
+    };
+    diagnostics::contribute(&mut caps, &ctx);
+    workspace::contribute(&mut caps, &ctx);
+    semantic_tokens::contribute(&mut caps, &ctx);
+    navigation::contribute(&mut caps, &ctx);
+    document_links::contribute(&mut caps, &ctx);
+    color::contribute(&mut caps, &ctx);
+    code_lens::contribute(&mut caps, &ctx);
+    file_operations::contribute(&mut caps, &ctx);
+    on_type_formatting::contribute(&mut caps, &ctx);
+    formatting::contribute(&mut caps, &ctx);
+    code_actions::contribute(&mut caps, &ctx);
+    caps
 }
+
+#[cfg(test)]
+#[path = "capabilities_tests.rs"]
+mod tests;
