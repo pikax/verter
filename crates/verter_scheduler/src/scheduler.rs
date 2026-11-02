@@ -16411,6 +16411,98 @@ mod tests {
             );
         }
 
+        /// Without a driver thread nothing else delivers stage completions, so
+        /// a producer worker waiting on a dependency runs the ready stages on
+        /// its own thread and leaves the request settled when dispatch stops
+        /// progressing.
+        #[test]
+        fn a_producer_worker_runs_stages_itself_without_a_driver_thread() {
+            use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
+
+            #[derive(Default)]
+            struct StageThreads(parking_lot::Mutex<Vec<std::thread::ThreadId>>);
+            impl StageThreads {
+                fn record(&self) {
+                    self.0.lock().push(std::thread::current().id());
+                }
+            }
+            impl crate::execution::executor::StageExecutor for StageThreads {
+                fn as_any(&self) -> &dyn std::any::Any {
+                    self
+                }
+                fn execute_source(
+                    &self,
+                    _c: &str,
+                    _k: FileLanguage,
+                    content: Arc<str>,
+                    generation: u64,
+                    _incarnation: u64,
+                ) -> Result<SourceSnapshot, crate::execution::executor::StageError>
+                {
+                    self.record();
+                    Ok(SourceSnapshot::new_empty(content, generation))
+                }
+                fn execute_analysis(
+                    &self,
+                    _c: &str,
+                    _s: &SourceSnapshot,
+                    generation: u64,
+                ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError>
+                {
+                    self.record();
+                    Ok(AnalysisSnapshot::new_empty(generation))
+                }
+                fn execute_artifact(
+                    &self,
+                    _c: &str,
+                    _s: &SourceSnapshot,
+                    _a: &AnalysisSnapshot,
+                    profile_hash: u64,
+                    generation: u64,
+                ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError>
+                {
+                    self.record();
+                    Ok(ArtifactSnapshot {
+                        generation,
+                        profile_hash,
+                        data: Arc::new(crate::node::EmptyData),
+                    })
+                }
+            }
+
+            let threads = Arc::new(StageThreads::default());
+            let sched = Scheduler::test_new_sync_with_executor(
+                SchedulerConfig::default(),
+                Arc::new(MemorySourceLoader::new()) as Arc<dyn crate::source_loader::SourceLoader>,
+                Arc::clone(&threads) as Arc<dyn crate::execution::executor::StageExecutor>,
+            );
+            let handle = sched.submit_request(Request {
+                file_id: "/x.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("<template>x</template>")),
+                file_language: None,
+                request_context: None,
+            });
+
+            let _producer = crate::caller_kind::CallerKindGuard::install(
+                crate::caller_kind::CallerKind::ProducerWorker,
+            );
+            while sched.dispatch_for_pending_dependency() {}
+
+            assert!(
+                matches!(handle.try_get(), Some(CompletionState::Ready(_))),
+                "the request must be settled once dispatch stops progressing"
+            );
+            let current = std::thread::current().id();
+            let ran = threads.0.lock();
+            assert_eq!(ran.len(), 2, "source and analysis both ran: {ran:?}");
+            assert!(
+                ran.iter().all(|thread| *thread == current),
+                "stages must run on the producer worker's own thread: {ran:?}"
+            );
+        }
+
         /// Per-file gate so the test can park the single IO worker inside
         /// Source and observe that the driver keeps making progress.
         struct SourceGate {
