@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   artifactKey,
+  auditHazard,
   cacheKeyFor,
   canonicalJson,
   closureManifestDigest,
@@ -23,6 +24,7 @@ import {
   reuseVerdict,
   revocationCatalogDigest,
   MANIFEST_IDENTITY_AXES,
+  RECEIPT_SET_ARRAYS,
   revocationCatalogHazard,
   sortedClosureFiles,
   transitionAllowed,
@@ -217,10 +219,16 @@ test("compatibility mutations each reach a distinct typed verdict", () => {
       .filter((vector) => vector.expected === "Compatible")
       .map((vector) => vector.artifact?.flavor ?? artifact.flavor),
   );
-  for (const flavor of ["native-tsgo", "wasm-single", "wasm-threaded", "js-worker"]) {
+  for (const flavor of schema.$defs.EngineFlavor.enum) {
     assert.ok(compatibleFlavors.has(flavor), `no positive vector runs ${flavor}`);
   }
-  const { versionWindow, versionBoundaries, stableFloorBoundaries } = contract.compatibility;
+  const { versionWindow, versionBoundaries, stableFloorBoundaries, prereleaseLineBoundaries } =
+    contract.compatibility;
+  for (const [version, expected] of prereleaseLineBoundaries.cases) {
+    assert.equal(versionVerdict(version, prereleaseLineBoundaries.window), expected, version);
+  }
+  const { prereleaseCores: _, ...unnamed } = prereleaseLineBoundaries.window;
+  assert.equal(versionVerdict("6.0.0-beta.1", unnamed), "Unsupported");
   for (const [version, expected] of versionBoundaries) {
     assert.equal(versionVerdict(version, versionWindow), expected, String(version));
     reached.add(expected);
@@ -267,6 +275,7 @@ test("every source class has its own evidence obligation", () => {
 const revocationView = (overrides = {}) => ({
   catalog: contract.revocation.catalog.body,
   approvedRoots: contract.evidence.approvedRoots,
+  verifiedSignatures: [(overrides.catalog ?? contract.revocation.catalog.body).signature],
   ...contract.revocation.catalog.view,
   ...overrides,
 });
@@ -279,7 +288,9 @@ const evidenceContext = (overrides = {}) => ({
   entryPointRoles: contract.evidence.entryPointRoles,
   authorizedSources: contract.evidence.authorizedSources,
   authorizedOrigins: contract.evidence.authorizedOrigins,
-  policyRequiredEvidence: contract.evidence.policyRequiredEvidence,
+  trustedOrigins: contract.evidence.trustedOrigins,
+  observation: contract.evidence.observation,
+  sourcePolicies: contract.evidence.sourcePolicies,
   observedEvidence: contract.evidence.observedEvidence,
   observedArchiveIntegrity: contract.evidence.observedArchiveIntegrity,
   developmentPermitted: contract.evidence.developmentPermitted,
@@ -293,13 +304,26 @@ const browserContext = (overrides = {}) =>
   evidenceContext({
     authorizedSources: contract.evidence.browser.authorizedSources,
     authorizedOrigins: contract.evidence.browser.authorizedOrigins,
-    policyRequiredEvidence: contract.evidence.browser.policyRequiredEvidence,
+    trustedOrigins: contract.evidence.browser.trustedOrigins,
+    sourcePolicies: contract.evidence.browser.sourcePolicies,
     observedClosure: contract.evidence.browser.observedClosure,
     ...overrides,
   });
 
 const verdictOf = (descriptor, context) =>
   evidenceVerdict(contract.validationOrder.trust, descriptor, context);
+
+/**
+ * The observation in which the validator did verify and receive exactly what is presented, so a
+ * vector reaches the check it names rather than failing earlier as unobserved.
+ */
+const observedAsPresented = ({ originReceipts, signature, provenance }) => ({
+  observation: {
+    originReceipts,
+    signatures: signature.signatures,
+    provenance: provenance.references,
+  },
+});
 
 test("byte, origin, signature and manifest mutations are refused before execution", () => {
   const { descriptor, mutations } = contract.evidence;
@@ -328,8 +352,90 @@ test("byte, origin, signature and manifest mutations are refused before executio
     for (const [path, value] of Object.entries(mutation.set ?? {})) setPath(changed, path, value);
     const observedClosure = { ...contract.evidence.observedClosure, ...mutation.observed };
     if (mutation.removeObserved !== undefined) delete observedClosure[mutation.removeObserved];
-    const context = evidenceContext({ observedClosure, ...mutation.context });
+    const context = evidenceContext({
+      observedClosure,
+      ...(mutation.observation === "captured" ? {} : observedAsPresented(changed)),
+      ...mutation.context,
+    });
     assert.equal(verdictOf(changed, context), mutation.expected, mutation.id);
+  }
+});
+
+/** Recomputes the manifest digest and copies it into everything a descriptor carries over it. */
+function rewriteDigests(descriptor) {
+  const digest = closureManifestDigest(descriptor.id, descriptor.integrity);
+  descriptor.integrity.closureManifestDigest = digest;
+  descriptor.id.contentDigest = digest;
+  descriptor.originReceipts.forEach((receipt) => (receipt.closureManifestDigest = digest));
+  descriptor.signature.signatures.forEach((entry) => (entry.manifestDigest = digest));
+  descriptor.provenance.references.forEach((reference) => (reference.subjectDigest = digest));
+  return digest;
+}
+
+test("a descriptor that recomputes its own digests proves nothing without an observation", () => {
+  const { descriptor, observedClosure } = contract.evidence;
+  const forgedBytes = contract.identity.axisMutations.at(-1).value;
+  const rewrites = [
+    [
+      "replaced executable bytes",
+      (forged) => (forged.integrity.files[0].digest = forgedBytes),
+      { ...observedClosure, [descriptor.integrity.files[0].path]: forgedBytes },
+    ],
+    ["relabelled version", (forged) => (forged.id.version = "7.1.9"), observedClosure],
+  ];
+  for (const [name, rewrite, closure] of rewrites) {
+    const forged = clone(descriptor);
+    rewrite(forged);
+    rewriteDigests(forged);
+    conforms(forged, "EngineArtifactDescriptor");
+    const context = (overrides) => evidenceContext({ observedClosure: closure, ...overrides });
+    assert.equal(verdictOf(forged, context({})), "OriginMismatch", name);
+
+    // Even an authority tricked into minting a receipt over it leaves the signature unverified.
+    const minted = { ...contract.evidence.observation, originReceipts: forged.originReceipts };
+    assert.equal(verdictOf(forged, context({ observation: minted })), "SignatureFailure", name);
+
+    // Only a verification the validator performed over these exact bytes passes.
+    assert.equal(verdictOf(forged, context(observedAsPresented(forged))), null, name);
+  }
+});
+
+test("on an unsigned route a relabelled descriptor cannot mint its own origin receipt", () => {
+  const unsigned = clone(contract.evidence.descriptor);
+  unsigned.signature.signatures = [];
+  unsigned.provenance.references = [];
+  const observation = { originReceipts: unsigned.originReceipts, signatures: [], provenance: [] };
+  const context = evidenceContext({ sourcePolicies: [], observation });
+  assert.equal(verdictOf(unsigned, context), null);
+
+  const relabelled = clone(unsigned);
+  relabelled.id.version = "7.1.9";
+  rewriteDigests(relabelled);
+  assert.equal(verdictOf(relabelled, context), "OriginMismatch");
+});
+
+test("a provenance requirement demands every named kind, and no single kind stands in", () => {
+  const { descriptor, obligations } = contract.evidence;
+  const { requiredKinds } = obligations.find((row) => row.evidence === "provenance");
+  assert.deepEqual(
+    [...requiredKinds].sort(),
+    [...schema.$defs.EngineProvenanceReference.properties.kind.enum].sort(),
+  );
+  for (const kind of requiredKinds) {
+    const without = clone(descriptor);
+    without.provenance.references = without.provenance.references.filter((r) => r.kind !== kind);
+    assert.equal(
+      verdictOf(without, evidenceContext(observedAsPresented(without))),
+      "ProvenanceIncomplete",
+      kind,
+    );
+  }
+});
+
+test("an origin's captured scope refuses a wildcard or an empty package list", () => {
+  const origin = contract.fixtures.TrustedEngineOrigin;
+  for (const packageScope of [["*"], [], ["../typescript"], ["@typescript/*"]]) {
+    refuses({ ...origin, packageScope }, "TrustedEngineOrigin");
   }
 });
 
@@ -343,19 +449,31 @@ test("a declaration recomputed over signed bytes loses the signature and the key
   assert.notEqual(digest, descriptor.id.contentDigest);
   forged.integrity.closureManifestDigest = digest;
   forged.id.contentDigest = digest;
-  assert.equal(verdictOf(forged, evidenceContext()), "OriginMismatch", "receipt covers old bytes");
+  const forgedContext = () => evidenceContext(observedAsPresented(forged));
+  assert.equal(verdictOf(forged, forgedContext()), "OriginMismatch", "receipt covers old bytes");
   forged.originReceipts[0].closureManifestDigest = digest;
-  assert.equal(verdictOf(forged, evidenceContext()), "SignatureFailure");
+  assert.equal(verdictOf(forged, forgedContext()), "SignatureFailure");
   assert.notEqual(artifactKey(forged.id), artifactKey(descriptor.id));
   forged.signature.signatures[0].manifestDigest = digest;
   forged.provenance.references.forEach((reference) => (reference.subjectDigest = digest));
-  assert.equal(verdictOf(forged, evidenceContext()), null, "a publisher's own re-signing is valid");
+  const minted = { ...contract.evidence.observation, originReceipts: forged.originReceipts };
+  assert.equal(
+    verdictOf(forged, evidenceContext({ observation: minted })),
+    "SignatureFailure",
+    "copying a digest into the entry is not signing",
+  );
+  assert.equal(
+    verdictOf(forged, evidenceContext(observedAsPresented(forged))),
+    null,
+    "a publisher's own re-signing, which the validator verified, is valid",
+  );
 });
 
 test("the trust table alone orders the evidence verdict", () => {
   const changed = clone(contract.evidence.descriptor);
   changed.originReceipts[0].trustRoot.rootSetRevision = 2;
   const context = evidenceContext({
+    ...observedAsPresented(changed),
     observedClosure: {
       ...contract.evidence.observedClosure,
       "lib/tsc": contract.identity.axisMutations.at(-1).value,
@@ -407,21 +525,25 @@ test("each source's own required evidence is demanded, and only policy can add t
       const context = (overrides) =>
         evidenceContext({
           authorizedSources: [row.source],
-          authorizedOrigins: [origin],
-          policyRequiredEvidence: [],
+          authorizedOrigins: [{ ...contract.evidence.authorizedOrigins[0], ...origin }],
+          sourcePolicies: [],
           ...overrides,
         });
       return { trustClass, base, context };
     });
     for (const { trustClass, base, context } of classes) {
       const permits = { developmentPermitted: true };
-      assert.equal(verdictOf(base, context(permits)), null, `${row.source} ${trustClass}`);
+      assert.equal(
+        verdictOf(base, context({ ...permits, ...observedAsPresented(base) })),
+        null,
+        `${row.source} ${trustClass}`,
+      );
       const demanded = [...row.required, ...(row.requiredByTrustClass?.[trustClass] ?? [])];
       for (const token of demanded) {
         const obligation = contract.evidence.obligations.find((item) => item.evidence === token);
         if (obligation.proof === "structural") continue;
         const stripped = clone(base);
-        const overrides = { ...permits };
+        const overrides = { ...permits, ...observedAsPresented(stripped) };
         if (token === "development-policy") overrides.developmentPermitted = false;
         else if (obligation.proof === "observed") {
           overrides.observedEvidence = contract.evidence.observedEvidence.filter(
@@ -440,11 +562,14 @@ test("each source's own required evidence is demanded, and only policy can add t
   const proved = contract.evidence.obligations.filter((item) => item.proof !== "structural");
   assert.ok(exercised >= proved.length, `only ${exercised} evidence cases ran`);
 
-  for (const demanded of [
-    contract.evidence.policyRequiredEvidence,
-    contract.evidence.browser.policyRequiredEvidence,
+  for (const policies of [
+    contract.evidence.sourcePolicies,
+    contract.evidence.browser.sourcePolicies,
   ]) {
-    for (const token of demanded) conforms(token, "EnginePolicyEvidence");
+    for (const row of policies) conforms(row, "EngineSourcePolicyEvidence");
+  }
+  for (const { sourcePolicyId } of contract.evidence.sourcePolicies) {
+    assert.ok(contract.fixtures.EngineProvisioningPolicy.sourcePolicies.includes(sourcePolicyId));
   }
   for (const token of schema.$defs.EnginePolicyEvidence.enum) {
     assert.ok(
@@ -457,6 +582,12 @@ test("each source's own required evidence is demanded, and only policy can add t
   const unsigned = clone(contract.evidence.descriptor);
   unsigned.signature.signatures = [];
   assert.equal(verdictOf(unsigned, evidenceContext()), "SignatureFailure");
+  const elsewhere = [{ ...contract.evidence.sourcePolicies[0], source: "SystemPath" }];
+  assert.equal(
+    verdictOf(unsigned, evidenceContext({ sourcePolicies: elsewhere })),
+    null,
+    "a policy row demands evidence only of its own source",
+  );
   refuses({ requirement: "not-required", signatures: [] }, "EngineSignatureEvidence");
   refuses({ requirement: "not-required", references: [] }, "EngineProvenanceEvidence");
 });
@@ -485,7 +616,8 @@ test("a browser development artifact can never present as a published one", () =
   for (const vector of vectors) {
     const changed = clone(contract.evidence.browser[vector.descriptor]);
     for (const [path, value] of Object.entries(vector.set ?? {})) setPath(changed, path, value);
-    assert.equal(verdictOf(changed, browserContext(vector.context)), vector.expected, vector.id);
+    const context = browserContext({ ...observedAsPresented(changed), ...vector.context });
+    assert.equal(verdictOf(changed, context), vector.expected, vector.id);
   }
 });
 
@@ -734,6 +866,11 @@ test("reuse needs an equal key, and each changed basis forces fresh validation",
     reuseVerdict(reuse, key, key, { mutability: "immutable-ready", boundary: "lost" }),
     "ValidateFresh",
   );
+  // A key lacking a field never matches, on either side.
+  const { revocationEpoch: _, ...withoutEpoch } = key;
+  assert.equal(reuseVerdict(reuse, withoutEpoch, key, warm), "ValidateFresh");
+  assert.equal(reuseVerdict(reuse, key, withoutEpoch, warm), "ValidateFresh");
+  assert.equal(reuseVerdict(reuse, {}, key, warm), "ValidateFresh");
   for (const boundary of ["retained-verified-handle", "lost"]) {
     assert.equal(
       reuseVerdict(reuse, key, key, { mutability: "mutable", boundary }),
@@ -831,9 +968,16 @@ test("a revocation catalog is verified before use and names each target by its o
     const catalog = { ...clone(body), ...vector.catalog };
     if (vector.root !== undefined) catalog.signature.trustRoot = vector.root;
     if (vector.signer !== undefined) catalog.signature.signerId = vector.signer;
+    if (vector.scheme !== undefined) catalog.signature.scheme = vector.scheme;
+    if (vector.material !== undefined) catalog.signature.signatureDigest = vector.material;
     if (vector.entries !== undefined) catalog.entries = clone(vector.entries);
     if (vector.resign === true) catalog.signature.manifestDigest = revocationCatalogDigest(catalog);
-    const view = revocationView({ catalog, ...vector.view });
+    const verified = vector.unverified === true ? body : catalog;
+    const view = revocationView({
+      catalog,
+      verifiedSignatures: [verified.signature],
+      ...vector.view,
+    });
     assert.equal(revocationCatalogHazard(view), vector.expected, vector.id);
     if (vector.expected !== null) {
       const context = evidenceContext({ revocation: view });
@@ -860,7 +1004,14 @@ test("a revocation catalog is verified before use and names each target by its o
       assert.equal(verdictOf(descriptor, context), "Revoked", id);
     }
   }
-  assert.deepEqual([...kinds].sort(), ["artifact", "origin", "signer", "trust-root"]);
+  assert.deepEqual([...kinds].sort(), [
+    "artifact",
+    "content",
+    "file",
+    "origin",
+    "signer",
+    "trust-root",
+  ]);
   refuses(
     { ...entry, target: { kind: "artifact", artifactKey: "artifact-1" } },
     "EngineRevocation",
@@ -870,6 +1021,52 @@ test("a revocation catalog is verified before use and names each target by its o
     { ...entry, target: { kind: "origin", artifactKey: entry.target.artifactKey } },
     "EngineRevocation",
   );
+});
+
+test("revoked bytes stay revoked through any other authorized origin", () => {
+  const { descriptor, secondOrigin, approvedRoots } = contract.evidence;
+  const viaMirror = clone(descriptor);
+  viaMirror.id.origin = secondOrigin.authorization.originId;
+  viaMirror.originReceipts[0].origin = {
+    ...viaMirror.originReceipts[0].origin,
+    originId: secondOrigin.authorization.originId,
+    authorizedChannel: secondOrigin.authorization.authorizedChannel,
+  };
+  const context = (revocation) =>
+    evidenceContext({
+      ...observedAsPresented(viaMirror),
+      authorizedOrigins: [secondOrigin.authorization],
+      trustedOrigins: [secondOrigin.trustedOrigin],
+      approvedRoots: [...approvedRoots, secondOrigin.root],
+      revocation,
+    });
+  const { body } = contract.revocation.catalog;
+  const revoking = (target) => {
+    const catalog = { ...clone(body), entries: [{ ...body.entries[0], target }] };
+    catalog.signature.manifestDigest = revocationCatalogDigest(catalog);
+    return revocationView({ catalog });
+  };
+  assert.equal(verdictOf(viaMirror, context(revocationView())), null);
+  assert.equal(viaMirror.id.contentDigest, descriptor.id.contentDigest);
+
+  // A key includes its origin, so revoking one route leaves the other standing.
+  const byKey = revoking({ kind: "artifact", artifactKey: artifactKey(descriptor.id) });
+  assert.equal(verdictOf(descriptor, evidenceContext({ revocation: byKey })), "Revoked");
+  assert.equal(verdictOf(viaMirror, context(byKey)), null);
+
+  const byContent = { kind: "content", contentDigest: descriptor.id.contentDigest };
+  assert.equal(verdictOf(viaMirror, context(revoking(byContent))), "Revoked");
+  const byFile = { kind: "file", fileDigest: descriptor.integrity.files[0].digest };
+  assert.equal(verdictOf(viaMirror, context(revoking(byFile))), "Revoked");
+
+  // The same bytes under a relabelled manifest have another content digest, not another file.
+  const rebuilt = clone(viaMirror);
+  rebuilt.id.build = "repackaged-build";
+  rewriteDigests(rebuilt);
+  const rebuiltContext = (revocation) =>
+    evidenceContext({ ...context(revocation), ...observedAsPresented(rebuilt) });
+  assert.equal(verdictOf(rebuilt, rebuiltContext(revoking(byContent))), null);
+  assert.equal(verdictOf(rebuilt, rebuiltContext(revoking(byFile))), "Revoked");
 });
 
 test("receipts are deterministic and bind their whole basis", () => {
@@ -882,6 +1079,56 @@ test("receipts are deterministic and bind their whole basis", () => {
   for (const { id, set } of contract.receiptGolden.refused) {
     assert.throws(() => conforms({ ...receipt, ...set }, "EngineValidationReceipt"), undefined, id);
   }
+});
+
+const arrayPathsOf = (definition, prefix = "") => {
+  const node =
+    definition.$ref === undefined ? definition : schema.$defs[definition.$ref.split("/").at(-1)];
+  if (node.type === "array") {
+    return [prefix, ...arrayPathsOf(node.items, `${prefix}[]`)];
+  }
+  return Object.entries(node.properties ?? {}).flatMap(([key, value]) =>
+    arrayPathsOf(value, prefix === "" ? key : `${prefix}.${key}`),
+  );
+};
+
+test("a receipt's digest ignores the order of every array it holds", () => {
+  const { encoding, receiptGolden, fixtures } = contract;
+  // The schema decides the universe, so a new array field cannot escape the ordering law.
+  assert.deepEqual(
+    arrayPathsOf(schema.$defs.EngineValidationReceipt).sort(),
+    [...RECEIPT_SET_ARRAYS].sort(),
+  );
+  assert.deepEqual(encoding.receiptSetArrays.arrays, RECEIPT_SET_ARRAYS);
+
+  const receipt = { ...fixtures.EngineValidationReceipt, ...receiptGolden.multiLocator.set };
+  conforms(receipt, "EngineValidationReceipt");
+  assert.equal(receiptDigest(receipt), receiptGolden.multiLocator.digest);
+  assert.notEqual(receiptGolden.multiLocator.digest, receiptGolden.digest);
+  const holderOf = (target, path) => {
+    const steps = path.split(".");
+    const last = steps.pop();
+    return [steps.reduce((node, step) => node[step], target), last];
+  };
+  for (const path of RECEIPT_SET_ARRAYS) {
+    const reversed = clone(receipt);
+    const [holder, last] = holderOf(reversed, path);
+    assert.ok(holder[last].length > 1, `${path} must hold a permutation to discriminate`);
+    holder[last].reverse();
+    assert.equal(receiptDigest(reversed), receiptGolden.multiLocator.digest, path);
+
+    // Ordering is not dropping: each member still reaches the digest.
+    const smaller = clone(receipt);
+    const [smallerHolder, smallerLast] = holderOf(smaller, path);
+    smallerHolder[smallerLast].pop();
+    assert.notEqual(receiptDigest(smaller), receiptGolden.multiLocator.digest, path);
+  }
+  assert.throws(() =>
+    conforms(
+      { ...receipt, hostFeatures: ["SharedArrayBuffer", "SharedArrayBuffer"] },
+      "EngineValidationReceipt",
+    ),
+  );
 });
 
 test("canonical encoding refuses values two implementations could encode differently", () => {
@@ -903,6 +1150,17 @@ test("public status is an allowlisted projection free of roots and credentials",
     conforms(projected, "EnginePublicStatus");
     assert.equal(unportableString(projected), null, vector.id);
   }
+  const { envelope } = contract.publicStatus;
+  const success = new Set(envelope.stageSuccess);
+  const positive = new Set();
+  for (const { expected } of vectors) {
+    if (success.has(expected.state)) {
+      positive.add(expected.state);
+      assert.equal(expected.remediation, "none", expected.state);
+      assert.equal(expected.receiptDigest, contract.receiptGolden.digest, expected.state);
+    } else assert.equal(expected.receiptDigest, undefined, expected.state);
+  }
+  assert.deepEqual([...positive].sort(), [...envelope.stageSuccess].sort());
   for (const text of unportable) assert.notEqual(unportableString({ text }), null, text);
   for (const text of portable) assert.equal(unportableString({ text }), null, text);
   for (const fixture of [
@@ -911,6 +1169,43 @@ test("public status is an allowlisted projection free of roots and credentials",
     contract.fixtures.EngineArtifactDescriptor,
   ]) {
     assert.equal(unportableString(fixture), null);
+  }
+});
+
+test("every public state and completion maps to one outcome of the public envelope", () => {
+  const { envelope } = contract.publicStatus;
+  const states = schema.$defs.EnginePublicStatus.properties.state.enum;
+  assert.deepEqual(Object.keys(envelope.states).sort(), [...states].sort());
+  const document = readFileSync(new URL(`../../../${envelope.document}`, import.meta.url), "utf8");
+  const outcomes = new Set([...document.matchAll(/^\| (PO\d\d) \|/gmu)].map((match) => match[1]));
+  assert.ok(outcomes.size > 0, "the envelope's outcome table was not read");
+  const mapped = [...Object.values(envelope.states), ...Object.values(envelope.completions)];
+  for (const outcome of mapped) assert.ok(outcomes.has(outcome), outcome);
+  const completions = schema.$defs.EnginePublicStatus.properties.completion.enum;
+  assert.deepEqual(
+    [...Object.keys(envelope.completions), "Complete"].sort(),
+    [...completions].sort(),
+  );
+  // Every stage's outcome is either in this projection or named with the stage that reports it.
+  assert.deepEqual(
+    policy.outcomes.map((row) => row.state).sort(),
+    [...states, ...Object.keys(envelope.otherStages)].sort(),
+  );
+  for (const state of envelope.stageSuccess) assert.equal(envelope.states[state], "PO01", state);
+});
+
+test("a private audit record keeps local detail and refuses credentials", () => {
+  const record = contract.fixtures.EngineValidationAudit;
+  conforms(record, "EngineValidationAudit");
+  for (const { id, record: change, expected } of contract.publicStatus.audit.vectors) {
+    assert.equal(auditHazard({ ...record, ...change }), expected, id);
+  }
+  assert.notEqual(unportableString(record.privateDetail), null, "must hold a machine path");
+  const projected = publicProjection(contract.publicStatus.allowlist, record);
+  conforms(projected, "EnginePublicStatus");
+  assert.equal(unportableString(projected), null);
+  for (const key of ["privateDetail", "originId", "requestId", "work"]) {
+    assert.ok(!Object.hasOwn(projected, key), key);
   }
 });
 
@@ -1101,6 +1396,8 @@ test("the population holds every named boundary, source class and displaced rout
     "EngineIntegrityEvidence",
     "EngineSignatureEvidence",
     "EngineValidationReceipt",
+    "EngineValidatorObservation",
+    "EngineValidationAudit",
     "EngineInstallLayout",
     "EngineReadyMarker",
     "EngineCacheKey",

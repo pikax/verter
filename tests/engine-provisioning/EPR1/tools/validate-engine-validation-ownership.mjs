@@ -120,6 +120,8 @@ const REQUIRED_MEMBERS = {
     "EngineIntegrityEvidence",
     "EngineSignatureEvidence",
     "EngineValidationReceipt",
+    "EngineValidatorObservation",
+    "EngineValidationAudit",
     "EngineInstallLayout",
     "EngineReadyMarker",
     "EngineCacheKey",

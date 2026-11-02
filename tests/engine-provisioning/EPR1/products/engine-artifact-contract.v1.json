@@ -44,6 +44,18 @@
       ],
       "utf8Order": ["lib/～", "lib/😀"],
       "digest": "sha256:0128156f0b7f87cc652f0a5270a57552449aba5d754ea065b4e4c3e131287db2"
+    },
+    "receiptSetArrays": {
+      "arrays": [
+        "originReceipts",
+        "observedBasis",
+        "hostFeatures",
+        "integrity.files",
+        "signature.signatures",
+        "provenance.references"
+      ],
+      "order": "Each is a set, sorted before hashing by the UTF-8 bytes of each element's canonical JSON, so enumeration order never reaches the digest. It covers every array the receipt holds.",
+      "authoredOrder": "A declaration, requirement or revocation catalog is an authored document: its digest covers its arrays in their authored order, and a validator never reorders them. A permutation is a different document, so it loses its signature or misses its key and fails closed."
     }
   },
   "identity": {
@@ -591,6 +603,90 @@
           }
         },
         "expected": "HostUnsupported"
+      },
+      {
+        "id": "tsserver-stable-in-its-window",
+        "requirement": {
+          "allowedFlavors": ["node-tsserver"],
+          "versionFloor": "5.8.0",
+          "versionCeilingExclusive": "7.0.0",
+          "prereleaseCores": ["6.0.0"]
+        },
+        "artifact": {
+          "flavor": "node-tsserver",
+          "version": "5.9.3"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "native-process",
+            "moduleFormat": "node-commonjs",
+            "requiredHostFeatures": []
+          }
+        },
+        "expected": "Compatible"
+      },
+      {
+        "id": "tsserver-prerelease-on-a-named-line",
+        "requirement": {
+          "allowedFlavors": ["node-tsserver"],
+          "versionFloor": "5.8.0",
+          "versionCeilingExclusive": "7.0.0",
+          "prereleaseCores": ["6.0.0"]
+        },
+        "artifact": {
+          "flavor": "node-tsserver",
+          "version": "6.0.0-beta.1"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "native-process",
+            "moduleFormat": "node-commonjs",
+            "requiredHostFeatures": []
+          }
+        },
+        "expected": "Compatible"
+      },
+      {
+        "id": "tsserver-below-its-floor",
+        "requirement": {
+          "allowedFlavors": ["node-tsserver"],
+          "versionFloor": "5.8.0",
+          "versionCeilingExclusive": "7.0.0",
+          "prereleaseCores": ["6.0.0"]
+        },
+        "artifact": {
+          "flavor": "node-tsserver",
+          "version": "5.7.9"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "native-process",
+            "moduleFormat": "node-commonjs",
+            "requiredHostFeatures": []
+          }
+        },
+        "expected": "TooOld"
+      },
+      {
+        "id": "tsserver-prerelease-on-an-unnamed-line",
+        "requirement": {
+          "allowedFlavors": ["node-tsserver"],
+          "versionFloor": "5.8.0",
+          "versionCeilingExclusive": "7.0.0",
+          "prereleaseCores": ["6.0.0"]
+        },
+        "artifact": {
+          "flavor": "node-tsserver",
+          "version": "6.1.0-beta.1"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "native-process",
+            "moduleFormat": "node-commonjs",
+            "requiredHostFeatures": []
+          }
+        },
+        "expected": "Unsupported"
       }
     ],
     "versionWindow": {
@@ -630,6 +726,28 @@
     "policyChange": {
       "law": "The key carries a digest of the whole requirement and the host's features, so a changed bound, feature or host cannot reuse a receipt even under unchanged IDs.",
       "keyFields": ["requirementId", "requirementDigest", "compatibilityPolicyId", "hostFeatures"]
+    },
+    "prereleaseLineBoundaries": {
+      "window": {
+        "floor": "5.8.0",
+        "ceilingExclusive": "7.0.0",
+        "prereleaseChannels": ["beta", "rc"],
+        "prereleaseCores": ["6.0.0", "5.0.0"]
+      },
+      "cases": [
+        ["5.7.9", "TooOld"],
+        ["5.8.0", "Compatible"],
+        ["5.9.3", "Compatible"],
+        ["5.9.0-beta", "Unsupported"],
+        ["5.0.0-beta", "Unsupported"],
+        ["6.0.0-alpha.1", "Unsupported"],
+        ["6.0.0-beta.1", "Compatible"],
+        ["6.0.0-rc.1", "Compatible"],
+        ["6.0.0", "Compatible"],
+        ["6.1.0-beta", "Unsupported"],
+        ["7.0.0-beta", "TooNew"],
+        ["7.0.0", "TooNew"]
+      ]
     }
   },
   "sourceEvidence": [
@@ -750,6 +868,7 @@
         "signatures": [
           {
             "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+            "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -771,6 +890,11 @@
           {
             "kind": "license",
             "referenceId": "license-1",
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+          },
+          {
+            "kind": "attestation",
+            "referenceId": "attestation-1",
             "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ]
@@ -843,12 +967,13 @@
       {
         "evidence": "signature",
         "check": "signatureValid",
-        "proof": "compared"
+        "proof": "verified"
       },
       {
         "evidence": "provenance",
         "check": "provenanceComplete",
-        "proof": "compared"
+        "proof": "verified",
+        "requiredKinds": ["attestation", "sbom", "license"]
       },
       {
         "evidence": "development-policy",
@@ -862,10 +987,34 @@
         "originId": "npm-typescript-darwin-arm64",
         "sourceKind": "ManagedCache",
         "trustClass": "registry-integrity",
-        "authorizedChannel": "project-opt-in-install"
+        "authorizedChannel": "project-opt-in-install",
+        "trustRootIds": [
+          {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          }
+        ],
+        "acceptedSigners": [
+          {
+            "signerId": "signer-1",
+            "scheme": "policy-approved-scheme",
+            "trustRoot": {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            }
+          }
+        ],
+        "artifactScope": [
+          {
+            "package": "@typescript/typescript-darwin-arm64",
+            "engine": "typescript",
+            "platform": "aarch64-apple-darwin"
+          }
+        ]
       }
     ],
-    "policyRequiredEvidence": ["signature", "provenance"],
     "observedEvidence": [
       "approval",
       "attestation",
@@ -1061,7 +1210,47 @@
         "set": {
           "id.engine": "typescript-next"
         },
-        "expected": "IntegrityFailure"
+        "expected": "IntegrityFailure",
+        "context": {
+          "authorizedOrigins": [
+            {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "registry-integrity",
+              "authorizedChannel": "project-opt-in-install",
+              "trustRootIds": [
+                {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              ],
+              "acceptedSigners": [
+                {
+                  "signerId": "signer-1",
+                  "scheme": "policy-approved-scheme",
+                  "trustRoot": {
+                    "rootSetIdentity": "system-ca",
+                    "rootSetRevision": 3,
+                    "policyEpoch": 7
+                  }
+                }
+              ],
+              "artifactScope": [
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript",
+                  "platform": "aarch64-apple-darwin"
+                },
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript-next",
+                  "platform": "aarch64-apple-darwin"
+                }
+              ]
+            }
+          ]
+        }
       },
       {
         "id": "identity-version-claimed",
@@ -1082,7 +1271,47 @@
         "set": {
           "id.platform": "x86_64-unknown-linux-gnu"
         },
-        "expected": "IntegrityFailure"
+        "expected": "IntegrityFailure",
+        "context": {
+          "authorizedOrigins": [
+            {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "registry-integrity",
+              "authorizedChannel": "project-opt-in-install",
+              "trustRootIds": [
+                {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              ],
+              "acceptedSigners": [
+                {
+                  "signerId": "signer-1",
+                  "scheme": "policy-approved-scheme",
+                  "trustRoot": {
+                    "rootSetIdentity": "system-ca",
+                    "rootSetRevision": 3,
+                    "policyEpoch": 7
+                  }
+                }
+              ],
+              "artifactScope": [
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript",
+                  "platform": "aarch64-apple-darwin"
+                },
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript",
+                  "platform": "x86_64-unknown-linux-gnu"
+                }
+              ]
+            }
+          ]
+        }
       },
       {
         "id": "identity-abi-claimed",
@@ -1138,7 +1367,13 @@
           "signature.signatures": []
         },
         "context": {
-          "policyRequiredEvidence": ["provenance"]
+          "sourcePolicies": [
+            {
+              "sourcePolicyId": "source-policy-1",
+              "source": "ManagedCache",
+              "requiredEvidence": ["provenance"]
+            }
+          ]
         },
         "expected": null
       },
@@ -1174,7 +1409,32 @@
               "originId": "npm-typescript-darwin-arm64",
               "sourceKind": "ManagedCache",
               "trustClass": "registry-integrity",
-              "authorizedChannel": "other-channel"
+              "authorizedChannel": "other-channel",
+              "trustRootIds": [
+                {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              ],
+              "acceptedSigners": [
+                {
+                  "signerId": "signer-1",
+                  "scheme": "policy-approved-scheme",
+                  "trustRoot": {
+                    "rootSetIdentity": "system-ca",
+                    "rootSetRevision": 3,
+                    "policyEpoch": 7
+                  }
+                }
+              ],
+              "artifactScope": [
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript",
+                  "platform": "aarch64-apple-darwin"
+                }
+              ]
             }
           ]
         },
@@ -1188,13 +1448,63 @@
               "originId": "npm-typescript-darwin-arm64",
               "sourceKind": "ManagedCache",
               "trustClass": "registry-integrity",
-              "authorizedChannel": "project-opt-in-install"
+              "authorizedChannel": "project-opt-in-install",
+              "trustRootIds": [
+                {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              ],
+              "acceptedSigners": [
+                {
+                  "signerId": "signer-1",
+                  "scheme": "policy-approved-scheme",
+                  "trustRoot": {
+                    "rootSetIdentity": "system-ca",
+                    "rootSetRevision": 3,
+                    "policyEpoch": 7
+                  }
+                }
+              ],
+              "artifactScope": [
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript",
+                  "platform": "aarch64-apple-darwin"
+                }
+              ]
             },
             {
               "originId": "npm-typescript-darwin-arm64",
               "sourceKind": "ManagedCache",
               "trustClass": "local-approval",
-              "authorizedChannel": "project-opt-in-install"
+              "authorizedChannel": "project-opt-in-install",
+              "trustRootIds": [
+                {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              ],
+              "acceptedSigners": [
+                {
+                  "signerId": "signer-1",
+                  "scheme": "policy-approved-scheme",
+                  "trustRoot": {
+                    "rootSetIdentity": "system-ca",
+                    "rootSetRevision": 3,
+                    "policyEpoch": 7
+                  }
+                }
+              ],
+              "artifactScope": [
+                {
+                  "package": "@typescript/typescript-darwin-arm64",
+                  "engine": "typescript",
+                  "platform": "aarch64-apple-darwin"
+                }
+              ]
             }
           ]
         },
@@ -1210,9 +1520,154 @@
       {
         "id": "policy-demands-unknown-evidence",
         "context": {
-          "policyRequiredEvidence": ["sbom-not-a-token"]
+          "sourcePolicies": [
+            {
+              "sourcePolicyId": "source-policy-1",
+              "source": "ManagedCache",
+              "requiredEvidence": ["sbom-not-a-token"]
+            }
+          ]
         },
         "expected": "InvalidSchema"
+      },
+      {
+        "id": "origin-receipt-not-minted",
+        "set": {
+          "originReceipts.0.authorityReceiptId": "self-issued"
+        },
+        "observation": "captured",
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "origin-receipt-id-not-minted",
+        "set": {
+          "originReceipts.0.receiptId": "origin-receipt-forged"
+        },
+        "observation": "captured",
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "signature-entry-made-up",
+        "set": {
+          "signature.signatures.0.validityId": "made-up"
+        },
+        "observation": "captured",
+        "expected": "SignatureFailure"
+      },
+      {
+        "id": "signature-material-not-verified",
+        "set": {
+          "signature.signatures.0.signatureDigest": "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa"
+        },
+        "observation": "captured",
+        "expected": "SignatureFailure"
+      },
+      {
+        "id": "signer-not-accepted-for-the-origin",
+        "set": {
+          "signature.signatures.0.signerId": "attacker-signer"
+        },
+        "expected": "SignatureFailure"
+      },
+      {
+        "id": "scheme-not-accepted-for-the-origin",
+        "set": {
+          "signature.signatures.0.scheme": "none"
+        },
+        "expected": "SignatureFailure"
+      },
+      {
+        "id": "root-approved-only-for-another-origin",
+        "set": {
+          "originReceipts.0.trustRoot": {
+            "rootSetIdentity": "enterprise-ca",
+            "rootSetRevision": 1,
+            "policyEpoch": 7
+          },
+          "signature.signatures.0.trustRoot": {
+            "rootSetIdentity": "enterprise-ca",
+            "rootSetRevision": 1,
+            "policyEpoch": 7
+          }
+        },
+        "context": {
+          "approvedRoots": [
+            {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            },
+            {
+              "rootSetIdentity": "enterprise-ca",
+              "rootSetRevision": 1,
+              "policyEpoch": 7
+            }
+          ]
+        },
+        "expected": "TrustFailure"
+      },
+      {
+        "id": "platform-outside-the-origin-scope",
+        "set": {
+          "id.platform": "x86_64-unknown-linux-gnu"
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "engine-outside-the-origin-scope",
+        "set": {
+          "id.engine": "typescript-next"
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "authorization-wider-than-the-captured-origin",
+        "context": {
+          "trustedOrigins": [
+            {
+              "originId": "npm-typescript-darwin-arm64",
+              "exactHttpsOriginOrApprovedLocalOrigin": "https://registry.npmjs.org",
+              "packageScope": ["typescript"],
+              "trustRootIds": [
+                {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              ],
+              "authorizationProvenance": "user-opt-in-1"
+            }
+          ]
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "captured-origin-absent",
+        "context": {
+          "trustedOrigins": []
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "provenance-license-alone",
+        "set": {
+          "provenance.references": [
+            {
+              "kind": "license",
+              "referenceId": "license-1",
+              "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+            }
+          ]
+        },
+        "expected": "ProvenanceIncomplete"
+      },
+      {
+        "id": "provenance-reference-not-observed",
+        "set": {
+          "provenance.references.0.referenceId": "made-up"
+        },
+        "observation": "captured",
+        "expected": "ProvenanceIncomplete"
       }
     ],
     "closurePathHazards": [
@@ -1293,6 +1748,7 @@
           "signatures": [
             {
               "manifestDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb",
+              "signatureDigest": "sha256:cb1073b8cb01e8ab4b780742804f281aadec2df1775f119b865288600ec7a163",
               "scheme": "policy-approved-scheme",
               "signerId": "signer-1",
               "trustRoot": {
@@ -1309,6 +1765,16 @@
             {
               "kind": "attestation",
               "referenceId": "attestation-1",
+              "subjectDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
+            },
+            {
+              "kind": "sbom",
+              "referenceId": "sbom-1",
+              "subjectDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
+            },
+            {
+              "kind": "license",
+              "referenceId": "license-1",
               "subjectDigest": "sha256:145dfa1e2a5fb303d9de87b1e1cafeb9bb36552480d93dff23d493f485ec23cb"
             }
           ]
@@ -1409,16 +1875,65 @@
           "originId": "browser-cdn-1",
           "sourceKind": "BrowserArtifact",
           "trustClass": "published-browser-manifest",
-          "authorizedChannel": "published-release"
+          "authorizedChannel": "published-release",
+          "trustRootIds": [
+            {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            }
+          ],
+          "acceptedSigners": [
+            {
+              "signerId": "signer-1",
+              "scheme": "policy-approved-scheme",
+              "trustRoot": {
+                "rootSetIdentity": "system-ca",
+                "rootSetRevision": 3,
+                "policyEpoch": 7
+              }
+            }
+          ],
+          "artifactScope": [
+            {
+              "package": "@verter/engine-browser",
+              "engine": "typescript",
+              "platform": "wasm32-browser"
+            }
+          ]
         },
         {
           "originId": "local-dev-server-1",
           "sourceKind": "BrowserArtifact",
           "trustClass": "development-browser-manifest",
-          "authorizedChannel": "development-policy"
+          "authorizedChannel": "development-policy",
+          "trustRootIds": [
+            {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            }
+          ],
+          "acceptedSigners": [
+            {
+              "signerId": "signer-1",
+              "scheme": "policy-approved-scheme",
+              "trustRoot": {
+                "rootSetIdentity": "system-ca",
+                "rootSetRevision": 3,
+                "policyEpoch": 7
+              }
+            }
+          ],
+          "artifactScope": [
+            {
+              "package": "verter-local-engine",
+              "engine": "typescript",
+              "platform": "wasm32-browser"
+            }
+          ]
         }
       ],
-      "policyRequiredEvidence": [],
       "observedClosure": {
         "engine.wasm": "sha256:2a708564b7d4940d983e7aae40151cfdc1d6e2f05ca881687aadad4be1bba8e0",
         "worker.js": "sha256:c66243794e2df3a6f1aa3845aebf84fd38b0fb66c12525c5768727237bab22d0"
@@ -1516,8 +2031,173 @@
           },
           "expected": "InvalidSchema"
         }
+      ],
+      "trustedOrigins": [
+        {
+          "originId": "browser-cdn-1",
+          "exactHttpsOriginOrApprovedLocalOrigin": "https://engines.verter.example",
+          "packageScope": ["@verter/engine-browser"],
+          "trustRootIds": [
+            {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            }
+          ],
+          "authorizationProvenance": "admin-approval-2"
+        },
+        {
+          "originId": "local-dev-server-1",
+          "exactHttpsOriginOrApprovedLocalOrigin": "approved-local:dev-server-1",
+          "packageScope": ["verter-local-engine"],
+          "trustRootIds": [
+            {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            }
+          ],
+          "authorizationProvenance": "user-approval-1"
+        }
+      ],
+      "sourcePolicies": []
+    },
+    "trustedOrigins": [
+      {
+        "originId": "npm-typescript-darwin-arm64",
+        "exactHttpsOriginOrApprovedLocalOrigin": "https://registry.npmjs.org",
+        "packageScope": ["@typescript/typescript-darwin-arm64"],
+        "trustRootIds": [
+          {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          }
+        ],
+        "authorizationProvenance": "user-opt-in-1"
+      }
+    ],
+    "observation": {
+      "originReceipts": [
+        {
+          "receiptId": "origin-receipt-1",
+          "origin": {
+            "originId": "npm-typescript-darwin-arm64",
+            "sourceKind": "ManagedCache",
+            "trustClass": "registry-integrity",
+            "authorizedChannel": "project-opt-in-install"
+          },
+          "locatorId": "locator-1",
+          "authorityReceiptId": "authority-1",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        }
+      ],
+      "signatures": [
+        {
+          "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+          "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
+          "scheme": "policy-approved-scheme",
+          "signerId": "signer-1",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          "validityId": "validity-1"
+        }
+      ],
+      "provenance": [
+        {
+          "kind": "sbom",
+          "referenceId": "sbom-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        },
+        {
+          "kind": "license",
+          "referenceId": "license-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        },
+        {
+          "kind": "attestation",
+          "referenceId": "attestation-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        }
       ]
-    }
+    },
+    "sourcePolicies": [
+      {
+        "sourcePolicyId": "source-policy-1",
+        "source": "ManagedCache",
+        "requiredEvidence": ["signature", "provenance"]
+      }
+    ],
+    "secondOrigin": {
+      "root": {
+        "rootSetIdentity": "enterprise-ca",
+        "rootSetRevision": 1,
+        "policyEpoch": 7
+      },
+      "authorization": {
+        "originId": "enterprise-mirror-1",
+        "sourceKind": "ManagedCache",
+        "trustClass": "registry-integrity",
+        "authorizedChannel": "admin-approved-mirror",
+        "trustRootIds": [
+          {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          {
+            "rootSetIdentity": "enterprise-ca",
+            "rootSetRevision": 1,
+            "policyEpoch": 7
+          }
+        ],
+        "acceptedSigners": [
+          {
+            "signerId": "signer-1",
+            "scheme": "policy-approved-scheme",
+            "trustRoot": {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            }
+          }
+        ],
+        "artifactScope": [
+          {
+            "package": "@typescript/typescript-darwin-arm64",
+            "engine": "typescript",
+            "platform": "aarch64-apple-darwin"
+          }
+        ]
+      },
+      "trustedOrigin": {
+        "originId": "enterprise-mirror-1",
+        "exactHttpsOriginOrApprovedLocalOrigin": "https://registry.mirror.example",
+        "packageScope": ["@typescript/typescript-darwin-arm64"],
+        "trustRootIds": [
+          {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          {
+            "rootSetIdentity": "enterprise-ca",
+            "rootSetRevision": 1,
+            "policyEpoch": 7
+          }
+        ],
+        "authorizationProvenance": "admin-approval-1"
+      }
+    },
+    "observationLaw": "Delivered signatures, origin receipts and provenance references are compared with what the validator observed, never believed. It verifies each signature's detached material against the accepted signer's key under its root, reads each origin receipt from the store of the authority that minted it, and resolves each provenance reference. An unsigned route's identity axes are bound by the receipt its authority minted over the closure digest, which covers them, so nothing runs to discover them."
   },
   "validationOrder": {
     "trust": [
@@ -2713,6 +3393,7 @@
         ],
         "signature": {
           "manifestDigest": "sha256:6e8a7b2f11137bc8c09e35f445170f62dd26a3a1fb5cf2eeb61710fc4f1f26f5",
+          "signatureDigest": "sha256:542edfe7068e6ded5c5f4f0ff27bf3199ad776dffdbcd5830d7d565e87cb6d76",
           "scheme": "policy-approved-scheme",
           "signerId": "signer-1",
           "trustRoot": {
@@ -2727,7 +3408,17 @@
         "issuers": [
           {
             "issuerId": "issuer-1",
-            "signerIds": ["signer-1"]
+            "acceptedSigners": [
+              {
+                "signerId": "signer-1",
+                "scheme": "policy-approved-scheme",
+                "trustRoot": {
+                  "rootSetIdentity": "system-ca",
+                  "rootSetRevision": 3,
+                  "policyEpoch": 7
+                }
+              }
+            ]
           }
         ],
         "lastSeenEpoch": 2,
@@ -2820,6 +3511,51 @@
           ],
           "resign": true,
           "expected": "entry-not-from-catalog"
+        },
+        {
+          "id": "forged-catalog-recomputes-its-own-digest",
+          "catalog": {
+            "entries": [],
+            "revocationEpoch": 99,
+            "notAfter": 4102444800
+          },
+          "resign": true,
+          "unverified": true,
+          "expected": "signature-not-verified"
+        },
+        {
+          "id": "signature-entry-the-validator-did-not-verify",
+          "unverified": true,
+          "material": "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa",
+          "expected": "signature-not-verified"
+        },
+        {
+          "id": "scheme-the-issuer-does-not-accept",
+          "scheme": "none",
+          "expected": "signer-not-issuer"
+        },
+        {
+          "id": "root-approved-only-for-others",
+          "root": {
+            "rootSetIdentity": "enterprise-ca",
+            "rootSetRevision": 1,
+            "policyEpoch": 7
+          },
+          "view": {
+            "approvedRoots": [
+              {
+                "rootSetIdentity": "system-ca",
+                "rootSetRevision": 3,
+                "policyEpoch": 7
+              },
+              {
+                "rootSetIdentity": "enterprise-ca",
+                "rootSetRevision": 1,
+                "policyEpoch": 7
+              }
+            ]
+          },
+          "expected": "signer-not-issuer"
         }
       ]
     },
@@ -2895,6 +3631,38 @@
           }
         },
         "matches": false
+      },
+      {
+        "id": "this-content",
+        "target": {
+          "kind": "content",
+          "contentDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        },
+        "matches": true
+      },
+      {
+        "id": "another-content",
+        "target": {
+          "kind": "content",
+          "contentDigest": "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa"
+        },
+        "matches": false
+      },
+      {
+        "id": "this-file",
+        "target": {
+          "kind": "file",
+          "fileDigest": "sha256:c66243794e2df3a6f1aa3845aebf84fd38b0fb66c12525c5768727237bab22d0"
+        },
+        "matches": true
+      },
+      {
+        "id": "another-file",
+        "target": {
+          "kind": "file",
+          "fileDigest": "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa"
+        },
+        "matches": false
       }
     ]
   },
@@ -2951,6 +3719,50 @@
           "remediation": "retry-request",
           "completion": "Cancelled"
         }
+      },
+      {
+        "id": "resolved-with-its-receipt",
+        "input": {
+          "source": "ManagedCache",
+          "version": "7.1.0-beta",
+          "state": "Resolved",
+          "remediation": "none",
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "completion": "Complete",
+          "privateRoot": "/Users/private/.cache/verter/v1"
+        },
+        "expected": {
+          "source": "ManagedCache",
+          "version": "7.1.0-beta",
+          "state": "Resolved",
+          "remediation": "none",
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "completion": "Complete"
+        }
+      },
+      {
+        "id": "selected-with-its-receipt",
+        "input": {
+          "source": "ManagedCache",
+          "version": "7.1.0-beta",
+          "state": "Selected",
+          "remediation": "none",
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "completion": "Complete",
+          "diagnostic": "selected from C:\\Users\\private\\engine.exe"
+        },
+        "expected": {
+          "source": "ManagedCache",
+          "version": "7.1.0-beta",
+          "state": "Selected",
+          "remediation": "none",
+          "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+          "receiptDigest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
+          "completion": "Complete"
+        }
       }
     ],
     "unportable": [
@@ -2979,7 +3791,77 @@
       "IntegrityFailure",
       "repair-input",
       "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c"
-    ]
+    ],
+    "envelope": {
+      "document": "docs/arch/kernel/public-envelope.md",
+      "stageSuccess": ["Resolved", "Selected"],
+      "states": {
+        "Resolved": "PO01",
+        "Selected": "PO01",
+        "NeedInputs": "PO04",
+        "Unsupported": "PO05",
+        "Cancelled": "PO07",
+        "Forbidden": "PO09",
+        "IntegrityFailure": "PO09",
+        "TrustFailure": "PO09",
+        "Incompatible": "PO10",
+        "Offline": "PO10",
+        "NotFound": "PO10",
+        "OperationalFailure": "PO10"
+      },
+      "completions": {
+        "Partial": "PO02",
+        "Cancelled": "PO07",
+        "Stale": "PO08"
+      },
+      "otherStages": {
+        "Acquired": "The acquisition owner reports it; validation never acquires",
+        "Available": "The activation owner reports it; validation never activates"
+      }
+    },
+    "audit": {
+      "vectors": [
+        {
+          "id": "private-detail-keeps-a-machine-path",
+          "record": {},
+          "expected": null
+        },
+        {
+          "id": "proxy-credentials-in-private-detail",
+          "record": {
+            "privateDetail": {
+              "diagnostic": "via https://user:hunter2@proxy.internal:8080"
+            }
+          },
+          "expected": "secret-in-audit"
+        },
+        {
+          "id": "token-in-private-detail",
+          "record": {
+            "privateDetail": {
+              "diagnostic": "auth with npm_abc123 refused"
+            }
+          },
+          "expected": "secret-in-audit"
+        },
+        {
+          "id": "certificate-in-private-detail",
+          "record": {
+            "privateDetail": {
+              "diagnostic": "-----BEGIN CERTIFICATE-----"
+            }
+          },
+          "expected": "secret-in-audit"
+        },
+        {
+          "id": "machine-root-outside-private-detail",
+          "record": {
+            "requirementId": "/home/alice/requirement"
+          },
+          "expected": "machine-root-outside-private-detail"
+        }
+      ]
+    }
   },
   "work": {
     "limits": {
@@ -3241,6 +4123,7 @@
     },
     "EngineSignature": {
       "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+      "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
       "scheme": "policy-approved-scheme",
       "signerId": "signer-1",
       "trustRoot": {
@@ -3254,6 +4137,7 @@
       "signatures": [
         {
           "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+          "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
           "scheme": "policy-approved-scheme",
           "signerId": "signer-1",
           "trustRoot": {
@@ -3275,6 +4159,11 @@
         {
           "kind": "license",
           "referenceId": "license-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        },
+        {
+          "kind": "attestation",
+          "referenceId": "attestation-1",
           "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
         }
       ]
@@ -3359,6 +4248,7 @@
         "signatures": [
           {
             "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+            "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -3380,6 +4270,11 @@
           {
             "kind": "license",
             "referenceId": "license-1",
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+          },
+          {
+            "kind": "attestation",
+            "referenceId": "attestation-1",
             "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ]
@@ -3476,6 +4371,7 @@
         "signatures": [
           {
             "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+            "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -3497,6 +4393,11 @@
           {
             "kind": "license",
             "referenceId": "license-1",
+            "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+          },
+          {
+            "kind": "attestation",
+            "referenceId": "attestation-1",
             "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
           }
         ]
@@ -3637,6 +4538,7 @@
           "signatures": [
             {
               "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+              "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
               "scheme": "policy-approved-scheme",
               "signerId": "signer-1",
               "trustRoot": {
@@ -3658,6 +4560,11 @@
             {
               "kind": "license",
               "referenceId": "license-1",
+              "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+            },
+            {
+              "kind": "attestation",
+              "referenceId": "attestation-1",
               "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
             }
           ]
@@ -3737,7 +4644,32 @@
       "originId": "npm-typescript-darwin-arm64",
       "sourceKind": "ManagedCache",
       "trustClass": "registry-integrity",
-      "authorizedChannel": "project-opt-in-install"
+      "authorizedChannel": "project-opt-in-install",
+      "trustRootIds": [
+        {
+          "rootSetIdentity": "system-ca",
+          "rootSetRevision": 3,
+          "policyEpoch": 7
+        }
+      ],
+      "acceptedSigners": [
+        {
+          "signerId": "signer-1",
+          "scheme": "policy-approved-scheme",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          }
+        }
+      ],
+      "artifactScope": [
+        {
+          "package": "@typescript/typescript-darwin-arm64",
+          "engine": "typescript",
+          "platform": "aarch64-apple-darwin"
+        }
+      ]
     },
     "EngineRevocationTarget": {
       "kind": "artifact",
@@ -3762,6 +4694,7 @@
       ],
       "signature": {
         "manifestDigest": "sha256:6e8a7b2f11137bc8c09e35f445170f62dd26a3a1fb5cf2eeb61710fc4f1f26f5",
+        "signatureDigest": "sha256:542edfe7068e6ded5c5f4f0ff27bf3199ad776dffdbcd5830d7d565e87cb6d76",
         "scheme": "policy-approved-scheme",
         "signerId": "signer-1",
         "trustRoot": {
@@ -3771,10 +4704,137 @@
         },
         "validityId": "validity-1"
       }
+    },
+    "EnginePackageName": "@typescript/typescript-darwin-arm64",
+    "EngineAcceptedSigner": {
+      "signerId": "signer-1",
+      "scheme": "policy-approved-scheme",
+      "trustRoot": {
+        "rootSetIdentity": "system-ca",
+        "rootSetRevision": 3,
+        "policyEpoch": 7
+      }
+    },
+    "EngineArtifactScope": {
+      "package": "@typescript/typescript-darwin-arm64",
+      "engine": "typescript",
+      "platform": "aarch64-apple-darwin"
+    },
+    "EngineProvenanceReference": {
+      "kind": "sbom",
+      "referenceId": "sbom-1",
+      "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+    },
+    "EngineSourcePolicyEvidence": {
+      "sourcePolicyId": "source-policy-1",
+      "source": "ManagedCache",
+      "requiredEvidence": ["signature", "provenance"]
+    },
+    "EngineRevocationIssuer": {
+      "issuerId": "issuer-1",
+      "acceptedSigners": [
+        {
+          "signerId": "signer-1",
+          "scheme": "policy-approved-scheme",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          }
+        }
+      ]
+    },
+    "EngineValidatorObservation": {
+      "originReceipts": [
+        {
+          "receiptId": "origin-receipt-1",
+          "origin": {
+            "originId": "npm-typescript-darwin-arm64",
+            "sourceKind": "ManagedCache",
+            "trustClass": "registry-integrity",
+            "authorizedChannel": "project-opt-in-install"
+          },
+          "locatorId": "locator-1",
+          "authorityReceiptId": "authority-1",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        }
+      ],
+      "signatures": [
+        {
+          "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+          "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
+          "scheme": "policy-approved-scheme",
+          "signerId": "signer-1",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          "validityId": "validity-1"
+        }
+      ],
+      "provenance": [
+        {
+          "kind": "sbom",
+          "referenceId": "sbom-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        },
+        {
+          "kind": "license",
+          "referenceId": "license-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        },
+        {
+          "kind": "attestation",
+          "referenceId": "attestation-1",
+          "subjectDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+        }
+      ]
+    },
+    "EngineValidationAudit": {
+      "schema": 1,
+      "requestId": "request-1",
+      "stage": "validate",
+      "source": "ManagedCache",
+      "originId": "npm-typescript-darwin-arm64",
+      "requirementId": "tsgo-lsp-api",
+      "state": "IntegrityFailure",
+      "reason": "IntegrityFailure",
+      "remediation": "repair-input",
+      "completion": "Complete",
+      "artifactKey": "sha256:55b200852e4a16f6bcffac3616c2e0b9059b24f150933e7c384cf85fdc7a321c",
+      "policyEpoch": 7,
+      "trustEpoch": 3,
+      "revocationEpoch": 2,
+      "work": {
+        "candidates": 0,
+        "statOps": 0,
+        "readOps": 0,
+        "readBytes": 0,
+        "hashOps": 0,
+        "hashBytes": 0,
+        "manifestOps": 0,
+        "signatureChecks": 0,
+        "cacheHits": 0,
+        "invalidations": 0,
+        "retainedBytes": 0,
+        "retainedEntries": 0,
+        "networkAttempts": 0,
+        "processSpawns": 0
+      },
+      "privateDetail": {
+        "locator": "C:\\Users\\alice\\AppData\\Local\\verter\\v1\\lib\\tsc",
+        "diagnostic": "digest mismatch at /home/alice/.cache/verter/v1/lib/tsc"
+      }
     }
   },
   "receiptGolden": {
-    "digest": "sha256:2d8fbed85362d180d19649c80b12f07d8d98bf6f90f83ada5db044f946c070b9",
+    "digest": "sha256:4a4c87a6a44f184ebcc2f62a70df6dc0b77469923a68d7d827e4d65db14b9ec0",
     "mutations": [
       {
         "id": "other-policy-epoch",
@@ -3850,7 +4910,89 @@
           "host": "/Users/private/host"
         }
       }
-    ]
+    ],
+    "multiLocator": {
+      "set": {
+        "originReceipts": [
+          {
+            "receiptId": "origin-receipt-1",
+            "origin": {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "registry-integrity",
+              "authorizedChannel": "project-opt-in-install"
+            },
+            "locatorId": "locator-1",
+            "authorityReceiptId": "authority-1",
+            "trustRoot": {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            },
+            "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+          },
+          {
+            "receiptId": "origin-receipt-2",
+            "origin": {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "registry-integrity",
+              "authorizedChannel": "project-opt-in-install"
+            },
+            "locatorId": "locator-2",
+            "authorityReceiptId": "authority-1",
+            "trustRoot": {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            },
+            "closureManifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac"
+          }
+        ],
+        "observedBasis": [
+          {
+            "locatorId": "locator-1",
+            "mutability": "immutable-ready",
+            "statFingerprint": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d"
+          },
+          {
+            "locatorId": "locator-2",
+            "mutability": "immutable-ready",
+            "statFingerprint": "sha256:40f9f3c623ebd08c4f4317ec53c8d7c30cdd66e76d53e0690654d713ea37896a"
+          }
+        ],
+        "hostFeatures": ["SharedArrayBuffer", "cross-origin-isolated"],
+        "signature": {
+          "signatures": [
+            {
+              "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+              "signatureDigest": "sha256:b66b3bc69f3059e10b86f2ee367901970bc1b01e46b739cbc7d060a8151e7547",
+              "scheme": "policy-approved-scheme",
+              "signerId": "signer-1",
+              "trustRoot": {
+                "rootSetIdentity": "system-ca",
+                "rootSetRevision": 3,
+                "policyEpoch": 7
+              },
+              "validityId": "validity-1"
+            },
+            {
+              "manifestDigest": "sha256:317a13f20ed05cc1b71c76a4b15b7897b6c1f3fac88b003a2a5aba0a2f4667ac",
+              "signatureDigest": "sha256:8777061e59e6a3728bee80f306acb816a6e1b0e53abefba2fb7d7501e96d090c",
+              "scheme": "policy-approved-scheme",
+              "signerId": "signer-2",
+              "trustRoot": {
+                "rootSetIdentity": "system-ca",
+                "rootSetRevision": 3,
+                "policyEpoch": 7
+              },
+              "validityId": "validity-1"
+            }
+          ]
+        }
+      },
+      "digest": "sha256:7608213e8aafc1fb649f810123fd9a4af1d502e89fe979ea40f12b990a5439e5"
+    }
   },
   "ownership": {
     "population": [
@@ -3920,6 +5062,11 @@
         "sourceRef": "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
       },
       {
+        "id": "EngineValidatorObservation",
+        "role": "outcome",
+        "sourceRef": "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+      },
+      {
         "id": "TrustedEngineOrigin",
         "role": "outcome",
         "sourceRef": "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
@@ -3981,6 +5128,11 @@
       },
       {
         "id": "EnginePublicStatus",
+        "role": "outcome",
+        "sourceRef": "docs/arch/engine-provisioning.md#public-validation-status"
+      },
+      {
+        "id": "EngineValidationAudit",
         "role": "outcome",
         "sourceRef": "docs/arch/engine-provisioning.md#public-validation-status"
       },
@@ -4395,6 +5547,30 @@
       "concern": "security",
       "prevents": "A signer under an approved root issuing a catalog in a trusted issuer's name, suppressing or adding revocations, reproduced by review",
       "notCoveredBecause": "Runtime cryptography verifies a signature, not a binding between signer and issuer the contract never states"
+    },
+    {
+      "condition": "A signature, origin receipt or provenance reference counts only when the validator's own observation holds it; a delivered copy is compared and never believed",
+      "concern": "security",
+      "prevents": "Anyone able to write a descriptor or catalog recomputing every digest and copying it into each entry, which the digest comparison alone accepts as signed",
+      "notCoveredBecause": "The trust table is the receiving owner's specification, and a digest comparison is all CI can run here"
+    },
+    {
+      "condition": "Each origin's authorization names its exact roots, its accepted signer, scheme and root triples, and the engine and platform of each package in its captured scope",
+      "concern": "security",
+      "prevents": "A root or signer approved for one mirror vouching for another origin, or an origin delivering a package it was never approved for",
+      "notCoveredBecause": "A single approved-root list cannot say which origin a root was approved for"
+    },
+    {
+      "condition": "A revocation can name a closure manifest or one closure file, not only a key",
+      "concern": "security",
+      "prevents": "A revoked release still running from a mirror or project-local origin an issuer cannot enumerate",
+      "notCoveredBecause": "An artifact key includes the origin by design, so no key-scoped revocation reaches another route"
+    },
+    {
+      "condition": "A receipt's arrays are sets, sorted before hashing",
+      "concern": "correctness",
+      "prevents": "Two validators enumerating one artifact's locators differently and publishing two digests for one basis",
+      "notCoveredBecause": "RFC 8785 orders object members only, and a single-locator golden cannot show a permutation"
     }
   ]
 }

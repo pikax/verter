@@ -314,7 +314,13 @@ key, closure manifest or receipt digest is SHA-256 over a domain string, one NUL
 byte and those bytes; the domains are in the product, and the goldens let a Rust
 implementation prove byte agreement. Closure files sort by the UTF-8 bytes of their
 path, which is Rust's `str` order and differs from JavaScript string order outside
-the basic plane, so one golden uses a supplementary-plane path. The schemas are
+the basic plane, so one golden uses a supplementary-plane path. Every array a receipt
+holds (origin receipts, observed basis, host features, closure files, signatures and
+provenance references) is a set: before hashing it sorts by the UTF-8 bytes of each
+element's canonical JSON, so two validators enumerating one artifact's locators in
+either order publish one digest. A declaration, requirement or revocation catalog is an
+authored document instead: its digest covers its arrays as authored, a validator never
+reorders them, and a permutation is a different document that fails closed. The schemas are
 draft 2020-12 and close every object with `additionalProperties: false`, so a
 standard validator refuses an added claim; refusing non-NFC text is the one rule the
 dialect cannot state, and it belongs to the canonical encoding. `EngineVersion` is strict SemVer and keeps
@@ -344,8 +350,12 @@ declaration must state the required protocol.
 `WrongEngine`, `WrongPlatform`, `WrongFlavor`, `UnsupportedProtocol`, `UnsupportedApi`,
 `MissingCommand`, `MissingFeature`, `ToolchainIncompatible`, `HostUnsupported` or
 `UnknownCompatibility`. Unknown is ineligible, including an unreadable version.
-Version boundaries restate the current tsgo line law without moving a pin or floor;
-tsserver serving tiers remain a separately identified requirement input. The cache key
+Version boundaries restate the current tsgo line law without moving a pin or floor: a
+prerelease is served only on its floor's own line. A requirement may also name further
+lines in `prereleaseCores`, which is how the managed tsserver requirement serves
+`6.0.0-beta.1` from a window that starts at `5.8.0`; a line below the floor or outside
+the window stays refused, and every other prerelease line stays `Unsupported`. The
+serving tier itself remains a separately identified requirement input. The cache key
 and receipt carry a digest of the whole requirement and the host's features, so a
 raised bound or a host losing isolation cannot reuse a receipt, even under unchanged
 IDs and without relying on anyone minting a new one.
@@ -368,8 +378,30 @@ reserved names, alternate streams and case collisions. `EngineSignatureEvidence`
 provenance references bind the same digest; `EngineOriginReceipt` binds it to a listed
 locator, an authorized channel and `EngineTrustRootId`. `TrustedEngineOrigin` and
 `EngineProvisioningPolicy` keep the fields the policy above defines.
+
 `EngineOriginAuthorization` is the captured policy row that gives one origin its one
-source, trust class and channel, so a receipt cannot choose its own class.
+source, trust class and channel, so a receipt cannot choose its own class. It also names
+the roots that origin may present, each accepted signer as one exact `EngineAcceptedSigner`
+of signer, scheme and root, and, through `EngineArtifactScope`, the engine and platform of
+each package it may deliver. It only narrows the captured `TrustedEngineOrigin`: its roots
+must be among that origin's, and each scoped package in its `packageScope`, which refuses
+wildcards. So a root approved for a mirror cannot vouch for the public registry, a certificate
+holder under an approved root is not a signer, and no origin delivers a package it was not
+approved for. A foreign root is `TrustFailure`, a foreign signer or scheme is
+`SignatureFailure`, and a package outside the scope is `OriginMismatch`.
+
+A digest a descriptor carries is a claim, and anyone able to write the descriptor can
+recompute it and copy it into every entry. So delivered evidence is only ever compared with
+`EngineValidatorObservation`, which the validator produces itself and never reads from
+delivered data. It holds each signature the validator verified, the detached material
+`EngineSignature.signatureDigest` names, checked against the accepted signer's key under its
+root; each origin receipt the authority minted, read from that authority's store; and each
+provenance reference it resolved. An entry absent from the observation fails its own check,
+whatever its digests say. An unsigned route is bound the same way: its local trust receipt,
+authenticated registry metadata, editor attestation or shipping manifest is what mints the
+origin receipt, and the receipt's closure digest covers the identity axes, so approving that
+digest approves those axes and nothing runs to discover them. A relabelled descriptor names a
+digest no authority minted and is `OriginMismatch`.
 
 `EngineValidationReceipt` is immutable and exists only for a complete, compatible
 result on one current basis, so its verdict and completion are constants. It binds
@@ -403,12 +435,14 @@ typed rejection and never lowers a trust class. No source lacks evidence for its
 authorized class, because each class above names evidence that source can produce.
 
 What must be present comes from this table and captured policy, which may add a
-signature or provenance requirement. The captured source policy rows that
+signature or provenance requirement. The captured `EngineSourcePolicyEvidence` rows that
 `EngineProvisioningPolicy.sourcePolicies` names carry those additions as
-`EnginePolicyEvidence` values; a required token that no obligation row names fails
+`EnginePolicyEvidence` values for their own source; a required token that no obligation row names fails
 closed as `InvalidSchema` rather than being silently satisfied. The descriptor has no field that can waive one.
 The product's `obligations` table assigns each kind of evidence to the trust check, and
-so the rejection, that reports its absence.
+so the rejection, that reports its absence. A provenance requirement demands all of its
+row's `requiredKinds`, an attestation, an SBOM and a license, so a lone license reference
+is `ProvenanceIncomplete`.
 
 ### Browser worker artifacts
 
@@ -492,13 +526,19 @@ decide acceptance, and this contract makes no runtime performance claim.
 ### Revocation, corruption and quarantine
 
 `EngineRevocation` names its target by that target's own identity: an artifact by its
-key, an origin or signer by its ID, a trust root by its `EngineTrustRootId`. It adds a
-reason, issuer and epoch. `EngineRevocationCatalog` is signed over a domain digest of its
-issuer, epoch, freshness limit and entries. A catalog that is absent, altered, signed
-under an unapproved root, from an unknown issuer, past its limit, or older than the last
-epoch seen, signed by a signer captured policy does not name for its issuer, or carrying
-an entry from another issuer or a later epoch fails closed as `RevocationDataUnavailable`, so replaying an older signed
-catalog cannot hide a revocation. The product lists these cases and which entries match
+key, a closure manifest by its content digest, one closure file by its digest, an origin
+or signer by its ID, a trust root by its `EngineTrustRootId`. It adds a reason, issuer and
+epoch. An artifact key includes the origin, so it withdraws one route. A content target
+withdraws one manifest through every origin, including mirrors and project-local routes
+an issuer cannot enumerate, and a file target withdraws compromised bytes under any
+manifest, so relabelling the build does not escape it. `EngineRevocationCatalog` is signed
+over a domain digest of its issuer, epoch, freshness limit and entries, and the validator
+verifies that signature itself: a catalog that recomputes its own digest over fewer entries
+proves nothing. A catalog that is absent, altered, unverified, signed under an unapproved
+root, from an unknown issuer, past its limit, or older than the last epoch seen, signed by
+anything other than an `EngineRevocationIssuer`'s accepted signer, or carrying an entry from
+another issuer or a later epoch fails closed as `RevocationDataUnavailable`, so replaying an
+older signed catalog cannot hide a revocation. The product lists these cases and which entries match
 a descriptor. The product has one action for each stage and event: validation rejects; selection
 publication cancels; pending activation cancels; an active provider withdraws its
 capabilities. None reuses a receipt, falls back or reports not-found.
@@ -523,7 +563,27 @@ becomes `NotFound`, whose row means exhaustive absence with nothing rejected.
 remediation, artifact key, receipt digest and completion for the
 [public envelope](kernel/public-envelope.md). Anything else stays private by
 construction. Absolute roots, credential URLs, tokens and certificates cannot reach
-it, and portable receipts carry only opaque IDs and digests.
+it, and portable receipts carry only opaque IDs and digests. `Resolved` and `Selected` are
+the validation stages' own successes and carry their receipt digest; `Acquired` and
+`Available` belong to the acquisition and activation owners, so this projection has no row
+for them.
+
+| Status                                                      | Envelope outcome |
+| ----------------------------------------------------------- | ---------------- |
+| `Resolved`, `Selected`                                      | PO01 Success     |
+| `NeedInputs`                                                | PO04 NeedInputs  |
+| `Unsupported`                                               | PO05 Unsupported |
+| `Cancelled`, or any `Cancelled` completion                  | PO07 Cancelled   |
+| `Forbidden`, `IntegrityFailure`, `TrustFailure`             | PO09 Refused     |
+| `Incompatible`, `Offline`, `NotFound`, `OperationalFailure` | PO10 Unavailable |
+| Any `Partial` completion                                    | PO02 Partial     |
+| Any `Stale` completion                                      | PO08 Stale       |
+
+`EngineValidationAudit` is the private counterpart: the request, stage, origin, requirement,
+epochs and work counters behind one status, with an optional `privateDetail` that may hold a
+machine path or diagnostic for local use. It never leaves the host, and the public projection
+drops everything outside the allowlist. No field of it may hold a credential, token or trust
+material, and outside `privateDetail` it stays as portable as a receipt.
 
 ### Runtime ownership transfer
 

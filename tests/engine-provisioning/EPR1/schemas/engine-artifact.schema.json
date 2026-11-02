@@ -216,9 +216,9 @@
         },
         "packageScope": {
           "type": "array",
+          "minItems": 1,
           "items": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/$defs/EnginePackageName"
           },
           "uniqueItems": true
         },
@@ -346,7 +346,8 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/EngineClosureFile"
-          }
+          },
+          "uniqueItems": true
         },
         "archiveIntegrity": {
           "type": "string",
@@ -356,10 +357,20 @@
     },
     "EngineSignature": {
       "type": "object",
-      "required": ["manifestDigest", "scheme", "signerId", "trustRoot", "validityId"],
+      "required": [
+        "manifestDigest",
+        "signatureDigest",
+        "scheme",
+        "signerId",
+        "trustRoot",
+        "validityId"
+      ],
       "additionalProperties": false,
       "properties": {
         "manifestDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signatureDigest": {
           "$ref": "#/$defs/Digest"
         },
         "scheme": {
@@ -385,7 +396,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/EngineSignature"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -397,21 +409,9 @@
         "references": {
           "type": "array",
           "items": {
-            "type": "object",
-            "required": ["kind", "referenceId", "subjectDigest"],
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "enum": ["sbom", "license", "attestation"]
-              },
-              "referenceId": {
-                "$ref": "#/$defs/OpaqueId"
-              },
-              "subjectDigest": {
-                "$ref": "#/$defs/Digest"
-              }
-            }
-          }
+            "$ref": "#/$defs/EngineProvenanceReference"
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -481,7 +481,8 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/EngineOriginReceipt"
-          }
+          },
+          "uniqueItems": true
         },
         "locators": {
           "type": "array",
@@ -565,6 +566,14 @@
         },
         "prereleaseChannels": {
           "$ref": "#/$defs/OpaqueIdList"
+        },
+        "prereleaseCores": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+          },
+          "uniqueItems": true
         },
         "protocol": {
           "$ref": "#/$defs/OpaqueId"
@@ -657,7 +666,8 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/EngineOriginReceipt"
-          }
+          },
+          "uniqueItems": true
         },
         "integrity": {
           "$ref": "#/$defs/EngineIntegrityEvidence"
@@ -715,7 +725,8 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/EngineLocatorBasis"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -970,6 +981,7 @@
         },
         "state": {
           "enum": [
+            "Resolved",
             "Selected",
             "Forbidden",
             "Incompatible",
@@ -1098,7 +1110,15 @@
     },
     "EngineOriginAuthorization": {
       "type": "object",
-      "required": ["originId", "sourceKind", "trustClass", "authorizedChannel"],
+      "required": [
+        "originId",
+        "sourceKind",
+        "trustClass",
+        "authorizedChannel",
+        "trustRootIds",
+        "acceptedSigners",
+        "artifactScope"
+      ],
       "additionalProperties": false,
       "properties": {
         "originId": {
@@ -1112,6 +1132,29 @@
         },
         "authorizedChannel": {
           "$ref": "#/$defs/OpaqueId"
+        },
+        "trustRootIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineTrustRootId"
+          },
+          "uniqueItems": true
+        },
+        "acceptedSigners": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineAcceptedSigner"
+          },
+          "uniqueItems": true
+        },
+        "artifactScope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineArtifactScope"
+          },
+          "uniqueItems": true,
+          "minItems": 1
         }
       }
     },
@@ -1126,6 +1169,32 @@
               "const": "artifact"
             },
             "artifactKey": {
+              "$ref": "#/$defs/Digest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "contentDigest"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "content"
+            },
+            "contentDigest": {
+              "$ref": "#/$defs/Digest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "fileDigest"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "file"
+            },
+            "fileDigest": {
               "$ref": "#/$defs/Digest"
             }
           }
@@ -1198,6 +1267,235 @@
         },
         "signature": {
           "$ref": "#/$defs/EngineSignature"
+        }
+      }
+    },
+    "EnginePackageName": {
+      "type": "string",
+      "pattern": "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
+    },
+    "EngineProvenanceReference": {
+      "type": "object",
+      "required": ["kind", "referenceId", "subjectDigest"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["sbom", "license", "attestation"]
+        },
+        "referenceId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "subjectDigest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "EngineAcceptedSigner": {
+      "type": "object",
+      "required": ["signerId", "scheme", "trustRoot"],
+      "additionalProperties": false,
+      "properties": {
+        "signerId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "scheme": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "trustRoot": {
+          "$ref": "#/$defs/EngineTrustRootId"
+        }
+      }
+    },
+    "EngineArtifactScope": {
+      "type": "object",
+      "required": ["package", "engine", "platform"],
+      "additionalProperties": false,
+      "properties": {
+        "package": {
+          "$ref": "#/$defs/EnginePackageName"
+        },
+        "engine": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "platform": {
+          "$ref": "#/$defs/EnginePlatform"
+        }
+      }
+    },
+    "EngineSourcePolicyEvidence": {
+      "type": "object",
+      "required": ["sourcePolicyId", "source", "requiredEvidence"],
+      "additionalProperties": false,
+      "properties": {
+        "sourcePolicyId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "source": {
+          "$ref": "#/$defs/EngineSourceKind"
+        },
+        "requiredEvidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EnginePolicyEvidence"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "EngineRevocationIssuer": {
+      "type": "object",
+      "required": ["issuerId", "acceptedSigners"],
+      "additionalProperties": false,
+      "properties": {
+        "issuerId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "acceptedSigners": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineAcceptedSigner"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        }
+      }
+    },
+    "EngineValidatorObservation": {
+      "type": "object",
+      "required": ["originReceipts", "signatures", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "originReceipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineOriginReceipt"
+          },
+          "uniqueItems": true
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineSignature"
+          },
+          "uniqueItems": true
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineProvenanceReference"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "EngineValidationAudit": {
+      "type": "object",
+      "required": [
+        "schema",
+        "requestId",
+        "stage",
+        "source",
+        "originId",
+        "requirementId",
+        "state",
+        "remediation",
+        "completion",
+        "policyEpoch",
+        "trustEpoch",
+        "revocationEpoch",
+        "work"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "requestId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "stage": {
+          "enum": ["validate", "select", "activate"]
+        },
+        "source": {
+          "$ref": "#/$defs/EngineSourceKind"
+        },
+        "originId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "requirementId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "state": {
+          "enum": [
+            "Resolved",
+            "Selected",
+            "Forbidden",
+            "Incompatible",
+            "IntegrityFailure",
+            "TrustFailure",
+            "NeedInputs",
+            "Offline",
+            "NotFound",
+            "Cancelled",
+            "OperationalFailure",
+            "Unsupported"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/EngineRejectionReason"
+        },
+        "remediation": {
+          "enum": [
+            "none",
+            "repair-input",
+            "refresh-trust",
+            "contact-admin",
+            "choose-compatible",
+            "choose-host",
+            "supply-input",
+            "retry-online",
+            "retry-request",
+            "inspect-diagnostic"
+          ]
+        },
+        "completion": {
+          "enum": ["Complete", "Partial", "Cancelled", "Stale"]
+        },
+        "artifactKey": {
+          "$ref": "#/$defs/Digest"
+        },
+        "receiptDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "policyEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "trustEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revocationEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "work": {
+          "$ref": "#/$defs/EngineValidationWorkCounters"
+        },
+        "privateDetail": {
+          "type": "object",
+          "required": ["diagnostic"],
+          "additionalProperties": false,
+          "properties": {
+            "locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "diagnostic": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
       }
     }

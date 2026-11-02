@@ -172,8 +172,36 @@ export const closureManifestDigest = (id, { declarationDigest: declared, entryPo
     files: sortedClosureFiles(files),
   });
 
+/** Every array a receipt holds. Each is a set, so enumeration order never reaches its digest. */
+export const RECEIPT_SET_ARRAYS = [
+  "originReceipts",
+  "observedBasis",
+  "hostFeatures",
+  "integrity.files",
+  "signature.signatures",
+  "provenance.references",
+];
+
+const inSetOrder = (items) =>
+  items
+    .map((item) => ({ item, bytes: Buffer.from(canonicalJson(item)) }))
+    .sort((a, b) => Buffer.compare(a.bytes, b.bytes))
+    .map(({ item }) => item);
+
+/** A receipt with each set array ascending by the UTF-8 bytes of its elements' canonical JSON. */
+export function canonicalReceipt(receipt) {
+  const canonical = structuredClone(receipt);
+  for (const path of RECEIPT_SET_ARRAYS) {
+    const steps = path.split(".");
+    const last = steps.pop();
+    const holder = steps.reduce((node, step) => node[step], canonical);
+    holder[last] = inSetOrder(holder[last]);
+  }
+  return canonical;
+}
+
 export const receiptDigest = (receipt) =>
-  domainDigest("verter.engine-validation-receipt.v1", receipt);
+  domainDigest("verter.engine-validation-receipt.v1", canonicalReceipt(receipt));
 
 const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$)(\.|$)/iu;
 
@@ -249,10 +277,12 @@ export function versionVerdict(text, policy) {
   const [floor, ceiling] = [parseVersion(policy.floor), parseVersion(policy.ceilingExclusive)];
   if (compareCore(version, ceiling) >= 0) return "TooNew";
   if (version.pre !== null) {
-    const admitted =
-      policy.prereleaseChannels.includes(version.pre[0]) &&
-      compareCore(version, floor) === 0 &&
-      comparePrecedence(version, floor) >= 0;
+    // A prerelease is served at the floor's own line, or on a line the requirement names.
+    const atFloor = compareCore(version, floor) === 0 && comparePrecedence(version, floor) >= 0;
+    const onNamedLine =
+      compareCore(version, floor) >= 0 &&
+      (policy.prereleaseCores ?? []).some((core) => compareCore(version, parseVersion(core)) === 0);
+    const admitted = policy.prereleaseChannels.includes(version.pre[0]) && (atFloor || onNamedLine);
     return admitted ? "Compatible" : "Unsupported";
   }
   return comparePrecedence(version, floor) < 0 ? "TooOld" : "Compatible";
@@ -268,8 +298,13 @@ export function firstFailure(rows, facts) {
 
 /** Reuse needs every key field equal; then mutability and the trust boundary decide the work. */
 export function reuseVerdict(table, storedKey, currentKey, entry) {
-  const changed = Object.keys(storedKey).filter(
-    (field) => canonicalJson(storedKey[field]) !== canonicalJson(currentKey[field]),
+  // A field either key lacks is a mismatch, so a stored key missing an epoch reuses under none.
+  const fields = new Set([...Object.keys(storedKey), ...Object.keys(currentKey)]);
+  const changed = [...fields].filter(
+    (field) =>
+      !Object.hasOwn(storedKey, field) ||
+      !Object.hasOwn(currentKey, field) ||
+      canonicalJson(storedKey[field]) !== canonicalJson(currentKey[field]),
   );
   if (changed.length > 0) return table.keyMismatch;
   return (
@@ -297,19 +332,23 @@ export function publicProjection(allowlist, status) {
 }
 
 // A scheme or drive prefix (`https:/`, `file:/`, `C:\`) is never portable, credentialed or not.
-const UNPORTABLE = [
+const MACHINE_ROOTS = [
   /(^|[\s"'=(])\/[^\s"']/u,
   /(^|[\s"'=(])~[\\/]/u,
   /\$[A-Za-z_]+[\\/]/u,
   /%[A-Za-z_]+%/u,
   /[A-Za-z]:[\\/]/u,
   /\\\\[^\s\\]+\\/u,
+];
+
+const SECRETS = [
   /[^\s/:@]+:[^\s/@]+@/u,
   /\b(token|password|secret|authorization|bearer)\b/iu,
   /\b(npm|gh[opsu])_[A-Za-z0-9]+/u,
-  /\[REDACTED\]/u,
   /-----BEGIN /u,
 ];
+
+const UNPORTABLE = [...MACHINE_ROOTS, ...SECRETS, /\[REDACTED\]/u];
 
 function* strings(value) {
   if (typeof value === "string") yield value;
@@ -328,6 +367,20 @@ export function unportableString(value) {
     if (UNPORTABLE.some((pattern) => pattern.test(text))) return text;
   }
   return null;
+}
+
+/**
+ * Why a private audit record cannot be kept, or null. Its one `privateDetail` member may hold
+ * machine paths for local diagnosis; nothing in the record may hold a credential or trust
+ * material, and everything outside that member stays as portable as a receipt.
+ */
+export function auditHazard(record) {
+  for (const text of strings(record)) {
+    if (SECRETS.some((pattern) => pattern.test(text))) return "secret-in-audit";
+  }
+  const shared = { ...record };
+  delete shared.privateDetail;
+  return unportableString(shared) === null ? null : "machine-root-outside-private-detail";
 }
 
 const missing = (required, declared) => required.some((item) => !declared.includes(item));
@@ -363,6 +416,7 @@ export function compatibilityVerdict(rules, requirement, declaration, artifact, 
     floor: requirement.versionFloor,
     ceilingExclusive: requirement.versionCeilingExclusive,
     prereleaseChannels: requirement.prereleaseChannels,
+    prereleaseCores: requirement.prereleaseCores,
   });
   if (verdict !== "Compatible") return verdict;
   return requirement.exactPin === undefined || requirement.exactPin === artifact.version
@@ -392,7 +446,16 @@ export function cacheKeyFor(facts) {
   };
 }
 
-const sameRoot = (a, b) => canonicalJson(a) === canonicalJson(b);
+const sameValue = (a, b) => canonicalJson(a) === canonicalJson(b);
+
+const holds = (rows, value) => rows.some((row) => sameValue(row, value));
+
+/** An accepted signer is one exact signer, scheme and root, so none of the three stands alone. */
+const accepts = (acceptedSigners, { signerId, scheme, trustRoot }) =>
+  acceptedSigners.some(
+    (row) =>
+      row.signerId === signerId && row.scheme === scheme && sameValue(row.trustRoot, trustRoot),
+  );
 
 export const revocationCatalogDigest = ({ schema, issuerId, revocationEpoch, notAfter, entries }) =>
   domainDigest("verter.engine-revocation-catalog.v1", {
@@ -404,23 +467,23 @@ export const revocationCatalogDigest = ({ schema, issuerId, revocationEpoch, not
   });
 
 /**
- * Why a revocation catalog cannot be used, or null. Every reason fails closed. Captured
- * policy names each issuer with the signers that may speak for it, so a signer under an
- * approved root cannot issue in another issuer's name, and every entry belongs to the
+ * Why a revocation catalog cannot be used, or null. Every reason fails closed. A digest the
+ * catalog carries proves nothing, so only a signature the validator verified itself counts.
+ * Captured policy names each issuer with its exact accepted signers, so a signer or root
+ * approved elsewhere cannot issue in another issuer's name, and every entry belongs to the
  * catalog that carries it.
  */
 export function revocationCatalogHazard(view) {
   if (view === null) return "catalog-absent";
-  const { catalog, issuers, approvedRoots, lastSeenEpoch, now } = view;
+  const { catalog, issuers, approvedRoots, verifiedSignatures, lastSeenEpoch, now } = view;
   const issuer = issuers.filter((row) => row.issuerId === catalog.issuerId);
   if (issuer.length !== 1) return "issuer-unknown";
   if (catalog.signature.manifestDigest !== revocationCatalogDigest(catalog)) {
     return "signature-other-content";
   }
-  if (!issuer[0].signerIds.includes(catalog.signature.signerId)) return "signer-not-issuer";
-  if (!approvedRoots.some((root) => sameRoot(root, catalog.signature.trustRoot))) {
-    return "root-not-approved";
-  }
+  if (!holds(verifiedSignatures, catalog.signature)) return "signature-not-verified";
+  if (!holds(approvedRoots, catalog.signature.trustRoot)) return "root-not-approved";
+  if (!accepts(issuer[0].acceptedSigners, catalog.signature)) return "signer-not-issuer";
   const foreign = catalog.entries.some(
     (entry) =>
       entry.issuerId !== catalog.issuerId || entry.revocationEpoch > catalog.revocationEpoch,
@@ -436,15 +499,22 @@ const descriptorRoots = ({ originReceipts, signature }) => [
   ...signature.signatures.map((entry) => entry.trustRoot),
 ];
 
+/**
+ * An artifact key includes the origin, so it withdraws one route. `content` withdraws one
+ * manifest through every origin, and `file` withdraws compromised bytes under any manifest.
+ */
 const REVOCATION_MATCH = {
   artifact: (target, descriptor) => target.artifactKey === artifactKey(descriptor.id),
+  content: (target, descriptor) => target.contentDigest === descriptor.id.contentDigest,
+  file: (target, descriptor) =>
+    descriptor.integrity.files.some((file) => file.digest === target.fileDigest),
   origin: (target, descriptor) =>
     target.originId === descriptor.id.origin ||
     descriptor.originReceipts.some((receipt) => receipt.origin.originId === target.originId),
   signer: (target, descriptor) =>
     descriptor.signature.signatures.some((entry) => entry.signerId === target.signerId),
   "trust-root": (target, descriptor) =>
-    descriptorRoots(descriptor).some((root) => sameRoot(root, target.root)),
+    descriptorRoots(descriptor).some((root) => sameValue(root, target.root)),
 };
 
 /** The first catalog entry that applies to this descriptor, or null. */
@@ -454,17 +524,21 @@ export const matchingRevocation = (entries, descriptor) =>
 /** What the source row, the origin's trust class and captured policy demand of one origin. */
 function requiredEvidence({ origin }, context) {
   const row = context.sourceEvidence.find((candidate) => candidate.source === origin.sourceKind);
+  const policies = context.sourcePolicies.filter((policy) => policy.source === origin.sourceKind);
   return new Set([
     ...(row?.required ?? []),
     ...(row?.requiredByTrustClass?.[origin.trustClass] ?? []),
-    ...context.policyRequiredEvidence,
+    ...policies.flatMap((policy) => policy.requiredEvidence),
   ]);
 }
 
 /** Tokens not named here are proved by the validator observing them directly. */
 const EVIDENCE_HOLDS = {
   signature: (descriptor) => descriptor.signature.signatures.length > 0,
-  provenance: (descriptor) => descriptor.provenance.references.length > 0,
+  provenance: ({ provenance }, context) =>
+    context.evidenceObligations
+      .find(({ evidence }) => evidence === "provenance")
+      .requiredKinds.every((kind) => provenance.references.some((item) => item.kind === kind)),
   "archive-integrity": ({ integrity }, context) =>
     integrity.archiveIntegrity !== undefined &&
     integrity.archiveIntegrity === context.observedArchiveIntegrity,
@@ -492,20 +566,46 @@ const obligationsHold = (check, descriptor, context) =>
     });
   });
 
+/** An origin holds exactly one authorization, so it can never present as a second class. */
+const authorizationOf = (originId, context) => {
+  const rows = context.authorizedOrigins.filter((item) => item.originId === originId);
+  return rows.length === 1 ? rows[0] : null;
+};
+
+/** An authorization only narrows its captured origin, and must cover this engine and platform. */
+function withinCapturedScope(authorization, { engine, platform }, context) {
+  const captured = context.trustedOrigins.filter(
+    (item) => item.originId === authorization.originId,
+  );
+  if (captured.length !== 1) return false;
+  const { trustRootIds, packageScope } = captured[0];
+  return (
+    authorization.trustRootIds.every((root) => holds(trustRootIds, root)) &&
+    authorization.artifactScope.some(
+      (scope) =>
+        scope.engine === engine &&
+        scope.platform === platform &&
+        packageScope.includes(scope.package),
+    )
+  );
+}
+
 function originBound(receipt, descriptor, context) {
   const { origin } = receipt;
   const row = context.sourceEvidence.find((candidate) => candidate.source === origin.sourceKind);
-  // An origin holds exactly one authorization, so it can never present as a second class.
-  const authorized = context.authorizedOrigins.filter((item) => item.originId === origin.originId);
+  const authorized = authorizationOf(origin.originId, context);
   return (
     origin.originId === descriptor.id.origin &&
-    authorized.length === 1 &&
-    authorized[0].sourceKind === origin.sourceKind &&
-    authorized[0].trustClass === origin.trustClass &&
-    authorized[0].authorizedChannel === origin.authorizedChannel &&
+    authorized !== null &&
+    authorized.sourceKind === origin.sourceKind &&
+    authorized.trustClass === origin.trustClass &&
+    authorized.authorizedChannel === origin.authorizedChannel &&
+    withinCapturedScope(authorized, descriptor.id, context) &&
     row?.trustClasses.includes(origin.trustClass) === true &&
     receipt.closureManifestDigest === descriptor.id.contentDigest &&
-    descriptor.locators.some((locator) => locator.locatorId === receipt.locatorId)
+    descriptor.locators.some((locator) => locator.locatorId === receipt.locatorId) &&
+    // A delivered copy is compared with what the authority minted; it never mints one itself.
+    holds(context.observation.originReceipts, receipt)
   );
 }
 
@@ -550,17 +650,28 @@ const EVIDENCE_CHECKS = {
       obligationsHold("bytesMatch", descriptor, context)
     );
   },
-  rootApproved: (descriptor, context) =>
-    descriptorRoots(descriptor).every((root) =>
-      context.approvedRoots.some((approved) => sameRoot(approved, root)),
-    ),
-  signatureValid: (descriptor, context) =>
-    descriptor.signature.signatures.every(
-      (entry) => entry.manifestDigest === descriptor.id.contentDigest,
-    ) && obligationsHold("signatureValid", descriptor, context),
+  rootApproved: (descriptor, context) => {
+    const trustRootIds = authorizationOf(descriptor.id.origin, context)?.trustRootIds ?? [];
+    return descriptorRoots(descriptor).every(
+      (root) => holds(context.approvedRoots, root) && holds(trustRootIds, root),
+    );
+  },
+  signatureValid: (descriptor, context) => {
+    const acceptedSigners = authorizationOf(descriptor.id.origin, context)?.acceptedSigners ?? [];
+    return (
+      descriptor.signature.signatures.every(
+        (entry) =>
+          entry.manifestDigest === descriptor.id.contentDigest &&
+          accepts(acceptedSigners, entry) &&
+          holds(context.observation.signatures, entry),
+      ) && obligationsHold("signatureValid", descriptor, context)
+    );
+  },
   provenanceComplete: (descriptor, context) =>
     descriptor.provenance.references.every(
-      (reference) => reference.subjectDigest === descriptor.id.contentDigest,
+      (reference) =>
+        reference.subjectDigest === descriptor.id.contentDigest &&
+        holds(context.observation.provenance, reference),
     ) && obligationsHold("provenanceComplete", descriptor, context),
   artifactClassPermitted: (descriptor, context) =>
     obligationsHold("artifactClassPermitted", descriptor, context),
