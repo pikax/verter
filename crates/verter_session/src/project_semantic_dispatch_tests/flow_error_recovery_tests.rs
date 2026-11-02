@@ -6,8 +6,8 @@
 //! rest of the program answering on its own. Whatever the checker's answer
 //! is not known for keeps its typed refusal.
 //!
-//! Oracle comparison: TypeScript 7.0.2, whose `tsc` differs from later releases
-//! on what a marked `this` reports.
+//! Oracle comparison: TypeScript 7.0.2.
+//! Later releases of `tsc` differ on what a marked `this` reports.
 //! Every row was read through that version over these sources under `noLib`,
 //! by its native API (`getTypeAtPosition` on the probe alias, `typeToString`
 //! with `NoTruncation | InTypeAlias`, `getSemanticDiagnostics` for each code,
