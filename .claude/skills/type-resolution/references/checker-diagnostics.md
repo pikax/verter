@@ -153,6 +153,42 @@ the checker's first failure and records no diagnostic.
   (`explicit_overload_recovery`, `getLongestCandidateIndex`) — the same one, or another whose
   instantiated return the call then takes, carrying the fitting candidate's diagnostic.
 
+## Error recovery in a flow
+
+`project_semantic_dispatch/flow_return_recovery.rs` owns the two recoveries the flow rail answers.
+Each is `Opaque(QueryError::CheckerRecovery)` with a certified basis: it reads, relates and prints
+as `any`, leaves the result complete (no `FlowReturnDegradation`, warm-admissible) and stays
+distinct from an authored `any` and from every typed gap. A consumer tells a recovery from a
+refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
+`FlowReturnInferencePayload::checker_diagnostics` (code, start, end), never by a partial reason.
+
+- **TS2339.** A member read the shared walk missed, off a type that proves it absent
+  (`member_proven_absent`): a union or an intersection with every arm lacking it (an arm declaring it
+  may be the one a narrowing this rail does not model selects), a closed object surface, a primitive whose wrapper the program declares, a class from its
+  declarations alone (`class_proves_member_absent`, its surface is in flight inside its own member
+  bodies). An undeclared receiver, an open surface, a callable and anything that does not settle
+  prove nothing and keep their typed gap. Reported at the member's name (`OptionalMember::name_spans`,
+  `GatedLeaf::member_spans`, `SymbolicCallee::member_spans`). `SliceContent::receiver_reads` lists an
+  object-literal method's `this` reads the demanded return did not select, as the checker's check of
+  the whole body reports them; a receiver a contextual type supplies reports only what the return
+  reads, and so does every other receiver. A read off the error type is the error type and reports
+  nothing.
+- **TS7023.** An inferred return that requires itself: `any` in every setting, reported at the name
+  the function goes by (`FunctionProgramEntry::report_name`, `SliceObjectMember::spans.name`) under
+  `noImplicitAny`. Three producers, one rule, the checker's `pushTypeResolution`: a call re-entering
+  a return in flight marks every return from it inward (`mark_return_cycle`, the frame takes its mark
+  when it closes); object-literal methods still reading each other when their round stalls; and a
+  return reading an absent member off its own literal's `this`, whose message prints the signature
+  being inferred. A method reading a member already found circular is circular too, since that
+  message prints every member. A declared return is never inferred. The bare self-call is exempt:
+  `return f()` of a function declaration, awaited or not, is skipped.
+
+Known limits, each a narrower diagnostic rather than a wrong answer: TS2339 on a declared literal's
+`this` prints `typeof value`, and on a literal a generic call infers it prints the literal rather
+than the instantiated contextual type; the code and position are exact. TS7022 (a local holding the
+read) and TS7024 (an anonymous function) are not reported. A cycle through another file's
+initializer stays a typed `Unresolved` failure.
+
 ## Formatted node and walker diagnostics
 
 - `ProjectSemanticDispatch::checker_recovery_message(node)`: the `TS<code>: <message>` a

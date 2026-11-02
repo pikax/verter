@@ -48,6 +48,9 @@ impl CheckerDiagnostic {
             CheckerDiagnosticCode::ExcessivelyDeepInstantiation
             | CheckerDiagnosticCode::CircularTypeAlias
             | CheckerDiagnosticCode::CannotFindName
+            | CheckerDiagnosticCode::PropertyDoesNotExist
+            | CheckerDiagnosticCode::CircularReturn
+            | CheckerDiagnosticCode::ImplicitAnyParameter
             | CheckerDiagnosticCode::RecursiveFulfillmentCallback
             | CheckerDiagnosticCode::UnionTooComplex
             | CheckerDiagnosticCode::TupleTooLarge
@@ -98,6 +101,19 @@ pub enum CheckerDiagnosticCode {
     /// declaration's constraint in the same pattern). A checker error: the
     /// reference is the error type, `any`.
     CannotFindName,
+    /// TS2339: a member read off a type every member of which is known and
+    /// none of which has that name. A checker error: the read is the error
+    /// type, `any`, and what the checker goes on to infer from it stands.
+    PropertyDoesNotExist,
+    /// TS7023 under `noImplicitAny`: an inferred return that requires
+    /// itself — through another function's return, a return expression
+    /// composing a call of the function, or a message printing the
+    /// function's own signature. The return is the error type, `any`, with
+    /// `noImplicitAny` or without; only the report depends on it.
+    CircularReturn,
+    /// TS7006 under `noImplicitAny`: a parameter with no annotation and no
+    /// contextual type.
+    ImplicitAnyParameter,
     /// TS2590: a cross product over unions has at least the checker's
     /// product limit of constituents, checked before one is built
     /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
@@ -168,6 +184,9 @@ impl CheckerDiagnosticCode {
             | Self::RelationTooComplex => true,
             Self::CircularTypeAlias
             | Self::CannotFindName
+            | Self::PropertyDoesNotExist
+            | Self::CircularReturn
+            | Self::ImplicitAnyParameter
             | Self::NoMatchingOverload
             | Self::TypeNotAssignable
             | Self::UnrelatedTypesWithSameName
@@ -194,6 +213,9 @@ impl CheckerDiagnosticCode {
             Self::ExcessivelyDeepInstantiation => 2589,
             Self::CircularTypeAlias => 2456,
             Self::CannotFindName => 2304,
+            Self::PropertyDoesNotExist => 2339,
+            Self::CircularReturn => 7023,
+            Self::ImplicitAnyParameter => 7006,
             Self::UnionTooComplex => 2590,
             Self::TupleTooLarge => 2799,
             Self::ExpressionTupleTooLarge => 2800,
@@ -231,6 +253,13 @@ impl CheckerDiagnosticCode {
             }
             Self::CircularTypeAlias => "Type alias '{0}' circularly references itself.",
             Self::CannotFindName => "Cannot find name '{0}'.",
+            Self::PropertyDoesNotExist => "Property '{0}' does not exist on type '{1}'.",
+            Self::CircularReturn => {
+                "'{0}' implicitly has return type 'any' because it does not have a return type \
+                 annotation and is referenced directly or indirectly in one of its return \
+                 expressions."
+            }
+            Self::ImplicitAnyParameter => "Parameter '{0}' implicitly has an 'any' type.",
             Self::UnionTooComplex => {
                 "Expression produces a union type that is too complex to represent."
             }
@@ -341,6 +370,14 @@ pub enum CheckerDiagnosticOperation {
     TypeAliasDeclaration,
     /// A type reference's name resolution (`resolveEntityName`).
     TypeReference,
+    /// A member read off a value or a written indexed access
+    /// (`checkPropertyAccessExpression`, `getPropertyTypeForIndexType`).
+    MemberRead,
+    /// A function's return inferred from its body
+    /// (`getReturnTypeOfSignature`).
+    ReturnInference,
+    /// A parameter's declaration (`reportImplicitAny`).
+    ParameterDeclaration,
 }
 
 /// Why a checker recovery is the answer: what the recovery proves.
@@ -721,6 +758,12 @@ impl CheckerDiagnosticOccurrence {
     #[must_use]
     pub const fn start(&self) -> u32 {
         self.start
+    }
+
+    /// The byte offset into the occurrence's file the diagnostic ends at.
+    #[must_use]
+    pub const fn end(&self) -> u32 {
+        self.end
     }
 
     /// The printed values of the message's placeholders, in order.

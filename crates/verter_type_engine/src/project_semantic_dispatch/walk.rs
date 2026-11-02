@@ -1229,6 +1229,50 @@ struct CompositeJoin {
     index: usize,
 }
 
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
+    /// Whether the program declares the global wrapper the primitive `node`
+    /// reads its members from.
+    pub(super) fn apparent_wrapper_settles(&self, node: SemanticNodeId, origin: &str) -> bool {
+        use super::apparent_type::GlobalWrapper;
+        let wrapper = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => "String",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => "Number",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "Boolean",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => "BigInt",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => "Symbol",
+            _ => return false,
+        };
+        matches!(
+            self.global_wrapper_surface(wrapper, &[], origin),
+            GlobalWrapper::Surface(_)
+        )
+    }
+
+    /// Whether the global `Object` type every object reads declares `name`,
+    /// or does not settle.
+    pub(super) fn global_object_declares(&self, name: &str, origin: &str) -> bool {
+        use super::apparent_type::GlobalWrapper;
+        match self.global_wrapper_surface("Object", &[], origin) {
+            GlobalWrapper::Absent => false,
+            GlobalWrapper::Unsettled => true,
+            GlobalWrapper::Surface(object) => {
+                let Some(SemanticNodeData::Object(view)) = self
+                    .graph()
+                    .node_data(object)
+                    .as_deref()
+                    .map(SemanticNodeData::clone)
+                else {
+                    return true;
+                };
+                !matches!(
+                    view.project_known_key(&PropertyKey::identifier(Arc::from(name))),
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                )
+            }
+        }
+    }
+}
+
 /// Whether an apparent type declares a member
 /// ([`PathWalker::apparent_member_surface`]).
 enum ApparentMember {

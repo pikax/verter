@@ -223,7 +223,6 @@ pub(crate) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialR
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
         | FlowReturnDegradation::ContextSensitiveInference
-        | FlowReturnDegradation::AbsentReceiverMember
         | FlowReturnDegradation::FailedBindingInitializer => PartialReason::FlowReturnUninferred,
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
@@ -3331,6 +3330,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
             }
         }
+    }
+
+    /// Mark every inferred return from the in-flight `target` inward as
+    /// requiring itself, as `pushTypeResolution` marks the resolution stack.
+    pub(super) fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let Some(from) = txn
+            .reentry()
+            .find(&ObligationIdentity::FlowReturn(target.clone()))
+        else {
+            return;
+        };
+        let members: Vec<FlowReturnKey> = txn.reentry().flow_returns_from(from).cloned().collect();
+        txn.circular_returns.extend(members);
     }
 
     fn execute_flow_return_validated(&self, key: FlowReturnKey) -> FlowReturnStep {
@@ -7296,6 +7309,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical,
             owner,
             nullability: key.context.policy.nullability,
+            circular_return: std::cell::Cell::new(false),
+            frame_declares_return: ir.declared_return.is_some(),
+            bare_self_return: None,
             no_implicit_any: key.context.policy.no_implicit_any,
             use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
             no_implicit_this: key.context.policy.no_implicit_this,
@@ -7379,6 +7395,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let frame_products;
         let inferred_predicate;
         let checker_diagnostics;
+        let circular_return;
         let independent_members;
         let independent_returns;
         let constructive_return;
@@ -7386,8 +7403,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
+            evaluator.report_receiver_reads(ir.receiver_reads.as_ref());
             evaluator.promote_pending_statement_gap();
             inferred_predicate = evaluator.inferred_predicate;
+            circular_return = (self.take_return_cycle(key) || evaluator.circular_return.get())
+                && ir.declared_return.is_none();
+            if circular_return {
+                let occurrence = entry
+                    .report_name()
+                    .and_then(|name| evaluator.circular_return_occurrence(name));
+                if let Some(occurrence) = occurrence {
+                    evaluator.record_checker_diagnostic(occurrence);
+                }
+            }
             checker_diagnostics = {
                 let mut occurrences = std::mem::take(&mut evaluator.checker_diagnostics);
                 occurrences.sort();
@@ -7541,11 +7569,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             frame_product_evidence
         };
-        let contributors = if executed_walk.local_aborted && contributors.is_ok() {
-            Err(FlowReturnFailure::Unresolved)
-        } else {
-            contributors
-        };
+        let contributors =
+            if executed_walk.local_aborted && contributors.is_ok() && !circular_return {
+                Err(FlowReturnFailure::Unresolved)
+            } else {
+                contributors
+            };
         let witness = FlowExecutionWitness {
             executed_selection: executed_walk.completed_selection(planned.selection()),
             skeleton: &skeleton,
@@ -7612,7 +7641,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let result = self
                     .attach_inferred_predicate(result, inferred_predicate)
                     .with_checker_diagnostics(checker_diagnostics.into());
-                let result = if whole_return_point {
+                let result = if circular_return {
+                    // The error type stands for the whole return, whatever
+                    // the body's other returns and its form.
+                    let recovery = self.graph().intern_node(
+                        crate::semantic_query::checker_policy::checker_error_type(
+                            crate::semantic_query::checker_policy::circular_return(),
+                        ),
+                    );
+                    result
+                        .with_return_type(self.graph().store(), recovery)
+                        .without_function_kind()
+                } else if whole_return_point {
                     self.attach_function_kind_wrap(
                         result,
                         skeleton.kind,
@@ -8803,7 +8843,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(primitive)));
             } else {
-                return Err(FlowReturnFailure::EmptyCycle);
+                // Every return is the function calling itself: the checker
+                // skips them all and the return is `never`.
+                arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)));
             }
         }
         // TypeScript's return-position reunion applies SUBTYPE REDUCTION
@@ -10741,6 +10783,8 @@ use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, Ca
 mod call_effects;
 #[path = "flow_return_contextual.rs"]
 mod contextual;
+#[path = "flow_return_recovery.rs"]
+mod recovery;
 use contextual::ContextualSignature;
 #[path = "flow_return_arm_index.rs"]
 mod arm_index;
@@ -11074,6 +11118,31 @@ pub(super) trait FlowDemandDriver {
         canonical: &str,
         call_span: verter_span::Span,
     ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence>;
+    /// One type as the checker prints it in a message; `None` when its
+    /// print is not known exactly.
+    fn print_checker_type(&self, node: SemanticNodeId) -> Option<String>;
+    /// Whether the global `Object` type every object reads declares `name`,
+    /// or does not settle.
+    fn global_object_declares(&self, name: &str, canonical: &str) -> bool;
+    /// Whether the program declares the global wrapper the primitive `node`
+    /// reads its members from.
+    fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool;
+    /// Whether the class reads from its declarations as having no member
+    /// `name`.
+    fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool;
+    /// Mark every return from the in-flight `target` inward as requiring
+    /// itself.
+    fn mark_return_cycle(&self, target: &FlowReturnKey);
+    /// Whether the return `key` was marked as requiring itself; takes the
+    /// mark.
+    fn take_return_cycle(&self, key: &FlowReturnKey) -> bool;
     /// Spread-normalise the tuple an array literal produces.
     fn normalize_expression_tuple_spread(
         &self,
@@ -11787,6 +11856,33 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         call_span: verter_span::Span,
     ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
         ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
+    }
+    fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
+        self.print_diagnostic_type(node)
+    }
+    fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
+        ProjectSemanticDispatch::global_object_declares(self, name, canonical)
+    }
+    fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool {
+        ProjectSemanticDispatch::apparent_wrapper_settles(self, node, canonical)
+    }
+    fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool {
+        ProjectSemanticDispatch::class_proves_member_absent(
+            self, canonical, owner, class, args, name,
+        )
+    }
+    fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        ProjectSemanticDispatch::mark_return_cycle(self, target);
+    }
+    fn take_return_cycle(&self, key: &FlowReturnKey) -> bool {
+        self.dispatch_txn.borrow_mut().circular_returns.remove(key)
     }
     fn normalize_expression_tuple_spread(
         &self,
@@ -12669,6 +12765,32 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .bind_checker_recovery(node, canonical, call_span)
     }
+    fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
+        self.driver.print_checker_type(node)
+    }
+    fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
+        self.driver.global_object_declares(name, canonical)
+    }
+    fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool {
+        self.driver.apparent_wrapper_settles(node, canonical)
+    }
+    fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool {
+        self.driver
+            .class_proves_member_absent(canonical, owner, class, args, name)
+    }
+    fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        self.driver.mark_return_cycle(target);
+    }
+    fn take_return_cycle(&self, key: &FlowReturnKey) -> bool {
+        self.driver.take_return_cycle(key)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -13157,6 +13279,17 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// modeled-`any` substitution for a value it could not model). Rides
     /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
     degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    /// Whether this frame's return requires itself: the checker's TS7023,
+    /// whose return is its error type whatever else the body returns.
+    circular_return: std::cell::Cell<bool>,
+    /// Whether the function declares its return, which is then never
+    /// inferred from the body.
+    frame_declares_return: bool,
+    /// The call a `return` statement holds alone, when it calls the function
+    /// by its own name: the checker skips that return
+    /// (`checkAndAggregateReturnExpressionTypes`), every other re-entry is
+    /// circular.
+    bare_self_return: Option<verter_span::Span>,
     /// `noImplicitAny` of the function's own project — whether an
     /// unannotated `let` / `var` of the auto-typed form is auto-typed or
     /// declared as its initializer's widened type.
@@ -14588,6 +14721,28 @@ enum ObjectEvalStep<'e> {
 }
 
 /// One link of an optional chain read by [`FlowEvaluator::optional_chain_link`].
+/// Whether an object-literal member's function declares its return.
+fn member_declares_return(member: &verter_session_query::flow::slice::SliceObjectMember) -> bool {
+    matches!(
+        member.value,
+        verter_session_query::flow::slice::SliceExpr::NestedFunctionValue {
+            has_declared_return: true,
+            ..
+        }
+    )
+}
+
+/// Where one link of an optional chain stands.
+#[derive(Clone, Copy)]
+struct OptionalLinkSite {
+    /// The link's ordinal in its chain.
+    index: usize,
+    /// The link's member name, when it has one.
+    name_span: Option<verter_session_query::flow::frame_span::FrameSpan>,
+    /// Whether the chain reads an object literal's own `this`.
+    reads_own_literal: bool,
+}
+
 enum OptionalLink {
     /// The link's read, off `base` — the value the link was read from,
     /// after its own nullish strip.
@@ -15245,6 +15400,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             .as_ref()
                             .expect("a literal with deferred members has a receiver"),
                     );
+                    let value =
+                        self.settle_method_cycle(&receiver, member, value, again, degradation);
                     if !again && receiver.forward_read.get() {
                         if observations.finish(()).discard().is_err() {
                             return ObjectEvalStep::Done(Positional::Unmodeled);
@@ -15912,6 +16069,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let spread_seen = frame.spread_seen;
         let late_bound = std::mem::take(&mut frame.late_bound);
         let receiver = frame.receiver.take();
+        let absent_reads = receiver
+            .as_ref()
+            .map(|receiver| std::mem::take(&mut *receiver.absent_reads.borrow_mut()))
+            .unwrap_or_default();
         let enclosing_receiver = frame
             .enclosing_receiver
             .take()
@@ -16050,6 +16211,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if unwidened_differs {
             let unwidened = identify(intern(unwidened_members));
             self.unwidened_views.insert(node, unwidened);
+        }
+        if !absent_reads.is_empty() {
+            if let Some(printed) = self.dispatch.print_checker_type(node) {
+                for (name, span) in absent_reads {
+                    self.record_member_diagnostic(&name, &printed, span);
+                }
+            }
         }
         Positional::Value(node)
     }
@@ -19819,13 +19987,79 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// stays the honest answer). A projection miss after a resolved root
     /// takes the same fallback: the position degrades exactly as the
     /// owner-scope walk's miss does, never a fabricated member.
+    #[inline(never)]
+    fn eval_type_leaf(
+        &mut self,
+        leaf: &verter_session_query::flow::slice::GatedLeaf,
+    ) -> Positional<SemanticNodeId> {
+        let node = self.lower_body_type(leaf.ty());
+        if self.member_read_missed(Some(node)) {
+            let recovered =
+                self.recovered_typeof_path(leaf.ty(), leaf.frame_root(), leaf.member_spans());
+            if let Some(recovered) = recovered {
+                return Positional::Value(recovered);
+            }
+        }
+        Positional::Value(node)
+    }
+
+    #[inline(never)]
     fn eval_frame_rooted_typeof_path(
         &mut self,
-        ty: &verter_type_expr::TypeExpr,
-        binding: Option<&FlowProductSubject>,
+        leaf: &verter_session_query::flow::slice::GatedLeaf,
     ) -> Option<Positional<SemanticNodeId>> {
-        self.frame_rooted_typeof_path_node(ty, binding)
-            .map(Positional::Value)
+        let read = self.frame_rooted_typeof_path_node(leaf.ty(), leaf.frame_root());
+        if self.member_read_missed(read) {
+            let recovered =
+                self.recovered_typeof_path(leaf.ty(), leaf.frame_root(), leaf.member_spans());
+            if let Some(recovered) = recovered {
+                return Some(Positional::Value(recovered));
+            }
+        }
+        read.map(Positional::Value)
+    }
+
+    /// A missed `typeof` path leaf whose walk stopped at a member its parent
+    /// proves absent, or at an `any` it reads on through: the checker's
+    /// answer for the read. `None` when no hop proves it.
+    fn recovered_typeof_path(
+        &mut self,
+        ty: &verter_type_expr::TypeExpr,
+        frame_root: Option<&FlowProductSubject>,
+        member_spans: &[verter_session_query::flow::frame_span::FrameSpan],
+    ) -> Option<SemanticNodeId> {
+        let verter_type_expr::TypeExpr::TypeOf(value) = ty else {
+            return None;
+        };
+        let (root, segments) = value.path.split_first()?;
+        if !value.type_args.is_empty() {
+            return None;
+        }
+        let mut current = match frame_root {
+            Some(binding) => self.read_local(binding)?,
+            None => {
+                let root = verter_type_expr::ValueRef {
+                    path: vec![root.clone()],
+                    ..value.clone()
+                };
+                self.lower_body_type(&verter_type_expr::TypeExpr::TypeOf(root))
+            }
+        };
+        for (index, segment) in segments.iter().enumerate() {
+            if self.node_is_semantic_any(current) {
+                return Some(current);
+            }
+            let name: Arc<str> = Arc::from(segment.as_str());
+            let read = self.project_segments_navigate(current, std::slice::from_ref(&name));
+            if self.member_read_missed(read) {
+                return self.member_proven_absent(current, &name).then(|| {
+                    let span = member_spans.get(index).copied();
+                    self.absent_member_recovery(current, &name, span, false)
+                });
+            }
+            current = read?;
+        }
+        None
     }
 
     /// The node half of [`Self::eval_frame_rooted_typeof_path`]: resolve
@@ -26663,6 +26897,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     match argument {
                         Some(expr) => {
+                            self.bare_self_return = self.return_of_bare_self_call(expr);
                             let bare_literal = matches!(
                                 freshness,
                                 verter_session_query::flow::slice::SliceFreshness::Fresh
@@ -27747,6 +27982,50 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `signature` with its return (and any predicate beside it) replaced by
     /// `any` — a nested function whose return was read while it was being
     /// resolved.
+    /// A method's `value` once this round is over. Siblings stopped making
+    /// progress with it still reading one not evaluated: their returns
+    /// require each other, so it returns the checker's error type.
+    #[inline(never)]
+    fn settle_method_cycle(
+        &mut self,
+        receiver: &class_expression::ClassReceiver,
+        member: &verter_session_query::flow::slice::SliceObjectMember,
+        value: SemanticNodeId,
+        stalled: bool,
+        degradation: Option<FlowReturnDegradation>,
+    ) -> SemanticNodeId {
+        let value = if stalled && receiver.forward_read.get() && !member_declares_return(member) {
+            self.degradation = degradation;
+            self.signature_returning_any(value)
+        } else {
+            value
+        };
+        if self.returns_circularly(value) {
+            self.report_circular_member(receiver, member);
+        }
+        value
+    }
+
+    fn report_circular_member(
+        &mut self,
+        receiver: &class_expression::ClassReceiver,
+        member: &verter_session_query::flow::slice::SliceObjectMember,
+    ) {
+        let verter_session_query::flow::slice::SliceObjectKey::Static(key) = &member.key else {
+            return;
+        };
+        receiver
+            .circular_members
+            .borrow_mut()
+            .insert(Arc::clone(key));
+        let Some(span) = member.spans.name else {
+            return;
+        };
+        if let Some(occurrence) = self.circular_return_occurrence(&(span, Arc::clone(key))) {
+            self.record_checker_diagnostic(occurrence);
+        }
+    }
+
     fn signature_returning_any(&self, signature: SemanticNodeId) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         let Some(SemanticNodeData::Signature {
@@ -27761,7 +28040,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         else {
             return signature;
         };
-        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let any = self.circular_return_recovery();
         graph.intern_node(SemanticNodeData::Signature {
             kind,
             params,
@@ -29222,9 +29501,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Positional<SemanticNodeId> {
         let graph = self.dispatch.graph();
         match expr {
-            verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
-                Positional::Value(self.lower_body_type(leaf.ty()))
-            }
+            verter_session_query::flow::slice::SliceExpr::Type(leaf) => self.eval_type_leaf(leaf),
             verter_session_query::flow::slice::SliceExpr::FrameShadowed(wrapped) => {
                 let (inner, shadowed) = (wrapped.inner(), wrapped.shadowed());
                 // The root-identifier gate's decision point. The content
@@ -29253,9 +29530,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // owner scope answers for the same name, the frame's read
                 // is the answer.
                 if let verter_session_query::flow::slice::SliceExpr::Type(leaf) = inner {
-                    if let Some(node) =
-                        self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
-                    {
+                    if let Some(node) = self.eval_frame_rooted_typeof_path(leaf) {
                         return node;
                     }
                 }
@@ -29358,12 +29633,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // the chain unions `undefined` once if any strip removed arms —
             // a non-nullable base publishes the plain member type, exactly
             // as the checker does.
-            verter_session_query::flow::slice::SliceExpr::OptionalMember { root, links } => {
+            verter_session_query::flow::slice::SliceExpr::OptionalMember {
+                root,
+                links,
+                name_spans,
+                first_link_undeclared,
+            } => {
                 let node = match self.eval_expr(root) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                if *first_link_undeclared {
+                    if let Some(recovered) = self.undeclared_literal_member(node, links, name_spans)
+                    {
+                        return Positional::Value(recovered);
+                    }
+                }
                 // An `any` root keeps the authored `any`: every member
                 // read off `any` is `any`, optionality included.
                 if self.node_is_semantic_any(node) {
@@ -29390,13 +29676,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }),
                     _ => None,
                 };
+                let reads_own_literal = self.reads_own_literal(root, node);
                 let mut current = node;
                 let mut adds_undefined = false;
                 for index in 0..links.len() {
+                    if self.node_is_semantic_any(current) {
+                        break;
+                    }
                     match self.optional_chain_link(
                         current,
                         links,
-                        index,
+                        OptionalLinkSite {
+                            index,
+                            name_span: name_spans.get(index).copied(),
+                            reads_own_literal,
+                        },
                         narrow_root.as_ref(),
                         &mut adds_undefined,
                     ) {
@@ -29762,10 +30056,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         mut current: SemanticNodeId,
         links: &[(Arc<str>, bool)],
-        index: usize,
+        site: OptionalLinkSite,
         narrow_root: Option<&verter_session_query::flow::slice::SliceNarrowRoot>,
         stripped: &mut bool,
     ) -> OptionalLink {
+        let index = site.index;
         let (name, optional) = &links[index];
         if *optional {
             match self.strip_nullish_arms_for_optional_read(current) {
@@ -29796,28 +30091,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `this` to the receiver.
         let this_source = self.this_member_source(current, name);
         let read_base = this_source.unwrap_or(current);
-        let Some(member) = this_source
+        let member = this_source
             .and_then(|source| self.receiver_non_public_member(source, name))
-            .or_else(|| self.project_path_navigate(read_base, std::slice::from_ref(name)))
-        else {
+            .or_else(|| self.project_path_navigate(read_base, std::slice::from_ref(name)));
+        // A member the receiver proves absent: the checker's TS2339, and
+        // its error type is the read. A name-less link (an element read) is
+        // no property read.
+        if self.member_read_missed(member)
+            && site.name_span.is_some()
+            && (self.receiver_lacks_member(current, name)
+                || self.member_proven_absent(read_base, name))
+        {
+            let own_method = site.reads_own_literal && !self.frame_declares_return;
+            return OptionalLink::Read {
+                base: current,
+                read: self.absent_member_recovery(current, name, site.name_span, own_method),
+            };
+        }
+        let Some(member) = member else {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
             ));
             return OptionalLink::Unmodeled;
         };
-        // A member the receiver does not declare: the checker's TS2339,
-        // whose error type this rail does not model, named as its cause.
-        if this_source.is_some()
-            && matches!(
-                self.dispatch.arena().node_data(member).as_deref(),
-                Some(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss
-                ))
-            )
-            && self.receiver_lacks_member(current, name)
-        {
-            self.record_degradation(FlowReturnDegradation::AbsentReceiverMember);
-        }
         // An element read (`a[0]`) the walk misses is a position
         // this lane does not model, never a published miss.
         let element_read = name.parse::<u64>().is_ok();
@@ -29908,6 +30204,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             seen.push(node);
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => return true,
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    diagnostic, ..
+                })) if diagnostic.recovery().is_some() => return true,
                 Some(SemanticNodeData::Alias(target)) => pending.push(*target),
                 Some(
                     composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
@@ -30524,9 +30823,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     returned,
                 )))
             }
-            // An SCC back-edge through the executor: the close discharges
-            // it on the component's admitted results.
-            super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
+            // A back-edge through the executor re-enters a return in flight.
+            super::call_resolve::ResolveCallStep::Hold(_) => {
+                let recovery = self.circular_return_recovery();
+                Some(Positional::Value(CallValue::of_resolved_call(
+                    self.dispatch,
+                    recovery,
+                )))
+            }
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
             ) => {
@@ -30995,11 +31299,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 }
                                 Positional::Value(value)
                             }
-                            FlowReturnStep::Hold(key) => {
-                                self.holds
-                                    .push(HeldCallee::foreign((*key).clone(), callee_clause));
-                                Positional::Hold
-                            }
+                            FlowReturnStep::Hold(key) => self.circular_call(&key),
                             FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {
                                 // An empty-cycle callee IS a hold — the SCC
                                 // close discharges it (and its callers) on
@@ -31180,13 +31480,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return Positional::Unmodeled;
                 };
                 match self.dispatch.execute_flow_return(self_slot.clone()) {
-                    FlowReturnStep::Hold(_) => {
+                    // A `return` of the bare self-call contributes nothing:
+                    // its return is the function's other returns.
+                    FlowReturnStep::Hold(_) if self.bare_self_return == Some(site.span()) => {
                         // The one hold whose target's binders are THIS
                         // frame's own: a self-call's callee IS the caller,
                         // so the fixed point must leave them alone.
                         self.holds.push(HeldCallee::own_frame(self_slot.clone()));
                         Positional::Hold
                     }
+                    FlowReturnStep::Hold(key) => self.circular_call(&key),
                     FlowReturnStep::Complete(_) => {
                         unreachable!("a same-slot recursive edge is always a hold in flight")
                     }
@@ -31239,7 +31542,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 self.call_return_of_callee_node(callee, site)
             }
             verter_session_query::flow::slice::SliceCall::Symbolic(callee) => {
-                let (ty, binding) = (callee.ty(), callee.frame_root());
+                let (ty, binding, member_spans) =
+                    (callee.ty(), callee.frame_root(), callee.member_spans());
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -31266,8 +31570,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // `typeof` leaf does. Everything else lowers in owner
                 // scope as before.
                 let mut frame_rooted = false;
-                let Some(callee_node) =
-                    (match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
+                let callee_node =
+                    match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
                         Some(node) => {
                             frame_rooted = true;
                             Some(node)
@@ -31278,8 +31582,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             &type_arguments[0],
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
                         ),
-                    })
-                else {
+                    };
+                // A callee its object proves absent is the checker's TS2339,
+                // and a call of its error type is untyped.
+                if self.member_read_missed(callee_node) {
+                    let recovered =
+                        self.recovered_member_callee(&type_arguments[0], binding, member_spans);
+                    if let Some(recovered) = recovered {
+                        return recovered;
+                    }
+                }
+                let Some(callee_node) = callee_node else {
                     return self.degraded_unrepresentable_callee();
                 };
                 // A FRAME-ROOTED member callee carries receiver semantics
@@ -31425,7 +31738,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     match self.optional_chain_link(
                         callee,
                         links,
-                        index,
+                        OptionalLinkSite {
+                            index,
+                            name_span: None,
+                            reads_own_literal: false,
+                        },
                         narrow_root.as_ref(),
                         &mut stripped,
                     ) {
@@ -31482,7 +31799,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     if self.node_is_semantic_any(current) {
                         break;
                     }
-                    match self.optional_chain_link(current, after, index, None, &mut stripped) {
+                    let site = OptionalLinkSite {
+                        index,
+                        name_span: None,
+                        reads_own_literal: false,
+                    };
+                    match self.optional_chain_link(current, after, site, None, &mut stripped) {
                         OptionalLink::Read { read, .. } => current = read,
                         OptionalLink::ShortCircuit => {
                             return Positional::Value(CallValue::of_resolved_call(

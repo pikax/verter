@@ -11,7 +11,7 @@
       "reason": "evidence-record"
     },
     ".claude/skills/type-resolution/references/flow-return-substrate.md": {
-      "count": 4,
+      "count": 3,
       "reason": "evidence-record"
     },
     "crates/verter_semantic/src/analysis/flow/mod.rs": {

@@ -1205,8 +1205,10 @@ fn flow_return_base_plus_recursion_admits_widened_number() {
     });
 }
 
+/// A function whose every return is the bare call of itself: the checker
+/// skips those returns and the return is `never`, a value.
 #[test]
-fn flow_return_empty_cycle_is_return_only_and_never_never() {
+fn a_function_returning_only_itself_has_a_value() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
@@ -1215,21 +1217,7 @@ fn flow_return_empty_cycle_is_return_only_and_never_never() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        assert!(
-            flow_is_miss(dispatch, key.clone()),
-            "an empty recursive cycle is ReturnOnly"
-        );
-        // Never admitted: the warm read misses, and nothing in the result is
-        // `never`.
-        assert!(
-            dispatch
-                .graph()
-                .get_flow_return_result(dispatch.ctx, &key)
-                .map(|served| served.value().clone())
-                .is_none(),
-            "an empty recursive cycle admits no family value"
-        );
-        assert!(flow_is_miss(dispatch, key), "still cold on the next demand");
+        assert!(!flow_is_miss(dispatch, key), "the answer has a value");
     });
 }
 
@@ -5144,31 +5132,18 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
             "{second} must leave no claimed/uncompleted flight: {second_retained:?}"
         );
 
-        // Each member publishes ITS OWN return sites in source order
-        // (own literal first, the component contribution second) — and
-        // the SAME value whichever member was demanded first, which is
-        // the order-independence half of the contract.
+        // The SAME value whichever member was demanded first, which is the
+        // order-independence half of the contract.
         for name in ["scCleanA", "scCleanB"] {
             let (result, _, _) = scc_expect_value(&host, name);
             let projected = host
                 .project_node_to_type_expr_for_test(result.return_type())
                 .expect("a component member projects");
-            let verter_type_expr::TypeExpr::Union(arms) = &projected else {
-                panic!("{name} publishes the component union, got {projected:?}");
-            };
-            // Every member of a mutual component shares the component's
-            // fixed point, so both publish the SAME arm set in either
-            // demand order. Arm ORDER follows the root's accumulation
-            // order and is not part of this contract.
-            let mut arms: Vec<String> = arms.iter().map(|arm| format!("{arm:?}")).collect();
-            arms.sort();
+            // tsgo: TS7023 on both members, each `any`.
             assert_eq!(
-                arms,
-                vec![
-                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(1.0)),
-                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(2.0)),
-                ],
-                "{name} publishes the component's exact fixed point (demand order {first} → {second})"
+                projected,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+                "{name} is the checker's circular return"
             );
         }
     }
@@ -10474,25 +10449,11 @@ function f(x: string | number) {
     });
 }
 
-/// A FLOW-rooted component's carrier — the self-root union the root and
-/// its batched members publish on — covers every file any drained member
-/// observed, the CALL members included. Here `seed`'s initializer in a
-/// THIRD file calls back into the pending root, so its call drains as a
-/// call member whose self-roots name that file (its program point and
-/// its argument node), while no flow or relation member of the component
-/// does: a carrier composed from the flow and relation members alone
-/// omits it. The component degrades (a program-expression hold has no
-/// value to resurrect the read with) and publishes nothing, so the
-/// composed carrier is read through the observation probe.
-///
-/// The explicit-type-argument spelling of the same omission
-/// (`bb<Arg>(n - 1)` with `Arg` imported from a third file) composes the
-/// same incomplete carrier, but its edit is already caught by the fact
-/// rail — the import's resolution facts — so it warms and invalidates
-/// correctly before and after the union; the third-file program point is
-/// the observation that only the union covers.
+/// A return that requires itself through another file's initializer has no
+/// value here, and an edit of that file that breaks the cycle answers: what
+/// did not complete was kept for no one.
 #[test]
-fn flow_root_component_carrier_covers_call_member_roots() {
+fn a_cycle_through_another_file_follows_an_edit_of_that_file() {
     const A: &str = "/ws/scc-call-roots/a.ts";
     const A_SRC: &str = r#"
 import { seed } from "/ws/scc-call-roots/c";
@@ -10512,32 +10473,35 @@ export const seed = a(0);
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, A, A_SRC);
     upsert_ts(&host, C, C_SRC);
-    *host
-        .flow_fault_injection
-        .flow_root_carrier_probe
-        .lock()
-        .expect("the flow-root carrier probe is never poisoned") = Some(Vec::new());
-    with_dispatch(&host, |dispatch| {
-        let key = whole_return_key(dispatch, A, "a");
-        let _ = execute_flow(dispatch, key);
-    });
-    let roots = host
-        .flow_fault_injection
-        .flow_root_carrier_probe
-        .lock()
-        .expect("the flow-root carrier probe is never poisoned")
-        .take()
-        .expect("the probe stays armed");
-    assert!(
-        !roots.is_empty(),
-        "the flow-root close composed and recorded a carrier"
+    let answer = |host: &Arc<VerterHost>| {
+        let (result, _) = host
+            .get_flow_return_type_with_audit(
+                &verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(A),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from("a"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            )
+            .into_parts();
+        result.ok().map(|result| {
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the return projects")
+        })
+    };
+    assert_eq!(answer(&host), None, "the cycle has no value");
+    upsert_ts(&host, C, "export const seed = \"s\";\n");
+    let edited = answer(&host).expect("the edit broke the cycle");
+    assert_ne!(
+        edited,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+        "the edit broke the cycle"
     );
-    for file in [A, C] {
-        assert!(
-            roots.iter().any(|root| root.as_ref() == file),
-            "the component carrier covers {file}: {roots:?}"
-        );
-    }
 }
 
 /// A mixed component's UNPROVEN deferred flow members poison the

@@ -317,6 +317,7 @@ impl VerterHost {
                 budget_exceeded_events: ctx.flow_return_budget_exceeded.load(Ordering::Relaxed),
                 cycle_reentry_holds: ctx.flow_return_cycle_reentries.load(Ordering::Relaxed),
                 partiality: observed_partiality(&outcome),
+                checker_diagnostics: observed_checker_diagnostics(&outcome),
             };
             // Cold-vs-warm contract, counter side: a request that produced
             // a value with ZERO cold evaluations was served warm.
@@ -459,7 +460,6 @@ fn degradation_tag(degradation: FlowReturnDegradation) -> FlowDegradationTag {
         FlowReturnDegradation::ContextSensitiveInference => {
             FlowDegradationTag::ContextSensitiveInference
         }
-        FlowReturnDegradation::AbsentReceiverMember => FlowDegradationTag::AbsentReceiverMember,
         FlowReturnDegradation::FailedBindingInitializer => {
             FlowDegradationTag::FailedBindingInitializer
         }
@@ -565,4 +565,23 @@ fn noop_flow_return_record(
         capture_state,
         trace_id: String::new(),
     }
+}
+
+/// The checker diagnostics of a request that produced a value.
+#[cfg(feature = "semantic-observe")]
+fn observed_checker_diagnostics(
+    outcome: &Result<Arc<FlowReturnResult>, FlowReturnError>,
+) -> Vec<verter_audit::FlowCheckerDiagnostic> {
+    let Ok(result) = outcome else {
+        return Vec::new();
+    };
+    result
+        .checker_diagnostics()
+        .iter()
+        .map(|occurrence| verter_audit::FlowCheckerDiagnostic {
+            code: occurrence.code().code(),
+            start: occurrence.start(),
+            end: occurrence.end(),
+        })
+        .collect()
 }

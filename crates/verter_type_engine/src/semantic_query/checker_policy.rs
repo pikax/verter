@@ -254,6 +254,24 @@ pub(crate) const fn unresolved_type_name() -> CheckerDiagnostic {
     }
 }
 
+/// The checker's TS2339 for a member read off a type that proves it absent.
+/// A checker error: the read is the error type, `any`, in every setting.
+pub(crate) const fn absent_member() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::PropertyDoesNotExist,
+        operation: CheckerDiagnosticOperation::MemberRead,
+    }
+}
+
+/// The checker's TS7023 for an inferred return that requires itself. Its
+/// report depends on `noImplicitAny`; its recovery, `any`, does not.
+pub(crate) const fn circular_return() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::CircularReturn,
+        operation: CheckerDiagnosticOperation::ReturnInference,
+    }
+}
+
 /// The checker's error type after its TS2456 for the type alias `alias`
 /// (its `DeclRef`): the typed recovery carrier, a complete answer, whose
 /// origin names the alias its message is about.
@@ -279,11 +297,16 @@ pub(crate) fn checker_recovery<M: verter_audit::observe::ObserveExec>(
         !diagnostic.code.is_resource_limit(),
         "a resource diagnostic comes only from a refusal or a certified divergence"
     );
-    graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+    graph.intern_node(checker_error_type(diagnostic))
+}
+
+/// The node of the checker's error type after a diagnostic the types decide.
+pub(crate) fn checker_error_type(diagnostic: CheckerDiagnostic) -> SemanticNodeData {
+    SemanticNodeData::Opaque(QueryError::CheckerRecovery {
         diagnostic,
         basis: RecoveryBasis::Certified,
         origin: None,
-    }))
+    })
 }
 
 /// The checker's instantiation depth along one evaluation path
