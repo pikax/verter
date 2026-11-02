@@ -68,6 +68,7 @@ related as usual (TypeScript 7.1.0-beta). This lane reports nothing there either
 engine itself still fails the pair past the depth (the known deviation documented on
 `CHECKER_RELATION_DEPTH_LIMIT`), so such a call is a typed gap rather than a complete answer. When the two printed operands
 of an elaborated assignment coincide, its head is TS2719, retaining the complete failure chain.
+`relation_type_names` owns that decision for every message naming a failed pair, as `getTypeNamesForErrorDisplay` does: heads and chain lines through `relation_operands`, and the missing-property messages (TS2741, TS2739, TS2740) directly. Two operands that print the same text are printed again fully qualified (`DisplayFacet::QualifyNames` with `CheckerSpelling`), and only spellings that still agree take TS2719's message. Each declaration's symbol chain comes from `declaration_chain`: a module export prints as `import("<file without extension>").<export>`, an `export =` declaration as `import("<file without extension>")` with any namespace path below it, while a global or a declaration its module does not export prints bare, so same-named types from two modules keep TS2322 and unexported ones keep TS2719. The declaration chain retains its lexical owner: an export in a different script owner cannot qualify a same-named local declaration. A private namespace member stops the chain at the last private segment (`Hidden`, or `B.Inner` below private namespace `B`), using the shared header visibility inventory. A chain that cannot be determined withholds the diagnostic. A generalized literal source is always fully qualified (`getTypeNameForErrorDisplay`), collision or not: `literal_base_spelling` settles carriers and prints an enum base through its chain, so an exported enum passed to `string` names `import("<file>").E`.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
@@ -85,7 +86,7 @@ prints its call, construct and index signatures before its properties, an index 
 declared parameter name (`IndexSignature::key_name`; `x` for one no declaration wrote), and under
 `strictNullChecks` an optional tuple element's type with `undefined` added. A query (`typeof a.b`) and a class-expression instance (`(Anonymous class)`)
 count their symbol chain — each name and separator, the first twice — after their type arguments; an
-import type its specifier and ten, then each qualifier name and separator; a type predicate its type
+import type (including a fully qualified module export) its specifier and ten, then each qualifier name and separator once; a type predicate its type
 alone. A part with no checker type (an `Opaque` error carrier) is cut. Generic mapped types count their key constraint, parameter name, remap and template
 in builder order, then ten bytes for the mapping. Closed mappings, spread
 alternatives and anonymous peer-merged declarations are prepared by the consumer

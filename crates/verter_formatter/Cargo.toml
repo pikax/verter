@@ -10,6 +10,9 @@ description = "Typed byte coordinate domains and provenance identity for the Ver
 keywords = ["vue", "compiler", "formatter"]
 categories = ["compilers"]
 
-# Width tables only; no parser, semantic, host or routing dependencies.
+# The only production dependency is the regular-expression engine that runs
+# the pinned text-width tables. No parser, semantic, host, protocol or routing
+# crate: the renderer cannot parse source, analyze semantics or dispatch a
+# request.
 [dependencies]
 regex = "=1.13.1"

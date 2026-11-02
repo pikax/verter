@@ -46,15 +46,17 @@ pub(crate) fn columns(text: &str) -> usize {
     width + scalar_columns(&shadow[end..])
 }
 
+// Mirrors string-width's `codePointAt` walk over UTF-16 units: a paired
+// surrogate decodes to its scalar; an unpaired one (only possible where an
+// emoji match boundary splits a pair) counts as its own code unit.
 fn scalar_columns(shadow: &str) -> usize {
-    let mut chars = shadow.chars();
+    let mut chars = shadow.chars().map(u32::from).peekable();
     let mut width = 0;
-    while let Some(c) = chars.next() {
-        let mut c = u32::from(c);
+    while let Some(mut c) = chars.next() {
         if (0xf0000..=0xf03ff).contains(&c) {
-            let high = c - 0xf0000;
-            let low = u32::from(chars.next().expect("paired shadow surrogate")) - 0xf0400;
-            c = 0x10000 + (high << 10) + low;
+            if let Some(low) = chars.next_if(|low| (0xf0400..=0xf07ff).contains(low)) {
+                c = 0x10000 + ((c - 0xf0000) << 10) + (low - 0xf0400);
+            }
         }
         if c <= 0x1f || (0x7f..=0x9f).contains(&c) || (0x300..=0x36f).contains(&c) {
             continue;

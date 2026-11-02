@@ -1,5 +1,11 @@
 //! Flat, single-owner document algebra. Nodes may be attached once, so neither
 //! traversal nor destruction recurses and a shared subtree cannot expand work.
+//!
+//! The algebra is framework-neutral: text (generated or source-backed),
+//! concatenation, groups, indentation and alignment, conditional flat/broken
+//! content, soft/space/hard lines and ordered line suffixes. Source-backed
+//! content carries the foundation's unchanged [`AuthoredProvenance`] binding;
+//! this module mints no identity and assigns no authored range.
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::provenance::{AuthoredProvenance, FormatProvenanceId, Provenanced};
@@ -12,7 +18,7 @@ mod sealed {
 /// Connects the document's identity parameter to the sole provenance binding.
 /// Sealed: another token cannot stand in for a formatter identity.
 pub trait DocProvenance: sealed::Sealed {
-    type Binding: Copy + std::fmt::Debug;
+    type Binding: Clone + std::fmt::Debug;
 }
 impl DocProvenance for FormatProvenanceId {
     type Binding = AuthoredProvenance;
@@ -102,8 +108,17 @@ impl Doc {
     }
 
     /// Source text carries its original binding unchanged to the output.
+    /// A binding names exactly one authored range whose bytes the output
+    /// segment must equal, so the renderer can never split it at a queued
+    /// suffix's newline. Source text is therefore single-line; a multi-line
+    /// authored literal is supplied as one binding per line joined by
+    /// generated raw newline text, which flushes suffixes like any raw newline.
     pub fn source(&mut self, text: Provenanced<String>) -> DocId {
         let (text, binding) = text.into_parts();
+        assert!(
+            !text.contains(['\r', '\n']),
+            "source text must be single-line"
+        );
         self.push(Node::Text(text, Some(binding)))
     }
 

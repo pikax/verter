@@ -194,6 +194,7 @@ fn macro_field_address_storage_is_charged_once_until_the_last_cell_owner_drops()
                 program.borrow_dependent(),
                 program.source_str(),
                 &TopLevelOwnerTable::ordinary_file(1),
+                &verter_audit::observe::ObservedU64::default(),
             )
         });
     let table = table.expect("address table");

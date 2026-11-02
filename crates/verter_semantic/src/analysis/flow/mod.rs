@@ -355,6 +355,7 @@ struct SiteDraft {
     capture_bindings: Vec<FlowBindingRef>,
     closures: Vec<SkeletonClosure>,
     calls: Vec<SkeletonCall>,
+    input_sites: Vec<SkeletonExprSiteId>,
 }
 
 struct SkeletonBuilder<'entry> {
@@ -531,6 +532,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             capture_bindings: Vec::new(),
             closures: Vec::new(),
             calls: Vec::new(),
+            input_sites: Vec::new(),
         });
         id
     }
@@ -1377,6 +1379,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                         ),
                         closures: OwnedSlice::from(draft.closures.into_boxed_slice()),
                         calls: OwnedSlice::from(draft.calls.into_boxed_slice()),
+                        input_sites: OwnedSlice::from(draft.input_sites.into_boxed_slice()),
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -1905,13 +1908,18 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     fn visit_object_expression(&mut self, it: &ObjectExpression<'a>) {
         // An object literal nested inside a non-object expression tree
         // becomes its own child site so its property footprint stays
-        // path-precise.
+        // path-precise. Its reads no longer land on the containing site, so
+        // a computation that consumes it (a call argument) names it as an
+        // input: the demand that reaches a bare argument read reaches these.
         let parent = self.current_site();
-        self.open_object_site(
+        let site = self.open_object_site(
             it,
             parent,
             verter_span::Span::new(it.span.start, it.span.end),
         );
+        if let (Some(parent), FlowReadKind::Input) = (parent, self.read_kind) {
+            self.sites[parent.index()].input_sites.push(site);
+        }
     }
 
     fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
