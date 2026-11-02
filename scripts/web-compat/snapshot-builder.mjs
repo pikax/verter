@@ -195,20 +195,15 @@ function projectWebFeature(validator, schema, feature) {
   };
 }
 
-/** The identity law both this generator and the session loader derive `snapshot_id` from. */
+/**
+ * The identity law both this generator and the session loader derive `snapshot_id`
+ * from: the SHA-256 of the canonical header without `snapshot_id`. Every other
+ * header field, provenance and counts included, is bound, and canonical JSON is
+ * injective, so moving bytes from one field into its neighbour changes the id.
+ */
 export function deriveSnapshotId(header) {
-  const parts = [`${FORMAT}-id`, String(header.format_version)];
-  for (const dataset of header.datasets) {
-    parts.push(
-      dataset.name,
-      dataset.release,
-      dataset.integrity,
-      dataset.schema_digest,
-      dataset.license_digest,
-    );
-  }
-  parts.push(header.recipe_digest, header.payload_digest);
-  return sha256(Buffer.from(parts.join("\0"), "utf8"));
+  const { snapshot_id: _derived, ...preimage } = header;
+  return sha256(Buffer.from(canonicalJson(preimage), "utf8"));
 }
 
 /**

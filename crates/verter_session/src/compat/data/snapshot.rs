@@ -23,7 +23,7 @@ const SNAPSHOT_FORMAT_KEYWORD: &str = "snapshot-format";
 /// The one snapshot the session admits by default. A dataset or recipe change
 /// re-mints this identity, so no other data can answer silently.
 const ADMITTED_SNAPSHOT_ID: &str =
-    "sha256:f7298cd7911b59e014970646d4a1b76c7cb076cd947606884bb67fd9cda5ce3d";
+    "sha256:0c061c75a2a118850ff7f299c9aedb9c9946510ae712eea3962c73e5a7457f91";
 
 /// The exact snapshot identity a caller accepts. There is no floating form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,26 +476,54 @@ fn sha256_label(bytes: &[u8]) -> String {
     label
 }
 
-/// The identity law, shared with the generator: every constituent identity, the
-/// recipe and the payload digest, in order.
-fn derive_snapshot_id(header: &Header) -> String {
-    let format_version = header.format_version.to_string();
-    let format_tag = format!("{FORMAT}-id");
-    let mut parts: Vec<&str> = vec![&format_tag, &format_version];
-    for dataset in &header.datasets {
-        parts.extend([
-            dataset.name.as_str(),
-            dataset.release.as_str(),
-            dataset.integrity.as_str(),
-            dataset.schema_digest.as_str(),
-            dataset.license_digest.as_str(),
-        ]);
+/// Canonical JSON, as the generator writes it: object keys in ascending order, no
+/// whitespace, strings and numbers in their shortest JSON spelling. It is
+/// injective: two different values never share a spelling, since every string
+/// is quoted and escaped. The generator orders keys by UTF-16 code unit and this
+/// by byte; they agree on every key the strict header shape admits, all ASCII.
+fn write_canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            out.push('{');
+            for (index, (key, member)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::Value::from(key.as_str()).to_string());
+                out.push(':');
+                write_canonical_json(member, out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
     }
-    parts.extend([
-        header.recipe_digest.as_str(),
-        header.payload_digest.as_str(),
-    ]);
-    sha256_label(parts.join("\0").as_bytes())
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_canonical_json(value, &mut out);
+    out
+}
+
+/// The identity law, shared with the generator: the SHA-256 of the canonical
+/// header without its `snapshot_id`. Every other header field, provenance and
+/// counts included, is bound, and the encoding keeps field boundaries.
+fn derive_snapshot_id(header: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut preimage = header.clone();
+    preimage.remove("snapshot_id");
+    sha256_label(canonical_json(&serde_json::Value::Object(preimage)).as_bytes())
 }
 
 fn layout(detail: impl Into<String>) -> SnapshotRejection {
@@ -553,11 +581,21 @@ impl CompatSnapshot {
                 version: format.format_version,
             });
         }
-        let header: Header = serde_json::from_slice(header_bytes).map_err(|error| {
-            SnapshotRejection::HeaderMismatch {
-                detail: error.to_string(),
-            }
-        })?;
+        let header_mismatch = |detail: String| SnapshotRejection::HeaderMismatch { detail };
+        let header: Header = serde_json::from_slice(header_bytes)
+            .map_err(|error| header_mismatch(error.to_string()))?;
+        // The identity is derived from the header's values, so the header must
+        // have exactly one spelling: otherwise two byte strings share an id.
+        let header_value: serde_json::Value = serde_json::from_slice(header_bytes)
+            .map_err(|error| header_mismatch(error.to_string()))?;
+        let Some(header_fields) = header_value.as_object() else {
+            return Err(header_mismatch("the header is not an object".to_owned()));
+        };
+        if canonical_json(&header_value).as_bytes() != header_bytes {
+            return Err(header_mismatch(
+                "the header is not in its canonical spelling".to_owned(),
+            ));
+        }
         let payload_start = header_end + 1;
         let actual = sha256_label(&bytes[payload_start..]);
         if actual != header.payload_digest {
@@ -566,7 +604,7 @@ impl CompatSnapshot {
                 actual,
             });
         }
-        let derived = derive_snapshot_id(&header);
+        let derived = derive_snapshot_id(header_fields);
         if derived != header.snapshot_id {
             return Err(SnapshotRejection::IdentityMismatch {
                 declared: header.snapshot_id,
