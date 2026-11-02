@@ -6,8 +6,9 @@
  * `vscode.executeCompletionItemProvider`, which queries the provider without
  * applying the chosen item's text edits or its `additionalTextEdits` (the import).
  * `acceptCompletion` instead invokes `editor.action.triggerSuggest` then
- * `acceptSelectedSuggestion`, and asserts that BOTH the document text and the
- * import text changed — the user-visible accept the differential cares about.
+ * `acceptSelectedSuggestion`, and asserts that BOTH the expected identifier landed
+ * outside the static imports AND the static imports changed — the user-visible
+ * accept the differential cares about.
  *
  * Both halves of the interaction finish AFTER their command returns, so the driver
  * synchronizes on observed editor state, never on elapsed time:
@@ -51,20 +52,51 @@ export interface AcceptSnapshot {
 
 /** Classification of an accept attempt. */
 export interface AcceptClassification {
-  readonly docChanged: boolean;
+  /**
+   * The expected identifier was inserted: the document, with its static import
+   * declarations excluded, holds more whole-identifier occurrences of the expected
+   * suggestion than before the accept. An import-only edit cannot set this.
+   */
+  readonly identifierChanged: boolean;
+  /** The static import declarations changed. */
   readonly importChanged: boolean;
-  /** A real auto-import accept changed BOTH the document and the import text. */
+  /** A real auto-import accept inserted the identifier AND changed the imports. */
   readonly accepted: boolean;
 }
 
 /**
- * Classify an accept: it counts as a real auto-import accept only when BOTH the
- * document text and the import text changed.
+ * Classify an accept: it counts as a real auto-import accept only when the
+ * expected identifier landed outside the static imports AND the static imports
+ * changed. Judging the identifier on the whole document would let an accept that
+ * applied only its additional (import) edit pass, because that edit changes the
+ * document too.
  */
-export function classifyAcceptOutcome(snap: AcceptSnapshot): AcceptClassification {
-  const docChanged = snap.docAfter !== snap.docBefore;
+export function classifyAcceptOutcome(
+  snap: AcceptSnapshot,
+  expectedSuggestion: string,
+): AcceptClassification {
+  const identifierChanged =
+    countIdentifier(textOutsideStaticImports(snap.docAfter), expectedSuggestion) >
+    countIdentifier(textOutsideStaticImports(snap.docBefore), expectedSuggestion);
   const importChanged = snap.importAfter !== snap.importBefore;
-  return { docChanged, importChanged, accepted: docChanged && importChanged };
+  return { identifierChanged, importChanged, accepted: identifierChanged && importChanged };
+}
+
+const IDENTIFIER_CHAR = /[\p{ID_Continue}$\u200c\u200d]/u;
+
+/**
+ * Count occurrences of `identifier` in `text` that are not part of a longer
+ * identifier, so accepting `computedAsync` is not counted as `computed`.
+ */
+function countIdentifier(text: string, identifier: string): number {
+  if (identifier.length === 0) return 0;
+  let count = 0;
+  for (let at = text.indexOf(identifier); at >= 0; at = text.indexOf(identifier, at + 1)) {
+    const before = at > 0 ? text[at - 1] : "";
+    const after = text[at + identifier.length] ?? "";
+    if (!IDENTIFIER_CHAR.test(before) && !IDENTIFIER_CHAR.test(after)) count += 1;
+  }
+  return count;
 }
 
 /** The text of the `<script>` block (where an auto-import lands), or the whole doc. */
@@ -73,6 +105,51 @@ export function scriptBlockText(doc: { getText(): string }): string {
   const start = text.indexOf("<script");
   const end = text.indexOf("</script>");
   return start >= 0 && end > start ? text.slice(start, end) : text;
+}
+
+/**
+ * Parse the script content of a script/SFC-script snapshot and return its static
+ * import (and import-equals) declarations with the offset of the parsed content.
+ */
+function parseStaticImports(scriptSnapshot: string): {
+  readonly sourceFile: ts.SourceFile;
+  readonly offset: number;
+  readonly imports: Array<ts.ImportDeclaration | ts.ImportEqualsDeclaration>;
+} {
+  const offset = /^\s*<script\b[^>]*>/i.exec(scriptSnapshot)?.[0].length ?? 0;
+  const sourceFile = ts.createSourceFile(
+    "completion-accept.ts",
+    scriptSnapshot.slice(offset),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const imports = sourceFile.statements.filter(
+    (statement): statement is ts.ImportDeclaration | ts.ImportEqualsDeclaration =>
+      ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement),
+  );
+  return { sourceFile, offset, imports };
+}
+
+/**
+ * The document text with the static import declarations of its `<script>` block
+ * (see {@link scriptBlockText}) removed: where an accepted identifier must land.
+ */
+export function textOutsideStaticImports(docText: string): string {
+  const start = docText.indexOf("<script");
+  const end = docText.indexOf("</script>");
+  const hasBlock = start >= 0 && end > start;
+  const scriptStart = hasBlock ? start : 0;
+  const scriptEnd = hasBlock ? end : docText.length;
+  const { sourceFile, offset, imports } = parseStaticImports(docText.slice(scriptStart, scriptEnd));
+  const kept: string[] = [];
+  let cursor = scriptStart;
+  for (const statement of imports) {
+    kept.push(docText.slice(cursor, scriptStart + offset + statement.getStart(sourceFile)));
+    cursor = scriptStart + offset + statement.getEnd();
+  }
+  kept.push(docText.slice(cursor));
+  return docText.slice(0, scriptStart) + kept.join("");
 }
 
 /**
@@ -85,22 +162,8 @@ export function scriptBlockText(doc: { getText(): string }): string {
  * handled without a regex grammar.
  */
 export function extractStaticImportText(scriptSnapshot: string): string {
-  const openTagEnd = /^\s*<script\b[^>]*>/i.exec(scriptSnapshot)?.[0].length;
-  const scriptText = openTagEnd === undefined ? scriptSnapshot : scriptSnapshot.slice(openTagEnd);
-  const sourceFile = ts.createSourceFile(
-    "completion-accept.ts",
-    scriptText,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  return sourceFile.statements
-    .filter(
-      (statement): statement is ts.ImportDeclaration | ts.ImportEqualsDeclaration =>
-        ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement),
-    )
-    .map((statement) => statement.getText(sourceFile))
-    .join("\n");
+  const { sourceFile, imports } = parseStaticImports(scriptSnapshot);
+  return imports.map((statement) => statement.getText(sourceFile)).join("\n");
 }
 
 /** A subscription or armed timer the accept driver owns and releases. */
@@ -113,12 +176,13 @@ export interface AcceptCompletionDeps {
   /**
    * The text the expected suggestion inserts. The accept is issued only once the
    * visible suggestion widget has focused this item, so a different first
-   * suggestion or a widget that never populated cannot be accepted.
+   * suggestion or a widget that never populated cannot be accepted; the accept
+   * passes only once this identifier has landed outside the static imports.
    */
   readonly expectedSuggestion: string;
   /** Runs a VS Code command (the real path: `vscode.commands.executeCommand`). */
   runCommand: (command: string) => unknown | PromiseLike<unknown>;
-  /** Reads the current document text. */
+  /** Reads the current document text (the whole document, imports included). */
   readDocText: () => string;
   /** Reads the current import-region text. */
   readImportText: () => string;
@@ -154,7 +218,8 @@ function latch(): { readonly opened: Promise<void>; open(): void } {
 /**
  * Drive the real accept path: snapshot, `triggerSuggest`, wait until the suggestion
  * widget focuses {@link AcceptCompletionDeps.expectedSuggestion}, `acceptSelectedSuggestion`,
- * then wait until the document AND its static imports have both changed. Each
+ * then wait until the expected identifier has landed outside the static imports AND
+ * the static imports have changed. Each
  * command is issued exactly once. Throws if the widget never focuses the expected
  * item or the accept never reaches the accepted state before the deadline, and
  * releases every subscription on every ending. Returns the outcome on success.
@@ -178,12 +243,17 @@ export async function acceptCompletion(deps: AcceptCompletionDeps): Promise<Acce
   let acceptIssued = false;
 
   const checkAccepted = (): void => {
-    if (acceptIssued && classifyAcceptOutcome(observe()).accepted) acceptedState.open();
+    if (acceptIssued && classifyAcceptOutcome(observe(), deps.expectedSuggestion).accepted) {
+      acceptedState.open();
+    }
   };
 
   const verdict = (snap: AcceptSnapshot): string => {
-    const { docChanged, importChanged } = classifyAcceptOutcome(snap);
-    return `document changed=${docChanged}, import changed=${importChanged}`;
+    const { identifierChanged, importChanged } = classifyAcceptOutcome(
+      snap,
+      deps.expectedSuggestion,
+    );
+    return `identifier changed=${identifierChanged}, import changed=${importChanged}`;
   };
 
   try {
@@ -233,7 +303,7 @@ export async function acceptCompletion(deps: AcceptCompletionDeps): Promise<Acce
     await within(acceptedState.opened);
 
     const snap = observe();
-    return { ...classifyAcceptOutcome(snap), ...snap, commands };
+    return { ...classifyAcceptOutcome(snap, deps.expectedSuggestion), ...snap, commands };
   } finally {
     for (const subscription of subscriptions.splice(0).reverse()) subscription.dispose();
   }
@@ -266,7 +336,8 @@ export interface VsCodeAcceptOptions {
 /**
  * Bind the accept driver to a VS Code editor.
  *
- * Commands run through `executeCommand`; the document text is the whole document;
+ * Commands run through `executeCommand`; the document text is the whole document
+ * (the identifier verdict excludes its static imports);
  * the import fingerprint contains only parsed static import declarations, so a
  * completion that changes an identifier without applying its additional import
  * edit cannot produce a false positive. The suggestion widget's focused item is

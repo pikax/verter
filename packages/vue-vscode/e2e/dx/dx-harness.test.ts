@@ -144,9 +144,9 @@ suite("DX extension-host gate", function () {
     const importBefore = scriptBlockText(editor!.document);
     const outcome = await acceptCompletionInEditor(editor!, scenario.acceptExpect);
 
-    // The real accept must have changed BOTH the document body and the import block.
-    expect(outcome.accepted, "completion accept mutated document + import").to.equal(true);
-    expect(outcome.docChanged).to.equal(true);
+    // The real accept must have inserted the identifier AND changed the import block.
+    expect(outcome.accepted, "completion accept inserted identifier + import").to.equal(true);
+    expect(outcome.identifierChanged).to.equal(true);
     expect(outcome.importChanged).to.equal(true);
     const importAfter = scriptBlockText(editor!.document);
     expect(importAfter).to.not.equal(importBefore);

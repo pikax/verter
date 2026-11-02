@@ -6,6 +6,7 @@ import {
   acceptCompletion,
   classifyAcceptOutcome,
   extractStaticImportText,
+  textOutsideStaticImports,
   TRIGGER_SUGGEST_COMMAND,
   vscodeAcceptCompletionDeps,
   type AcceptCompletionDeps,
@@ -14,38 +15,84 @@ import {
   type VsCodeAcceptApi,
 } from "./dxAcceptCompletion";
 
+const SCRIPT_BEFORE = `<script setup lang="ts">
+import { ref } from "vue";
+const doubled = comput(() => ref(1).value * 2);
+</script>`;
+const SCRIPT_IDENTIFIER_ACCEPTED = SCRIPT_BEFORE.replace("comput(", "computed(");
+const SCRIPT_IMPORT_APPLIED = SCRIPT_IDENTIFIER_ACCEPTED.replace(
+  'import { ref } from "vue";',
+  'import { computed, ref } from "vue";',
+);
+/** The import edit applied while the identifier is still `comput`. */
+const SCRIPT_IMPORT_ONLY = SCRIPT_BEFORE.replace(
+  'import { ref } from "vue";',
+  'import { computed, ref } from "vue";',
+);
+
 describe("classifyAcceptOutcome", () => {
-  it("counts the accept as real only when BOTH document and import text changed", () => {
-    expect(
-      classifyAcceptOutcome({
-        docBefore: "a",
-        docAfter: "aMyComp",
-        importBefore: "",
-        importAfter: "import { MyComp } from './c'",
-      }),
-    ).toEqual({ docChanged: true, importChanged: true, accepted: true });
+  // Snapshots as the adapter produces them: the import text is derived from the
+  // document, so an import edit always changes the document too.
+  const snapshot = (docBefore: string, docAfter: string) => ({
+    docBefore,
+    docAfter,
+    importBefore: extractStaticImportText(docBefore),
+    importAfter: extractStaticImportText(docAfter),
   });
 
-  it("is not accepted when only the document changed (no auto-import edit)", () => {
+  it("counts the accept as real only when the identifier AND the import landed", () => {
     expect(
-      classifyAcceptOutcome({
-        docBefore: "a",
-        docAfter: "aMyComp",
-        importBefore: "x",
-        importAfter: "x",
-      }).accepted,
-    ).toBe(false);
+      classifyAcceptOutcome(snapshot(SCRIPT_BEFORE, SCRIPT_IMPORT_APPLIED), "computed"),
+    ).toEqual({ identifierChanged: true, importChanged: true, accepted: true });
   });
 
-  it("is not accepted when only the import changed (no document mutation)", () => {
+  it("is not accepted when only the identifier changed (no auto-import edit)", () => {
     expect(
-      classifyAcceptOutcome({
-        docBefore: "a",
-        docAfter: "a",
-        importBefore: "",
-        importAfter: "import { MyComp } from './c'",
-      }).accepted,
-    ).toBe(false);
+      classifyAcceptOutcome(snapshot(SCRIPT_BEFORE, SCRIPT_IDENTIFIER_ACCEPTED), "computed"),
+    ).toEqual({ identifierChanged: true, importChanged: false, accepted: false });
+  });
+
+  it("is not accepted when only the import landed and the identifier is unchanged", () => {
+    expect(classifyAcceptOutcome(snapshot(SCRIPT_BEFORE, SCRIPT_IMPORT_ONLY), "computed")).toEqual({
+      identifierChanged: false,
+      importChanged: true,
+      accepted: false,
+    });
+  });
+
+  it("does not count a different, longer identifier as the expected one", () => {
+    const wrongItem = SCRIPT_IMPORT_APPLIED.replace("computed(", "computedAsync(");
+    expect(classifyAcceptOutcome(snapshot(SCRIPT_BEFORE, wrongItem), "computed")).toMatchObject({
+      identifierChanged: false,
+      accepted: false,
+    });
+  });
+
+  it("judges an identifier inserted outside the script block (template)", () => {
+    const before = `<script setup lang="ts">
+import { ref } from "vue";
+</script>
+<template><MyCo /></template>`;
+    const after = before
+      .replace("<MyCo ", "<MyComp ")
+      .replace(
+        'import { ref } from "vue";',
+        'import { ref } from "vue";\nimport MyComp from "./MyComp.vue";',
+      );
+    expect(classifyAcceptOutcome(snapshot(before, after), "MyComp").accepted).toBe(true);
+    const importOnly = before.replace(
+      'import { ref } from "vue";',
+      'import { ref } from "vue";\nimport MyComp from "./MyComp.vue";',
+    );
+    expect(classifyAcceptOutcome(snapshot(before, importOnly), "MyComp").accepted).toBe(false);
+  });
+});
+
+describe("textOutsideStaticImports", () => {
+  it("removes only the static import declarations of the script block", () => {
+    expect(textOutsideStaticImports(SCRIPT_IMPORT_APPLIED)).toBe(
+      `<script setup lang="ts">\n\nconst doubled = computed(() => ref(1).value * 2);\n</script>`,
+    );
   });
 });
 
@@ -76,19 +123,13 @@ const value = import("./dynamic");
   });
 });
 
-const SCRIPT_BEFORE = `<script setup lang="ts">
-import { ref } from "vue";
-const doubled = comput(() => ref(1).value * 2);
-</script>`;
-const SCRIPT_IDENTIFIER_ACCEPTED = SCRIPT_BEFORE.replace("comput(", "computed(");
-const SCRIPT_IMPORT_APPLIED = SCRIPT_IDENTIFIER_ACCEPTED.replace(
-  'import { ref } from "vue";',
-  'import { computed, ref } from "vue";',
-);
-
 /** How the simulated editor answers an accept. */
 interface AcceptBehaviour {
-  /** The accept inserts the focused item's identifier. */
+  /**
+   * The accept inserts the focused item's identifier. When it does not, an
+   * `importEdit: "with-insert"` still applies the import alone (a dropped or no-op
+   * main edit beside an applied additional edit).
+   */
   readonly insertsIdentifier: boolean;
   /** When the import edit lands: with the insert, after `resolveArrives()`, or never. */
   readonly importEdit: "with-insert" | "on-resolve" | "never";
@@ -148,7 +189,10 @@ class SimulatedEditor {
     // `acceptSelectedSuggestion` requires a visible widget with a focused item.
     if (this.focused === undefined) return;
     this.focused = undefined;
-    if (!this.behaviour.insertsIdentifier) return;
+    if (!this.behaviour.insertsIdentifier) {
+      if (this.behaviour.importEdit === "with-insert") this.edit(SCRIPT_IMPORT_ONLY, "import-only");
+      return;
+    }
     if (this.behaviour.importEdit === "with-insert") {
       this.edit(SCRIPT_IMPORT_APPLIED, "insert+import");
     } else {
@@ -236,7 +280,7 @@ describe("acceptCompletion", () => {
     ]);
     expect(run.state.outcome).toMatchObject({
       accepted: true,
-      docChanged: true,
+      identifierChanged: true,
       importChanged: true,
       commands: [TRIGGER_SUGGEST_COMMAND, ACCEPT_SUGGESTION_COMMAND],
     });
@@ -316,14 +360,21 @@ describe("acceptCompletion", () => {
       name: "an identifier change without the static import",
       behaviour: { insertsIdentifier: true, importEdit: "never" },
       listArrives: true,
-      message: /document changed=true, import changed=false/,
+      message: /identifier changed=true, import changed=false/,
+      commands: [TRIGGER_SUGGEST_COMMAND, ACCEPT_SUGGESTION_COMMAND],
+    },
+    {
+      name: "a static import applied while the identifier never changed",
+      behaviour: { insertsIdentifier: false, importEdit: "with-insert" },
+      listArrives: true,
+      message: /identifier changed=false, import changed=true/,
       commands: [TRIGGER_SUGGEST_COMMAND, ACCEPT_SUGGESTION_COMMAND],
     },
     {
       name: "a no-op accept",
       behaviour: { insertsIdentifier: false, importEdit: "never" },
       listArrives: true,
-      message: /document changed=false, import changed=false/,
+      message: /identifier changed=false, import changed=false/,
       commands: [TRIGGER_SUGGEST_COMMAND, ACCEPT_SUGGESTION_COMMAND],
     },
     {
@@ -555,27 +606,44 @@ describe("vscodeAcceptCompletionDeps", () => {
     expect(vs.live()).toBe(0);
   });
 
-  it("fails an identifier-only accept through the adapter", async () => {
-    const vs = fakeVsCode();
-    vs.onCommand((command) => {
-      if (command === ACCEPT_SUGGESTION_COMMAND) vs.edit(SCRIPT_IDENTIFIER_ACCEPTED);
-    });
-    const guard = deadline();
-    const run = start(
-      acceptCompletion(
-        vscodeAcceptCompletionDeps(vs.api, vs.editor, {
-          expectedSuggestion: "computed",
-          armDeadline: guard.armDeadline,
-        }),
-      ),
-    );
-    await drain();
-    vs.requestInline(vs.editor.document, "computed");
-    await drain();
-    guard.fire();
-    await drain();
+  const partialAccepts = [
+    {
+      name: "an identifier-only accept",
+      after: SCRIPT_IDENTIFIER_ACCEPTED,
+      message: /identifier changed=true, import changed=false/,
+    },
+    {
+      name: "an import-only accept whose identifier never changed",
+      after: SCRIPT_IMPORT_ONLY,
+      message: /identifier changed=false, import changed=true/,
+    },
+  ];
 
-    expect(String(run.state.error)).toMatch(/document changed=true, import changed=false/);
-    expect(vs.live()).toBe(0);
-  });
+  for (const partial of partialAccepts) {
+    it(`fails ${partial.name} through the adapter`, async () => {
+      const vs = fakeVsCode();
+      vs.onCommand((command) => {
+        if (command === ACCEPT_SUGGESTION_COMMAND) vs.edit(partial.after);
+      });
+      const guard = deadline();
+      const run = start(
+        acceptCompletion(
+          vscodeAcceptCompletionDeps(vs.api, vs.editor, {
+            expectedSuggestion: "computed",
+            armDeadline: guard.armDeadline,
+          }),
+        ),
+      );
+      await drain();
+      vs.requestInline(vs.editor.document, "computed");
+      await drain();
+      expect(run.state).toEqual({});
+      guard.fire();
+      await drain();
+
+      expect(String(run.state.error)).toMatch(partial.message);
+      expect(vs.commands).toEqual([TRIGGER_SUGGEST_COMMAND, ACCEPT_SUGGESTION_COMMAND]);
+      expect(vs.live()).toBe(0);
+    });
+  }
 });
