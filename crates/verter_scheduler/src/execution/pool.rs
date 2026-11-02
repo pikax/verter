@@ -223,6 +223,15 @@ pub struct SchedulerCpuPool {
     /// Bounded CPU transport. Each successful `try_submit` holds one
     /// owned permit until the spawned task drops it.
     slots: std::sync::Arc<crate::execution::cpu_concurrency::CpuConcurrencySemaphore>,
+    /// The workers [`Self::install`] runs on, built on first use.
+    ///
+    /// A producer's computation may block on a dependency, a flight or a
+    /// host lock, and a lock holder may be waiting for a stage. Stages never
+    /// block on any of those, so keeping producers off the stage workers
+    /// means a queued stage always reaches a worker.
+    producers: std::sync::OnceLock<rayon::ThreadPool>,
+    /// Worker count of both `pool` and `producers`.
+    threads: usize,
     /// Resolved transport capacity after the same
     /// `max(threads*4, requested, 1)` floor as [`SchedulerIoPool`].
     #[cfg(any(test, feature = "test-support"))]
@@ -277,35 +286,51 @@ impl SchedulerCpuPool {
         let capacity = transport_capacity.max(threads * 4).max(1);
         #[cfg(any(test, feature = "test-support"))]
         let pool_id = NEXT_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("verter-cpu-{i}"))
-            .start_handler(move |_| {
-                // Mark every rayon worker as a scheduler CPU worker so
-                // cooperative-pump callers reached via the session-side
-                // `wait_or_drive` entry can detect that they are running
-                // inside the scheduler's owned pool. `dispatch_ready_job`
-                // inline-executes only `CpuWorker`×non-Source and
-                // `IoWorker`×Source — `External` is excluded, so host
-                // workers never run scheduler CPU work (dual-pool
-                // isolation invariant).
-                let _ =
-                    crate::caller_kind::CallerKind::set(crate::caller_kind::CallerKind::CpuWorker);
-                #[cfg(any(test, feature = "test-support"))]
-                SCHEDULER_CPU_POOL_TOKEN.with(|c| c.set(Some(pool_id)));
-            })
-            .build()
-            .expect("failed to build scheduler CPU pool");
+        let pool = Self::build_workers(
+            threads,
+            |i| format!("verter-cpu-{i}"),
+            crate::caller_kind::CallerKind::CpuWorker,
+            #[cfg(any(test, feature = "test-support"))]
+            pool_id,
+        );
         std::sync::Arc::new(Self {
             pool,
             slots: std::sync::Arc::new(
                 crate::execution::cpu_concurrency::CpuConcurrencySemaphore::new(capacity),
             ),
+            producers: std::sync::OnceLock::new(),
+            threads,
             #[cfg(any(test, feature = "test-support"))]
             transport_capacity: capacity,
             #[cfg(any(test, feature = "test-support"))]
             pool_id,
         })
+    }
+
+    fn build_workers(
+        threads: usize,
+        name: fn(usize) -> String,
+        caller_kind: crate::caller_kind::CallerKind,
+        #[cfg(any(test, feature = "test-support"))] pool_id: usize,
+    ) -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(name)
+            .start_handler(move |_| {
+                // Mark every rayon worker with its role so cooperative-pump
+                // callers reached via the session-side `wait_or_drive` entry
+                // can detect that they are running inside the scheduler's
+                // owned pool. `dispatch_ready_job` inline-executes only
+                // `CpuWorker`×non-Source and `IoWorker`×Source — `External`
+                // and `ProducerWorker` are excluded, so host workers never
+                // run scheduler CPU work (dual-pool isolation invariant) and
+                // producer workers never run file stages.
+                let _ = crate::caller_kind::CallerKind::set(caller_kind);
+                #[cfg(any(test, feature = "test-support"))]
+                SCHEDULER_CPU_POOL_TOKEN.with(|c| c.set(Some(pool_id)));
+            })
+            .build()
+            .expect("failed to build scheduler CPU pool")
     }
 
     /// Nonblocking owner-affine submit. Takes a CPU-owned command and
@@ -347,19 +372,31 @@ impl SchedulerCpuPool {
         self.transport_capacity
     }
 
-    /// Execute a non-`'static` scoped operation on this scheduler CPU pool.
+    /// Execute a non-`'static` scoped operation on this pool's producer
+    /// workers.
     ///
     /// Unlike [`Self::try_submit`], `install` blocks until the operation
     /// returns, so the closure may borrow caller-owned state. This is the
     /// execution substrate for request-scoped semantic producers whose
-    /// resolver context cannot be promoted to `'static`.
+    /// resolver context cannot be promoted to `'static`. Producers do not
+    /// share workers with stages; see the `producers` field.
     pub fn install<OP, R>(&self, operation: OP) -> R
     where
         OP: FnOnce() -> R + Send,
         R: Send,
     {
         verter_execution::blocking::enter_wait(verter_execution::blocking::WaitFamily::CpuPool);
-        self.pool.install(operation)
+        self.producers
+            .get_or_init(|| {
+                Self::build_workers(
+                    self.threads,
+                    |i| format!("verter-producer-{i}"),
+                    crate::caller_kind::CallerKind::ProducerWorker,
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.pool_id,
+                )
+            })
+            .install(operation)
     }
 
     /// Process-unique identity of this pool. Pair with
@@ -597,6 +634,29 @@ mod tests {
         tracker.wait_before(boundary);
         newer();
         assert!(tracker.ledger.lock().in_flight.is_empty());
+    }
+
+    /// Stage workers and producer workers report distinct roles: a producer
+    /// worker that reported `CpuWorker` would inline-run the file stages its
+    /// producer waits on, putting stage work on a worker a blocked producer
+    /// can hold.
+    #[test]
+    fn producer_workers_report_a_role_apart_from_stage_workers() {
+        use crate::caller_kind::CallerKind;
+        let pool = SchedulerCpuPool::new(1, 0);
+        let (stage_tx, stage_rx) = crossbeam_channel::bounded(1);
+        pool.try_submit(cpu(Box::new(move || {
+            let _ = stage_tx.send(CallerKind::current());
+        })))
+        .expect("the stage worker accepts the task");
+        assert_eq!(
+            stage_rx.recv().expect("the stage worker ran the task"),
+            CallerKind::CpuWorker
+        );
+        assert_eq!(
+            pool.install(CallerKind::current),
+            CallerKind::ProducerWorker
+        );
     }
 
     #[test]

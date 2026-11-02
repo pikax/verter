@@ -11,6 +11,10 @@
 //!   dependency) keeps the pipeline alive.
 //! - [`CallerKind::IoWorker`]  — a thread owned by the scheduler's
 //!   I/O pool. Same constraint.
+//! - [`CallerKind::ProducerWorker`] — a producer worker of the
+//!   scheduler's CPU pool, running a scoped cache-node producer. It
+//!   never runs a file stage: while a driver runs, the stages it waits
+//!   on go to the stage workers.
 //! - [`CallerKind::Inline`]    — a thread that owns a sync scheduler
 //!   and is responsible for driving stages itself.
 //! - [`CallerKind::External`]  — a thread outside the scheduler's
@@ -35,6 +39,11 @@ pub enum CallerKind {
     CpuWorker,
     /// A worker on the scheduler-owned I/O pool.
     IoWorker,
+    /// A producer worker of the scheduler-owned CPU pool. A producer may
+    /// block on a dependency, a flight or a host lock, so the stages it
+    /// waits on run on the stage workers rather than inline on it; only a
+    /// nested producer it is parked on may borrow capacity from it.
+    ProducerWorker,
     /// A thread that owns a sync scheduler and is driving inline.
     Inline,
 }
