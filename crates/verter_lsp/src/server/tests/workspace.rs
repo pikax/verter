@@ -653,6 +653,82 @@ import Child from './Child.vue'
     drop(service);
 }
 
+// @ai-generated
+#[tokio::test(flavor = "multi_thread")]
+async fn readiness_fails_closed_while_a_direct_child_contract_is_stale_under_a_current_receipt() {
+    const MALFORMED_CHILD: &str = r#"<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>"#;
+    const PARENT: &str = r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script><template><Child /></template>"#;
+    const SIBLING_V1: &str = "<template><p>one</p></template>";
+    const SIBLING_V2: &str = "<template><p>two</p></template>";
+
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/Child.vue", "vue", MALFORMED_CHILD),
+                ("src/App.vue", "vue", PARENT),
+                // Never imported by the parent: editing it must advance the
+                // workspace content generation without touching the parent's
+                // recorded dependency roots.
+                ("src/Other.vue", "vue", SIBLING_V1),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let other_uri = workspace_uri(&workspace_id, "src/Other.vue");
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let child_id = format!("{workspace_id}/src/Child.vue");
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(server.child_public_contract_is_settled(&child_id));
+    assert!(
+        server.dependency_readiness_capture(&app_uri).is_ready(),
+        "settled precondition: a provenance-current failure settles the child contract"
+    );
+
+    // The sibling edit retires the child's cached projection failure (its
+    // freshness pins the workspace content generation) while leaving the
+    // parent's receipt current: the receipt's recorded roots are the DIRECT
+    // carrier imports, and neither the parent nor the child transitioned.
+    assert!(
+        server
+            .documents
+            .did_change(&other_uri, 2, SIBLING_V2)
+            .changed
+    );
+    assert!(
+        !server.child_public_contract_is_settled(&child_id),
+        "the sibling edit must retire the child's cached projection failure"
+    );
+    assert!(
+        server
+            .import_sync
+            .is_current(&app_id, &server.documents, &server.vfs_workspace),
+        "the parent's receipt must survive: its recorded dependency roots are untouched"
+    );
+
+    // The readiness gate must agree with the publication pass's skip gate: a
+    // receipt alone must not read Ready while a direct child's contract is
+    // stale, or no publication is ever enqueued to repair it.
+    assert!(
+        !server.dependency_readiness_capture(&app_uri).is_ready(),
+        "a current receipt must not read Ready over a stale direct child contract"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 /// W02 discriminator (Vue, both provider kinds): a carrier opened MALFORMED
 /// (no projection), then FIXED by a commit that compiles nothing, must get a
 /// real provider-backed hover on the FIRST interactive request — with the

@@ -351,7 +351,8 @@ impl VerterLanguageServer {
     }
 
     /// Capture-only dependency readiness for interactive requests: never waits — a
-    /// committed receipt reads [`DependencyReadiness::Ready`]; anything else
+    /// committed receipt over settled direct-child contracts reads
+    /// [`DependencyReadiness::Ready`]; anything else
     /// reads `NotReady` after (at most) enqueueing a background publication.
     /// Non-destructive navigation callers still query the engine because a
     /// partial answer beats none mid-typing; rename consumes the verdict to
@@ -370,9 +371,17 @@ impl VerterLanguageServer {
             self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
             return DependencyReadiness::NotReady;
         }
+        // The receipt alone is not readiness: its recorded roots are the
+        // DIRECT carrier imports, so a change that retires only an imported
+        // child's contract state (not the parent's roots) leaves the receipt
+        // current while a direct child's contract is stale. Gate on the same
+        // child-contract leg the publication pass gates its skip on, so
+        // readiness never reports Ready over a closure the sole producer
+        // would still repair — and the enqueue below starts that repair.
         if self
             .import_sync
             .is_current(&canonical_id, &self.documents, &self.vfs_workspace)
+            && self.imported_child_contracts_current_for_parent(&canonical_id)
         {
             return DependencyReadiness::Ready;
         }
