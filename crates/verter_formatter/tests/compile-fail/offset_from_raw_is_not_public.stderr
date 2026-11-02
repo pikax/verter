@@ -1,0 +1,25 @@
+error[E0599]: no associated function or constant named `from_raw` found for struct `FormattedByteOffset` in the current scope
+ --> tests/compile-fail/offset_from_raw_is_not_public.rs:5:34
+  |
+5 |     let _ = FormattedByteOffset::from_raw(0);
+  |                                  ^^^^^^^^ associated function or constant not found in `FormattedByteOffset`
+  |
+note: if you're trying to build a new `FormattedByteOffset`, consider using `FormattedByteOffset::for_source` which returns `Result<FormattedByteOffset, CoordinateError>`
+ --> src/coordinates.rs
+  |
+  |               pub fn for_source(source: &str, offset: usize) -> Result<Self, CoordinateError> {
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  | / utf8_byte_domain! {
+  | |     /// Byte offset from the start of the rendered formatter output.
+  | |     FormattedByteOffset,
+  | |     /// Half-open `[start, end)` byte range in the rendered formatter output.
+  | |     FormattedByteRange,
+  | | }
+  | |_- in this macro invocation
+  = note: this error originates in the macro `utf8_byte_domain` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: there is an associated function `from` with a similar name
+  |
+5 -     let _ = FormattedByteOffset::from_raw(0);
+5 +     let _ = FormattedByteOffset::from(0);
+  |

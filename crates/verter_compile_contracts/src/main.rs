@@ -52,6 +52,12 @@ fn selected_owner() -> (&'static str, &'static str, &'static str) {
             "tests/compile-fail",
         ),
         (
+            cfg!(feature = "formatter"),
+            "formatter",
+            "crates/verter_formatter",
+            "tests/compile-fail",
+        ),
+        (
             cfg!(feature = "identity"),
             "identity",
             "crates/verter_identity",
