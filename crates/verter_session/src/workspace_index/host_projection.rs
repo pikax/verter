@@ -375,6 +375,9 @@ pub(super) fn carrier_claim(language: &FileLanguage) -> ProfileClaim {
     ProfileClaim::Carrier(CarrierProfileId::from_carrier(&family, &schema))
 }
 
+/// A file with a source the host cannot read: its locator and content hash.
+type UnreadableFile = (Arc<str>, [u8; 16]);
+
 /// One tracked file as captured for a walk.
 struct TrackedFile {
     canonical: Arc<str>,
@@ -862,10 +865,7 @@ impl VerterHost {
 
     /// One read of every tracked file's identity and content hash. A file with
     /// a source the host cannot read comes back separately, with its hash.
-    fn capture_tracked(
-        &self,
-        project_generation: u64,
-    ) -> (Vec<TrackedFile>, Vec<(Arc<str>, [u8; 16])>) {
+    fn capture_tracked(&self, project_generation: u64) -> (Vec<TrackedFile>, Vec<UnreadableFile>) {
         use crate::host_executor::HostSourceData;
 
         let mut ids = tracked_ids(self);
@@ -1418,7 +1418,7 @@ impl VerterHost {
 fn captured_population(
     project_generation: u64,
     files: &[TrackedFile],
-    unavailable: &[(Arc<str>, [u8; 16])],
+    unavailable: &[UnreadableFile],
 ) -> CanonicalDigest {
     let mut entries: Vec<(&str, &[u8; 16])> = files
         .iter()

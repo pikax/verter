@@ -865,7 +865,8 @@
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs"
+              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
+              "crates/verter_session/src/workspace_index/store_tests.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [
