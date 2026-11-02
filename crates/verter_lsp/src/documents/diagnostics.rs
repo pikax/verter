@@ -102,16 +102,32 @@ struct InFlightSend {
 /// certifies the document (`diagnostics_ready`). An INCOMPLETE one — the
 /// provider batch could not be merged: no committed IDE surface at pull time,
 /// a refused commit, a surface superseded mid-flight — certifies nothing but
-/// records that the document is OWED a publication, so the generation advance
-/// that eventually settles its carrier re-arms it like any outdated receipt.
-/// Without that record an incomplete publication left nothing to outdate, and
-/// the open document stayed uncertified until the next editor signal, which an
-/// editor waiting on the receipt never sends.
+/// records that the document is OWED a publication. Two events settle it: a
+/// generation advance that outdates it like any receipt, and the commit of the
+/// provider surface its capture missed (see [`SurfaceObservation`]). Without
+/// that record an incomplete publication left nothing to outdate, and the open
+/// document stayed uncertified until the next editor signal, which an editor
+/// waiting on the receipt never sends.
 #[derive(Clone)]
 struct DiagnosticsReceipt {
     publication: BackgroundPublication,
     surface: Option<Arc<ProviderSurfaceSnapshot>>,
     complete: bool,
+}
+
+/// Which provider-surface settlement a publication's capture already saw.
+///
+/// A publication reads the committed provider surface once, when it builds its
+/// provider batch. A surface committed AFTER that read is invisible to it, and
+/// nothing about the document or its compiler environment changes, so neither
+/// the epoch nor the environment fence would ever replace the publication. The
+/// observation records the document's settlement count at the read; a commit
+/// that advances the count past it owes the publication a replacement, whether
+/// its receipt has landed yet or not.
+#[derive(Clone)]
+struct SurfaceObservation {
+    publication: BackgroundPublication,
+    settled: u64,
 }
 
 #[derive(Default)]
@@ -121,6 +137,12 @@ pub(super) struct DiagnosticsState {
     receipts: HashMap<String, DiagnosticsReceipt>,
     /// The outbound sends currently suspended on the client channel, one per URI.
     in_flight: HashMap<String, InFlightSend>,
+    /// Provider-surface commits per tracked URI. Monotonic while the document
+    /// stays open; released with the rest of its state on close.
+    settlements: HashMap<String, u64>,
+    /// What the current epoch's publication saw of those commits when it
+    /// captured its provider surface. A new epoch has not captured yet.
+    observations: HashMap<String, SurfaceObservation>,
 }
 
 impl DiagnosticsState {
@@ -146,10 +168,20 @@ impl DiagnosticsState {
             }
             None => {
                 self.epochs.remove(uri);
+                self.settlements.remove(uri);
             }
         }
         self.receipts.remove(uri);
         self.in_flight.remove(uri);
+        self.observations.remove(uri);
+    }
+
+    /// Take a new epoch for `uri` and hand its replacement to the coordinator.
+    fn rearm(&mut self, uri: &Uri) -> PublicationEpoch {
+        self.next_epoch += 1;
+        let epoch = PublicationEpoch(self.next_epoch);
+        self.take_uri(uri.as_str(), Some(epoch));
+        epoch
     }
 }
 
@@ -168,9 +200,7 @@ impl DocumentRegistry {
         if state.epochs.get(refresh.uri.as_str()) != Some(&refresh.epoch) {
             return false;
         }
-        state.next_epoch += 1;
-        let epoch = PublicationEpoch(state.next_epoch);
-        state.take_uri(refresh.uri.as_str(), Some(epoch));
+        state.rearm(&refresh.uri);
         true
     }
 
@@ -179,18 +209,24 @@ impl DocumentRegistry {
     /// A newer document or publication already owns its own work and must not
     /// be displaced by this older writer.
     fn refresh_superseded_diagnostics(&self, uri: &Uri, publication: &BackgroundPublication) {
-        if !self.snapshot_identity_is_current(uri, &publication.basis.snapshot)
-            || publication.basis.environment_is_current(self, uri)
-        {
+        if publication.basis.environment_is_current(self, uri) {
+            return;
+        }
+        self.replace_publication(uri, publication);
+    }
+
+    /// Replace `publication` through the coordinator, iff it still owns the
+    /// URI's epoch for the live document revision. The ONE re-arm both owed
+    /// causes — an outdated environment and a missed surface commit — share.
+    fn replace_publication(&self, uri: &Uri, publication: &BackgroundPublication) {
+        if !self.snapshot_identity_is_current(uri, &publication.basis.snapshot) {
             return;
         }
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) != Some(&publication.epoch) {
             return;
         }
-        state.next_epoch += 1;
-        let epoch = PublicationEpoch(state.next_epoch);
-        state.take_uri(uri.as_str(), Some(epoch));
+        let epoch = state.rearm(uri);
         let _ = self.diagnostics_refresh_tx.send(DiagnosticsRefresh {
             uri: uri.clone(),
             snapshot: publication.basis.snapshot.clone(),
@@ -216,23 +252,83 @@ impl DocumentRegistry {
         }
     }
 
-    /// A background pass settled `canonical_id`'s carrier (the drain re-synced
-    /// it and advanced its diagnostics generation) with no publication in
-    /// flight to notice. If the open document holds a receipt that pass
-    /// outdated — complete or owed — replace it through the coordinator.
-    pub(crate) fn refresh_owed_diagnostics(&self, canonical_id: &str) {
+    /// Record that the provider surface `canonical_id`'s diagnostics read has
+    /// just been COMMITTED (or settled terminally), and replace whatever
+    /// publication of the open document that commit left owed.
+    ///
+    /// Every provider-state commit for a source reports here once its committed
+    /// state is visible to capture. Two publications are owed:
+    /// - one that captured its provider surface BEFORE this commit and has not
+    ///   certified the document — whether its incomplete receipt already landed
+    ///   or it is still in flight. The commit changes neither the document nor
+    ///   its compiler environment, so no other fence would ever replace it. A
+    ///   publication that has not captured yet will read this commit itself,
+    ///   and a complete receipt is never displaced.
+    /// - a receipt whose compiler generation or workspace the commit's pass
+    ///   advanced, complete or not, exactly like
+    ///   [`Self::refresh_outdated_receipts`].
+    ///
+    /// Both replacements go through the same epoch-fenced re-arm, so a closed,
+    /// edited or superseded document is never re-armed, and each commit re-arms
+    /// a publication at most once: the replacement observes the new count.
+    pub(crate) fn settle_provider_surface(&self, canonical_id: &str) {
         let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
             return;
         };
-        let receipt = self
-            .diagnostics_state
-            .lock()
-            .receipts
-            .get(uri.as_str())
-            .map(|receipt| receipt.publication.clone());
-        if let Some(publication) = receipt {
+        let (missed, receipt) = {
+            let mut state = self.diagnostics_state.lock();
+            let Some(&epoch) = state.epochs.get(uri.as_str()) else {
+                // No publication has ever been admitted, so none observed the
+                // surface: the first one will capture this commit.
+                return;
+            };
+            let settled = {
+                let count = state.settlements.entry(uri.to_string()).or_insert(0);
+                *count += 1;
+                *count
+            };
+            let receipt = state.receipts.get(uri.as_str());
+            let certified = receipt
+                .is_some_and(|receipt| receipt.complete && receipt.publication.epoch == epoch);
+            let missed = state
+                .observations
+                .get(uri.as_str())
+                .filter(|seen| {
+                    !certified && seen.publication.epoch == epoch && seen.settled < settled
+                })
+                .map(|seen| seen.publication.clone());
+            let receipt = receipt.map(|receipt| receipt.publication.clone());
+            (missed, receipt)
+        };
+        if let Some(publication) = missed {
+            tracing::debug!(
+                uri = uri.as_str(),
+                epoch = publication.epoch.0,
+                "provider surface committed after the publication captured it; publication owed"
+            );
+            self.replace_publication(&uri, &publication);
+        } else if let Some(publication) = receipt {
             self.refresh_superseded_diagnostics(&uri, &publication);
         }
+    }
+
+    /// Record what the provider surface looked like to `publication` as it
+    /// captures it. Call it immediately BEFORE the capture, so a commit that
+    /// lands after this observation is either seen by the capture or counted
+    /// against it by [`Self::settle_provider_surface`].
+    pub(crate) fn observe_provider_surface(&self, uri: &Uri, publication: &BackgroundPublication) {
+        let mut state = self.diagnostics_state.lock();
+        if state.epochs.get(uri.as_str()) != Some(&publication.epoch) {
+            return;
+        }
+        let settled = state.settlements.get(uri.as_str()).copied().unwrap_or(0);
+        state.observations.insert(
+            uri.to_string(),
+            SurfaceObservation {
+                publication: publication.clone(),
+                settled,
+            },
+        );
     }
 
     /// Pending work invalidates immediately, including same-version semantic
@@ -351,7 +447,15 @@ impl DocumentRegistry {
     #[cfg(test)]
     pub(crate) fn tracked_diagnostics_documents(&self) -> usize {
         let state = self.diagnostics_state.lock();
-        state.epochs.len().max(state.receipts.len())
+        [
+            state.epochs.len(),
+            state.receipts.len(),
+            state.settlements.len(),
+            state.observations.len(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
     }
 
     pub(crate) fn begin_diagnostics_publication(&self, uri: &Uri) -> Option<BackgroundPublication> {
@@ -1209,6 +1313,120 @@ mod tests {
             .await
             .expect("the server exits")
             .unwrap();
+    }
+
+    /// A provider-surface commit re-arms only the CURRENT publication that
+    /// captured before it and has not certified the document — exactly once per
+    /// commit — and never a superseded, complete, closed or reopened one.
+    ///
+    /// Discriminating: a settlement that re-arms on every commit loops on a
+    /// replacement that stays incomplete for another reason; one that ignores
+    /// the epoch resurrects the superseded or pre-close capture; one that
+    /// records settlements for untracked URIs leaks state past close.
+    #[tokio::test(flavor = "current_thread")]
+    async fn surface_settlement_rearms_only_the_current_uncertified_capture_once() {
+        use futures_util::StreamExt as _;
+
+        let outbound = crate::outbound::Outbound::default();
+        let documents = registry_on(&outbound);
+        let mut wire = outbound.wire();
+        tokio::spawn(async move { while wire.next().await.is_some() {} });
+        let uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+        open(&documents, &uri);
+        let canonical = documents.get_canonical_id(&uri).expect("open document");
+        let mut refreshes = documents.subscribe_diagnostics_refresh();
+
+        documents.settle_provider_surface(&canonical);
+        assert!(
+            refreshes.try_recv().is_err(),
+            "no publication has captured, so none missed the commit"
+        );
+        assert_eq!(documents.tracked_diagnostics_documents(), 0);
+
+        // Superseded: a newer publication owns the URI and has not captured yet.
+        let older = documents.begin_diagnostics_publication(&uri).unwrap();
+        documents.observe_provider_surface(&uri, &older);
+        let newer = documents.begin_diagnostics_publication(&uri).unwrap();
+        documents.settle_provider_surface(&canonical);
+        assert!(
+            refreshes.try_recv().is_err(),
+            "the newer publication will capture the commit itself"
+        );
+        documents
+            .publish_diagnostics(&uri, &older, diagnostic("stale"), false, None)
+            .await;
+        assert!(!documents.diagnostic_publication_is_current(&uri, &older));
+
+        // Current and incomplete: owed once, however many commits follow.
+        documents.observe_provider_surface(&uri, &newer);
+        documents
+            .publish_diagnostics(&uri, &newer, diagnostic("owed"), false, None)
+            .await;
+        assert!(!documents.diagnostics_ready(&uri), "owed is not ready");
+        documents.settle_provider_surface(&canonical);
+        let refresh = refreshes
+            .try_recv()
+            .expect("the commit owes the incomplete capture a replacement");
+        assert_eq!(refresh.uri, uri);
+        assert!(
+            !documents.diagnostic_publication_is_current(&uri, &newer),
+            "the re-arm supersedes the incomplete publication"
+        );
+        documents.settle_provider_surface(&canonical);
+        assert!(
+            refreshes.try_recv().is_err(),
+            "the queued replacement is owed once, not once per commit"
+        );
+        assert!(documents.claim_diagnostics_refresh(&refresh));
+
+        // A replacement that saw every commit and is still incomplete waits for
+        // the next commit instead of polling.
+        let replacement = documents.begin_diagnostics_publication(&uri).unwrap();
+        documents.observe_provider_surface(&uri, &replacement);
+        documents
+            .publish_diagnostics(&uri, &replacement, diagnostic("still owed"), false, None)
+            .await;
+        assert!(refreshes.try_recv().is_err(), "no commit, no replacement");
+
+        // Complete: never displaced by a later commit.
+        let complete = documents.begin_diagnostics_publication(&uri).unwrap();
+        documents.observe_provider_surface(&uri, &complete);
+        documents
+            .publish_diagnostics(&uri, &complete, diagnostic("complete"), true, None)
+            .await;
+        assert!(documents.diagnostics_ready(&uri));
+        documents.settle_provider_surface(&canonical);
+        assert!(
+            refreshes.try_recv().is_err(),
+            "a complete receipt owes nothing"
+        );
+        assert!(documents.diagnostics_ready(&uri));
+
+        // Closed with a capture in flight, then reopened: nothing to re-arm,
+        // nothing left behind, and the pre-close capture stays dead.
+        let before_close = documents.begin_diagnostics_publication(&uri).unwrap();
+        documents.observe_provider_surface(&uri, &before_close);
+        documents.did_close(&uri);
+        documents.settle_provider_surface(&canonical);
+        assert!(
+            refreshes.try_recv().is_err(),
+            "a closed document is never re-armed"
+        );
+        assert_eq!(documents.tracked_diagnostics_documents(), 0);
+        open(&documents, &uri);
+        documents.settle_provider_surface(&canonical);
+        assert!(
+            refreshes.try_recv().is_err(),
+            "the reopened document has captured nothing"
+        );
+        assert_eq!(documents.tracked_diagnostics_documents(), 0);
+        documents
+            .publish_diagnostics(&uri, &before_close, diagnostic("pre-close"), true, None)
+            .await;
+        assert!(
+            !documents.diagnostics_ready(&uri),
+            "the pre-close capture cannot certify the reopened document"
+        );
     }
 
     #[test]
