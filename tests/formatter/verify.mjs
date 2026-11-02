@@ -588,23 +588,30 @@ export function validateFormatterLock(lock) {
     "cancellation",
   ])
     check(actionKinds.has(kind), `missing churn action ${kind}`);
-  const routeKeys = inventory.routes.map((r) => `${r.path}::${r.symbol}`);
-  check(unique(routeKeys), "duplicate route owner");
+  // A reviewed route is identified by its symbol; the reviewed inventory
+  // records where each route lived when it was reviewed, while this lock binds
+  // it to the file that carries it in the current tree (a route survives a
+  // refactor that moves its file, which is exactly what "retain" means).
+  const routeSymbols = inventory.routes.map((r) => r.symbol);
+  check(unique(routeSymbols), "duplicate route owner");
   const sourceRoutes = lock.sourceInventory.currentRoutes;
+  check(unique(sourceRoutes.map((r) => r.symbol)), "duplicate reviewed route symbol");
   check(
-    same([...routeKeys].sort(), sourceRoutes.map((r) => `${r.path}::${r.symbol}`).sort()),
+    same(routeSymbols.sort(), sourceRoutes.map((r) => r.symbol).sort()),
     "incomplete route inventory",
   );
   for (const route of inventory.routes) {
-    const prior = sourceRoutes.find((r) => r.path === route.path && r.symbol === route.symbol);
+    const prior = sourceRoutes.find((r) => r.symbol === route.symbol);
     const expectedOwner = prior?.deletionOwner ?? prior?.integrationOwner ?? "markup-auto-close";
     check(
       route.disposition === prior?.disposition && route.owner === expectedOwner,
       `route ownership ${route.symbol}`,
     );
+    // A provider is advertised either as a struct-literal field or assigned on
+    // the capability set by its per-slot contributor.
     const symbol = route.symbol.split("::").at(-1);
     const pattern = symbol.endsWith("provider")
-      ? new RegExp(`\\b${symbol}\\s*:`)
+      ? new RegExp(`\\b${symbol}\\s*[:=]`)
       : new RegExp(`\\bfn\\s+${symbol}\\s*\\(`);
     check(
       pattern.test(lock.routeSources[route.path] ?? ""),
