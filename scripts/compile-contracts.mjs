@@ -15,6 +15,7 @@ export const CONTRACT_GROUPS = Object.freeze({
   core: Object.freeze([
     "audit",
     "css-syntax",
+    "formatter",
     "identity",
     "language",
     "semantic",

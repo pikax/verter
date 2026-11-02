@@ -171,7 +171,7 @@
       "reason": "measured-record"
     },
     "crates/verter_session/src/project_semantic_dispatch_tests/deep_input_tests.rs": {
-      "count": 30,
+      "count": 32,
       "reason": "measured-record"
     },
     "crates/verter_session/src/project_semantic_dispatch_tests/differential_call_tests.rs": {

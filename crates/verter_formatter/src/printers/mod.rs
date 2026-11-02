@@ -1,0 +1,21 @@
+//! Reserved homes for the per-language formatter printers.
+pub(crate) mod css;
+pub(crate) mod cypher;
+pub(crate) mod graphql;
+pub(crate) mod html;
+pub(crate) mod javascript;
+pub(crate) mod json;
+pub(crate) mod jsx;
+pub(crate) mod less;
+pub(crate) mod markdown;
+pub(crate) mod mdx;
+pub(crate) mod pug;
+pub(crate) mod scss;
+pub(crate) mod sql;
+pub(crate) mod svelte;
+pub(crate) mod toml;
+pub(crate) mod tsx;
+pub(crate) mod typescript;
+pub(crate) mod vue;
+pub(crate) mod xml;
+pub(crate) mod yaml;

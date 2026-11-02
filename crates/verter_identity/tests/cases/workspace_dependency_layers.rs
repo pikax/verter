@@ -50,6 +50,13 @@ const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     // The process allocator selection that each native entry point installs
     // as its global allocator; it depends on no workspace crate.
     "verter_alloc",
+    // The formatter's dependency-free foundation: the authored/formatted
+    // byte coordinate domains and the revision-scoped provenance
+    // identity/carrier vocabulary later formatter nodes join through. It has
+    // no production dependencies today; a later formatter module that needs
+    // a higher layer's crates must move this entry with it, not grow past
+    // it.
+    "verter_formatter",
 ];
 
 const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[

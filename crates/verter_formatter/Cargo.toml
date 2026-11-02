@@ -1,0 +1,16 @@
+[package]
+name = "verter_formatter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Typed byte coordinate domains and provenance identity for the Verter formatter — the foundation under native document formatting"
+keywords = ["vue", "compiler", "formatter"]
+categories = ["compilers"]
+
+# Deliberately dependency-free. With no `[dependencies]` at all the
+# foundation cannot parse, render, format or serialize a request; later
+# formatter work in this crate adds only what its own module needs.
+[dependencies]

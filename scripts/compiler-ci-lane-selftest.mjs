@@ -47,7 +47,7 @@ test("the matrix partitions all owners and feature variants without feature unif
   const all = compileContractPlan();
   const split = Object.keys(CONTRACT_GROUPS).flatMap((group) => compileContractPlan(group));
   assert.deepEqual(split, all);
-  assert.equal(new Set(all.map(({ name }) => name)).size, 14);
+  assert.equal(new Set(all.map(({ name }) => name)).size, 15);
   const owners = spawnSync(
     process.execPath,
     [join(SCRIPT_DIR, "compile-contracts.mjs"), "--list-owners"],
