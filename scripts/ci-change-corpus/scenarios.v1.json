@@ -1,0 +1,837 @@
+{
+  "corpus": "ci-change-corpus/1",
+  "scenarios": [
+    {
+      "id": "CH01",
+      "kind": "change",
+      "purpose": "Inert prose runs nothing: the unaffected control for every selection change.",
+      "dimensions": ["passing"],
+      "samples": [
+        {
+          "id": "docs",
+          "changedFiles": ["docs/guide/introduction.md"],
+          "expect": { "class": "none" }
+        }
+      ]
+    },
+    {
+      "id": "CH02",
+      "kind": "change",
+      "purpose": "A lane-root crate nothing else depends on reaches its own artifact and consumers, and no provider or editor lane.",
+      "dimensions": ["passing", "platform-feature"],
+      "samples": [
+        {
+          "id": "wasm-root",
+          "changedFiles": ["crates/verter_wasm/src/lib.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "wasm", "wasm_artifact", "playground"],
+            "mustNotSelect": ["providers", "vscode", "editors"],
+            "mustImpact": ["verter_wasm"],
+            "mustNotImpact": ["verter_session"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH03",
+      "kind": "change",
+      "purpose": "The language server reaches editor and provider lanes, and no wasm lane.",
+      "dimensions": ["passing", "platform-feature"],
+      "samples": [
+        {
+          "id": "lsp-binary",
+          "changedFiles": ["crates/verter_lsp/src/main.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "providers", "editor_lsp", "editors", "vscode"],
+            "mustNotSelect": ["wasm", "wasm_artifact"],
+            "mustImpact": ["verter_lsp"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH04",
+      "kind": "change",
+      "purpose": "An extension source runs the JavaScript and editor lanes behind its native artifact, and no Rust lane.",
+      "dimensions": ["passing"],
+      "samples": [
+        {
+          "id": "extension",
+          "changedFiles": ["packages/vue-vscode/src/extension.ts"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["js", "vscode", "native_artifact"],
+            "mustNotSelect": ["rust", "providers"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH05",
+      "kind": "change",
+      "purpose": "Reverse-dependent closure has a direction: the engine's dependents include the session; the session's do not include the engine.",
+      "dimensions": ["passing"],
+      "samples": [
+        {
+          "id": "engine",
+          "changedFiles": ["crates/verter_type_engine/src/lib.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "wasm", "providers", "compiler_contracts"],
+            "mustImpact": ["verter_type_engine", "verter_session", "verter_lsp", "verter_wasm"]
+          }
+        },
+        {
+          "id": "session",
+          "changedFiles": ["crates/verter_session/src/lib.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "wasm", "providers"],
+            "mustImpact": ["verter_session", "verter_lsp", "verter_wasm"],
+            "mustNotImpact": ["verter_type_engine"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH06",
+      "kind": "change",
+      "purpose": "A crate no lane root depends on runs only the crate-wide lanes.",
+      "dimensions": ["passing"],
+      "samples": [
+        {
+          "id": "bench-leaf",
+          "changedFiles": ["crates/verter_bench/src/lib.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust"],
+            "mustNotSelect": ["wasm", "vscode", "providers", "native_artifact"],
+            "mustImpact": ["verter_bench"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH07",
+      "kind": "change",
+      "purpose": "A build script belongs to its crate, so its closure is the crate's closure.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "build-script",
+          "changedFiles": ["crates/verter_protocol/build.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "wasm", "providers"],
+            "mustImpact": ["verter_protocol", "verter_session"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH08",
+      "kind": "change",
+      "purpose": "A proc macro changes how its dependents compile, so it selects every impact-bearing lane.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "proc-macro",
+          "changedFiles": ["crates/verter_no_typeexpr_derive/src/lib.rs"],
+          "expect": {
+            "class": "impact-full",
+            "mustSelect": ["rust", "wasm", "providers", "compiler_contracts"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH09",
+      "kind": "change",
+      "purpose": "A shared test helper reaches its dependents through dev-dependency edges.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "test-helper",
+          "changedFiles": ["crates/verter_test_support/src/lib.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "providers"],
+            "mustImpact": ["verter_test_support", "verter_session", "verter_lsp"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH10",
+      "kind": "change",
+      "purpose": "A feature-bearing manifest keeps its crate's closure, and a runner excluded from the workspace still selects its isolated lane.",
+      "dimensions": ["passing", "platform-feature"],
+      "samples": [
+        {
+          "id": "feature-manifest",
+          "changedFiles": ["crates/verter_session/Cargo.toml"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "bf2", "providers"],
+            "mustImpact": ["verter_session"]
+          }
+        },
+        {
+          "id": "excluded-observe-runner",
+          "changedFiles": ["crates/verter_compile_contracts_session_observe/Cargo.toml"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "compiler_contracts"],
+            "mustNotSelect": ["wasm", "providers"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH11",
+      "kind": "change",
+      "purpose": "Generated and included inputs reach the lanes that read them, not only a Rust glob.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "proto",
+          "changedFiles": ["crates/verter_protocol/proto/verter/v1/typeinfo.proto"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["proto", "rust", "wasm"],
+            "mustImpact": ["verter_protocol"]
+          }
+        },
+        {
+          "id": "generated-binding",
+          "changedFiles": ["packages/types/audit.generated.ts"],
+          "expect": { "mustSelect": ["rust", "js", "native_artifact"] }
+        },
+        {
+          "id": "test-read-schema",
+          "changedFiles": ["schemas/scanners-replacement-v1.schema.json"],
+          "expect": { "class": "narrow", "mustSelect": ["rust"] }
+        }
+      ]
+    },
+    {
+      "id": "CH12",
+      "kind": "change",
+      "purpose": "Each input that changes how every crate builds selects every impact-bearing lane; each array is a separate sample.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "workspace-manifest",
+          "changedFiles": ["Cargo.toml"],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        },
+        {
+          "id": "lockfile",
+          "changedFiles": ["Cargo.lock"],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        },
+        {
+          "id": "toolchain",
+          "changedFiles": ["rust-toolchain.toml"],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        },
+        {
+          "id": "cargo-config",
+          "changedFiles": [".cargo/config.toml"],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        },
+        {
+          "id": "nextest-config",
+          "changedFiles": [".config/nextest.toml"],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        },
+        {
+          "id": "identity-crate",
+          "changedFiles": ["crates/verter_identity/src/lib.rs"],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        }
+      ]
+    },
+    {
+      "id": "CH13",
+      "kind": "change",
+      "purpose": "A change to what CI runs or how selection is made cannot exempt itself: every lane runs.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "workflow",
+          "changedFiles": [".github/workflows/ci.yml"],
+          "expect": { "class": "everything", "mustSelect": ["rust", "js", "jetbrains"] }
+        },
+        {
+          "id": "local-action",
+          "changedFiles": [".github/actions/nextest-evidence/action.yml"],
+          "expect": { "class": "everything", "mustSelect": ["rust", "js", "jetbrains"] }
+        },
+        {
+          "id": "classifier",
+          "changedFiles": ["scripts/ci-impact.mjs"],
+          "expect": { "class": "everything", "mustSelect": ["rust", "js", "jetbrains"] }
+        },
+        {
+          "id": "crate-graph-library",
+          "changedFiles": ["scripts/lib/crate-graph.mjs"],
+          "expect": { "class": "everything", "mustSelect": ["rust", "js", "jetbrains"] }
+        }
+      ]
+    },
+    {
+      "id": "CH14",
+      "kind": "change",
+      "purpose": "A path nobody classified fails closed: every lane runs rather than a guess.",
+      "dimensions": ["failing", "shared-input"],
+      "samples": [
+        {
+          "id": "unowned-path",
+          "changedFiles": ["ci-change-corpus-unowned.txt"],
+          "expect": { "class": "everything", "mustSelect": ["rust", "js", "jetbrains"] }
+        }
+      ]
+    },
+    {
+      "id": "CH15",
+      "kind": "change",
+      "purpose": "Renames and deletions: a rename inside a crate is that crate's change; a deleted crate reaches every impact-bearing lane through the workspace files its removal must change. The source-only sample records the closure the current graph cannot see, because a deleted crate is not in the new metadata.",
+      "dimensions": ["passing", "shared-input"],
+      "samples": [
+        {
+          "id": "rename-within-crate",
+          "changedFiles": [
+            "crates/verter_wasm/src/ci_change_corpus_old.rs",
+            "crates/verter_wasm/src/ci_change_corpus_new.rs"
+          ],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": ["rust", "wasm"],
+            "mustImpact": ["verter_wasm"]
+          }
+        },
+        {
+          "id": "deleted-crate-with-workspace-files",
+          "changedFiles": [
+            "crates/verter_ci_change_corpus_removed/src/lib.rs",
+            "crates/verter_ci_change_corpus_removed/Cargo.toml",
+            "Cargo.lock"
+          ],
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm", "providers"] }
+        },
+        {
+          "id": "deleted-crate-source-only",
+          "changedFiles": ["crates/verter_ci_change_corpus_removed/src/lib.rs"],
+          "expect": { "mustSelect": ["rust"] }
+        }
+      ]
+    },
+    {
+      "id": "CH16",
+      "kind": "change",
+      "purpose": "Interacting parents: two changes together select at least what each selects alone.",
+      "dimensions": ["passing"],
+      "samples": [
+        {
+          "id": "union",
+          "changedFiles": ["crates/verter_wasm/src/lib.rs", "crates/verter_lsp/src/main.rs"],
+          "expect": {
+            "class": "narrow",
+            "mustSelect": [
+              "rust",
+              "wasm",
+              "wasm_artifact",
+              "playground",
+              "providers",
+              "editor_lsp",
+              "vscode"
+            ],
+            "mustImpact": ["verter_wasm", "verter_lsp"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "CH17",
+      "kind": "change",
+      "purpose": "Release events: a release pull request keeps its lanes and names its kind; its landed commit runs none because the pull request's CI tested that tree.",
+      "dimensions": ["passing", "release-tag"],
+      "samples": [
+        {
+          "id": "project-release-pr",
+          "changedFiles": ["Cargo.toml"],
+          "release": "project",
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm"] }
+        },
+        {
+          "id": "ide-release-pr",
+          "changedFiles": ["Cargo.toml"],
+          "release": "ide",
+          "expect": { "class": "impact-full", "mustSelect": ["rust", "wasm"] }
+        },
+        {
+          "id": "landed-release-commit",
+          "changedFiles": ["Cargo.toml"],
+          "release": "landed",
+          "expect": { "class": "none" }
+        }
+      ]
+    },
+    {
+      "id": "SP01",
+      "kind": "selector-plant",
+      "purpose": "Missed normal edge: an impact graph without the wasm root's dependencies must not satisfy the wasm lane's obligation.",
+      "dimensions": ["failing"],
+      "changedFiles": ["crates/verter_span/src/lib.rs"],
+      "expect": { "mustSelect": ["wasm"], "mustImpact": ["verter_wasm"] },
+      "dropEdges": { "from": "verter_wasm" }
+    },
+    {
+      "id": "SP02",
+      "kind": "selector-plant",
+      "purpose": "Missed dev edge: an impact graph without dev-dependencies must not satisfy a shared test helper's dependents.",
+      "dimensions": ["failing", "shared-input"],
+      "changedFiles": ["crates/verter_test_support/src/lib.rs"],
+      "expect": { "mustImpact": ["verter_session", "verter_lsp"] },
+      "dropEdges": { "kind": "dev" }
+    },
+    {
+      "id": "FX01",
+      "kind": "fixture",
+      "purpose": "Synthetic closure seeds: transitive reach, isolated crate, dev edge, and normal/build/dev edges in the reverse graph.",
+      "dimensions": ["passing"],
+      "fixtures": [
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "a change inside a lane root's dependency closure impacts that lane and no other",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "a crate nothing depends on impacts no lane, and a dev-dependency edge counts",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/lib/crate-graph.spec.mjs",
+          "test": "buildReverseDependencyGraph includes normal, build, and dev edges",
+          "subject": "accept"
+        }
+      ]
+    },
+    {
+      "id": "FX02",
+      "kind": "fixture",
+      "purpose": "Unknown or unreadable selection input widens to every lane.",
+      "dimensions": ["failing", "shared-input"],
+      "fixtures": [
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "a non-crate file no path filter owns forces every lane on rather than guessing",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "unreadable selection data breaks no importer: every lane runs and the audit names it",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "a lane root that is not a workspace member is refused, never silently empty",
+          "subject": "reject"
+        }
+      ]
+    },
+    {
+      "id": "FX03",
+      "kind": "fixture",
+      "purpose": "A consumer lane can never be scheduled behind a producer that was not.",
+      "dimensions": ["passing"],
+      "fixtures": [
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "every consumer gate implies its producer's artifact gate, for every input combination",
+          "subject": "accept"
+        }
+      ]
+    },
+    {
+      "id": "FX04",
+      "kind": "fixture",
+      "purpose": "A required lane missing from the aggregate is reported; the real workflow's aggregate is complete.",
+      "dimensions": ["passing", "failing"],
+      "fixtures": [
+        {
+          "file": "scripts/check-ci-aggregate.test.mjs",
+          "test": "complete aggregation (block-list needs) passes",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/check-ci-aggregate.test.mjs",
+          "test": "real ci.yml aggregator is complete",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/check-ci-aggregate.test.mjs",
+          "test": "a job missing from needs is reported",
+          "subject": "reject"
+        }
+      ]
+    },
+    {
+      "id": "FX05",
+      "kind": "fixture",
+      "purpose": "Release proof: a tag publishes only the tree its release pull request's CI tested, with a successful rehearsal and every unexpired artifact family.",
+      "dimensions": ["passing", "failing", "release-tag"],
+      "fixtures": [
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "proves a tag is its release pull request's tested tree and names the newest successful run to reuse",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "refuses a tag that is not the squash of a merged release pull request",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "refuses a tagged tree that is not the tree the pull request's CI tested",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "refuses without a successful CI run for the head, or when that run skipped the rehearsal",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "refuses when an artifact family the release publishes is missing or expired, never matching CI's own artifacts",
+          "subject": "reject"
+        }
+      ]
+    },
+    {
+      "id": "FX06",
+      "kind": "fixture",
+      "purpose": "Release titles and tags: the project and IDE lanes own distinct subjects and tag prefixes.",
+      "dimensions": ["passing", "release-tag"],
+      "fixtures": [
+        {
+          "file": "scripts/release-lanes.spec.mjs",
+          "test": "an unscoped release subject is the monorepo lane",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/release-lanes.spec.mjs",
+          "test": "a scoped release subject names its lane and tags under it",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/release-lanes.spec.mjs",
+          "test": "an ordinary commit is not a release commit",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/ci-impact.test.mjs",
+          "test": "a release pull request keeps its lanes and names its kind; its landed commit runs none",
+          "subject": "accept"
+        }
+      ]
+    },
+    {
+      "id": "FX07",
+      "kind": "fixture",
+      "purpose": "Run metadata: the argument vector, features, filter and partition are recorded from the run itself, and drifted test evidence is refused.",
+      "dimensions": ["passing", "failing", "platform-feature"],
+      "fixtures": [
+        {
+          "file": "scripts/ci-junit-metadata.test.mjs",
+          "test": "a complete document passes and every test is non-hermetic without a listing",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/ci-junit-metadata.test.mjs",
+          "test": "command, features, filter and partition are read from the run's argument vector",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/ci-junit-metadata.test.mjs",
+          "test": "a hermetic flag not on the approved list, or a test list that drifts from the junit.xml, fails",
+          "subject": "reject"
+        }
+      ]
+    },
+    {
+      "id": "FX08",
+      "kind": "fixture",
+      "purpose": "Stale proof: a run counts only when it recorded testing the landed tree, so an older head's success cannot prove a newer one.",
+      "dimensions": ["failing", "superseded-push"],
+      "fixtures": [
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "proves a pull request's squash landed the tree its CI tested, and nothing else",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "reuses only a run that recorded testing this pull request's landed tree",
+          "subject": "reject"
+        },
+        {
+          "file": "scripts/release-proof.spec.mjs",
+          "test": "a named run is the only one considered, and it must prove the commit itself",
+          "subject": "reject"
+        }
+      ]
+    },
+    {
+      "id": "FX09",
+      "kind": "fixture",
+      "purpose": "Hermetic candidates: only reruns that varied every dimension without a fingerprint difference propose a test, so flaky evidence cannot qualify a reuse.",
+      "dimensions": ["passing", "failing"],
+      "fixtures": [
+        {
+          "file": "scripts/perturbation.test.mjs",
+          "test": "a candidate passed unchanged in every rerun and no exclusion names it",
+          "subject": "accept"
+        },
+        {
+          "file": "scripts/perturbation.test.mjs",
+          "test": "reruns that do not vary every dimension, or differ in fingerprint, propose nothing",
+          "subject": "reject"
+        }
+      ]
+    },
+    {
+      "id": "PL01",
+      "kind": "plant",
+      "purpose": "A failing change every dependent inherits: a compile error at the bottom of the crate graph.",
+      "dimensions": ["failing"],
+      "changedFiles": ["crates/verter_span/src/lib.rs"],
+      "plant": {
+        "file": "crates/verter_span/src/lib.rs",
+        "append": "\ncompile_error!(\"ci_change_corpus_plant\");\n",
+        "marker": "ci_change_corpus_plant"
+      },
+      "obligation": {
+        "argv": ["cargo", "check", "-p", "verter_span"],
+        "expectFailureMatch": "ci_change_corpus_plant"
+      }
+    },
+    {
+      "id": "PL02",
+      "kind": "plant",
+      "purpose": "A failing test: the change compiles and its assertion fails.",
+      "dimensions": ["failing"],
+      "changedFiles": ["crates/verter_span/src/lib.rs"],
+      "plant": {
+        "file": "crates/verter_span/src/lib.rs",
+        "append": "\n#[cfg(test)]\nmod ci_change_corpus_plant {\n    #[test]\n    fn fails() {\n        panic!(\"planted failure\");\n    }\n}\n",
+        "marker": "ci_change_corpus_plant"
+      },
+      "obligation": {
+        "argv": ["cargo", "test", "-p", "verter_span", "--lib", "ci_change_corpus_plant"],
+        "expectFailureMatch": "planted failure"
+      }
+    },
+    {
+      "id": "PL03",
+      "kind": "plant",
+      "purpose": "A failing format lane: the change compiles and its tests pass, and only the format obligation can reject it.",
+      "dimensions": ["failing"],
+      "changedFiles": ["crates/verter_span/src/lib.rs"],
+      "plant": {
+        "file": "crates/verter_span/src/lib.rs",
+        "append": "\nfn ci_change_corpus_plant( ){ }\n",
+        "marker": "ci_change_corpus_plant"
+      },
+      "obligation": {
+        "argv": ["cargo", "fmt", "-p", "verter_span", "--", "--check"],
+        "expectFailureMatch": "ci_change_corpus_plant"
+      }
+    },
+    {
+      "id": "PL04",
+      "kind": "plant",
+      "purpose": "A failing JavaScript test: the Rust lanes cannot reject this change.",
+      "dimensions": ["failing"],
+      "changedFiles": ["packages/language-shared/src/ci-change-corpus-plant.spec.ts"],
+      "plant": {
+        "file": "packages/language-shared/src/ci-change-corpus-plant.spec.ts",
+        "create": "import { expect, test } from \"vitest\";\n\ntest(\"ci_change_corpus_plant\", () => {\n  expect(1).toBe(2);\n});\n",
+        "marker": "ci_change_corpus_plant"
+      },
+      "obligation": {
+        "argv": [
+          "pnpm",
+          "vitest",
+          "--run",
+          "packages/language-shared/src/ci-change-corpus-plant.spec.ts"
+        ],
+        "expectFailureMatch": "ci_change_corpus_plant"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "id": "CC01",
+      "purpose": "Three concurrent pull requests with superseded pushes: the newest heads progress without starvation and the unaffected pull request is not held back.",
+      "dimensions": ["concurrent-prs", "superseded-push"],
+      "pullRequests": {
+        "A": { "scenario": "CH02", "sample": "wasm-root", "pushes": 3 },
+        "B": { "scenario": "CH03", "sample": "lsp-binary", "pushes": 2 },
+        "C": { "scenario": "CH01", "sample": "docs", "pushes": 1 }
+      },
+      "events": [
+        { "submit": "A1", "after": "stream start" },
+        { "submit": "B1", "after": "A1 submitted" },
+        { "submit": "C1", "after": "B1 submitted" },
+        { "submit": "A2", "after": "A1 admitted or queued" },
+        { "submit": "A3", "after": "A2 admitted or queued" },
+        { "submit": "B2", "after": "B1 execution started" }
+      ],
+      "expected": "Every still-current head reaches a terminal disposition; superseded work stays in runner-minute totals and never counts as green, as a landing, or as zero latency.",
+      "unavailableReason": "needs hosted execution and an observable admission signal; the inventory records no public source-admission contract, so no local replay can substitute for this stream"
+    },
+    {
+      "id": "CC02",
+      "purpose": "A superseded head's success arrives after the current head exists and must not prove it.",
+      "dimensions": ["concurrent-prs", "superseded-push"],
+      "pullRequests": {
+        "A": { "scenario": "CH02", "sample": "wasm-root", "pushes": 3 }
+      },
+      "events": [
+        { "submit": "A1", "after": "stream start" },
+        { "submit": "A3", "after": "A1 proof held at the adapter's test barrier" },
+        { "release": "A1 proof", "after": "A3 is current" }
+      ],
+      "expected": "A1's proof does not satisfy A3. FX08 is the local form of this rejection; a live adapter must replay it through its own barrier.",
+      "unavailableReason": "needs a controllable proof-delivery barrier in a live scheduler; none exists, so only the local FX08 fixtures answer this case"
+    }
+  ],
+  "cells": [
+    {
+      "id": "linux-debug-nextest",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "rust-test",
+      "dimensions": ["platform-feature"],
+      "purpose": "Linux debug core suite, four shards over one nextest archive."
+    },
+    {
+      "id": "linux-archive-build",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "rust-test-build",
+      "dimensions": ["platform-feature", "cold-warm"],
+      "purpose": "The archive producer; its cache state decides what its shards inherit."
+    },
+    {
+      "id": "shipped-cfg",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "rust-build-configs",
+      "dimensions": ["platform-feature"],
+      "purpose": "No-debug-assertions and other build configurations; a debug pass does not answer these."
+    },
+    {
+      "id": "semantic-observe",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "rust-observe",
+      "dimensions": ["platform-feature"],
+      "purpose": "Feature-on instrumentation smoke; it never replaces a feature-off obligation."
+    },
+    {
+      "id": "compile-contracts",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "compiler-contracts",
+      "dimensions": ["platform-feature"],
+      "purpose": "Isolated compile-contract groups, each with its own feature set."
+    },
+    {
+      "id": "wasm32",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "wasm-build",
+      "dimensions": ["platform-feature", "cold-warm"],
+      "purpose": "wasm32 artifact producer; a native pass is not a wasm result."
+    },
+    {
+      "id": "wasm-observe",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "wasm-observe-test",
+      "dimensions": ["platform-feature"],
+      "purpose": "wasm32 with instrumentation on."
+    },
+    {
+      "id": "lsp-debug",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "build-lsp-debug",
+      "dimensions": ["platform-feature", "cold-warm"],
+      "purpose": "Debug LSP producer for the editor-neutral, VS Code and DX lanes."
+    },
+    {
+      "id": "lsp-release",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "build-editor-lsp",
+      "dimensions": ["platform-feature", "cold-warm"],
+      "purpose": "Release LSP producer; debug and release LSP results are not interchangeable."
+    },
+    {
+      "id": "native-node",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "build-native-node",
+      "dimensions": ["platform-feature", "cold-warm"],
+      "purpose": "Release N-API producer behind the JavaScript and playground consumers."
+    },
+    {
+      "id": "js-workspace",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "js-build-test",
+      "dimensions": ["platform-feature"],
+      "purpose": "The JavaScript workspace and the scripts' self-tests."
+    },
+    {
+      "id": "release-native-matrix",
+      "workflow": ".github/workflows/release.yml",
+      "job": "build-native",
+      "dimensions": ["platform-feature"],
+      "purpose": "Windows, macOS and Linux native artifacts, reached only by a release event."
+    },
+    {
+      "id": "release-lsp-matrix",
+      "workflow": ".github/workflows/release.yml",
+      "job": "build-lsp",
+      "dimensions": ["platform-feature"],
+      "purpose": "Per-platform release LSP binaries, reached only by a release event."
+    },
+    {
+      "id": "ide-release-native-matrix",
+      "workflow": ".github/workflows/release-ide.yml",
+      "job": "build-native",
+      "dimensions": ["platform-feature"],
+      "purpose": "IDE-lane native artifacts, reached only by an IDE release event."
+    }
+  ],
+  "cacheConditions": [
+    {
+      "id": "cold",
+      "dimensions": ["cold-warm"],
+      "definition": "Observed restore miss for every Rust cache layer the cell's job declares, and every artifact the job consumes built by a producer that also missed."
+    },
+    {
+      "id": "warm",
+      "dimensions": ["cold-warm"],
+      "definition": "Observed restore hit from a compatible successful producer on the same configuration, followed by the full required validation."
+    },
+    {
+      "id": "mixed",
+      "dimensions": ["cold-warm"],
+      "definition": "Any other combination of hits and misses across layers, reported layer by layer; never counted as cold or as warm."
+    },
+    {
+      "id": "unknown",
+      "dimensions": ["cold-warm"],
+      "definition": "Cache state neither controlled nor observed; retained as such and never inferred from elapsed time."
+    }
+  ]
+}

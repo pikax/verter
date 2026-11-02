@@ -334,7 +334,7 @@
     "manifest schema exact version",
     "SDK protocol exact version",
     "extension namespace and exact version",
-    "source/license; content digest computed by core over the admitted manifest bytes",
+    "source/license; content digest computed by core over the exact admitted manifest bytes, with no normalization or field removal",
     "target canonical profiles and exact ReleaseId where applicable",
     "dependencies as exact T09 keys (kind, namespace, exact version)",
     "execution mode; guest format and engine exact release for executable mode",
@@ -342,7 +342,7 @@
   ],
   "coreMintedRowFields": {
     "provenance": "data-manifest for declarative and data-only, isolated-guest for isolated-executable; official-static only for statically registered first-party rows, never from a manifest",
-    "contentDigest": "computed over the admitted manifest bytes; a manifest-supplied value is an expectation that must match exactly"
+    "contentDigest": "algorithm-tagged <algorithm>:<lowercase hex>, algorithm fixed by the manifest schema version, computed over the exact admitted manifest bytes; detached representation: the manifest never carries its own digest (a self-digest field is unknown and rejects), and the expected digest arrives beside the manifest in the install request or package record and must match exactly"
   },
   "hostCompatibilityCheck": "exact lookup against the host's published schema/protocol/build and guest-format/engine tuple; checked at admission and never part of snapshot identity (CAT0 CR06)",
   "participationFacts": [
