@@ -160,6 +160,14 @@ export interface HostIdeProjectConfig {
   references?: string[];
 }
 
+/**
+ * Versioned tag naming the unit a wire span or offset is measured in. Positions
+ * are 0-based, ranges half-open, counted from the start of the file the owning
+ * record names. The suffix is the coordinate contract version: a consumer MUST
+ * reject a tag it does not know instead of reading its numbers as another unit.
+ */
+export type HostSpanEncoding = "utf8.v1" | "utf16.v1";
+
 export interface HostIdeResponse {
   code: string;
   sourceMap?: string;
@@ -171,12 +179,16 @@ export interface HostDestructuredBinding {
   name: string;
   sourceStart: number;
   sourceEnd: number;
+  /** Encoding of `sourceStart`/`sourceEnd` (domain: the authored SFC). */
+  sourceEncoding: HostSpanEncoding;
 }
 
 export interface HostDestructuredBlockMeta {
   bindings: HostDestructuredBinding[];
   blockStart: number;
   blockEnd: number;
+  /** Encoding of `blockStart`/`blockEnd` (domain: the generated TSX). */
+  blockEncoding: HostSpanEncoding;
 }
 
 export interface HostVirtualNodeKind {
@@ -193,12 +205,24 @@ export interface HostSliceChanges {
   descriptorChanged: boolean;
 }
 
+/** Why a span could not be produced exactly (never a byte pass-through). */
+export type HostSpanError =
+  | "SourceUnavailable"
+  | "NotCharBoundary"
+  | "InvalidBoundary"
+  | "Overflow";
+
 export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
-  spanStart: number;
-  spanEnd: number;
+  /** Absent when the span could not be converted exactly: see `spanError`. */
+  spanStart?: number;
+  spanEnd?: number;
+  /** Encoding of `spanStart`/`spanEnd`. */
+  spanEncoding: HostSpanEncoding;
+  /** Set (with no span) when the span could not be produced exactly. */
+  spanError?: HostSpanError;
 }
 
 export interface HostDiagnosticsSnapshot {
@@ -236,6 +260,8 @@ export interface HostModuleReference {
   spanEnd: number;
   exprSpanStart: number;
   exprSpanEnd: number;
+  /** Encoding of all four span fields. */
+  spanEncoding: HostSpanEncoding;
 }
 
 export interface HostPreprocessorRequest extends HostBlockContentCapturedEchoFields {
@@ -256,8 +282,25 @@ export interface HostPreprocessorRequest extends HostBlockContentCapturedEchoFie
   customType?: string;
 }
 
+/**
+ * A diagnostic an external preprocessor reported for its own input. A position
+ * is 1-based `line` and 1-based UTF-16 `column` of that input (lines end at
+ * `\n`, `\r\n` or a lone `\r`) and MUST declare `positionEncoding: "utf16.v1"`;
+ * a position without the tag, or outside the input, is rejected (the diagnostic
+ * keeps its message).
+ */
+export interface HostPreprocessorDiagnostic {
+  severity: "error" | "warning" | "info";
+  message: string;
+  line?: number;
+  column?: number;
+  positionEncoding?: "utf16.v1";
+}
+
 export interface HostBlockOverrideEntry extends HostBlockContentCapturedEchoFields {
   sourceSpaceToken: BlockContentSourceSpaceToken;
+  /** Diagnostics the preprocessor reported for this result. */
+  diagnostics?: HostPreprocessorDiagnostic[];
   /** Preprocessed code. */
   code: string;
   codeHash: BlockContentHashToken;
@@ -370,6 +413,8 @@ export interface HostDependencyResolution {
 export interface HostTextEdit {
   spanStart: number;
   spanEnd: number;
+  /** Encoding of `spanStart`/`spanEnd`. */
+  spanEncoding: HostSpanEncoding;
   newText: string;
 }
 
@@ -400,8 +445,13 @@ export interface HostLintDiagnostic {
   category: string;
   severity: string;
   message: string;
-  spanStart: number;
-  spanEnd: number;
+  /** Absent when the span could not be converted exactly: see `spanError`. */
+  spanStart?: number;
+  spanEnd?: number;
+  /** Encoding of `spanStart`/`spanEnd`. */
+  spanEncoding: HostSpanEncoding;
+  /** Set (with no span) when the span could not be produced exactly. */
+  spanError?: HostSpanError;
   tags: string[];
   spanKind: string;
 }
@@ -419,6 +469,8 @@ export interface HostDocumentSymbol {
   spanEnd: number;
   selectionStart: number;
   selectionEnd: number;
+  /** Encoding of the span and selection offsets. */
+  spanEncoding: HostSpanEncoding;
   children: HostDocumentSymbol[];
 }
 
@@ -430,6 +482,8 @@ export interface HostElementMatch {
   tag: string;
   spanStart: number;
   spanEnd: number;
+  /** Encoding of the element offsets. */
+  spanEncoding: HostSpanEncoding;
   /** "match", "maybe", or "no" */
   result: "match" | "maybe" | "no";
 }
@@ -438,6 +492,8 @@ export interface HostSelectorMatchResult {
   selectorText: string;
   selectorStart: number;
   selectorEnd: number;
+  /** Encoding of the selector offsets. */
+  spanEncoding: HostSpanEncoding;
   matches: HostElementMatch[];
 }
 

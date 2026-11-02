@@ -230,6 +230,10 @@ fn rendered_diagnostics_carry_the_selected_unit_or_no_position() {
     let position = renderer.resolve_selector(&selected).expect("in range");
     assert_eq!(position, (1, 6));
     assert!(renderer.is_at(&d, &path, position));
+    // A selector written relative to the reported absolute path matches on a
+    // whole path-component suffix, never a partial name.
+    assert!(renderer.is_at(&d, "App.vue", position));
+    assert!(!renderer.is_at(&d, "pp.vue", position));
     assert!(!renderer.is_at(&diagnostic(&path, 1, 2), &path, position));
     assert!(renderer
         .resolve_selector(&Selector::parse_line_char(&format!("{path}:1:3")).unwrap())

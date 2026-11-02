@@ -763,7 +763,7 @@ fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
 }
 
 #[test]
-fn supported_schema_version_set_is_exactly_two_through_eight() {
+fn supported_schema_version_set_is_exactly_two_through_nine() {
     assert_eq!(
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
         &[
@@ -773,13 +773,16 @@ fn supported_schema_version_set_is_exactly_two_through_eight() {
             5,
             6,
             7,
+            8,
             TYPEINFO_GRAPH_SCHEMA_VERSION
         ],
         "the supported set holds every version some operation still accepts: \
          schema 2 (legacy-operations-only), schema 3 (the framework-surface \
          floor), schema 4 (member default/origin fields), schema 5 \
          (payload-side relation_proofs table), schema 6 (typed property keys), \
-         and schema 7 (current — the canonical object-spread-program node)",
+         schema 7 (the canonical object-spread-program node), schema 8 (the \
+         compiler-intrinsic application node) and schema 9 (current — the \
+         stated UTF-8 byte unit of every span)",
     );
     assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
     assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 9);

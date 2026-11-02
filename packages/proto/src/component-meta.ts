@@ -21,6 +21,7 @@ export { ComponentMetaPayloadSchema, LegacyComponentMetaPayloadSchema, OriginGra
 export {
   SurfacePartialReason,
   SurfacePartialReasonSchema,
+  PositionEncoding,
 } from "./gen/verter/v1/component_meta_pb.js";
 
 export type ProtoRecord<TypeName extends string = string> = Message<TypeName> & Record<string, any>;

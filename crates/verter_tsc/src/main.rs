@@ -357,6 +357,57 @@ mod tests {
         );
     }
 
+    /// The column unit is explicit and defaults to the `tsc` convention; the
+    /// two position selectors parse strictly and cannot be combined.
+    #[test]
+    fn cli_position_encoding_and_selectors() {
+        let cli = Cli::try_parse_from(["verter-tsc", "--noEmit"]).expect("should parse");
+        assert_eq!(cli.position_encoding, position::ColumnEncoding::Utf16);
+        assert!(cli.at.is_none() && cli.offset.is_none());
+
+        let cli = Cli::try_parse_from([
+            "verter-tsc",
+            "--position-encoding",
+            "utf8",
+            "--at",
+            "src/App.vue:3:5",
+        ])
+        .expect("should parse");
+        assert_eq!(cli.position_encoding, position::ColumnEncoding::Utf8);
+        assert_eq!(
+            cli.at,
+            Some(position::Selector::LineChar {
+                file: "src/App.vue".into(),
+                line: 3,
+                column: 5
+            })
+        );
+
+        let cli = Cli::try_parse_from(["verter-tsc", "--offset", "src/App.vue:12"])
+            .expect("should parse");
+        assert_eq!(
+            cli.offset,
+            Some(position::Selector::Offset {
+                file: "src/App.vue".into(),
+                offset: 12
+            })
+        );
+
+        for bad in [
+            vec!["--position-encoding", "utf-16"],
+            vec!["--at", "App.vue:0:1"],
+            vec!["--offset", "App.vue:-1"],
+            vec!["--at", "App.vue:1:1", "--offset", "App.vue:1"],
+        ] {
+            let mut argv = vec!["verter-tsc"];
+            argv.extend(bad.iter().copied());
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
     #[test]
     fn cli_tsgo_bin_defaults_to_none() {
         let cli = Cli::try_parse_from(["verter-tsc", "--noEmit"]).expect("should parse");

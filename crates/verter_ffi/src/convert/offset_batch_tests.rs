@@ -308,3 +308,79 @@ fn destructured_bindings_convert_exactly_and_share_one_index() {
     );
     assert!(per_batch[0] <= 2 * sfc.len() as u64);
 }
+
+/// Cross-surface authored-location equivalence: the NAPI/WASM wire (UTF-16),
+/// the MCP wire (UTF-8 bytes) and a requester offset converted back through
+/// its tag all name the SAME authored text of a source with astral characters
+/// before the target. DISCRIMINATING: a surface that skips or double-applies
+/// its conversion names different text.
+#[test]
+fn every_surface_names_the_same_authored_text_after_declared_conversion() {
+    let source = "<template><p>\u{1F600}\u{1F600} {{ bad }}</p></template>";
+    let target = "bad";
+    let start = source.find(target).expect("target is authored") as u32;
+    let end = start + target.len() as u32;
+    let units: Vec<u16> = source.encode_utf16().collect();
+    let lint = |start, end| verter_diagnostics::LintDiagnostic {
+        rule: "r".to_string(),
+        category: "c".to_string(),
+        severity: verter_diagnostics::Severity::Error,
+        message: "m".to_string(),
+        span: verter_span::Span::new(start, end),
+        tags: vec![],
+        span_kind: verter_diagnostics::DiagnosticSpanKind::Interpolation,
+        certainty: verter_diagnostics::Certainty::Definite,
+        evidence: Vec::new(),
+        related_files: Vec::new(),
+    };
+
+    // NAPI / WASM lint wire: UTF-16 code units under `utf16.v1`.
+    let wire = lint_diagnostics_to_wire_utf16(vec![lint(start, end)], Some(source));
+    let span = &wire[0].span;
+    assert_eq!(span.encoding, SpanEncodingTag::Utf16);
+    let (s16, e16) = (span.start.expect("exact"), span.end.expect("exact"));
+    assert_eq!(
+        String::from_utf16(&units[s16 as usize..e16 as usize]).expect("utf16"),
+        target
+    );
+    assert_ne!(
+        (s16, e16),
+        (start, end),
+        "the astral prefix makes the units differ"
+    );
+
+    // MCP lint wire: UTF-8 bytes under `utf8.v1`.
+    let mcp = lint_diagnostics_to_wire_utf8(vec![lint(start, end)]);
+    let span = &mcp[0].span;
+    assert_eq!(span.encoding, SpanEncodingTag::Utf8);
+    assert_eq!(
+        &source[span.start.expect("exact") as usize..span.end.expect("exact") as usize],
+        target
+    );
+
+    // The host diagnostic wire agrees with the lint wire.
+    let host_diagnostic = host_diagnostic_to_ffi(
+        &host::HostDiagnostic {
+            severity: host::HostSeverity::Error,
+            code: "E".to_string(),
+            message: "m".to_string(),
+            arguments: Vec::new(),
+            span: verter_span::Span::new(start, end),
+        },
+        Some(source),
+    );
+    assert_eq!(
+        (host_diagnostic.span_start, host_diagnostic.span_end),
+        (Some(s16), Some(e16))
+    );
+
+    // A requester offset converts back to the native byte offset through its tag.
+    assert_eq!(
+        request_offset_to_byte(source, s16, SpanEncodingTag::Utf16),
+        Ok(start)
+    );
+    assert_eq!(
+        request_offset_to_byte(source, start, SpanEncodingTag::Utf8),
+        Ok(start)
+    );
+}

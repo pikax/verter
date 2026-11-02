@@ -162,7 +162,9 @@ impl fmt::Display for Diagnostic {
 /// diagnostic reported without a position.
 pub struct PositionRenderer {
     encoding: crate::position::ColumnEncoding,
-    files: std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<String>>>>,
+    /// The VFS boundary every file read goes through.
+    fs: verter_workspace::native_fs::NativeFs,
+    files: std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<str>>>>,
 }
 
 impl PositionRenderer {
@@ -170,15 +172,20 @@ impl PositionRenderer {
     pub fn new(encoding: crate::position::ColumnEncoding) -> Self {
         Self {
             encoding,
+            fs: verter_workspace::native_fs::NativeFs::new(),
             files: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
-    fn text(&self, file: &str) -> Option<std::rc::Rc<String>> {
+    fn text(&self, file: &str) -> Option<std::rc::Rc<str>> {
         self.files
             .borrow_mut()
             .entry(file.to_string())
-            .or_insert_with(|| std::fs::read_to_string(file).ok().map(std::rc::Rc::new))
+            .or_insert_with(|| {
+                self.fs
+                    .read_file(file)
+                    .map(|text| std::rc::Rc::from(&*text))
+            })
             .clone()
     }
 
@@ -232,13 +239,13 @@ impl PositionRenderer {
     }
 }
 
+/// Whether a reported file path names the selected one. Both are normalised
+/// (`\\` to `/`, a leading `./` dropped); a selector written relative to the
+/// reported absolute path matches on a whole path-component suffix.
 fn same_file(reported: &str, selected: &str) -> bool {
-    let normalise = |path: &str| {
-        std::fs::canonicalize(path)
-            .map(|canonical| canonical.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.replace('\\', "/").trim_start_matches("./").to_string())
-    };
-    normalise(reported) == normalise(selected)
+    let normalise = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_string();
+    let (reported, selected) = (normalise(reported), normalise(selected));
+    reported == selected || reported.ends_with(&format!("/{selected}"))
 }
 
 /// Parse the raw output of `tsc` into a list of diagnostics.

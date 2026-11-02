@@ -280,6 +280,12 @@ export interface StructureRange {
   sourceSpaceToken: string;
   start: number;
   end: number;
+  /**
+   * Versioned encoding tag of `start`/`end`: structure ranges are the native
+   * UTF-8 byte ranges of the registered carrier. A consumer compares in byte
+   * space (converting its own UTF-16 offset once) and rejects any other tag.
+   */
+  encoding: "utf8.v1";
 }
 
 export type StructureBlock =
@@ -876,8 +882,13 @@ export interface LintDiagnostic {
   category: string;
   severity: LintSeverity;
   message: string;
-  spanStart: number;
-  spanEnd: number;
+  /** Absent when the host could not convert the span exactly (`spanError`). */
+  spanStart?: number;
+  spanEnd?: number;
+  /** Versioned encoding tag of the span (`"utf16.v1"` from the WASM host). */
+  spanEncoding?: string;
+  /** Typed refusal set (with no span) when the span could not be produced. */
+  spanError?: string;
   fix?: LintFix;
 }
 

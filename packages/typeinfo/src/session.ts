@@ -60,11 +60,21 @@ export class TypeInfoSession {
     const raw = JSON.parse(buf.toString("utf-8")) as Array<{
       name: string;
       kind: string;
+      spanEncoding: string;
       spanStart: number;
       spanEnd: number;
       hasSpan: boolean;
       isExported: boolean;
     }>;
+    for (const r of raw) {
+      // The symbol list states its span unit; a tag from a future contract is
+      // refused rather than read as UTF-8 bytes.
+      if (r.spanEncoding !== "utf8.v1") {
+        throw new Error(
+          `listSymbols entry '${r.name}' declares span encoding '${String(r.spanEncoding)}'; expected 'utf8.v1'`,
+        );
+      }
+    }
     return raw.map<SymbolEntry>((r) => ({
       name: r.name,
       kind: r.kind as SymbolEntry["kind"],

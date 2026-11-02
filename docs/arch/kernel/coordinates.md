@@ -331,6 +331,23 @@ coverage and bounded inspection discriminate it. The diff adds no test.
 - **AC4 — bounded work: not applicable.** No hot path changes. The UTF-8
   zero-conversion-buffer cell is UAK0 `Z05`, confirmed by PER0E.
 
+## Non-editor boundary state
+
+The non-editor public wires now state their unit. `SpanEncodingTag`
+(`utf8.v1`/`utf16.v1`, in `verter_protocol::types`) tags every NAPI/WASM span;
+the converters in `verter_ffi::convert` return a typed `CoordError` or
+`SpanConversionError` instead of clamping, a missing source snapshot is a typed
+`SourceUnavailable` on the diagnostic, and `LintDiagnostic.span` stays UTF-8
+bytes while the adapter emits a separate tagged wire span. `getCodeActions`
+takes a required offset-encoding tag. MCP declares `utf8.v1` on every tool's
+`_meta`, validates the quick-fix offset, and tags lint diagnostics. Preprocessor
+diagnostic positions are 1-based UTF-16 under a required tag and validated
+against the tool's input. `verter-tsc` selects its column unit with
+`--position-encoding` and filters by `--at FILE:LINE:CHAR` / `--offset
+FILE:OFFSET`. Audit, component-meta protobuf, typeinfo (schema 9) and the
+protocol schema DTOs use the tagged range shapes. `.claude/skills/position-encoding`
+holds the working reference.
+
 ## Coordinate-boundary ratification — 2026-11-01
 
 ### Context

@@ -131,6 +131,9 @@ function updateMarkers() {
   const verterMarkers: monaco.editor.IMarkerData[] = [];
 
   for (const d of file.compiled.lintDiagnostics) {
+    // A span the host could not convert exactly is carried as a typed refusal:
+    // the diagnostic stays in the panels but has no editor range.
+    if (d.spanStart == null || d.spanEnd == null) continue;
     const startPos = model.getPositionAt(d.spanStart);
     const endPos = model.getPositionAt(d.spanEnd);
     verterMarkers.push({

@@ -3,6 +3,7 @@ import { fromBinary } from "@bufbuild/protobuf";
 import {
   ComponentMetaPayloadSchema,
   LegacyComponentMetaPayloadSchema,
+  PositionEncoding,
   SurfacePartialReason,
   type ComponentMetaPayload,
   type ProtoRecord,
@@ -2573,8 +2574,7 @@ function decodeResolvedNativeProp(
     visibility: graph.getString(
       readRequiredId(prop.visibilityId, "resolved native prop visibility"),
     ),
-    spanStart: Number(prop.spanStart ?? 0),
-    spanEnd: Number(prop.spanEnd ?? 0),
+    ...maybe("span", decodeCanonicalSpan(prop.span as ProtoRecord | undefined, "native prop span")),
   };
 }
 
@@ -2685,8 +2685,10 @@ function decodeResolvedTypeDeclaration(
     canonicalSource: graph.getString(
       readRequiredId(declaration.canonicalSourceId, "resolved declaration canonical source"),
     ),
-    spanStart: Number(declaration.spanStart ?? 0),
-    spanEnd: Number(declaration.spanEnd ?? 0),
+    ...maybe(
+      "span",
+      decodeCanonicalSpan(declaration.span as ProtoRecord | undefined, "resolved declaration span"),
+    ),
     kind: graph.getString(readRequiredId(declaration.kindId, "resolved declaration kind")),
     ...maybe("text", graph.getStringMaybe(Number(declaration.textId ?? 0))),
   };
@@ -2951,6 +2953,42 @@ function maybe<T>(key: string, value: T | undefined) {
 
 function maybeArray<T>(key: string, value: T[]) {
   return value.length === 0 ? {} : { [key]: value };
+}
+
+/**
+ * Decode a `CanonicalRange` into a tagged span. An absent range stays absent
+ * (never a zero-filled `0..0`); an encoding this consumer does not know, a
+ * non-offset representation, or an inverted range is rejected rather than
+ * read as another unit.
+ */
+function decodeCanonicalSpan(
+  range: ProtoRecord | undefined,
+  context: string,
+): { start: number; end: number; encoding: "utf8.v1" | "utf16.v1" } | undefined {
+  if (!range) return undefined;
+  const encoding =
+    range.encoding === PositionEncoding.UTF8_BYTES
+      ? "utf8.v1"
+      : range.encoding === PositionEncoding.UTF16_CODE_UNITS
+        ? "utf16.v1"
+        : undefined;
+  if (!encoding) {
+    throw graphError(
+      `component-meta graph ${context} declares position encoding ${String(range.encoding)}, which this consumer does not know`,
+    );
+  }
+  const representation = range.representation as
+    | { case?: string; value?: { start?: number; end?: number } }
+    | undefined;
+  if (representation?.case !== "offsetRange" || !representation.value) {
+    throw graphError(`component-meta graph ${context} is not an offset range`);
+  }
+  const start = Number(representation.value.start ?? 0);
+  const end = Number(representation.value.end ?? 0);
+  if (start > end) {
+    throw graphError(`component-meta graph ${context} is inverted (${start}..${end})`);
+  }
+  return { start, end, encoding };
 }
 
 function readRequiredId(value: unknown, context: string): number {

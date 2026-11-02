@@ -15,6 +15,9 @@ export type {
   HostSliceChanges,
   HostDiagnostic,
   HostDiagnosticsSnapshot,
+  HostSpanEncoding,
+  HostSpanError,
+  HostPreprocessorDiagnostic,
   HostExternalSourceRequest,
   HostScriptImportInfo,
   HostModuleReference,
@@ -63,6 +66,7 @@ import type {
   HostDocumentSymbol,
   HostSelectorMatchResult,
   HostDependencyResolution,
+  HostSpanEncoding,
 } from "@verter/native/host-types";
 
 export type {
@@ -119,7 +123,11 @@ type WasmHostResolveKnownModuleReferenceDependenciesFn = (
   extensions?: string[],
 ) => string[];
 type WasmHostLintFn = (canonicalOrAlias: string, config?: unknown) => HostLintDiagnostic[];
-type WasmHostGetCodeActionsFn = (canonicalOrAlias: string, offset: number) => HostCodeAction[];
+type WasmHostGetCodeActionsFn = (
+  canonicalOrAlias: string,
+  offset: number,
+  offsetEncoding: HostSpanEncoding,
+) => HostCodeAction[];
 type WasmHostGetLintRuleMetadataFn = () => HostLintRuleMetadata[];
 type WasmHostGetDocumentSymbolsFn = (canonicalOrAlias: string) => HostDocumentSymbol[];
 type WasmHostMatchCssSelectorsFn = (canonicalOrAlias: string) => HostSelectorMatchResult[];
@@ -374,14 +382,27 @@ export class Host {
     );
   }
 
-  /** Runs lint rules against a file and returns diagnostics with UTF-16 spans. */
+  /**
+   * Runs lint rules against a file and returns diagnostics with UTF-16 spans
+   * tagged `spanEncoding: "utf16.v1"` (absent, with a typed `spanError`, when a
+   * span cannot be converted exactly).
+   */
   lint(canonicalOrAlias: string, config?: unknown): HostLintDiagnostic[] {
     return this.inner.lint(canonicalOrAlias, config);
   }
 
-  /** Returns code actions (quick fixes) at a given UTF-16 offset. */
-  getCodeActions(canonicalOrAlias: string, offset: number): HostCodeAction[] {
-    return this.inner.getCodeActions(canonicalOrAlias, offset);
+  /**
+   * Returns code actions (quick fixes) at `offset` in the encoding
+   * `offsetEncoding` declares. An untagged or unknown tag, an offset inside a
+   * surrogate pair, or one past the end of the source is rejected, never
+   * snapped.
+   */
+  getCodeActions(
+    canonicalOrAlias: string,
+    offset: number,
+    offsetEncoding: HostSpanEncoding,
+  ): HostCodeAction[] {
+    return this.inner.getCodeActions(canonicalOrAlias, offset, offsetEncoding);
   }
 
   /** Returns metadata for all registered lint rules. */

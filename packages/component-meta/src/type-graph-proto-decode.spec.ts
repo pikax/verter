@@ -6,6 +6,7 @@ import {
   createTestComponentMetaPayload as factFixture,
   createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
   OriginGraphSchema,
+  PositionEncoding,
   SurfacePartialReason,
   SurfacePartialReasonSchema,
 } from "@verter/proto";
@@ -358,6 +359,104 @@ describe("decodeTypedComponentMetaPayload", () => {
     // UNDEMANDED: id 0 means the key is ABSENT — never `""`, never `"none"`.
     expect("returnWrapperRole" in result.bindings[2]!).toBe(false);
     expect("returnWrapperUnresolvedReason" in result.bindings[2]!).toBe(false);
+  });
+});
+
+describe("resolved declaration and native prop spans", () => {
+  const strings = (base: ReturnType<typeof createTestComponentMetaPayload>) => [
+    ...base.typeGraph!.strings,
+    "defineProps",
+    "Props",
+    "./types",
+    "/types.ts",
+    "interface",
+    "public",
+    "label",
+  ];
+
+  function payloadWith(
+    spans: { declaration?: object; prop?: object },
+    base = createTestComponentMetaPayload(),
+  ) {
+    const table = strings(base);
+    const id = (text: string) => table.indexOf(text) + 1;
+    return create(ComponentMetaPayloadSchema, {
+      ...base,
+      typeGraph: { ...base.typeGraph!, strings: table },
+      body: {
+        ...base.body!,
+        resolution: {
+          modeId: id("public"),
+          macros: [
+            {
+              macroIndex: 0,
+              macroKindId: id("defineProps"),
+              typeNameId: id("Props"),
+              importSourceId: id("./types"),
+              declaration: {
+                requestedNameId: id("Props"),
+                resolvedNameId: id("Props"),
+                canonicalSourceId: id("/types.ts"),
+                kindId: id("interface"),
+                ...spans.declaration,
+              },
+              nativeProps: [
+                {
+                  nameId: id("label"),
+                  visibilityId: id("public"),
+                  ...spans.prop,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  const offsetRange = (encoding: PositionEncoding, start: number, end: number) => ({
+    encoding,
+    representation: { case: "offsetRange" as const, value: { start, end } },
+  });
+
+  const decode = (payload: ReturnType<typeof payloadWith>) =>
+    decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+
+  it("decodes a UTF-8 byte range into a tagged span and keeps an absent range absent", () => {
+    const tagged = decode(
+      payloadWith({
+        declaration: { span: offsetRange(PositionEncoding.UTF8_BYTES, 12, 48) },
+        prop: { span: offsetRange(PositionEncoding.UTF8_BYTES, 30, 45) },
+      }),
+    ) as { resolution?: { macros: Array<Record<string, any>> } };
+    const macro = tagged.resolution!.macros[0]!;
+    expect(macro.declaration.span).toEqual({ start: 12, end: 48, encoding: "utf8.v1" });
+    expect(macro.nativeProps[0].span).toEqual({ start: 30, end: 45, encoding: "utf8.v1" });
+
+    const absent = decode(payloadWith({})) as {
+      resolution?: { macros: Array<Record<string, any>> };
+    };
+    const bare = absent.resolution!.macros[0]!;
+    // Never a zero-filled 0..0 range.
+    expect("span" in bare.declaration).toBe(false);
+    expect("span" in bare.nativeProps[0]).toBe(false);
+  });
+
+  it("rejects an encoding this consumer does not know and an inverted range", () => {
+    expect(() =>
+      decode(
+        payloadWith({
+          declaration: { span: offsetRange(PositionEncoding.UTF32_CODE_POINTS, 1, 2) },
+        }),
+      ),
+    ).toThrow(/does not know/);
+    expect(() =>
+      decode(
+        payloadWith({
+          prop: { span: offsetRange(PositionEncoding.UTF8_BYTES, 9, 4) },
+        }),
+      ),
+    ).toThrow(/inverted/);
   });
 });
 
