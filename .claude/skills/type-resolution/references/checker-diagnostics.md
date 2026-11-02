@@ -185,8 +185,8 @@ refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
   their report name through signature composition; their TS7023 occurrence rides the enclosing flow
   result and the nested body's replayed diagnostic effects.
 
-- **A written indexed access.** `build_project_path` answers a single literal `Index` hop whose walk
-  missed with TS2339 and the error type when `indexed_access_proves_absence` holds: every constituent,
+- **A written indexed access.** The shell's consumer answers a read that found nothing with TS2339 and
+  the error type (table below) when `indexed_access_proves_absence` holds: every constituent,
   through the aliases and declarations naming them, settles to a closed object lacking the key and its
   apparent members. A deferred operator, an open type parameter or a walk that stopped proves nothing and
   keeps its answer. A conditional over the error type is the error type, signature utilities included, and
