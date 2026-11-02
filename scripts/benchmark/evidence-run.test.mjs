@@ -170,6 +170,180 @@ describe("formatter contract", () => {
     }
   });
 
+  // Each mutation works on its own copy of the route data; the rest of the lock
+  // is shared read-only, so the whole-lock validator stays cheap to rerun.
+  const routeLockCopy = (lock) => ({
+    ...lock,
+    inventory: structuredClone(lock.inventory),
+    sourceInventory: structuredClone(lock.sourceInventory),
+    routeSources: { ...lock.routeSources },
+  });
+  const plantRouteSource = (copy, path, find, replacement) => {
+    const source = copy.routeSources[path];
+    const planted = source.replace(find, replacement);
+    assert.notEqual(planted, source, `plant did not apply to ${path}`);
+    copy.routeSources[path] = planted;
+  };
+  const CONTRIBUTORS = [
+    ["document_formatting_provider", "crates/verter_lsp/src/capabilities/formatting.rs"],
+    [
+      "document_on_type_formatting_provider",
+      "crates/verter_lsp/src/capabilities/on_type_formatting.rs",
+    ],
+  ];
+
+  test("both inventories bind each capability route to its live contributor", () => {
+    const lock = loadFormatterLock();
+    assert.deepEqual(validateFormatterLock(lock), []);
+    for (const [symbol, path] of CONTRIBUTORS) {
+      assert.equal(lock.inventory.routes.find((r) => r.symbol === symbol).path, path);
+      assert.equal(lock.sourceInventory.currentRoutes.find((r) => r.symbol === symbol).path, path);
+    }
+  });
+
+  test("a capability route needs a live registration in its contributor", () => {
+    const lock = loadFormatterLock();
+    for (const [symbol, path] of CONTRIBUTORS) {
+      const statement = new RegExp(`^[ \\t]*caps\\.${symbol} = [\\s\\S]*?;\\r?$`, "m");
+      const value = lock.routeSources[path].match(statement)?.[0].split(" = ")[1];
+      assert.ok(value, `${symbol} assignment not found in ${path}`);
+      const absent = [
+        ["removed", ""],
+        ["commented out", `// caps.${symbol} = ${value}`],
+        ["block commented", `/*\n    caps.${symbol} = ${value}\n    */`],
+        ["nested block commented", `/* outer /* inner */\n    caps.${symbol} = ${value}\n    */`],
+        ["inside a raw string", `let _ = r#"\ncaps.${symbol} = ${value}\n"#;`],
+        ["compared", `caps.${symbol} == ${value}`],
+        ["assigned None", `caps.${symbol} = None;`],
+        ["assigned a commented None", `caps.${symbol} = /* off */ None;`],
+        ["assigned None after a line comment", `caps.${symbol} = // off\n        None;`],
+        ["renamed", `caps.${symbol}_other = ${value}`],
+      ];
+      for (const [name, replacement] of absent) {
+        const copy = routeLockCopy(lock);
+        plantRouteSource(copy, path, statement, replacement);
+        assert.deepEqual(
+          validateFormatterLock(copy),
+          [`missing route symbol ${symbol}`],
+          `${symbol} ${name}`,
+        );
+      }
+      const present = [
+        ["multi-line assignment", `caps.${symbol} =\n        ${value}`],
+        ["struct-literal field", `${symbol}: ${value}`],
+        ["after a closed block comment", `/* note */ caps.${symbol} = ${value}`],
+        [
+          "after literals holding comment and quote markers",
+          `let _: &'static str = "/* // \\"'"; let _ = '"';\n    caps.${symbol} = ${value}`,
+        ],
+      ];
+      for (const [name, replacement] of present) {
+        const copy = routeLockCopy(lock);
+        plantRouteSource(copy, path, statement, replacement);
+        assert.deepEqual(validateFormatterLock(copy), [], `${symbol} ${name}`);
+      }
+    }
+  });
+
+  test("every declared route is checked against its own source", () => {
+    const lock = loadFormatterLock();
+    assert.equal(lock.inventory.routes.length, lock.sourceInventory.currentRoutes.length);
+    for (const route of lock.inventory.routes) {
+      const name = route.symbol.split("::").at(-1);
+      const copy = routeLockCopy(lock);
+      plantRouteSource(copy, route.path, new RegExp(`\\b${name}\\b`, "g"), `${name}_other`);
+      assert.deepEqual(
+        validateFormatterLock(copy),
+        [`missing route symbol ${route.symbol}`],
+        route.symbol,
+      );
+    }
+  });
+
+  test("the two route inventories must agree on paths, symbols, dispositions and owners", () => {
+    const lock = loadFormatterLock();
+    const [formatting, onType] = CONTRIBUTORS.map(([symbol]) => symbol);
+    const row = (rows, symbol) => rows.find((r) => r.symbol === symbol);
+    const parent = "crates/verter_lsp/src/capabilities.rs";
+    const mutations = [
+      ["route missing from lock", (l) => l.inventory.routes.pop(), /incomplete route inventory/],
+      [
+        "route missing from reviewed inventory",
+        (l) => l.sourceInventory.currentRoutes.pop(),
+        /incomplete route inventory/,
+      ],
+      [
+        "reviewed inventory left on the aggregating module",
+        (l) => (row(l.sourceInventory.currentRoutes, formatting).path = parent),
+        /incomplete route inventory/,
+      ],
+      [
+        "lock moved to another file that carries the registration",
+        (l) => {
+          const route = row(l.inventory.routes, onType);
+          l.routeSources[parent] = l.routeSources[route.path];
+          route.path = parent;
+        },
+        /incomplete route inventory/,
+      ],
+      [
+        "duplicate route symbol in lock",
+        (l) => l.inventory.routes.push({ ...row(l.inventory.routes, formatting), path: parent }),
+        /duplicate route owner/,
+      ],
+      [
+        "duplicate route symbol in reviewed inventory",
+        (l) =>
+          l.sourceInventory.currentRoutes.push({
+            ...row(l.sourceInventory.currentRoutes, onType),
+            path: parent,
+          }),
+        /duplicate reviewed route symbol/,
+      ],
+      [
+        "wrong lock owner",
+        (l) => (row(l.inventory.routes, formatting).owner = "wrong-owner"),
+        /route ownership document_formatting_provider/,
+      ],
+      [
+        "wrong reviewed owner",
+        (l) => (row(l.sourceInventory.currentRoutes, formatting).integrationOwner = "wrong-owner"),
+        /route ownership document_formatting_provider/,
+      ],
+      [
+        "formatter route without a reviewed owner, lock defaulted to markup-auto-close",
+        (l) => {
+          delete row(l.sourceInventory.currentRoutes, formatting).integrationOwner;
+          row(l.inventory.routes, formatting).owner = "markup-auto-close";
+        },
+        /route ownership document_formatting_provider/,
+      ],
+      [
+        "formatter route without an owner in either inventory",
+        (l) => {
+          delete row(l.sourceInventory.currentRoutes, formatting).integrationOwner;
+          delete row(l.inventory.routes, formatting).owner;
+        },
+        /route ownership document_formatting_provider/,
+      ],
+      [
+        "on-type route claimed by the formatter owner",
+        (l) => (row(l.inventory.routes, onType).owner = row(l.inventory.routes, formatting).owner),
+        /route ownership document_on_type_formatting_provider/,
+      ],
+      [
+        "mismatched disposition",
+        (l) => (row(l.inventory.routes, onType).disposition = "retain-continuously"),
+        /route ownership document_on_type_formatting_provider/,
+      ],
+    ];
+    for (const [name, mutate, expected] of mutations) {
+      const copy = routeLockCopy(lock);
+      mutate(copy);
+      assert.match(validateFormatterLock(copy).join("\n"), expected, name);
+    }
+  });
+
   test("evidence requires the candidate and a known corpus, with every mode unmeasured", async () => {
     const lock = loadFormatterLock();
     const loaded = loadManifest("formatter-performance");

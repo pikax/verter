@@ -222,6 +222,22 @@
       "implementationOwner": "ACT1",
       "successorPath": ["LRA0", "LSO8", "ACT1"],
       "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-C15",
+      "consumer": "Native LSP extract-to-component refactor, invoked directly by handle_code_action_attempt for refactor.extract independently of ActionEngine and native quickfix producers",
+      "source": "crates/verter_lsp/src/features/extract_component.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-C16",
+      "consumer": "Provider-backed LSP quickfixes, which handle_code_action_attempt obtains from TypeProvider::get_code_actions and projects through merge_code_actions independently of ActionEngine",
+      "source": "crates/verter_lsp/src/type_provider/merge/feature_merges.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
     }
   ],
   "displacedRoutes": [
@@ -367,8 +383,122 @@
       "receivingAcceptance": "LSO8-AC1",
       "parentRoute": null,
       "disposition": "Delete or structurally reject this independent semantic fix edit-construction route. Express unused-import deletion and specifier replacement as authored intents validated against exact source and map basis by the sole transaction engine, then project validated edits to LSP. Placeholder URI replacement does not validate the basis. Retiring the three action_utils builders leaves this route intact; ACT1 separately owns its action envelope."
+    },
+    {
+      "id": "LRA-D14",
+      "category": "untagged public identity",
+      "route": "extract_component_action constructs transport-native CodeActionOrCommand inline for refactor.extract, bypassing ActionEngine, CodeAction/FileEdit and action_utils action wrappers",
+      "source": "crates/verter_lsp/src/features/extract_component.rs",
+      "deletionOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1",
+      "parentRoute": null,
+      "disposition": "Migrate LSP-native extract-to-component onto qualified alternatives with independent applicability and safety. The refactor.extract-only request must consume this model even when no quickfix or ActionEngine route runs. Current controls pin the offer, kind and refusals, not the edit bytes, so ACT1 pins the selection replacement, import insertion and new-file content before migrating. ACT1-AC2 applies to this multi-file alternative. LSO8 separately retires the inline edit construction; RFX3 separately replaces the text-slice extraction body. No one of these discharges another's obligation."
+    },
+    {
+      "id": "LRA-D15",
+      "category": "untagged coordinate/public identity",
+      "route": "extract_component_action constructs replacement and import TextEdits, a CreateFile operation, a new-file edit and an inline WorkspaceEdit with version: None from a raw source slice. Its signature takes no source or map revision and it uses none of make_insert_action, make_insert_edit or make_replace_edit",
+      "source": "crates/verter_lsp/src/features/extract_component.rs",
+      "deletionOwner": "LSO8",
+      "successorPath": ["LRA0", "LSO8"],
+      "receivingAcceptance": "LSO8-AC1",
+      "parentRoute": null,
+      "disposition": "Delete or structurally reject this independent semantic edit-construction route. Express the selection replacement, import insertion and file creation as authored intents validated against exact source and map basis by the sole transaction engine, rejecting the whole alternative across all files on a stale or unmappable basis, then project validated edits to LSP. The foreground binding that stamps the request's document version onto the finished edit, its withholding of resource operations from clients without documentChanges and its refusal of a create target that appeared before settlement are request-validity rules; they do not validate the source and map basis the edits were built from. Retiring the three action_utils builders leaves this route intact; ACT1 separately owns its action envelope."
+    },
+    {
+      "id": "LRA-D16",
+      "category": "untagged public identity",
+      "route": "merge_code_actions constructs transport-native CodeActionOrCommand inline for provider quickfixes, bypassing ActionEngine, CodeAction/FileEdit and action_utils action wrappers",
+      "source": "crates/verter_lsp/src/type_provider/merge/feature_merges.rs",
+      "deletionOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1",
+      "parentRoute": null,
+      "disposition": "Carry provider quickfixes as qualified alternatives with external provenance and independent applicability and safety, preserving the mapped edits and fail-closed drops the merge and real-provider tests pin. The action is not machine-applicable without ACT2 verification. LSO8 separately owns the edit construction; model migration cannot discharge transaction validation."
+    },
+    {
+      "id": "LRA-D17",
+      "category": "untagged coordinate/public identity",
+      "route": "merge_code_actions builds per-URI TextEdits and an inline WorkspaceEdit from mapped provider edits, with its own preamble-import re-anchoring, without any action_utils edit builder",
+      "source": "crates/verter_lsp/src/type_provider/merge/feature_merges.rs",
+      "deletionOwner": "LSO8",
+      "successorPath": ["LRA0", "LSO8"],
+      "receivingAcceptance": "LSO8-AC1",
+      "parentRoute": null,
+      "disposition": "Delete or structurally reject this edit-construction route. Validate mapped provider edits against the exact source, mapper and snapshot of each target file through the sole transaction engine, retire the code-action import re-anchor in favour of the shared insertion anchor, and project validated edits to LSP. Strict mapping and post-await surface revalidation do not supply a transaction basis. ACT1 separately owns the action envelope."
     }
   ],
+  "codeActionRouteAudit": {
+    "handler": "crates/verter_lsp/src/server/aux_features.rs",
+    "entryPoint": "handle_code_action_attempt",
+    "rule": "Every producer the handler calls for a code-action answer. A direct producer builds its own transport action outside ActionEngine, so it binds one ACT1 model row and one LSO8 edit row. A bridged producer reaches ActionEngine and binds the shared engine and model rows.",
+    "producers": [
+      {
+        "producer": "organize_imports_actions",
+        "requestKind": "source.organizeImports",
+        "reach": "direct",
+        "consumer": "LRA-C14",
+        "routes": ["LRA-D12", "LRA-D13"]
+      },
+      {
+        "producer": "extract_component_action",
+        "requestKind": "refactor.extract",
+        "reach": "direct",
+        "consumer": "LRA-C15",
+        "routes": ["LRA-D14", "LRA-D15"]
+      },
+      {
+        "producer": "macro_code_actions",
+        "requestKind": "quickfix",
+        "reach": "direct",
+        "consumer": "LRA-C11",
+        "routes": ["LRA-D10", "LRA-D11"]
+      },
+      {
+        "producer": "component_code_actions",
+        "requestKind": "quickfix",
+        "reach": "direct",
+        "consumer": "LRA-C12",
+        "routes": ["LRA-D10", "LRA-D11"]
+      },
+      {
+        "producer": "suggest_matching_props",
+        "requestKind": "quickfix",
+        "reach": "direct",
+        "consumer": "LRA-C12",
+        "routes": ["LRA-D10", "LRA-D11"]
+      },
+      {
+        "producer": "event_type_hint_actions",
+        "requestKind": "quickfix",
+        "reach": "direct",
+        "consumer": "LRA-C13",
+        "routes": ["LRA-D10", "LRA-D11"]
+      },
+      {
+        "producer": "merge_code_actions",
+        "requestKind": "quickfix",
+        "reach": "direct",
+        "consumer": "LRA-C16",
+        "routes": ["LRA-D16", "LRA-D17"]
+      },
+      {
+        "producer": "action_engine_fixes",
+        "requestKind": "quickfix",
+        "reach": "bridged",
+        "consumer": "LRA-C06",
+        "routes": ["LRA-D04", "LRA-D05"]
+      },
+      {
+        "producer": "action_engine_refactorings",
+        "requestKind": "refactor",
+        "reach": "bridged",
+        "consumer": "LRA-C06",
+        "routes": ["LRA-D04", "LRA-D05"]
+      }
+    ]
+  },
   "referencedRoutes": [
     {
       "id": "D01-D08",
