@@ -319,6 +319,10 @@ export const PATH_FILTERS = Object.freeze({
   // rules. A script a lane executes is named in that lane's filter as well.
   scripts: [
     "scripts/**",
+    // The closure validator's self-tests run in this lane's script-test step.
+    "tools/validate-architecture-closure.mjs",
+    "tools/architecture-closure/**",
+    "schemas/architecture-closure.schema.json",
     "tests/formatter/**",
     "catalogs/formatter-*.toml",
     "fixtures/formatter/**",
