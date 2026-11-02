@@ -46,6 +46,18 @@ use verter_type_expr::facts::{
     SvelteLegacyPropFact, SvelteModuleExportFact, SvelteScriptFactsFact, SvelteSnippetImportFact,
 };
 
+// Reserved contribution homes for the svelte carrier. Each module below is
+// declaration-only: its doc line names the node that fills it, and
+// contribution nodes write inside their own reserved module only. They are
+// `pub(crate)` because the sibling fact families under `analysis` are not
+// descendants of this carrier module, so they could not address a
+// contribution home that stayed private to it.
+pub(crate) mod context;
+pub(crate) mod forwarding;
+pub(crate) mod hydration;
+pub(crate) mod render_tree;
+pub(crate) mod scheduling;
+
 #[path = "svelte_payload.rs"]
 mod payload;
 use payload::*;
