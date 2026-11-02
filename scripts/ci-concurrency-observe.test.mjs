@@ -128,10 +128,33 @@ test("an aggregate reading as passing beside unsatisfied work is a violation", (
       jobs: [job("a", "skipped"), job("CI Required", "success")],
       expected: [],
     },
+    {
+      label: "skipped aggregate",
+      jobs: [job("a", "success"), job("CI Required", "skipped")],
+      expected: ["aggregate-skipped"],
+    },
+    {
+      label: "skipped obligation",
+      jobs: [job("a", "skipped"), job("CI Required", "success")],
+      obligations: ["a"],
+      expected: ["passing-with-unmet-obligation:a"],
+    },
+    {
+      label: "absent obligation",
+      jobs: [job("CI Required", "success")],
+      obligations: ["a"],
+      expected: ["passing-without-obligation:a"],
+    },
+    {
+      label: "satisfied obligation",
+      jobs: [job("a", "success"), job("CI Required", "success")],
+      obligations: ["a"],
+      expected: [],
+    },
   ];
-  for (const { label, jobs, runOverrides, expected } of cases) {
+  for (const { label, jobs, runOverrides, obligations, expected } of cases) {
     const summary = summarizeAttempt({ run: run(runOverrides), jobs });
-    assert.deepEqual(findVerdictViolations(summary), expected, label);
+    assert.deepEqual(findVerdictViolations(summary, undefined, obligations), expected, label);
   }
 });
 
@@ -148,6 +171,24 @@ test("peak running jobs counts overlap and ignores work that never reached a run
     ],
   });
   assert.equal(summary.peakRunningJobs, 2);
+
+  // Jobs still in progress count until the observation time.
+  const live = summarizeAttempt({
+    run: run({ status: "in_progress", conclusion: null }),
+    observedAt: Date.parse(at(8)),
+    jobs: [
+      job("a", null, { status: "in_progress", started_at: at(0), completed_at: null }),
+      job("b", null, { status: "in_progress", started_at: at(2), completed_at: null }),
+      job("c", "success", { started_at: at(1), completed_at: at(3) }),
+      job("queued", null, {
+        status: "queued",
+        runner_name: "",
+        started_at: null,
+        completed_at: null,
+      }),
+    ],
+  });
+  assert.equal(live.peakRunningJobs, 3);
 });
 
 test("a re-run of an older run that displaces the newest push is reported", () => {
@@ -165,6 +206,7 @@ test("a re-run of an older run that displaces the newest push is reported", () =
   const newest = summarizeAttempt({
     run: run({
       id: 20,
+      head_sha: "newest-head",
       conclusion: "cancelled",
       created_at: "2026-01-01T09:00:00Z",
       run_started_at: "2026-01-01T09:00:00Z",
@@ -189,7 +231,9 @@ test("a re-run of an older run that displaces the newest push is reported", () =
   const newerRun = { ...older, runId: 30 };
   const outsideWindow = { ...older, attemptStartedAt: "2026-01-01T08:00:00Z" };
   const otherRef = { ...older, ref: "other" };
-  for (const candidate of [firstAttempt, newerRun, outsideWindow, otherRef]) {
+  const otherPull = { ...older, pullRequests: [8] };
+  const sameTree = { ...older, testedHead: "newest-head" };
+  for (const candidate of [firstAttempt, newerRun, outsideWindow, otherRef, otherPull, sameTree]) {
     assert.deepEqual(findOlderTreeDisplacements([candidate, newest]), []);
   }
 });
@@ -254,6 +298,35 @@ test("observe uses the latest attempt and records the cancel group on request", 
   assert.equal(result.summaries[0].cancelledByGroup, "slot-1");
 });
 
+test("cancel causes follow each job's check_run_url and can cover every cancelled job", async () => {
+  const url = (id) => `https://api.github.com/repos/${REPO}/check-runs/${id}`;
+  const { impl, calls } = fakeFetch({
+    "/actions/runs/1": respond(200, run({ conclusion: "cancelled" })),
+    "/actions/runs/1/attempts/1/jobs?per_page=100&page=1": respond(200, {
+      total_count: 3,
+      jobs: [
+        job("first", "cancelled", { id: 11, check_run_url: url(900) }),
+        job("second", "cancelled", { id: 12, check_run_url: url(901) }),
+        job("CI Required", "failure"),
+      ],
+    }),
+    "/check-runs/900/annotations": respond(200, [{ message: "The operation was canceled." }]),
+    "/check-runs/901/annotations": respond(200, [
+      { message: "Canceling since a higher priority waiting request for slot-1 exists" },
+    ]),
+  });
+  const result = await observe({
+    repo: REPO,
+    requests: [{ runId: "1" }],
+    fetchImpl: impl,
+    allCancelCauses: true,
+  });
+  assert.deepEqual(result.summaries[0].cancelCauses, { first: null, second: "slot-1" });
+  assert.equal(result.summaries[0].cancelledByGroup, "slot-1");
+  assert.ok(calls.includes("/check-runs/900/annotations"));
+  assert.ok(!calls.some((path) => path.includes("/check-runs/11/")));
+});
+
 test("an unreadable cancel cause keeps the run's states and reports the gap", async () => {
   const { impl } = fakeFetch({
     "/actions/runs/1": respond(200, run({ conclusion: "cancelled" })),
@@ -271,6 +344,7 @@ test("an unreadable cancel cause keeps the run's states and reports the gap", as
   });
   assert.equal(result.summaries[0].aggregate.conclusion, "failure");
   assert.equal(result.summaries[0].cancelledByGroup, null);
+  assert.deepEqual(result.summaries[0].cancelCauses, {});
   assert.deepEqual(result.missing, [
     { runId: "1", attempt: null, reason: "/check-runs/55/annotations: HTTP 404" },
   ]);
@@ -349,6 +423,9 @@ test("parseArgs accepts run attempts and rejects malformed input", () => {
   const options = parseArgs(["--repo", REPO, "--run", "12", "--run", "13@2", "--annotations"]);
   assert.deepEqual(options.requests, [{ runId: "12" }, { runId: "13", attempt: 2 }]);
   assert.equal(options.annotations, true);
+  const wide = parseArgs(["--repo", REPO, "--run", "1", "--annotations-all", "--obligation", "a"]);
+  assert.equal(wide.allCancelCauses, true);
+  assert.deepEqual(wide.obligations, ["a"]);
   for (const argv of [
     ["--run", "12"],
     ["--repo", REPO],

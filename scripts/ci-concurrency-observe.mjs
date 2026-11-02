@@ -7,7 +7,8 @@
  * Records each requested run attempt with its own jobs, then reports:
  *   - run, job and aggregate states, including cancelled jobs that never
  *     reached a runner and the peak number of jobs running at once
- *   - any aggregate that read as passing beside a job that did not finish well
+ *   - any aggregate that read as passing beside a job that did not finish well,
+ *     a skipped aggregate, or a named `--obligation` that was skipped or absent
  *   - any run cancelled while an older run of the same pull request was being
  *     re-run, which leaves the newest completed green on an older tree
  *
@@ -18,7 +19,7 @@
  * Usage:
  *   node scripts/ci-concurrency-observe.mjs --repo <owner/name> \
  *     --run <id>[@attempt] [--run ...] [--aggregate "CI Required"] \
- *     [--annotations] [--token-env NAME] [--max-requests N] [--out file]
+ *     [--annotations | --annotations-all] [--obligation <job>]...  *     [--token-env NAME] [--max-requests N] [--out file]
  *
  * Public repositories need no token; `--token-env` names the variable holding
  * one for a private trial repository.
@@ -47,12 +48,15 @@ const UNSATISFIED_CONCLUSIONS = new Set([
 
 class ReadUnavailable extends Error {}
 
-function peakRunningJobs(jobs) {
+// A job still running when observed counts until the observation time, so an
+// in-progress poll reports the live overlap instead of ignoring those jobs.
+function peakRunningJobs(jobs, observedAt) {
   const edges = [];
   for (const job of jobs) {
-    if (!job.hadRunner || !job.startedAt || !job.completedAt) continue;
+    if (!job.hadRunner || !job.startedAt) continue;
+    if (!job.completedAt && job.status !== "in_progress") continue;
     const start = Date.parse(job.startedAt);
-    const end = Date.parse(job.completedAt);
+    const end = job.completedAt ? Date.parse(job.completedAt) : observedAt;
     // A job cancelled before it ran can report its start after its completion.
     if (end <= start) continue;
     edges.push([start, 1], [end, -1]);
@@ -68,9 +72,15 @@ function peakRunningJobs(jobs) {
 }
 
 /** Reduces one attempt's API records to the states the evidence retains. */
-export function summarizeAttempt({ run, jobs, aggregateName = DEFAULT_AGGREGATE }) {
+export function summarizeAttempt({
+  run,
+  jobs,
+  aggregateName = DEFAULT_AGGREGATE,
+  observedAt = Date.now(),
+}) {
   const ownJobs = jobs.map((job) => ({
     id: job.id,
+    checkRunUrl: job.check_run_url ?? null,
     name: job.name,
     status: job.status,
     conclusion: job.conclusion,
@@ -102,17 +112,32 @@ export function summarizeAttempt({ run, jobs, aggregateName = DEFAULT_AGGREGATE 
     jobCounts,
     cancelledWhileRunning: cancelled.filter((job) => job.hadRunner).length,
     cancelledWithoutRunner: cancelled.filter((job) => !job.hadRunner).length,
-    peakRunningJobs: peakRunningJobs(ownJobs),
+    peakRunningJobs: peakRunningJobs(ownJobs, observedAt),
     jobs: ownJobs,
   };
 }
 
 /** Lists every way this attempt's aggregate misreports its own jobs. */
-export function findVerdictViolations(summary, aggregateName = DEFAULT_AGGREGATE) {
+export function findVerdictViolations(
+  summary,
+  aggregateName = DEFAULT_AGGREGATE,
+  obligations = [],
+) {
   if (!summary.aggregate) return ["aggregate-missing"];
+  // A finished run whose aggregate was skipped reports no verdict at all.
+  if (summary.aggregate.conclusion === "skipped") return ["aggregate-skipped"];
   if (summary.aggregate.conclusion !== "success") return [];
   const others = summary.jobs.filter((job) => job.name !== aggregateName);
   const violations = [];
+  // The aggregate accepts a skipped dependency, so a named obligation is judged
+  // here: it must have run and succeeded for the pass to be warranted.
+  for (const name of obligations) {
+    const obligation = others.find((job) => job.name === name);
+    if (!obligation) violations.push(`passing-without-obligation:${name}`);
+    else if (obligation.conclusion !== "success") {
+      violations.push(`passing-with-unmet-obligation:${name}`);
+    }
+  }
   if (summary.conclusion === "cancelled") violations.push("passing-in-cancelled-run");
   if (others.some((job) => job.conclusion === "cancelled")) {
     violations.push("passing-with-cancelled-job");
@@ -130,6 +155,13 @@ export function findVerdictViolations(summary, aggregateName = DEFAULT_AGGREGATE
   return violations;
 }
 
+// Runs on one pull request share its merge-ref group; runs without one share
+// the head branch.
+function sharesPullRequest(a, b) {
+  if (a.pullRequests.length === 0 && b.pullRequests.length === 0) return true;
+  return a.pullRequests.some((number) => b.pullRequests.includes(number));
+}
+
 /**
  * Finds runs cancelled while an older run of the same ref re-ran. An attempt's
  * record carries that attempt's creation time, so run ids order the runs. The
@@ -144,7 +176,10 @@ export function findOlderTreeDisplacements(summaries) {
     const windowEnd = Date.parse(displaced.updatedAt);
     for (const rerun of summaries) {
       if (rerun.ref !== displaced.ref || rerun.event !== displaced.event) continue;
+      if (!sharesPullRequest(rerun, displaced)) continue;
       if (rerun.attempt < 2 || rerun.runId >= displaced.runId) continue;
+      // An older tree is the point: a re-run of the same head is not one.
+      if (rerun.testedHead === displaced.testedHead) continue;
       const started = Date.parse(rerun.attemptStartedAt);
       if (started < windowStart || started > windowEnd) continue;
       displacements.push({
@@ -215,16 +250,33 @@ async function readAttemptJobs(read, runId, attempt) {
   }
 }
 
-async function readCancelCause(read, summary, reportMissing) {
-  const job = summary.jobs.find((candidate) => candidate.conclusion === "cancelled");
-  if (!job) return null;
-  try {
-    return cancelCauseGroup(await read(`/check-runs/${job.id}/annotations`));
-  } catch (error) {
-    if (!(error instanceof ReadUnavailable)) throw error;
-    reportMissing(error.message);
-    return null;
+function annotationsPath(repo, job) {
+  if (!job.checkRunUrl) return `/check-runs/${job.id}/annotations`;
+  // The job record names its own check run; keep the path below the repo root.
+  const { pathname } = new URL(job.checkRunUrl);
+  const marker = `/repos/${repo}`;
+  const at = pathname.indexOf(marker);
+  const path = at === -1 ? pathname : pathname.slice(at + marker.length);
+  return `${path}/annotations`;
+}
+
+/**
+ * Reads the cancel cause of the first cancelled job, or of every cancelled job
+ * when `all` is set so an eviction can be attributed per job.
+ */
+async function readCancelCauses({ read, repo, summary, all, reportMissing }) {
+  const cancelled = summary.jobs.filter((candidate) => candidate.conclusion === "cancelled");
+  const causes = {};
+  for (const job of all ? cancelled : cancelled.slice(0, 1)) {
+    try {
+      const group = cancelCauseGroup(await read(annotationsPath(repo, job)));
+      causes[job.name] = group;
+    } catch (error) {
+      if (!(error instanceof ReadUnavailable)) throw error;
+      reportMissing(error.message);
+    }
   }
+  return causes;
 }
 
 /** Reads every requested attempt. `requests` holds `{ runId, attempt? }`. */
@@ -236,6 +288,9 @@ export async function observe({
   aggregateName = DEFAULT_AGGREGATE,
   maxRequests = DEFAULT_MAX_REQUESTS,
   annotations = false,
+  allCancelCauses = false,
+  obligations = [],
+  observedAt = Date.now(),
 }) {
   const { read, state } = createReader({ repo, fetchImpl, token, maxRequests });
   const summaries = [];
@@ -248,15 +303,20 @@ export async function observe({
           : `/actions/runs/${runId}/attempts/${attempt}`,
       );
       const jobs = await readAttemptJobs(read, runId, run.run_attempt);
-      const summary = summarizeAttempt({ run, jobs, aggregateName });
-      if (annotations) {
-        summary.cancelledByGroup = await readCancelCause(read, summary, (reason) =>
-          missing.push({ runId, attempt: attempt ?? null, reason }),
-        );
+      const summary = summarizeAttempt({ run, jobs, aggregateName, observedAt });
+      if (annotations || allCancelCauses) {
+        summary.cancelCauses = await readCancelCauses({
+          read,
+          repo,
+          summary,
+          all: allCancelCauses,
+          reportMissing: (reason) => missing.push({ runId, attempt: attempt ?? null, reason }),
+        });
+        summary.cancelledByGroup = Object.values(summary.cancelCauses).find(Boolean) ?? null;
       }
       summaries.push({
         ...summary,
-        verdictViolations: findVerdictViolations(summary, aggregateName),
+        verdictViolations: findVerdictViolations(summary, aggregateName, obligations),
       });
     } catch (error) {
       if (!(error instanceof ReadUnavailable)) throw error;
@@ -280,6 +340,8 @@ export function parseArgs(argv) {
     aggregateName: DEFAULT_AGGREGATE,
     maxRequests: DEFAULT_MAX_REQUESTS,
     annotations: false,
+    allCancelCauses: false,
+    obligations: [],
   };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -287,11 +349,16 @@ export function parseArgs(argv) {
       options.annotations = true;
       continue;
     }
+    if (flag === "--annotations-all") {
+      options.allCancelCauses = true;
+      continue;
+    }
     index += 1;
     const value = argv[index];
     if (value === undefined) throw new Error(`${flag} needs a value`);
     if (flag === "--repo") options.repo = value;
     else if (flag === "--aggregate") options.aggregateName = value;
+    else if (flag === "--obligation") options.obligations.push(value);
     else if (flag === "--token-env") options.tokenEnv = value;
     else if (flag === "--out") options.out = value;
     else if (flag === "--max-requests") {
