@@ -11,10 +11,10 @@ Results, timings and raw records never enter this repository. Each collection ke
 
 `report` says `measured` only when all of these hold. Anything else is `missing-data`, whatever the window's runs look like.
 
-- Every telemetry family below is complete, with no denied, partial or skipped read.
-- Every corpus `change` sample has five repetitions bound to pull requests whose changed files exactly equal the sample's. The rows the versioned corpus itself rules out stay listed under `unavailableByCorpus`: `CC01` and `CC02`, which name their missing seam, and `CH17/landed-release-commit`, because no version may be published to collect one. A row with some bindings gets no exemption. A collector cannot excuse a row of its own.
-- A live required context was read.
-- Paid spend, hosted allocation, ready-to-landed and exact-tree-proven landings/day all have records.
+- Every telemetry family below is complete, with no denied, partial or skipped read, and the window's runs were read whole: a window declaring more runs than were read is a gap.
+- Every corpus `change` sample has five repetitions, each a distinct pull request whose changed files exactly equal the sample's and whose title gives the sample's release kind (`release: ` or `release(ide): `, or neither). A repetition is an integer from 1 to 5, and a pull request measures one repetition of one row. Every bound pull request also reaches a push-to-green sample: a source push event for its head, a green verdict for every required context, and runs inside the window. The rows the versioned corpus itself rules out stay listed under `unavailableByCorpus`: `CC01` and `CC02`, which name their missing seam, and `CH17/landed-release-commit`, because no version may be published to collect one. A row with some bindings gets no exemption. A collector cannot excuse a row of its own.
+- A live required context was read, from the rules, from classic branch protection, or from a `required-contexts.json` export.
+- Paid spend (every Actions item with a net amount), hosted allocation, ready-to-landed and exact-tree-proven landings/day all have records. Landing figures count only events with `exactTreeProven: true`, landing inside the window, for a corpus-bound pull request; each scenario and stream also reports its own.
 
 ## Access attempts
 
@@ -53,7 +53,7 @@ A denied or rate-limited read is the result, so `collect` exits 0 once its recei
 | Landings/day                           | Exact-tree-proven landing events            | Observational: first-parent commits or `merged_at`, with no proof of the landed tree | Landing controller owner, by `ready-events.json` |
 | Paid spend                             | Billing usage                               | Unavailable: HTTP 401                                                                | Account billing owner                            |
 | Hosted allocation                      | Account settings                            | Unavailable: no read endpoint is collected, and nothing records it                   | Account billing owner, by `allocation.json`      |
-| Required contexts                      | Repository rules, branch protection         | `CI Required` from the workflow source; the readable rules name none                 | Repository admin                                 |
+| Required contexts                      | Repository rules, branch protection         | `CI Required` from the workflow source; the readable rules name none                 | Repository admin, by read or `required-contexts.json` |
 | Cold and warm cells                    | The job that restores each cache            | `unknown` per cell, as the corpus requires                                           | Cache measurement work                           |
 
 Scenario runs are the decisive gap. Unmatched window runs are not a baseline under the protocol, and collecting scenario runs means opening pull requests that carry the corpus changes. That is outward-facing hosted execution a worker job cannot do and nobody has authorized here.
@@ -92,15 +92,17 @@ All of these are `observational`. Only runs bound to a corpus sample report as `
 | `bindings.json`     | `[{scenario, sample, repetition, pullRequest}]`, plus `[{stream, repetition, pullRequests: {<role>: <number>}}]`   |
 | `ready-events.json` | `[{pullRequest, head, readyAt, landedAt, exactTreeProven}]`. A record without `exactTreeProven` counts as censored |
 | `allocation.json`   | The owner's record of hosted capacity, kept as given                                                               |
-| `billing.json`      | The usage report's shape, `{usageItems: [{product, netAmount}]}`                                                   |
-| `push-events.json`  | `[{after, timestamp}]`, when activity is not readable                                                              |
+| `billing.json`      | The usage report's shape, `{timePeriod, usageItems: [{product, netAmount}]}`. An Actions item with no `netAmount` leaves spend unavailable, and `timePeriod` is reported beside the figure |
+| `push-events.json`  | `[{after, ref, timestamp}]`, when activity is not readable. A head's push time is its first push to its run's branch; an event with no `ref` answers for any branch |
+| `required-contexts.json` | `["CI Required", ...]`, from a repository admin who can read the rulesets or branch protection                |
 
 ## Limitations
 
-- **Observed, not specified.** The eligibility reading of `created_at` and the walk back through it come from sampled records. A chain broken by a gap over two seconds attributes the rest to pre-admission, and a rerun's copied jobs can do the same.
+- **Observed, not specified.** The eligibility reading of `created_at` and the walk back through it come from sampled records. A chain broken by a gap over two seconds attributes the rest to pre-admission, and a rerun's copied jobs can do the same. Runner-minutes and peak runners count a job repeated by a later attempt, under the same id or with the same name and timestamps, once.
 - **Bounded reads.** The runs API returns at most 1,000 results per query, so a busy window needs narrower windows. Activity retention is finite. The report states when a window was read in part.
 - **Shared streams.** A branch reused by two pull requests reads as one stream.
-- **Partial pools.** With job records for only some runs, peak share and peak runners are lower bounds. The report names how many runs were read.
+- **Partial pools.** With job records for only some runs, peak runners are lower bounds and peak share is a share of the jobs that were read, not of the runs that held runners. The report names how many runs were read.
+- **Timing only.** No artifact, JUnit, work-count or per-cell configuration record is collected, so answers and work counts are not part of this baseline.
 - **Clocks.** All timestamps come from GitHub at one-second resolution, so very short intervals round down.
 - **Local plants and fixtures** stay in the corpus replay. Nothing here shows they would behave the same in a hosted run.
 

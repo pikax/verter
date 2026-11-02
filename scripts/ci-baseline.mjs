@@ -58,7 +58,8 @@ export const FAMILIES = Object.freeze({
   pulls: "repository read access",
   pullFiles: "repository read access",
   pushes: "repository read access, or a push-event export",
-  requiredContexts: "repository read access",
+  requiredContexts:
+    "repository admin: rulesets and branch protection, or a required-contexts export",
   billing: "account billing owner",
   allocation: "account billing owner",
   readyEvents: "landing controller owner",
@@ -72,7 +73,11 @@ const EXPORTS = Object.freeze({
   allocation: "allocation.json",
   readyEvents: "ready-events.json",
   bindings: "bindings.json",
+  requiredContexts: "required-contexts.json",
 });
+
+/** Owner exports that must be JSON arrays; anything else is misuse, refused before a read is spent. */
+const ARRAY_EXPORTS = new Set(["pushes", "readyEvents", "bindings", "requiredContexts"]);
 
 const fail = (message) => {
   throw new Error(`ci-baseline: ${message}`);
@@ -131,11 +136,32 @@ export async function anonymousTransport(
         requests: pages.length,
       };
     }
-    const response = await fetchImpl(url, {
-      headers: { accept: "application/vnd.github+json", "user-agent": "verter-ci-baseline" },
-      signal: AbortSignal.timeout(30_000),
-    });
-    const body = await response.json().catch(() => null);
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        headers: { accept: "application/vnd.github+json", "user-agent": "verter-ci-baseline" },
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      // A refused connection or timeout is a result, as it is for the `gh` transport.
+      return {
+        status: 0,
+        pages,
+        detail: `${error?.name ?? "Error"}: ${error?.message ?? error}`,
+        partial: pages.length > 0,
+        requests: pages.length + 1,
+      };
+    }
+    const body = await response.json().catch(() => undefined);
+    if (response.status === 200 && body === undefined) {
+      return {
+        status: 0,
+        pages,
+        detail: "a 200 response whose body is not JSON",
+        partial: pages.length > 0,
+        requests: pages.length + 1,
+      };
+    }
     if (response.status !== 200) {
       const reset = response.headers.get("x-ratelimit-reset");
       const detail = `${body?.message ?? response.statusText}${reset ? ` (limit resets at epoch ${reset})` : ""}`;
@@ -181,10 +207,15 @@ class Session {
     if (this.requests >= this.maxRequests) {
       return this.skip(family, `request budget of ${this.maxRequests} exhausted`);
     }
-    const reply = await this.transport(path, {
-      maxPages: Math.min(MAX_PAGES_PER_READ, this.maxRequests - this.requests),
-      stopAfter,
-    });
+    let reply;
+    try {
+      reply = await this.transport(path, {
+        maxPages: Math.min(MAX_PAGES_PER_READ, this.maxRequests - this.requests),
+        stopAfter,
+      });
+    } catch (error) {
+      reply = { status: 0, pages: [], detail: String(error?.message ?? error), requests: 1 };
+    }
     this.requests += reply.requests;
     const outcome = reply.partial ? "partial" : classifyAttempt(reply.status, reply.detail);
     const receipt = {
@@ -247,19 +278,33 @@ export async function collect({
   }
   if (Date.parse(until) <= Date.parse(since)) fail("--until must follow --since");
   if (existsSync(out) && readdirSync(out).length > 0) fail(`${out} already holds a collection`);
-  mkdirSync(join(out, "raw"), { recursive: true });
 
   const { corpus, digest } = loadCorpus(corpusFile);
-  const session = new Session({ out, transport, maxRequests, describe });
-  const owner = repo.split("/")[0];
-
   const exported = {};
+  const exportSources = {};
   for (const [family, name] of Object.entries(EXPORTS)) {
     const source = exportDir && join(exportDir, name);
     if (!source || !existsSync(source)) continue;
+    let body;
+    try {
+      body = JSON.parse(readFileSync(source, "utf8"));
+    } catch (error) {
+      fail(`export ${name} is not JSON: ${error.message}`);
+    }
+    if (ARRAY_EXPORTS.has(family) && !Array.isArray(body))
+      fail(`export ${name} must be a JSON array`);
+    exported[family] = body;
+    exportSources[family] = source;
+  }
+
+  mkdirSync(join(out, "raw"), { recursive: true });
+  const session = new Session({ out, transport, maxRequests, describe });
+  const owner = repo.split("/")[0];
+
+  for (const [family, source] of Object.entries(exportSources)) {
+    const name = EXPORTS[family];
     const file = `raw/export-${name}`;
     copyFileSync(source, join(out, file));
-    exported[family] = JSON.parse(readFileSync(source, "utf8"));
     session.receipts.push({
       family,
       command: `owner export ${name}`,
@@ -294,11 +339,19 @@ export async function collect({
     }
   }
 
-  await session.get("requiredContexts", `repos/${repo}/rules/branches/main`);
+  if (!exported.requiredContexts) {
+    await session.get("requiredContexts", `repos/${repo}/rules/branches/main`);
+    // Classic branch protection is a separate record; it counts only as evidence beside the rules.
+    await session.get(
+      "branchProtection",
+      `repos/${repo}/branches/main/protection/required_status_checks`,
+    );
+  }
   if (!exported.billing) await session.get("billing", `users/${owner}/settings/billing/usage`);
   if (!exported.pushes) {
     // Newest first, and far longer than any window: stop once a page reaches past its start.
     const passedWindow = (page) =>
+      Array.isArray(page) &&
       page.some(({ timestamp }) => Date.parse(timestamp) < Date.parse(since));
     await session.get(
       "pushes",
@@ -312,14 +365,16 @@ export async function collect({
     "runs",
     `repos/${repo}/actions/runs?created=${since}..${until}&per_page=100`,
   );
-  const runs = (runPages ?? []).flatMap((page) => page.workflow_runs ?? []);
-  if (!runPages) {
-    for (const family of ["jobs", "pulls"]) session.skip(family, "unreachable without run records");
-  }
+  const runs = (runPages ?? []).flatMap((page) => page?.workflow_runs ?? []);
+  if (!runPages) session.skip("jobs", "unreachable without run records");
 
-  const pullNumbers = new Set(
-    runs.flatMap((run) => (run.pull_requests ?? []).map((pr) => pr.number)),
-  );
+  const bound = new Set(boundPullRequests(exported.bindings ?? []));
+  // A bound pull request's own runs often name no pull request, so its record is the only way
+  // to find its head branch: read every bound pull request, not just those the runs name.
+  const pullNumbers = new Set([
+    ...runs.flatMap((run) => (run.pull_requests ?? []).map((pr) => pr.number)),
+    ...bound,
+  ]);
   // A wholly skipped run held no runner, and most of a window's runs can be these.
   for (const run of runs.filter(({ conclusion }) => conclusion !== "skipped")) {
     for (let attempt = 1; attempt <= (run.run_attempt ?? 1); attempt += 1) {
@@ -330,9 +385,9 @@ export async function collect({
       );
     }
   }
+  if (pullNumbers.size === 0) session.skip("pulls", "no pull request named by a run or bound");
   for (const pr of pullNumbers) await session.get("pulls", `repos/${repo}/pulls/${pr}`, { pr });
 
-  const bound = new Set(boundPullRequests(exported.bindings ?? []));
   for (const pr of bound) {
     await session.get("pullFiles", `repos/${repo}/pulls/${pr}/files?per_page=100`, { pr });
   }
@@ -401,11 +456,24 @@ const metric = (status, samples, reason, context = {}) =>
     ? { status, ...percentiles(samples), ...context }
     : { status: "unavailable", reason, n: 0, ...context };
 
-/** Runner intervals for jobs: skipped jobs hold no runner, unknown orders are counted, not zeroed. */
+/**
+ * Runner intervals for jobs: skipped jobs hold no runner, unknown orders are counted, not
+ * zeroed. A rerun lists the jobs it copied from an earlier attempt again, under the same id
+ * (or with the same name and timestamps); a copy held no runner, so it adds nothing.
+ */
 export function runnerIntervals(jobs) {
   const intervals = [];
-  const tally = { skipped: 0, invalid: 0, outstanding: 0, neverAssigned: 0 };
+  const tally = { skipped: 0, invalid: 0, outstanding: 0, neverAssigned: 0, copied: 0 };
+  const firstAttempt = new Map();
   for (const job of jobs) {
+    const identity = job.id ?? `${job.name}|${job.started_at}|${job.completed_at}`;
+    if (job.status === "completed" && job.conclusion !== "skipped") {
+      if (firstAttempt.has(identity) && firstAttempt.get(identity) !== job.attempt) {
+        tally.copied += 1;
+        continue;
+      }
+      firstAttempt.set(identity, job.attempt);
+    }
     if (job.conclusion === "skipped") tally.skipped += 1;
     else if (job.status !== "completed" || !job.completed_at) tally.outstanding += 1;
     else if (neverAssigned(job)) {
@@ -586,7 +654,7 @@ export function headSamples(runs, jobsOf, { required, pushAt }) {
               : failed
                 ? "failed"
                 : "outstanding";
-      const pushed = Date.parse(pushAt(head) ?? "");
+      const pushed = Date.parse(pushAt(head, headRuns[0].head_branch) ?? "");
       const counted = outcome === "green" && Number.isFinite(pushed) && greenAt >= pushed;
       samples.push({
         stream,
@@ -617,7 +685,8 @@ function summarize(label, runs, ctx) {
   const splits = samples.flatMap(({ split }) => (split ? [split] : []));
 
   const allJobs = runs.flatMap(ctx.jobsOf);
-  const { intervals, skipped, invalid, outstanding, neverAssigned } = runnerIntervals(allJobs);
+  const { intervals, skipped, invalid, outstanding, neverAssigned, copied } =
+    runnerIntervals(allJobs);
   const queueOf = ({ job }) => elapsed(job.created_at, job.started_at);
   const known = (values) => values.filter((value) => value !== null);
 
@@ -666,7 +735,7 @@ function summarize(label, runs, ctx) {
       label,
       intervals.map(({ seconds }) => seconds),
       "no job with a valid runner interval",
-      { skipped, invalid, outstanding, neverAssigned },
+      { skipped, invalid, outstanding, neverAssigned, copied },
     ),
     peakRunnersPerStream:
       perStream.length > 0
@@ -716,8 +785,16 @@ export function familyStatus(receipts, family) {
 const sameFiles = (left, right) =>
   JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
 
-/** Runs count for a scenario only when a pull request really carried its exact changed files. */
-function resolveBindings(corpus, bindings, filesOf) {
+/** The release kind `ci.yml` derives from a pull request's title. */
+const releaseKindOf = (title) =>
+  title.startsWith("release(ide): ") ? "ide" : title.startsWith("release: ") ? "project" : "";
+
+/**
+ * Runs count for a scenario only when a pull request really carried its exact changed files
+ * and release kind, and each pull request measures one repetition of one row: a pull request
+ * bound twice would otherwise be counted as several repetitions of its single run.
+ */
+function resolveBindings(corpus, bindings, filesOf, titleOf) {
   const samples = corpus.scenarios
     .filter(({ kind }) => kind === "change")
     .flatMap((scenario) =>
@@ -725,6 +802,7 @@ function resolveBindings(corpus, bindings, filesOf) {
         scenario: scenario.id,
         sample: sample.id,
         files: sample.changedFiles,
+        release: sample.release ?? "",
       })),
     );
   const sampleOf = (scenario, id) =>
@@ -732,12 +810,38 @@ function resolveBindings(corpus, bindings, filesOf) {
   const accepted = new Map(samples.map((row) => [`${row.scenario}/${row.sample}`, []]));
   const streams = new Map((corpus.streams ?? []).map((stream) => [stream.id, []]));
   const rejected = [];
+  const used = new Set();
 
   const carries = (pr, sample) => {
     const files = filesOf(pr);
     if (!sample) return "names no corpus sample";
     if (!files) return `pull request ${pr} changed files are unavailable`;
-    return sameFiles(files, sample.files) ? "" : `pull request ${pr} changed different files`;
+    if (!sameFiles(files, sample.files)) return `pull request ${pr} changed different files`;
+    const title = titleOf(pr);
+    if (title === undefined) return `pull request ${pr} title is unavailable`;
+    const kind = releaseKindOf(title);
+    // A landed release commit is the merge of a release pull request of either kind.
+    const matches = sample.release === "landed" ? kind !== "" : kind === sample.release;
+    return matches ? "" : `pull request ${pr} is release kind "${kind}", not "${sample.release}"`;
+  };
+
+  const repetitionProblem = (binding, seen) => {
+    if (
+      !Number.isInteger(binding.repetition) ||
+      binding.repetition < 1 ||
+      binding.repetition > REPETITIONS
+    ) {
+      return `repetition must be an integer from 1 to ${REPETITIONS}`;
+    }
+    return seen.some(({ repetition }) => repetition === binding.repetition)
+      ? `repetition ${binding.repetition} is already bound`
+      : "";
+  };
+  const reuseProblem = (prs) => {
+    const reused = prs.find((pr, index) => used.has(pr) || prs.indexOf(pr) !== index);
+    return reused === undefined
+      ? ""
+      : `pull request ${reused} is already bound to another repetition`;
   };
 
   for (const binding of bindings) {
@@ -750,13 +854,25 @@ function resolveBindings(corpus, bindings, filesOf) {
               : carries(binding.pullRequests[role], sampleOf(scenario, sample)),
           )
         : ["names no corpus stream"];
-      const problem = problems.find(Boolean);
+      const problem =
+        problems.find(Boolean) ||
+        repetitionProblem(binding, streams.get(binding.stream) ?? []) ||
+        reuseProblem(Object.values(binding.pullRequests ?? {}));
       if (problem) rejected.push({ ...binding, reason: problem });
-      else streams.get(binding.stream).push(binding);
+      else {
+        streams.get(binding.stream).push(binding);
+        for (const pr of Object.values(binding.pullRequests)) used.add(pr);
+      }
     } else {
-      const problem = carries(binding.pullRequest, sampleOf(binding.scenario, binding.sample));
+      const problem =
+        carries(binding.pullRequest, sampleOf(binding.scenario, binding.sample)) ||
+        repetitionProblem(binding, accepted.get(`${binding.scenario}/${binding.sample}`) ?? []) ||
+        reuseProblem([binding.pullRequest]);
       if (problem) rejected.push({ ...binding, reason: problem });
-      else accepted.get(`${binding.scenario}/${binding.sample}`).push(binding);
+      else {
+        accepted.get(`${binding.scenario}/${binding.sample}`).push(binding);
+        used.add(binding.pullRequest);
+      }
     }
   }
   return { accepted, streams, rejected };
@@ -818,26 +934,48 @@ export function buildReport({ manifest, receipts, read, corpus }) {
   }
   const jobsOf = (run) => jobsByRun.get(run.id) ?? [];
 
-  const rules = pagesOf("requiredContexts").flat();
-  const liveRequired = rules
-    .filter(({ type }) => type === "required_status_checks")
+  const contextRecords = pagesOf("requiredContexts").flat();
+  const fromRules = contextRecords
+    .filter((rule) => rule?.type === "required_status_checks")
     .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
     .map(({ context }) => context);
+  // Classic branch protection answers `{ contexts, checks: [{ context }] }`; an export is a name list.
+  const fromProtection = pagesOf("branchProtection")
+    .flat()
+    .flatMap((record) => [
+      ...(record?.contexts ?? []),
+      ...(record?.checks ?? []).map((c) => c.context),
+    ]);
+  const fromExport = contextRecords.filter((entry) => typeof entry === "string");
+  const liveRequired = [...fromRules, ...fromProtection, ...fromExport].filter(Boolean);
   const required = liveRequired.length > 0 ? [...new Set(liveRequired)] : [SOURCE_REQUIRED_CHECK];
 
   const pushes = new Map();
   for (const event of pagesOf("pushes").flat()) {
     const after = event.after ?? event.head;
     const at = event.timestamp ?? event.pushedAt;
-    // A head pushed again keeps its first arrival: that is when its wait began.
-    if (after && at && !(Date.parse(pushes.get(after)) <= Date.parse(at))) pushes.set(after, at);
+    if (!after || !at) continue;
+    pushes.set(after, [...(pushes.get(after) ?? []), { ref: event.ref ?? null, at }]);
   }
+  /**
+   * When a head's wait began: its first push to the branch its runs ran on. A head pushed
+   * to another ref says nothing about this branch; an event with no ref answers for any.
+   */
+  const pushAt = (head, branch) => {
+    const events = pushes.get(head) ?? [];
+    const onBranch = events.filter(({ ref }) => ref === `refs/heads/${branch}`);
+    const answering = onBranch.length > 0 ? onBranch : events.filter(({ ref }) => ref === null);
+    return answering.reduce(
+      (first, { at }) => (first === undefined || Date.parse(at) < Date.parse(first) ? at : first),
+      undefined,
+    );
+  };
 
   const { intervals: pool } = runnerIntervals(runs.flatMap(jobsOf));
   const ctx = {
     jobsOf,
     required,
-    pushAt: (head) => pushes.get(head),
+    pushAt,
     pushReason:
       families.pushes.status === "unavailable"
         ? `no source push events (${families.pushes.reason})`
@@ -869,13 +1007,16 @@ export function buildReport({ manifest, receipts, read, corpus }) {
           .map(({ filename }) => filename)
       : null;
   };
+  const pulls = pagesOf("pulls")
+    .flat()
+    .filter((pull) => pull?.number !== undefined);
+  const titleOf = (pr) => pulls.find(({ number }) => number === pr)?.title;
   const bindings = pagesOf("bindings");
-  const { accepted, streams, rejected } = resolveBindings(corpus, bindings, filesOf);
+  const { accepted, streams, rejected } = resolveBindings(corpus, bindings, filesOf, titleOf);
   const corpusUnavailable = unavailableByCorpus(corpus);
   // The runs API leaves `pull_requests` empty on many pull request runs, so the head branch counts.
   const headBranchOf = new Map(
-    pagesOf("pulls")
-      .flat()
+    pulls
       .filter(({ head }) => head)
       .map(({ number, head }) => [number, `${head.repo?.full_name ?? ""}:${head.ref}`]),
   );
@@ -885,23 +1026,6 @@ export function buildReport({ manifest, receipts, read, corpus }) {
         (run.pull_requests ?? []).some(({ number }) => number === pr) ||
         streamOf(run) === headBranchOf.get(pr),
     );
-  const coverage = (id, bound, pullsOf) => ({
-    id,
-    repetitions: distinctRepetitions(bound),
-    required: REPETITIONS,
-    ...(bound.length === 0 && corpusUnavailable.has(id)
-      ? { unavailable: corpusUnavailable.get(id) }
-      : {}),
-    ...(bound.length > 0
-      ? { metrics: summarize("measured", bound.flatMap(pullsOf).flatMap(runsOfPull), ctx) }
-      : {}),
-  });
-  const scenarios = [...accepted].map(([id, bound]) =>
-    coverage(id, bound, ({ pullRequest }) => [pullRequest]),
-  );
-  const concurrent = [...streams].map(([id, bound]) =>
-    coverage(id, bound, ({ pullRequests }) => Object.values(pullRequests)),
-  );
 
   const windowDays =
     (Date.parse(manifest.window.until) - Date.parse(manifest.window.since)) / 86400000;
@@ -909,25 +1033,89 @@ export function buildReport({ manifest, receipts, read, corpus }) {
     Date.parse(at) >= Date.parse(manifest.window.since) &&
     Date.parse(at) <= Date.parse(manifest.window.until);
   const ready = pagesOf("readyEvents");
-  const proven = ready.filter(
-    ({ exactTreeProven, readyAt, landedAt }) =>
-      exactTreeProven && elapsed(readyAt, landedAt) !== null,
-  );
-  const merged = pagesOf("pulls")
-    .flat()
-    .flatMap(({ merged_at: mergedAt }) => (mergedAt && inWindow(mergedAt) ? [mergedAt] : []));
-  const localLandings = pagesOf("localLandings");
+  // Proof is a literal `true`, a valid order, and a landing inside the declared window.
+  const provenIn = (events) =>
+    events.filter(
+      ({ exactTreeProven, readyAt, landedAt }) =>
+        exactTreeProven === true && elapsed(readyAt, landedAt) !== null && inWindow(landedAt),
+    );
+  const landingOf = (events) => {
+    const proven = provenIn(events);
+    return {
+      readyToLanded: metric(
+        "measured",
+        proven.map(({ readyAt, landedAt }) => elapsed(readyAt, landedAt)),
+        "no ready event with an exact-tree proven landing in the window",
+        { censored: events.length - proven.length },
+      ),
+      landings: proven.length,
+    };
+  };
 
-  const readyToLanded = metric(
-    "measured",
-    proven.map(({ readyAt, landedAt }) => elapsed(readyAt, landedAt)),
-    `no ready event with an exact-tree proven landing (${families.readyEvents.reason ?? "export held none"})`,
-    { censored: ready.length - proven.length },
+  const coverage = (id, bound, pullsOf) => {
+    const prs = [...new Set(bound.flatMap(pullsOf))];
+    const rowRuns = [...new Map(prs.flatMap(runsOfPull).map((row) => [row.id, row])).values()];
+    // Each bound pull request is one repetition: it must itself reach a push-to-green sample.
+    const unsampled = prs.filter(
+      (pr) =>
+        !headSamples(runsOfPull(pr), ctx.jobsOf, ctx).some(
+          ({ pushToGreen }) => pushToGreen !== null,
+        ),
+    );
+    const { readyToLanded: rowReady, landings } = landingOf(
+      ready.filter(({ pullRequest }) => prs.includes(pullRequest)),
+    );
+    return {
+      id,
+      repetitions: distinctRepetitions(bound),
+      required: REPETITIONS,
+      ...(bound.length === 0 && corpusUnavailable.has(id)
+        ? { unavailable: corpusUnavailable.get(id) }
+        : {}),
+      ...(bound.length > 0
+        ? {
+            metrics: summarize("measured", rowRuns, ctx),
+            unsampledPullRequests: unsampled,
+            readyToLanded: rowReady,
+            landings,
+          }
+        : {}),
+    };
+  };
+  const scenarios = [...accepted].map(([id, bound]) =>
+    coverage(id, bound, ({ pullRequest }) => [pullRequest]),
   );
+  const concurrent = [...streams].map(([id, bound]) =>
+    coverage(id, bound, ({ pullRequests }) => Object.values(pullRequests)),
+  );
+
+  // The pooled landing figures cover corpus-bound pull requests only: a landing of a change
+  // nobody bound to a scenario says nothing about the corpus.
+  const boundPulls = new Set(
+    [...scenarios, ...concurrent].flatMap(({ id }) => {
+      const rows = accepted.get(id)?.map(({ pullRequest }) => pullRequest);
+      return rows ?? streams.get(id).flatMap(({ pullRequests }) => Object.values(pullRequests));
+    }),
+  );
+  const boundReady = ready.filter(({ pullRequest }) => boundPulls.has(pullRequest));
+  const { readyToLanded, landings } = landingOf(boundReady);
+  if (readyToLanded.status === "unavailable") {
+    readyToLanded.reason = `no corpus-bound ready event with an exact-tree proven landing (${
+      families.readyEvents.reason ?? "export held none"
+    })`;
+  }
+  const merged = pulls.flatMap(({ merged_at: mergedAt }) =>
+    mergedAt && inWindow(mergedAt) ? [mergedAt] : [],
+  );
+  const localLandings = pagesOf("localLandings");
   let landingsPerDay;
-  if (proven.length > 0) {
-    const count = proven.filter(({ landedAt }) => inWindow(landedAt)).length;
-    landingsPerDay = { status: "measured", count, windowDays, perDay: count / windowDays };
+  if (landings > 0) {
+    landingsPerDay = {
+      status: "measured",
+      count: landings,
+      windowDays,
+      perDay: landings / windowDays,
+    };
   } else if (merged.length > 0 || localLandings.length > 0) {
     const source =
       merged.length > 0 ? "merged pull requests" : "first-parent commits on the landing ref";
@@ -946,35 +1134,65 @@ export function buildReport({ manifest, receipts, read, corpus }) {
 
   const usage = pagesOf("billing").flatMap((page) => page.usageItems ?? []);
   const actionsUsage = usage.filter(({ product }) => /actions/i.test(product ?? ""));
+  const unpriced = actionsUsage.filter(({ netAmount }) => !Number.isFinite(netAmount)).length;
+  const periods = [
+    ...new Set(
+      pagesOf("billing").flatMap((page) =>
+        page.timePeriod ? [JSON.stringify(page.timePeriod)] : [],
+      ),
+    ),
+  ].map((text) => JSON.parse(text));
   const spend =
-    families.billing.status === "available" && actionsUsage.length > 0
+    families.billing.status === "available" && actionsUsage.length > 0 && unpriced === 0
       ? {
           status: "measured",
-          netAmount: actionsUsage.reduce((total, { netAmount }) => total + (netAmount ?? 0), 0),
+          netAmount: actionsUsage.reduce((total, { netAmount }) => total + netAmount, 0),
           items: actionsUsage.length,
+          // The read names no period, so the figure's span is whatever the record says it is.
+          periods: periods.length > 0 ? periods : "the billing record names no period",
         }
       : {
           status: "unavailable",
-          reason: families.billing.reason ?? "no Actions usage item in the billing record",
+          reason:
+            families.billing.reason ??
+            (unpriced > 0
+              ? `${unpriced} Actions usage item(s) carry no net amount`
+              : "no Actions usage item in the billing record"),
         };
   const allocationRecords = pagesOf("allocation");
   const allocation =
     allocationRecords.length > 0
       ? { status: "measured", records: allocationRecords }
-      : { status: "unavailable", reason: families.allocation.reason };
+      : {
+          status: "unavailable",
+          reason: families.allocation.reason ?? "the allocation record is empty",
+        };
 
   const gaps = [];
   for (const [family, { status, reason }] of Object.entries(families)) {
     if (status !== "available") gaps.push(`family ${family} is ${status}: ${reason ?? "partial"}`);
   }
-  for (const { id, repetitions, unavailable } of [...scenarios, ...concurrent]) {
+  if (Number.isFinite(declared) && declared > runs.length) {
+    gaps.push(`runs read in part: the window declares ${declared}, ${runs.length} were read`);
+  }
+  for (const { id, repetitions, unavailable, unsampledPullRequests } of [
+    ...scenarios,
+    ...concurrent,
+  ]) {
     if (repetitions < REPETITIONS && !unavailable)
       gaps.push(`${id} has ${repetitions} of ${REPETITIONS} bound repetitions`);
+    if (unsampledPullRequests?.length > 0) {
+      gaps.push(
+        `${id} pull request(s) ${unsampledPullRequests.join(", ")} reach no push-to-green sample`,
+      );
+    }
   }
   for (const { reason, scenario, sample, stream } of rejected) {
     gaps.push(`binding ${stream ?? `${scenario}/${sample}`} rejected: ${reason}`);
   }
   if (spend.status !== "measured") gaps.push(`paid spend unavailable: ${spend.reason}`);
+  if (allocation.status !== "measured")
+    gaps.push(`hosted allocation unavailable: ${allocation.reason}`);
   if (readyToLanded.status !== "measured")
     gaps.push(`ready-to-landed unavailable: ${readyToLanded.reason}`);
   if (landingsPerDay.status !== "measured") gaps.push("landings/day has no exact-tree proof");
@@ -983,12 +1201,16 @@ export function buildReport({ manifest, receipts, read, corpus }) {
   const limitations = [
     "Cache condition per cell stays unknown: restore state is observed only on the job that restores it.",
     "A corpus sample's selection is not its execution: only bound hosted runs carry timing.",
+    "Timing only: no artifact, JUnit, work-count or per-cell configuration record is collected, so answers and work counts are compared elsewhere.",
   ];
+  if (manifest.dirty) {
+    limitations.push("The collector ran on a tree with uncommitted changes.");
+  }
   if (liveRequired.length === 0) {
     limitations.push(
       `${
         families.requiredContexts.status === "available"
-          ? "The readable rules name no required status check; branch protection needs admin read."
+          ? "Neither the readable rules nor branch protection name a required status check; both need admin read, or a required-contexts export."
           : "Live required contexts unread."
       } Verdicts use the source-declared "${SOURCE_REQUIRED_CHECK}" alone.`,
     );
@@ -1049,9 +1271,13 @@ export function reportFromDirectory(dir, { corpusFile = DEFAULT_CORPUS } = {}) {
 function flagsOf(argv, known, booleans = []) {
   const flags = {};
   for (let index = 0; index < argv.length; index += 1) {
-    const name = argv[index].replace(/^--/, "");
+    const name = argv[index].startsWith("--") ? argv[index].slice(2) : "";
     if (booleans.includes(name)) flags[name] = true;
-    else if (known.includes(name) && argv[index + 1] !== undefined)
+    else if (
+      known.includes(name) &&
+      argv[index + 1] !== undefined &&
+      !argv[index + 1].startsWith("--")
+    )
       flags[name] = argv[(index += 1)];
     else fail(`unknown or incomplete argument ${argv[index]}`);
   }
@@ -1068,6 +1294,9 @@ async function main(argv = process.argv.slice(2)) {
     );
     if (!flags.out) fail("collect needs --out");
     const anonymous = flags.anonymous === true;
+    if (flags["max-requests"] !== undefined && !/^[1-9]\d*$/.test(flags["max-requests"])) {
+      fail("--max-requests must be a positive integer");
+    }
     const { receipts } = await collect({
       out: resolve(flags.out),
       repo: flags.repo,

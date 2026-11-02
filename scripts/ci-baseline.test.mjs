@@ -380,7 +380,7 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
   const bindings = [];
   const pushEvents = [];
   let pr = 0;
-  const pull = (changedFiles) => {
+  const pull = (changedFiles, release = "") => {
     pr += 1;
     const head = `head-${pr}`;
     const id = pr * 10;
@@ -388,12 +388,16 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
     pushEvents.push({ after: head, timestamp: at(pr - 0.5) });
     table[`repos/o/r/actions/runs/${id}/`] = [{ jobs: [job("CI Required", pr + 1, pr + 13)] }];
     table[`repos/o/r/pulls/${pr}/files`] = [changedFiles.map((filename) => ({ filename }))];
-    table[`repos/o/r/pulls/${pr}`] = [{ number: pr, merged_at: at(pr + 20) }];
+    const title = release === "ide" ? "release(ide): v1" : release ? "release: v1" : "feat: change";
+    table[`repos/o/r/pulls/${pr}`] = [{ number: pr, title, merged_at: at(pr + 20) }];
     return pr;
   };
   const filesOf = (scenario, sample) =>
     corpus.scenarios.find(({ id }) => id === scenario).samples.find(({ id }) => id === sample)
       .changedFiles;
+  const releaseOf = (scenario, sample) =>
+    corpus.scenarios.find(({ id }) => id === scenario).samples.find(({ id }) => id === sample)
+      .release;
   for (let repetition = 1; repetition <= 5; repetition += 1) {
     for (const scenario of corpus.scenarios.filter(({ kind }) => kind === "change")) {
       for (const sample of scenario.samples) {
@@ -401,14 +405,14 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
           scenario: scenario.id,
           sample: sample.id,
           repetition,
-          pullRequest: pull(sample.changedFiles),
+          pullRequest: pull(sample.changedFiles, sample.release),
         });
       }
     }
     for (const stream of corpus.streams) {
       const pullRequests = {};
       for (const [role, { scenario, sample }] of Object.entries(stream.pullRequests)) {
-        pullRequests[role] = pull(filesOf(scenario, sample));
+        pullRequests[role] = pull(filesOf(scenario, sample), releaseOf(scenario, sample));
       }
       bindings.push({ stream: stream.id, repetition, pullRequests });
     }
@@ -524,35 +528,29 @@ test("only rows the corpus itself exempts may stay unbound in a measured baselin
 test("a run whose API record names no pull request still counts through its head branch", async () => {
   await withTempDir(async (dir) => {
     const { exports, transport: base } = completeCollection(dir);
+    // The records are emptied at collection time, so the pull record is the only way back to a run.
     const transport = (path) => {
       const reply = base(path);
-      if (!path.includes("/actions/runs?")) {
-        if (/\/pulls\/\d+$/.test(path)) {
-          const pr = reply.pages[0];
-          return {
-            ...reply,
-            pages: [{ ...pr, head: { ref: `branch-${pr.number}`, repo: { full_name: "o/r" } } }],
-          };
-        }
-        return reply;
+      if (/\/pulls\/\d+$/.test(path)) {
+        const pr = reply.pages[0];
+        return {
+          ...reply,
+          pages: [{ ...pr, head: { ref: `branch-${pr.number}`, repo: { full_name: "o/r" } } }],
+        };
       }
+      if (!path.includes("/actions/runs?")) return reply;
       const [page] = reply.pages;
-      const runs = page.workflow_runs.map((row) => {
-        const number = row.pull_requests[0].number;
-        return { ...row, head_branch: `branch-${number}` };
-      });
+      const runs = page.workflow_runs.map((row) => ({
+        ...row,
+        head_branch: `branch-${row.pull_requests[0].number}`,
+        pull_requests: [],
+      }));
       return { ...reply, pages: [{ ...page, workflow_runs: runs }] };
     };
     const out = join(dir, "run");
     await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
-    const receipts = JSON.parse(readFileSync(join(out, "receipts.json"), "utf8"));
-    const runsFile = receipts.find(({ family }) => family === "runs").file;
-    const pages = JSON.parse(readFileSync(join(out, runsFile), "utf8"));
-    for (const row of pages[0].workflow_runs) {
-      if (row.pull_requests[0].number % 2 === 0) row.pull_requests = [];
-    }
-    writeFileSync(join(out, runsFile), JSON.stringify(pages));
     const report = reportFromDirectory(out);
+    assert.deepEqual(report.baseline.gaps, []);
     for (const { id, metrics } of report.scenarios) {
       assert.equal(metrics.pushToGreen.n, 5, id);
     }
@@ -687,5 +685,289 @@ test("local landing history is observational: no exact-tree proof backs it", asy
     assert.ok(landingsPerDay.count > 0);
     assert.equal(baseline.status, "missing-data");
     assert.ok(baseline.gaps.includes("landings/day has no exact-tree proof"));
+  });
+});
+
+/** Collect a complete fixture after `change` has rewritten its exports, and report it. */
+async function reportAfter(dir, change = () => {}, options = {}) {
+  const { exports, transport } = completeCollection(dir, options);
+  const rewrite = (name, value) => writeFileSync(join(exports, name), JSON.stringify(value));
+  const exported = (name) => JSON.parse(readFileSync(join(exports, name), "utf8"));
+  change({ rewrite, exported });
+  const out = join(dir, "run");
+  await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+  return reportFromDirectory(out);
+}
+
+test("a network failure on the anonymous route is a receipt, not a lost collection", async () => {
+  const refused = await anonymousTransport("x", {
+    fetchImpl: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  assert.equal(refused.status, 0);
+  assert.match(refused.detail, /fetch failed/);
+  const notJson = await anonymousTransport("x", {
+    fetchImpl: async () => ({
+      status: 200,
+      statusText: "",
+      json: async () => {
+        throw new SyntaxError("Unexpected token <");
+      },
+      headers: new Headers(),
+    }),
+  });
+  assert.equal(notJson.status, 0);
+  assert.equal(classifyAttempt(notJson.status, notJson.detail), "failed");
+
+  await withTempDir(async (dir) => {
+    const out = join(dir, "run");
+    const transport = () => {
+      throw new Error("socket hang up");
+    };
+    await collect({ out, repo: "o/r", ...WINDOW, transport });
+    const receipts = JSON.parse(readFileSync(join(out, "receipts.json"), "utf8"));
+    assert.match(familyStatus(receipts, "runs").reason, /^failed: socket hang up/);
+    assert.equal(reportFromDirectory(out).baseline.status, "missing-data");
+  });
+});
+
+test("a malformed owner export is refused before any read and leaves the directory reusable", async () => {
+  await withTempDir(async (dir) => {
+    const exports = join(dir, "exports");
+    mkdirSync(exports);
+    writeFileSync(join(exports, "bindings.json"), JSON.stringify({ not: "an array" }));
+    const { transport, seen } = tableTransport({});
+    const out = join(dir, "run");
+    await assert.rejects(
+      collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports }),
+      /bindings\.json must be a JSON array/,
+    );
+    assert.equal(seen.length, 0);
+    writeFileSync(join(exports, "bindings.json"), "[]");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+  });
+});
+
+test("one pull request bound for every repetition is one repetition, not five", async () => {
+  await withTempDir(async (dir) => {
+    const report = await reportAfter(dir, () => {}, {
+      mutate: (bindings) => {
+        const docs = bindings.filter(({ sample }) => sample === "docs");
+        return bindings.map((binding) =>
+          binding.sample === "docs" ? { ...binding, pullRequest: docs[0].pullRequest } : binding,
+        );
+      },
+    });
+    assert.equal(report.baseline.status, "missing-data");
+    const docs = report.scenarios.find(({ id }) => id === "CH01/docs");
+    assert.equal(docs.repetitions, 1);
+    assert.equal(docs.metrics.runnerMinutes.total, 12);
+    assert.equal(report.rejectedBindings.length, 4);
+    assert.match(report.rejectedBindings[0].reason, /already bound to another repetition/);
+  });
+  await withTempDir(async (dir) => {
+    const report = await reportAfter(dir, () => {}, {
+      mutate: (bindings) =>
+        bindings.map((binding, index) => (index === 0 ? { ...binding, repetition: 9 } : binding)),
+    });
+    assert.ok(
+      report.baseline.gaps.some((gap) => /repetition must be an integer from 1 to 5/.test(gap)),
+    );
+  });
+});
+
+test("an ordinary pull request touching the release manifest is not a release sample", async () => {
+  await withTempDir(async (dir) => {
+    const ordinary = (bindings) => {
+      const manifestPr = bindings.find(({ scenario }) => scenario === "CH12").pullRequest;
+      return bindings.map((binding) =>
+        binding.sample === "project-release-pr" && binding.repetition === 1
+          ? { ...binding, pullRequest: manifestPr }
+          : binding,
+      );
+    };
+    const report = await reportAfter(dir, () => {}, { mutate: ordinary });
+    assert.ok(
+      report.baseline.gaps.some((gap) =>
+        /CH17\/project-release-pr rejected: pull request \d+ is release kind "", not "project"/.test(
+          gap,
+        ),
+      ),
+    );
+  });
+});
+
+test("a baseline needs every bound pull request to reach a push-to-green sample", async () => {
+  await withTempDir(async (dir) => {
+    const report = await reportAfter(dir, ({ rewrite }) => rewrite("push-events.json", []));
+    assert.equal(report.baseline.status, "missing-data");
+    assert.equal(report.baseline.satisfiesComparisons, false);
+    assert.ok(
+      report.baseline.gaps.some((gap) =>
+        /^CH01\/docs pull request\(s\) .* no push-to-green/.test(gap),
+      ),
+    );
+  });
+  await withTempDir(async (dir) => {
+    // Only some runs fall in the window: the rest are bound but absent.
+    const report = await reportAfter(dir, ({ exported, rewrite }) => {
+      rewrite("push-events.json", exported("push-events.json").slice(0, 10));
+    });
+    assert.equal(report.baseline.status, "missing-data");
+  });
+});
+
+test("a window whose runs were read in part is a gap, whatever else is complete", async () => {
+  await withTempDir(async (dir) => {
+    const { exports, transport: base } = completeCollection(dir);
+    const transport = (path) => {
+      const reply = base(path);
+      return path.includes("/actions/runs?")
+        ? { ...reply, pages: [{ ...reply.pages[0], total_count: 5000 }] }
+        : reply;
+    };
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    const { baseline } = reportFromDirectory(out);
+    assert.equal(baseline.status, "missing-data");
+    assert.ok(baseline.gaps.some((gap) => /runs read in part: the window declares 5000/.test(gap)));
+  });
+});
+
+test("landing figures need a literal proof, the window, and a corpus-bound pull request", async () => {
+  const proven = (extra) => ({
+    pullRequest: 1,
+    head: "head-1",
+    readyAt: at(20),
+    landedAt: at(30),
+    exactTreeProven: true,
+    ...extra,
+  });
+  for (const [name, events] of [
+    [
+      "before the window",
+      [proven({ readyAt: "2020-01-01T00:00:00Z", landedAt: "2020-01-02T00:00:00Z" })],
+    ],
+    ["a truthy string", [proven({ exactTreeProven: "false" })]],
+    ["a pull request outside the corpus", [proven({ pullRequest: 99999 })]],
+  ]) {
+    await withTempDir(async (dir) => {
+      const report = await reportAfter(dir, ({ rewrite }) => rewrite("ready-events.json", events));
+      assert.equal(report.readyToLanded.status, "unavailable", name);
+      assert.equal(report.landingsPerDay.status, "observational", name);
+      assert.equal(report.baseline.status, "missing-data", name);
+    });
+  }
+  await withTempDir(async (dir) => {
+    const report = await reportAfter(dir);
+    const docs = report.scenarios.find(({ id }) => id === "CH01/docs");
+    assert.equal(docs.landings, 1);
+    assert.equal(docs.readyToLanded.p50, 600);
+    assert.equal(report.scenarios.find(({ id }) => id === "CH02/wasm-root").landings, 0);
+    assert.equal(report.landingsPerDay.count, 1);
+  });
+});
+
+test("spend with no amount and an empty allocation are gaps, never zeros", async () => {
+  await withTempDir(async (dir) => {
+    const report = await reportAfter(dir, ({ rewrite }) => {
+      rewrite("billing.json", { usageItems: [{ product: "Actions" }] });
+      rewrite("allocation.json", []);
+    });
+    assert.equal(report.paidSpend.status, "unavailable");
+    assert.match(report.paidSpend.reason, /no net amount/);
+    assert.ok(report.baseline.gaps.some((gap) => /^hosted allocation unavailable/.test(gap)));
+  });
+  await withTempDir(async (dir) => {
+    const report = await reportAfter(dir, ({ rewrite }) =>
+      rewrite("billing.json", {
+        timePeriod: { year: 2026, month: 10 },
+        usageItems: [{ product: "Actions", netAmount: 3.5 }],
+      }),
+    );
+    assert.deepEqual(report.paidSpend.periods, [{ year: 2026, month: 10 }]);
+    assert.equal(report.paidSpend.netAmount, 3.5);
+  });
+});
+
+test("required contexts can come from an owner export or from branch protection", async () => {
+  await withTempDir(async (dir) => {
+    const { exports, transport } = completeCollection(dir);
+    writeFileSync(join(exports, "required-contexts.json"), JSON.stringify(["CI Required", "Lint"]));
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    const report = reportFromDirectory(out);
+    assert.deepEqual(report.requiredContexts.contexts, ["CI Required", "Lint"]);
+    assert.equal(report.families.requiredContexts.status, "available");
+  });
+  await withTempDir(async (dir) => {
+    const { exports, transport: base } = completeCollection(dir);
+    const transport = (path) =>
+      path.endsWith("/rules/branches/main")
+        ? { status: 200, pages: [[]], detail: "", requests: 1 }
+        : path.endsWith("/protection/required_status_checks")
+          ? {
+              status: 200,
+              pages: [{ contexts: ["CI Required"], checks: [] }],
+              detail: "",
+              requests: 1,
+            }
+          : base(path);
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    const report = reportFromDirectory(out);
+    assert.deepEqual(report.requiredContexts.contexts, ["CI Required"]);
+    assert.ok(!report.baseline.gaps.includes("no live required context was read"));
+  });
+});
+
+test("a rerun's copied jobs add no runner time, and a head's push time is its own branch's", () => {
+  const original = job("build", 0, 10, { id: 7, attempt: 1 });
+  const rerun = [original, { ...original, attempt: 2 }, job("test", 12, 14, { id: 8, attempt: 2 })];
+  const { intervals, copied } = runnerIntervals(rerun);
+  assert.equal(copied, 1);
+  assert.equal(
+    intervals.reduce((total, { seconds }) => total + seconds, 0),
+    12 * 60,
+  );
+  assert.equal(peakRunners(intervals), 1);
+
+  const report = buildReport({
+    manifest: { window: WINDOW },
+    receipts: [
+      { family: "runs", outcome: "ok", file: "runs" },
+      { family: "jobs", outcome: "ok", file: "jobs", run: 1, attempt: 1 },
+      { family: "pushes", outcome: "export", file: "pushes" },
+    ],
+    read: (file) =>
+      ({
+        runs: [{ total_count: 1, workflow_runs: [run(1, "same", 599, { head_branch: "second" })] }],
+        jobs: [{ jobs: [job("CI Required", 600, 602)] }],
+        pushes: [
+          [
+            { after: "same", ref: "refs/heads/first", timestamp: at(0) },
+            { after: "same", ref: "refs/heads/second", timestamp: at(599) },
+          ],
+        ],
+      })[file],
+    corpus,
+  });
+  assert.equal(report.observational.populations["pull-request"].pushToGreen.p50, 180);
+});
+
+test("malformed flags are misuse", async () => {
+  await withTempDir(async (dir) => {
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport: tableTransport({}).transport });
+    const run = (argv) => spawnSync(process.execPath, [SCRIPT, ...argv], { encoding: "utf8" });
+    assert.equal(run(["report", "--in", out]).status, 0);
+    // A name without its dashes, or a flag swallowing the next flag as its value, is not a flag.
+    assert.equal(run(["report", "in", out]).status, 2);
+    assert.equal(run(["report", "--in", "--require-measured"]).status, 2);
+    assert.equal(
+      run(["collect", "--out", join(dir, "x"), "--repo", "o/r", "--max-requests", "many"]).status,
+      2,
+    );
   });
 });
