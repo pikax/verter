@@ -110,6 +110,11 @@ filter covers the catalogs, fixtures and validators; no CI lane or xtask is adde
 The existing evidence-run tests validate every corpus parameter and reject omitted
 candidate/unknown corpus, missing/duplicate cells and route owners, corrupt hashes,
 omitted numeric modes/calibration, and missing/noncontiguous churn actions.
+Routes are bound by path and symbol: `inventory.json` and the reviewed
+`formatter-inventory.v1.json` must name the same live file, disposition and owner
+for each route. A capability provider counts as registered only through an
+assignment statement on the capability set or a struct-literal field in that file;
+a comment, a comparison or a `None` value does not.
 Fixture paths are repository-confined, including realpath checks against symlink
 escapes. The restricted TOML reader rejects unknown syntax and duplicate keys.
 
