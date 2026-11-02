@@ -1168,7 +1168,8 @@ fn arrows_initializing_declarators_nested_deep_answer_on_a_small_stack() {
 
 /// Arrows nested 200 deep, each an arm of a conditional declarator's
 /// initializer the body returns, in `forms`, read on a small stack in a fresh
-/// process. The checker answers `1`, under every setting.
+/// process. The checker answers `1`, under every setting, re-measured on
+/// the pinned TypeScript 7.1.0-beta.
 /// Oracle comparison: TypeScript 7.0.2.
 fn conditional_declarator_arrows_answer(test: &str, forms: [(&'static str, &'static str); 2]) {
     in_a_fresh_process(test, || {
@@ -1219,7 +1220,8 @@ fn arrows_in_conditional_declarator_alternates_nested_deep_answer_on_a_small_sta
 /// Invoked arrows nested 200 deep in a conditional declarator's arms: the
 /// call suspends the arm's run at the function it evaluates. 480 KiB needed,
 /// so a level costing more than 0.8 KiB overflows. The checker answers
-/// `number`, under every setting.
+/// `number`, under every setting, re-measured on the pinned TypeScript
+/// 7.1.0-beta.
 /// Oracle comparison: TypeScript 7.0.2.
 #[test]
 fn invoked_arrows_in_conditional_declarators_nested_deep_answer_on_a_small_stack() {
