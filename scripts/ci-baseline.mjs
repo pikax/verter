@@ -91,8 +91,22 @@ const gitValue = (root, args) => {
   return status === 0 ? stdout.trim() : "unavailable";
 };
 
+/** The metric definitions a collection was made under; a comparison needs the same bytes. */
+const DEFINITION_DOCUMENTS = [
+  "docs/contributing/ci-change-corpus.v1.md",
+  "docs/contributing/ci-change-corpus-collection.v1.md",
+];
+
+export const definitionsDigest = (root = REPO_ROOT) =>
+  textDigest(
+    DEFINITION_DOCUMENTS.map((path) => {
+      const absolute = join(root, path);
+      return existsSync(absolute) ? textDigest(readFileSync(absolute, "utf8")) : "unavailable";
+    }).join("\n"),
+  );
+
 /** Every API read goes through this argument vector, so the driver cannot write. */
-export const ghArgs = (path) => ["api", "--method", "GET", "--paginate", "--slurp", path];
+export const ghArgs = (path) => ["api", "--method", "GET", "--include", path];
 
 export function classifyAttempt(status, detail = "") {
   if (status === 200) return "ok";
@@ -102,21 +116,53 @@ export function classifyAttempt(status, detail = "") {
   return "failed";
 }
 
-/** The collection protocol's `gh api` reads. A failed read returns its status and message. */
-export function ghTransport(path) {
-  const { status, stdout, stderr, error } = spawnSync("gh", ghArgs(path), {
-    encoding: "utf8",
-    maxBuffer: 512 * 1024 * 1024,
-  });
-  if (error) return { status: 0, pages: [], detail: error.message, requests: 1 };
-  if (status === 0) return { status: 200, pages: JSON.parse(stdout), detail: "", requests: 1 };
-  const code = /HTTP (\d{3})/.exec(stderr)?.[1];
-  return {
-    status: code ? Number(code) : 0,
-    pages: [],
-    detail: stderr.trim().split("\n")[0],
-    requests: 1,
-  };
+/**
+ * The collection protocol's `gh api` reads, paged one request at a time so the page
+ * budget and the window stop apply as they do for the anonymous transport. A failed
+ * read returns its status and message.
+ */
+export function ghTransport(path, { maxPages = 10, stopAfter, run = spawnSync } = {}) {
+  const pages = [];
+  let target = path;
+  while (target) {
+    if (pages.length >= maxPages) {
+      return {
+        status: 200,
+        pages,
+        detail: "page budget exhausted",
+        partial: true,
+        requests: pages.length,
+      };
+    }
+    const { status, stdout, stderr, error } = run("gh", ghArgs(target), {
+      encoding: "utf8",
+      maxBuffer: 512 * 1024 * 1024,
+    });
+    const failure = (code, detail) => ({
+      status: code,
+      pages,
+      detail,
+      partial: pages.length > 0,
+      requests: pages.length + 1,
+    });
+    if (error) return failure(0, error.message);
+    if (status !== 0) {
+      const code = /HTTP (\d{3})/.exec(stderr)?.[1];
+      return failure(code ? Number(code) : 0, stderr.trim().split("\n")[0]);
+    }
+    const split = /\r?\n\r?\n/.exec(stdout);
+    const head = split ? stdout.slice(0, split.index) : "";
+    let body;
+    try {
+      body = JSON.parse(split ? stdout.slice(split.index + split[0].length) : stdout);
+    } catch {
+      return failure(0, "a 200 response whose body is not JSON");
+    }
+    pages.push(body);
+    if (stopAfter?.(body)) break;
+    target = /^link:.*?<([^>]+)>;\s*rel="next"/im.exec(head)?.[1];
+  }
+  return { status: 200, pages, detail: "", requests: pages.length };
 }
 
 /** Unauthenticated reads of public data. Stops at the page budget; never waits out a limit. */
@@ -404,17 +450,7 @@ export async function collect({
     window: { since, until },
     corpus: corpus.corpus,
     corpusDigest: digest,
-    definitionsDigest: textDigest(
-      [
-        "docs/contributing/ci-change-corpus.v1.md",
-        "docs/contributing/ci-change-corpus-collection.v1.md",
-      ]
-        .map((path) => {
-          const absolute = join(root, path);
-          return existsSync(absolute) ? textDigest(readFileSync(absolute, "utf8")) : "unavailable";
-        })
-        .join("\n"),
-    ),
+    definitionsDigest: definitionsDigest(root),
     collectedAt: new Date().toISOString(),
     head: gitValue(root, ["rev-parse", "HEAD"]),
     tree: gitValue(root, ["rev-parse", "HEAD^{tree}"]),
@@ -611,7 +647,8 @@ export function criticalPath(verdict, jobs, pushedAt) {
 /**
  * One sample per head of a stream. A head is green at the latest of each
  * required context's first success; an optional lane finishing proves nothing.
- * A later head arriving before that green supersedes it, so it never counts.
+ * A later head arriving before that green, or before the failure of a head that
+ * never turned green, supersedes it, so it never counts.
  */
 export function headSamples(runs, jobsOf, { required, pushAt }) {
   const samples = [];
@@ -643,12 +680,19 @@ export function headSamples(runs, jobsOf, { required, pushAt }) {
           );
       const greenAt = verdict ? Date.parse(verdict.completed_at) : null;
       const next = heads[index + 1]?.createdAt;
-      const superseded = next !== undefined && (greenAt === null || next < greenAt);
-      const failed = jobs.some(
+      const failures = jobs.filter(
         (job) =>
           required.includes(job.name) &&
           ["failure", "cancelled", "timed_out"].includes(job.conclusion),
       );
+      const failedAt = failures
+        .map((job) => Date.parse(job.completed_at))
+        .filter(Number.isFinite)
+        .reduce((first, at) => Math.min(first, at), Infinity);
+      // A head is overtaken only if the next head arrives before its first terminal verdict.
+      const settledAt = greenAt ?? (Number.isFinite(failedAt) ? failedAt : null);
+      const superseded = next !== undefined && (settledAt === null || next < settledAt);
+      const failed = failures.length > 0;
       const outcome =
         jobs.length === 0
           ? "unread"
@@ -915,7 +959,7 @@ const distinctRepetitions = (bindings) =>
  * family is complete and every corpus sample and stream has its repetitions;
  * everything else stays `missing-data`, whatever the window's runs look like.
  */
-export function buildReport({ manifest, receipts, read, corpus }) {
+export function buildReport({ manifest, receipts, read, corpus, currentDefinitions }) {
   const pagesOf = (family) =>
     receipts.filter((row) => row.family === family && row.file).flatMap((row) => read(row.file));
   const families = Object.fromEntries(
@@ -988,11 +1032,9 @@ export function buildReport({ manifest, receipts, read, corpus }) {
     pool,
   };
 
-  const pullStreams = new Set(
-    runs
-      .filter((run) => run.event === "pull_request" || run.pull_requests?.length > 0)
-      .map(streamOf),
-  );
+  // Only a pull_request event marks a branch as a pull request head. A push that merely names
+  // a pull request is classified on its own, so the landing branch keeps its proof-reuse pushes.
+  const pullStreams = new Set(runs.filter((run) => run.event === "pull_request").map(streamOf));
   const classOf = (run) =>
     runClass(run, jobsOf(run), { pullStream: pullStreams.has(streamOf(run)) });
   const observational = Object.fromEntries(
@@ -1208,6 +1250,13 @@ export function buildReport({ manifest, receipts, read, corpus }) {
     gaps.push(`ready-to-landed unavailable: ${readyToLanded.reason}`);
   if (landingsPerDay.status !== "measured") gaps.push("landings/day has no exact-tree proof");
   if (liveRequired.length === 0) gaps.push("no live required context was read");
+  // The observations stay in the report; only the authority to compare against them is refused.
+  if (currentDefinitions !== undefined && manifest.definitionsDigest !== currentDefinitions) {
+    gaps.push(
+      `collected under other metric definitions (${manifest.definitionsDigest}, not ${currentDefinitions})`,
+    );
+  }
+  if (manifest.dirty) gaps.push("collected on a tree with uncommitted changes");
 
   const limitations = [
     "Cache condition per cell stays unknown: restore state is observed only on the job that restores it.",
@@ -1276,7 +1325,13 @@ export function reportFromDirectory(dir, { corpusFile = DEFAULT_CORPUS } = {}) {
   if (manifest.corpusDigest !== digest) {
     fail(`${dir} read corpus ${manifest.corpusDigest}, not ${digest}; pass the archived --corpus`);
   }
-  return buildReport({ manifest, receipts: parse("receipts.json"), read: parse, corpus });
+  return buildReport({
+    manifest,
+    receipts: parse("receipts.json"),
+    read: parse,
+    corpus,
+    currentDefinitions: definitionsDigest(),
+  });
 }
 
 function flagsOf(argv, known, booleans = []) {

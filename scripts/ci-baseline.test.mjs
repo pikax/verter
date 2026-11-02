@@ -15,6 +15,7 @@ import {
   FAMILIES,
   familyStatus,
   ghArgs,
+  ghTransport,
   headSamples,
   nearestRank,
   peakRunners,
@@ -38,6 +39,13 @@ async function withTempDir(body) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+/** The collector records whether its tree was dirty; a measured fixture asserts a clean one. */
+function markManifest(out, change) {
+  const file = join(out, "manifest.json");
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), ...change }));
+}
+const markClean = (out) => markManifest(out, { dirty: false });
 
 const job = (name, start, end, extra = {}) => ({
   name,
@@ -171,6 +179,88 @@ test("a push that ran no lane is separated from a push that ran its lanes", () =
   assert.equal(runClass({ event: "schedule" }, executed), "other");
 });
 
+test("a main push naming a pull request does not fold the other proof-only pushes out", () => {
+  const proof = [job("detect-changes", 0, 1), job("CI Required", 1, 2)];
+  const push = (id, extra = {}) => ({
+    ...run(id, `main-${id}`, 0),
+    event: "push",
+    conclusion: "success",
+    head_branch: "main",
+    path: ".github/workflows/ci.yml",
+    pull_requests: [],
+    ...extra,
+  });
+  const report = buildReport({
+    manifest: { window: WINDOW },
+    receipts: [
+      { family: "runs", outcome: "ok", file: "runs" },
+      { family: "jobs", outcome: "ok", file: "jobs1", run: 1, attempt: 1 },
+      { family: "jobs", outcome: "ok", file: "jobs2", run: 2, attempt: 1 },
+    ],
+    read: (file) =>
+      file === "runs"
+        ? [
+            {
+              total_count: 2,
+              workflow_runs: [push(1), push(2, { pull_requests: [{ number: 7 }] })],
+            },
+          ]
+        : [{ jobs: proof }],
+    corpus,
+  });
+  assert.ok(report.observational.populations["push-no-lanes"]);
+});
+
+test("the gh transport pages one request at a time and honours the budget and window stop", () => {
+  const reply = (body, link) => ({
+    status: 0,
+    stdout: `HTTP/2.0 200 OK\r\n${link ? `Link: <https://api.github.com/p${link}>; rel="prev", <https://api.github.com/p${link}>; rel="next"\r\n` : ""}\r\n${JSON.stringify(body)}`,
+    stderr: "",
+  });
+  const script = [reply([1], 2), reply([2], 3), reply([3])];
+  const calls = [];
+  const run = (_command, args) => {
+    calls.push(args.at(-1));
+    return script[calls.length - 1];
+  };
+  const whole = ghTransport("x", { run });
+  assert.deepEqual(whole.pages, [[1], [2], [3]]);
+  assert.equal(whole.requests, 3);
+  assert.deepEqual(calls, ["x", "https://api.github.com/p2", "https://api.github.com/p3"]);
+
+  calls.length = 0;
+  const limited = ghTransport("x", { run, maxPages: 2 });
+  assert.equal(limited.partial, true);
+  assert.equal(limited.requests, 2);
+  assert.equal(calls.length, 2);
+
+  calls.length = 0;
+  const stopped = ghTransport("x", { run, stopAfter: (page) => page[0] === 2 });
+  assert.deepEqual(stopped.pages, [[1], [2]]);
+  assert.equal(stopped.partial, undefined);
+
+  const denied = ghTransport("x", {
+    run: () => ({ status: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)\n" }),
+  });
+  assert.equal(denied.status, 404);
+});
+
+test("a collection under other definitions or from a dirty tree refuses comparison", async () => {
+  await withTempDir(async (dir) => {
+    for (const change of [{ definitionsDigest: "other" }, { dirty: true }]) {
+      const { exports, transport } = completeCollection(dir);
+      const out = join(dir, `run-${Object.keys(change)[0]}`);
+      await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+      markClean(out);
+      markManifest(out, change);
+      const { baseline } = reportFromDirectory(out);
+      assert.equal(baseline.satisfiesComparisons, false);
+      assert.equal(baseline.status, "missing-data");
+      assert.equal(baseline.gaps.length, 1);
+    }
+  });
+});
+
 test("the split walks eligibility back from the verdict and sums to push-to-green", () => {
   const stamp = (name, created, started, completed) =>
     job(name, started, completed, { created_at: at(created) });
@@ -254,10 +344,21 @@ test("green needs every required context, and only an unsuperseded head counts",
     pushAt: (head) => pushed[head],
   });
   assert.equal(stricter.find((sample) => sample.head === "green").createdToGreen, 1140);
+  // A failure that completed before the next head arrived is a failure, not a supersession.
   assert.equal(
     stricter.find((sample) => sample.head === "failed-then-rerun-green").outcome,
-    "superseded",
+    "failed",
   );
+  const overtaken = headSamples(
+    [run(1, "slow", 0), run(2, "next", 5)],
+    ({ id }) =>
+      id === 1
+        ? [job("CI Required", 1, 11, { conclusion: "failure" })]
+        : [job("CI Required", 6, 20)],
+    { required: ["CI Required"], pushAt: () => at(0) },
+  );
+  // The next head arrived at minute 5, before the failure at minute 11.
+  assert.equal(overtaken.find((sample) => sample.head === "slow").outcome, "superseded");
 });
 
 test("access failures become receipts, never records, and the baseline stays missing", async () => {
@@ -447,6 +548,7 @@ test("a complete collection is measured, and its scenario metrics are real", asy
     const { exports, transport } = completeCollection(dir);
     const out = join(dir, "run");
     await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    markClean(out);
     const report = reportFromDirectory(out);
 
     assert.deepEqual(report.baseline.gaps, []);
@@ -503,6 +605,7 @@ test("only rows the corpus itself exempts may stay unbound in a measured baselin
     });
     const out = join(dir, "run");
     await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    markClean(out);
     const { baseline } = reportFromDirectory(out);
     assert.deepEqual(baseline.gaps, []);
     assert.equal(baseline.status, "measured");
@@ -549,6 +652,7 @@ test("a run whose API record names no pull request still counts through its head
     };
     const out = join(dir, "run");
     await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    markClean(out);
     const report = reportFromDirectory(out);
     assert.deepEqual(report.baseline.gaps, []);
     for (const { id, metrics } of report.scenarios) {
@@ -725,6 +829,7 @@ async function reportAfter(dir, change = () => {}, options = {}) {
   change({ rewrite, exported });
   const out = join(dir, "run");
   await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+  markClean(out);
   return reportFromDirectory(out);
 }
 
