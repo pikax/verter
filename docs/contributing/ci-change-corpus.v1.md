@@ -7,7 +7,7 @@ The versioned input for every before/after CI comparison: selection, build shari
 - **Commands, metrics and repetition:** the [collection protocol](ci-change-corpus-collection.v1.md).
 - **What CI declares today:** the [inventory](ci-inventory/README.md), with its [workflows](ci-inventory/workflows.md) and [storage](ci-inventory/storage.md).
 
-Cause: isolated passing lanes do not show that a change is covered, or where waiting moves when lanes change. Owner and pattern: `ci-impact.mjs`, `check-ci-aggregate.mjs`, `release-proof.mjs` and `ci-junit-metadata.mjs` stay authoritative; the replay only calls them. CI behavior does not change, except that the scripts lane runs the replay's tests.
+Isolated passing lanes do not show that a change is covered, or where waiting moves when lanes change. `ci-impact.mjs`, `check-ci-aggregate.mjs`, `release-proof.mjs` and `ci-junit-metadata.mjs` stay authoritative; the replay only calls them. The replay's own tests run in the scripts lane against a synthetic crate graph, because crate-graph changes do not select that lane; the real graph is answered by `replay` and `compare`.
 
 ## Identity and versioning
 
@@ -20,12 +20,12 @@ The corpus identity is `ci-change-corpus/1`. Each replay records the digest of t
 
 ## Scenario kinds
 
-| Kind             | IDs            | Input                                                                   | What qualifies                                                                                                                                          |
-| ---------------- | -------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `change`         | `CH01`–`CH17`  | An exact changed-file array, and a release kind where one applies       | The selection and crate closure meet the declared floor. A path array is a selector input only: it compiles nothing and proves no test result.          |
-| `selector-plant` | `SP01`, `SP02` | A change, plus dependency edges removed from the real crate graph       | The expectation holds on the true graph and is violated on the planted one. A plant that leaves the answer intact fails as `plant-not-effective`.       |
-| `fixture`        | `FX01`–`FX09`  | Existing named tests, unmodified                                        | Each name runs and passes. A name that selects zero work fails. `subject` records what the implementation does: a passing `reject` row refused a plant. |
-| `plant`          | `PL01`–`PL04`  | A real failing change applied to a disposable tree, with its obligation | The marker is newly present once, and the obligation fails with the declared output. Passing, or failing for another reason, disqualifies the run.      |
+| Kind             | IDs            | Input                                                                   | What qualifies                                                                                                                                                                                                       |
+| ---------------- | -------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `change`         | `CH01`–`CH17`  | An exact changed-file array, and a release kind where one applies       | The selection and crate closure meet the declared floor. A path array is a selector input only: it compiles nothing and proves no test result.                                                                       |
+| `selector-plant` | `SP01`, `SP02` | A change, plus dependency edges removed from the real crate graph       | The expectation holds on the true graph and is violated on the planted one. A plant that leaves the answer intact fails as `plant-not-effective`.                                                                    |
+| `fixture`        | `FX01`–`FX09`  | Existing named tests, unmodified                                        | Each name runs and passes. A name that selects zero work, a failure, a body-less TODO, or a child that exits non-zero fails. `subject` records what the implementation does: a passing `reject` row refused a plant. |
+| `plant`          | `PL01`–`PL04`  | A real failing change applied to a disposable tree, with its obligation | The marker is newly present once, and the obligation fails with the declared output. Passing, or failing for another reason, disqualifies the run.                                                                   |
 
 An expectation is a floor (`mustSelect`, `mustImpact`), a few unaffected controls (`mustNotSelect`, `mustNotImpact`) and an answer class:
 
@@ -79,7 +79,7 @@ The local fixtures do not show that a future scheduler or cache adapter rejects 
 
 ## Reuse of qualification work
 
-The test-selection qualification corpora (DTEST) have not landed, so no DTEST product exists to reuse in this version. These are the parts that exist today:
+No shared test-selection qualification corpus exists yet to reuse in this version. These are the parts that exist today:
 
 - `FX07` reuses the JUnit metadata contract, and `FX09` reuses the perturbation and hermetic-candidate checks.
 - `FX01` to `FX04` reuse the selector and aggregate fixtures. They are synthetic: `span <- parser <- compiler <- {napi, wasm, lsp}` are not real crates, and they do not measure the workspace.
@@ -99,7 +99,7 @@ The corpus's real-crate samples use the same mutation classes as the planned Rus
 | Dependency edge the selector missed   | `SP01`, `SP02`, `FX01` |
 | JavaScript or TypeScript failure      | `CH04`, `PL04`         |
 
-When a DTEST corpus lands, adopt it through a new corpus version with an explicit scenario mapping. This corpus does not replace it: selection answers alone never show that a selected subset agrees with the full suite.
+When a test-selection qualification corpus lands, adopt it through a new corpus version with an explicit scenario mapping. This corpus does not replace it: selection answers alone never show that a selected subset agrees with the full suite.
 
 ## Coverage limitations
 

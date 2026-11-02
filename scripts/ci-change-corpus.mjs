@@ -60,6 +60,8 @@ const CONFIG_INPUTS = Object.freeze([
   ".github/workflows/release-ide.yml",
   "scripts/ci-impact.mjs",
   "scripts/ci-inert-paths.json",
+  "scripts/provider-ci-internals.mjs",
+  "tests/sfc-projection/STP1/products/current-feature-inventory.json",
   "scripts/lib/crate-graph.mjs",
   "scripts/check-ci-aggregate.mjs",
   "scripts/release-lanes.mjs",
@@ -94,6 +96,16 @@ export function loadCorpus(path = DEFAULT_CORPUS) {
   return { corpus: JSON.parse(text), digest: textDigest(text) };
 }
 
+/** Path-independent digest of a crate graph: no checkout location reaches it. */
+export function metadataDigest(metadata) {
+  const root = String(metadata.workspace_root ?? "");
+  const forms = [JSON.stringify(root).slice(1, -1), root.replaceAll("\\", "/"), root];
+  let text = JSON.stringify(metadata);
+  for (const form of new Set(forms.filter(Boolean))) text = text.split(form).join("<workspace>");
+  // JSON writes a Windows separator as an escaped pair.
+  return textDigest(text.replaceAll("\\\\", "/"));
+}
+
 export const readMetadata = (root = REPO_ROOT) => loadCargoMetadata(root);
 
 /** Problems that make a corpus unusable as a complete comparison input; empty when it is sound. */
@@ -119,6 +131,17 @@ export function validateCorpus(corpus, root = REPO_ROOT) {
     const workflow = existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n/g, "\n") : "";
     if (!workflow.split("\n").includes(`  ${cell.job}:`)) {
       problems.push(`cell ${cell.id} names ${cell.workflow} job ${cell.job}, which does not exist`);
+    }
+  }
+  for (const scenario of (corpus.scenarios ?? []).filter(({ kind }) => kind === "fixture")) {
+    for (const { file, test } of scenario.fixtures ?? []) {
+      const path = join(root, file);
+      const source = existsSync(path) ? readFileSync(path, "utf8") : null;
+      if (source === null)
+        problems.push(`fixture ${scenario.id} names ${file}, which does not exist`);
+      else if (!source.includes(test)) {
+        problems.push(`fixture ${scenario.id} names test "${test}", which ${file} no longer holds`);
+      }
     }
   }
   return problems;
@@ -242,16 +265,28 @@ export function replayFixture(scenario, { run = runFixtureFile } = {}, root = RE
     const result = run({ file, tests: fixtures.map(({ test }) => test), root });
     const stdout = result.stdout ?? "";
     logs.push(`# ${file} (exit ${result.status})\n${stdout}`);
+    // Any `not ok` for a name wins over a later same-named pass; a skipped or
+    // body-less TODO case ran no assertion, so it reports nothing.
     const reported = new Map();
     for (const line of stdout.split(/\r?\n/)) {
       const match = /^\s*(not ok|ok) \d+ - (.*)$/.exec(line);
       if (!match) continue;
       const [name, directive] = match[2].split(" # ");
-      if (/^skip/i.test(directive ?? "")) continue;
+      if (/^(skip|todo)/i.test(directive ?? "")) continue;
+      if (match[1] === "ok" && reported.get(name) === "failed") continue;
       reported.set(name, match[1] === "ok" ? "passed" : "failed");
     }
+    // A child that did not exit cleanly (non-zero, killed, or never started)
+    // certifies none of its passes.
+    const clean = result.status === 0 && !result.error;
     for (const { test, subject } of fixtures) {
-      rows.push({ file, test, subject, verdict: reported.get(test) ?? "no-matching-test" });
+      const verdict = reported.get(test) ?? "no-matching-test";
+      rows.push({
+        file,
+        test,
+        subject,
+        verdict: verdict === "passed" && !clean ? "runner-failed" : verdict,
+      });
     }
   }
   return {
@@ -338,7 +373,8 @@ export function replay({
     throw new Error(`ci-change-corpus: ${out} already holds a run`);
   }
   const { corpus, digest } = loadCorpus(corpusFile ?? DEFAULT_CORPUS);
-  const of = (kind) => corpus.scenarios.filter((scenario) => scenario.kind === kind);
+  const corpusProblems = validateCorpus(corpus, root);
+  const of = (kind) => (corpus.scenarios ?? []).filter((scenario) => scenario.kind === kind);
 
   const selection = of("change").flatMap((scenario) =>
     scenario.samples.map((sample) => {
@@ -366,12 +402,15 @@ export function replay({
     obligation: obligation.argv,
   }));
   const unavailable = [
-    ...corpus.streams.map(({ id, unavailableReason }) => ({ id, reason: unavailableReason })),
-    ...corpus.cells.map(({ id }) => ({
+    ...(corpus.streams ?? []).map(({ id, unavailableReason }) => ({
+      id,
+      reason: unavailableReason,
+    })),
+    ...(corpus.cells ?? []).map(({ id }) => ({
       id,
       reason: "a hosted job execution; this local replay does not start workflows",
     })),
-    ...corpus.cacheConditions.map(({ id }) => ({
+    ...(corpus.cacheConditions ?? []).map(({ id }) => ({
       id,
       reason: "cache state is only observable on the job that restores it",
     })),
@@ -379,6 +418,7 @@ export function replay({
   ];
 
   const ok =
+    corpusProblems.length === 0 &&
     selection.every((row) => row.violations.length === 0) &&
     selectorPlants.every((row) => row.verdict === "rejected-as-expected") &&
     fixtureRuns.every((run) => run.ok);
@@ -398,12 +438,14 @@ export function replay({
       configDigests: Object.fromEntries(
         CONFIG_INPUTS.map((path) => [path, fileDigest(root, path)]),
       ),
-      metadataDigest: textDigest(JSON.stringify(metadata)),
+      metadataDigest: metadataDigest(metadata),
+      fixturesRun: fixtures,
       node: process.version,
       platform: process.platform,
       arch: process.arch,
     },
     ok,
+    corpusProblems,
     selection,
     selectorPlants,
     fixtures: fixtureRuns.map(({ scenario, ok: passed, rows }) => ({ scenario, ok: passed, rows })),
@@ -418,10 +460,49 @@ export function replay({
 
 const difference = (left, right) => left.filter((item) => !right.includes(item));
 
+/** Pair rows of one kind by identity; an unmatched row on either side is a problem. */
+function pairRows(kind, baselineRows, candidateRows, key, problems) {
+  const baseline = new Map(baselineRows.map((row) => [key(row), row]));
+  const candidate = new Map(candidateRows.map((row) => [key(row), row]));
+  for (const id of baseline.keys()) {
+    if (!candidate.has(id)) problems.push(`candidate has no answer for ${kind} ${id}`);
+  }
+  for (const id of candidate.keys()) {
+    if (!baseline.has(id)) problems.push(`baseline has no answer for ${kind} ${id}`);
+  }
+  return [...baseline].flatMap(([id, row]) =>
+    candidate.has(id) ? [{ id, baseline: row, candidate: candidate.get(id) }] : [],
+  );
+}
+
+const fixtureRows = (run) =>
+  (run.fixtures ?? []).flatMap(({ scenario, rows }) => rows.map((row) => ({ scenario, ...row })));
+
+/** Everything in a run that is not the answer the corpus qualifies. */
+function runViolations(run) {
+  const found = [
+    ...(run.corpusProblems ?? []).map((problem) => `corpus: ${problem}`),
+    ...(run.selection ?? []).flatMap((row) =>
+      row.violations.map((violation) => `${row.scenario}/${row.sample}: ${violation}`),
+    ),
+    ...(run.selectorPlants ?? [])
+      .filter((row) => row.verdict !== "rejected-as-expected")
+      .map((row) => `${row.scenario}: selector plant ${row.verdict}`),
+    ...fixtureRows(run)
+      .filter((row) => row.verdict !== "passed")
+      .map((row) => `${row.scenario}: ${row.test}: ${row.verdict}`),
+  ];
+  if (found.length === 0 && run.ok === false) found.push("run reported ok=false");
+  return found;
+}
+
 /**
- * Pair two runs over byte-identical inputs. Differences are reported, not
- * judged, except a sample one arm lacks or a mismatch in inputs, either of which
- * means the arms did not answer the same question.
+ * Pair two runs over byte-identical inputs. Selection answers, selector plants
+ * and fixture rows are each paired by scenario; a row one arm lacks, a
+ * mismatch in inputs, or arms that are not a baseline and a candidate of the
+ * same repetition means the arms did not answer the same question. Differences
+ * between paired answers are reported, not judged; a candidate answer that is
+ * not the qualifying one is a violation.
  */
 export function compareRuns(baseline, candidate) {
   const problems = [];
@@ -430,30 +511,53 @@ export function compareRuns(baseline, candidate) {
       problems.push(`${field} differs: the arms did not read the same corpus (digest mismatch)`);
     }
   }
-  const key = ({ scenario, sample }) => `${scenario}/${sample}`;
-  const pairs = new Map(candidate.selection.map((row) => [key(row), row]));
-  const baselineKeys = new Set(baseline.selection.map(key));
-  for (const row of baseline.selection) {
-    if (!pairs.has(key(row))) problems.push(`candidate has no answer for ${key(row)}`);
+  if (baseline.manifest.arm !== "baseline" || candidate.manifest.arm !== "candidate") {
+    problems.push(
+      `arms are ${baseline.manifest.arm}/${candidate.manifest.arm}, expected baseline/candidate`,
+    );
   }
-  for (const row of candidate.selection) {
-    if (!baselineKeys.has(key(row))) problems.push(`baseline has no answer for ${key(row)}`);
+  if (baseline.manifest.repetition !== candidate.manifest.repetition) {
+    problems.push(
+      `repetition differs: ${baseline.manifest.repetition} against ${candidate.manifest.repetition}`,
+    );
   }
+
+  const selectionPairs = pairRows(
+    "sample",
+    baseline.selection ?? [],
+    candidate.selection ?? [],
+    ({ scenario, sample }) => `${scenario}/${sample}`,
+    problems,
+  );
+  const plantPairs = pairRows(
+    "selector plant",
+    baseline.selectorPlants ?? [],
+    candidate.selectorPlants ?? [],
+    ({ scenario }) => scenario,
+    problems,
+  );
+  const fixturePairs = pairRows(
+    "fixture",
+    fixtureRows(baseline),
+    fixtureRows(candidate),
+    ({ scenario, file, test }) => `${scenario}/${file}/${test}`,
+    problems,
+  );
 
   const changed = [];
   let unchanged = 0;
-  for (const row of baseline.selection) {
-    const other = pairs.get(key(row));
-    if (!other) continue;
+  for (const { baseline: row, candidate: other } of selectionPairs) {
     const entry = {
       scenario: row.scenario,
       sample: row.sample,
+      classChanged: row.class === other.class ? null : { from: row.class, to: other.class },
       gatesAdded: difference(other.gatesOn, row.gatesOn),
       gatesRemoved: difference(row.gatesOn, other.gatesOn),
       cratesAdded: difference(other.impactedCrates, row.impactedCrates),
       cratesRemoved: difference(row.impactedCrates, other.impactedCrates),
     };
     const moved =
+      (entry.classChanged ? 1 : 0) +
       entry.gatesAdded.length +
       entry.gatesRemoved.length +
       entry.cratesAdded.length +
@@ -462,10 +566,20 @@ export function compareRuns(baseline, candidate) {
     else unchanged += 1;
   }
 
-  const fixtureVerdicts = (run) =>
-    (run.fixtures ?? []).flatMap(({ scenario, rows }) =>
-      rows.map((row) => `${scenario}: ${row.test}: ${row.verdict}`),
-    );
+  const verdictChanges = (pairs) =>
+    pairs
+      .filter(({ baseline: before, candidate: after }) => before.verdict !== after.verdict)
+      .map(
+        ({ id, baseline: before, candidate: after }) =>
+          `${id}: ${before.verdict} -> ${after.verdict}`,
+      );
+  const notCompared = [
+    "plants (PL): they mutate a worktree, so each arm runs them with `plant <id>`",
+    ...(plantPairs.length === 0 && fixturePairs.length === 0
+      ? ["selector plants and fixtures: neither arm ran them"]
+      : []),
+  ];
+
   return {
     comparable: problems.length === 0,
     problems,
@@ -475,10 +589,11 @@ export function compareRuns(baseline, candidate) {
     },
     changed,
     unchanged,
-    candidateViolations: candidate.selection.flatMap((row) =>
-      row.violations.map((violation) => `${key(row)}: ${violation}`),
-    ),
-    fixtureChanges: difference(fixtureVerdicts(candidate), fixtureVerdicts(baseline)),
+    candidateViolations: runViolations(candidate),
+    baselineViolations: runViolations(baseline),
+    selectorPlantChanges: verdictChanges(plantPairs),
+    fixtureChanges: verdictChanges(fixturePairs),
+    notCompared,
   };
 }
 
@@ -509,6 +624,7 @@ function main(argv = process.argv.slice(2)) {
       fixtures: !rest.includes("--no-fixtures"),
     });
     const failed = [
+      ...result.corpusProblems.map((problem) => ({ corpus: problem })),
       ...result.selection.filter((row) => row.violations.length > 0),
       ...result.selectorPlants.filter((row) => row.verdict !== "rejected-as-expected"),
       ...result.fixtures.filter((row) => !row.ok),
