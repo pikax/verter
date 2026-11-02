@@ -456,6 +456,36 @@ fn name_search_returns_similarly_named_candidates_without_choosing_a_target() {
     };
     assert_eq!(fingerprint(&folded("TOTAL")), fingerprint(&page));
     assert_eq!(folded("TOTAL").status, EnumerationStatus::Complete);
+
+    // A projection no producer posts under is unsupported, never an empty
+    // population: neither a future lexical version nor a versioned key family
+    // that has no projection.
+    for (family, version) in [
+        (KeyFamily::Lexical, LEXICAL_PROJECTION_VERSION + 1),
+        (KeyFamily::Lexical, 0),
+        (KeyFamily::Exact, 1),
+    ] {
+        let search = Lookup::Prefix {
+            partition: PartitionFamily::Bindings,
+            family,
+            version,
+            prefix: Arc::from("total"),
+        };
+        let (page, _) = host.workspace_index_candidates(&demand, search, WIDE, None, &never());
+        assert!(page.candidates.is_empty(), "{family:?} v{version}");
+        assert!(
+            matches!(
+                page.status,
+                EnumerationStatus::Partial {
+                    cause: PartialCause::UnsupportedCoverage,
+                    continuation: None,
+                    ..
+                }
+            ),
+            "{family:?} v{version}: {:?}",
+            page.status
+        );
+    }
 }
 
 #[test]

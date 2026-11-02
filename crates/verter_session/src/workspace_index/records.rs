@@ -38,6 +38,18 @@ pub enum KeyFamily {
     Reverse,
 }
 
+impl KeyFamily {
+    /// Whether postings of this family are ever keyed under `version`. Only
+    /// the lexical family is projected, at its one current version; every
+    /// other family is unprojected, at version zero.
+    pub(super) fn posts_under(self, version: u32) -> bool {
+        match self {
+            Self::Lexical => version == LEXICAL_PROJECTION_VERSION,
+            Self::Exact | Self::Forward | Self::Reverse => version == 0,
+        }
+    }
+}
+
 /// The lexical search projection. Folding one character at a time keeps it
 /// context-free, so the fold of a prefix is a prefix of the fold of the whole.
 pub(super) fn lexical_fold(text: &str) -> String {

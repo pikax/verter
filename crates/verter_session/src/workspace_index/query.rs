@@ -15,9 +15,7 @@ use verter_identity::encoding::{CanonicalDigest, CanonicalEncoder};
 
 use super::delta::{ObservationOracle, PartialCause};
 use super::identity::{ContributionId, PartitionFamily, PartitionId, ScopeId};
-use super::records::{
-    lexical_fold, IndexRecord, KeyFamily, PostingKey, LEXICAL_PROJECTION_VERSION,
-};
+use super::records::{lexical_fold, IndexRecord, KeyFamily, PostingKey};
 use super::snapshot::{Contribution, CoverageRecord, IndexSnapshot, PostingRef, SnapshotIdentity};
 
 /// Finite budgets of one query.
@@ -37,7 +35,8 @@ pub enum Lookup {
     /// An ordered walk of one partition's key family from a text prefix, in the
     /// projection that family posts under: a lexical prefix is folded the way
     /// its postings are. The empty prefix is a broad walk: it consumes the
-    /// budget and reports `Partial` unless it proves exhaustion.
+    /// budget and reports `Partial` unless it proves exhaustion. A family and
+    /// version no postings are keyed under is `UnsupportedCoverage`.
     Prefix {
         partition: PartitionFamily,
         family: KeyFamily,
@@ -384,6 +383,21 @@ pub fn query_candidates(
     if is_cancelled() {
         return CandidatePage::cancelled(generation, walk.work);
     }
+    // No producer posts under an unsupported projection, so a walk of it would
+    // find nothing and prove nothing: it is unsupported, never complete-empty.
+    if let Lookup::Prefix {
+        family, version, ..
+    } = &query.lookup
+    {
+        if !family.posts_under(*version) {
+            let status = EnumerationStatus::Partial {
+                cause: PartialCause::UnsupportedCoverage,
+                covered: walk.covered(),
+                continuation: None,
+            };
+            return finish(walk, status, generation);
+        }
+    }
 
     let outcome = match &query.lookup {
         Lookup::Keys(keys) => walk_keys(&mut walk, keys, query.continuation.as_ref()),
@@ -516,7 +530,9 @@ fn walk_prefix(
         return Ok(());
     }
     let folded;
-    let prefix: &str = if family == KeyFamily::Lexical && version == LEXICAL_PROJECTION_VERSION {
+    // Only a supported projection reaches the walk, so a lexical one is the
+    // current fold.
+    let prefix: &str = if family == KeyFamily::Lexical {
         folded = lexical_fold(prefix);
         &folded
     } else {
