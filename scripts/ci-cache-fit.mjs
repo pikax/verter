@@ -70,8 +70,11 @@ export function createApi({ repo, token, fetchImpl = fetch }) {
 /**
  * Read every page of one listing, largest entries first so a listing cut short
  * by rate limiting still holds most of the bytes. `complete` holds only when the
- * distinct entries read equal the count the service reported on every page, so
- * an entry saved or evicted between pages never passes as a whole listing.
+ * distinct entries read equal the one count the service reported on every page.
+ * That rejects a repeated entry or a changed total, but not a swap (one entry
+ * evicted and another saved between pages leaves both counts equal), so a full
+ * observation also compares the listed bytes with the usage figure read beside
+ * it (`usageMatchesListing` in the report).
  */
 export async function listCaches(get, { ref } = {}) {
   const byId = new Map();
@@ -204,17 +207,33 @@ function declaredRows(workflow, job, groups, fields) {
 
 /**
  * Whether a workflow's own triggers run it from main: `automatic` on a schedule,
- * an issue comment or a push to main (those events run with the main ref),
- * `manual` when only a dispatch can, otherwise `none`.
+ * an issue comment or a push that can include main (those events run with the
+ * main ref), `manual` when only a dispatch can, otherwise `none`. A push with
+ * no filter, or only a path filter, reaches main; `branches` must name main;
+ * `branches-ignore` must not; a tag filter alone excludes branches. Block-style
+ * and flow-style (`on: [push]`, `on: push`) trigger lists are both read.
  */
 export function mainReachOf(text) {
   const triggers = new Set();
+  const push = {
+    branches: false,
+    mainNamed: false,
+    ignore: false,
+    ignoresMain: false,
+    tags: false,
+  };
   let inOn = false;
   let trigger = null;
-  let inBranches = false;
-  let pushesMain = false;
+  let filter = null;
   for (const line of text.split(/\r?\n/)) {
     if (/^\s*(#.*)?$/.test(line)) continue;
+    const flow = /^on:\s*(?!#)(.+?)\s*(#.*)?$/.exec(line);
+    if (flow) {
+      for (const name of flow[1].replace(/[[\]]/g, "").split(",")) {
+        if (/^[a-z_]+$/.test(name.trim())) triggers.add(name.trim());
+      }
+      break;
+    }
     if (/^on:\s*(#.*)?$/.test(line)) {
       inOn = true;
       continue;
@@ -225,20 +244,33 @@ export function mainReachOf(text) {
     if (named) {
       trigger = named[1];
       triggers.add(trigger);
-      inBranches = false;
+      filter = null;
       continue;
     }
     if (trigger !== "push") continue;
-    const branches = /^\s+branches:\s*(.*)$/.exec(line);
-    if (branches) {
-      inBranches = true;
-      pushesMain ||= /\bmain\b/.test(branches[1]);
+    const key = /^\s+(branches|branches-ignore|tags|tags-ignore):\s*(.*)$/.exec(line);
+    if (key) {
+      filter = key[1];
+      if (filter === "branches") push.branches = true;
+      if (filter === "branches-ignore") push.ignore = true;
+      if (filter === "tags") push.tags = true;
+      if (filter === "branches") push.mainNamed ||= /\bmain\b/.test(key[2]);
+      if (filter === "branches-ignore") push.ignoresMain ||= /\bmain\b/.test(key[2]);
     } else if (/^\s+[a-z_-]+:/.test(line)) {
-      inBranches = false;
-    } else if (inBranches) {
-      pushesMain ||= /\bmain\b/.test(line);
+      filter = null;
+    } else if (filter === "branches") {
+      push.mainNamed ||= /\bmain\b/.test(line);
+    } else if (filter === "branches-ignore") {
+      push.ignoresMain ||= /\bmain\b/.test(line);
     }
   }
+  const pushesMain = !triggers.has("push")
+    ? false
+    : push.branches
+      ? push.mainNamed
+      : push.ignore
+        ? !push.ignoresMain
+        : !push.tags;
   if (pushesMain || triggers.has("schedule") || triggers.has("issue_comment")) return "automatic";
   return triggers.has("workflow_dispatch") ? "manual" : "none";
 }
@@ -323,13 +355,25 @@ function occupancyOf(record) {
       total + (CANDIDATE_FAMILIES.has(family) ? row.otherRefBytes : row.bytes),
     0,
   );
+  const usageBytes = record.usage?.bytes ?? null;
+  // A listing cut short only sums what it read, so its preserved figure is a
+  // lower bound. Whatever the service counted but the listing never attributed
+  // may be preserved, which bounds it from above. Usage and listing are read
+  // moments apart, so a listing that read more than the usage never lowers it.
+  const preservedUpperBytes = record.listing.complete
+    ? preservedBytes
+    : usageBytes === null
+      ? null
+      : preservedBytes + Math.max(0, usageBytes - listedBytes);
   return {
     at: record.at,
     complete: record.listing.complete,
     listedBytes,
     preservedBytes,
+    preservedUpperBytes,
+    usageMatchesListing: usageBytes === null ? null : usageBytes === listedBytes,
     listedCount: record.listing.entries.length,
-    usageBytes: record.usage?.bytes ?? null,
+    usageBytes,
     usageCount: record.usage?.count ?? null,
     byFamily,
   };
@@ -390,18 +434,7 @@ function matchesDeclaration(declaredIdentity, measuredIdentity) {
   return new RegExp(`^${template}@`).test(measuredIdentity);
 }
 
-/**
- * Evaluate fit from recorded bytes only. The budget is the allowance minus the
- * largest occupancy observed at one moment from everything that stays as it is.
- * Measured candidates are admitted smallest first, which retains the most
- * identities; no reserve is added, no eviction is assumed, and an unmeasured
- * identity rules out `all-fit`.
- */
-export function evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeasured }) {
-  const budgetBytes = allowanceBytes - preservedBytes;
-  const ordered = [...candidates].sort(
-    (a, b) => a.bytes - b.bytes || a.identity.localeCompare(b.identity),
-  );
+function admit(budgetBytes, ordered) {
   const fitting = [];
   const excluded = [];
   let usedBytes = 0;
@@ -413,17 +446,50 @@ export function evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeas
       excluded.push({ identity, bytes, budgetLeftBytes: budgetBytes - usedBytes });
     }
   }
-  const everyIdentityFits = excluded.length === 0 && unmeasured.length === 0;
-  const outcome = fitting.length === 0 ? "none-fit" : everyIdentityFits ? "all-fit" : "partial-fit";
+  return { budgetBytes, usedBytes, headroomBytes: budgetBytes - usedBytes, fitting, excluded };
+}
+
+/**
+ * Evaluate fit from recorded bytes only. Measured candidates are admitted
+ * smallest first, which retains the most identities; no reserve is added, no
+ * eviction is assumed, and an unmeasured identity rules out `all-fit`.
+ *
+ * Preserved occupancy is only ever sampled, and a sample taken from a listing
+ * cut short is a lower bound. Two budgets follow from it:
+ * - `provisional`: allowance minus the lower bound. That is an UPPER bound on
+ *   the space available, so the identities it admits are a ceiling, not a fit.
+ * - `bounded`: allowance minus the upper bound on preserved occupancy at the
+ *   sampled moments (`null` when some sample has no upper bound). Its subset
+ *   held at every moment sampled; a peak between samples stays unobserved.
+ * `outcome` is `all-fit` only when `bounded` admits every identity and none is
+ * unmeasured. Anything else is `unestablished`: partial-fit is never certified
+ * from sampled occupancy, and adoption stays held.
+ */
+export function evaluateFit({
+  allowanceBytes,
+  preservedLowerBytes,
+  preservedUpperBytes,
+  candidates,
+  unmeasured,
+}) {
+  const ordered = [...candidates].sort(
+    (a, b) => a.bytes - b.bytes || a.identity.localeCompare(b.identity),
+  );
+  const provisional = admit(allowanceBytes - preservedLowerBytes, ordered);
+  const bounded =
+    preservedUpperBytes === null ? null : admit(allowanceBytes - preservedUpperBytes, ordered);
+  const allFit =
+    bounded !== null &&
+    bounded.excluded.length === 0 &&
+    bounded.fitting.length > 0 &&
+    unmeasured.length === 0;
   return {
     allowanceBytes,
-    preservedBytes,
-    budgetBytes,
-    usedBytes,
-    headroomBytes: budgetBytes - usedBytes,
-    outcome,
-    fitting,
-    excluded,
+    preservedLowerBytes,
+    preservedUpperBytes,
+    outcome: allFit ? "all-fit" : "unestablished",
+    provisional,
+    bounded,
   };
 }
 
@@ -457,6 +523,7 @@ export function summarize(observations, declarations) {
   if (completeRepository.length === 0) return { ...summary, available: false };
 
   // An incomplete listing is a lower bound on what it read, so it can only raise a peak.
+  // Its preserved figure is likewise a lower bound; `preservedUpperBytes` bounds it from above.
   const occupancies = repository.map(occupancyOf);
   const latest = occupancies.findLast((occupancy) => occupancy.complete);
   const peakByFamily = {};
@@ -488,7 +555,9 @@ export function summarize(observations, declarations) {
   ];
   const unmeasured = unmeasuredOf((row) => !isPreserved(row)).sort();
   const unmeasuredPreserved = unmeasuredOf(isPreserved).sort();
-  const preservedBytes = Math.max(...occupancies.map((occupancy) => occupancy.preservedBytes));
+  const preservedLowerBytes = Math.max(...occupancies.map(({ preservedBytes }) => preservedBytes));
+  const upperBounds = occupancies.map(({ preservedUpperBytes }) => preservedUpperBytes);
+  const preservedUpperBytes = upperBounds.includes(null) ? null : Math.max(...upperBounds);
   const candidates = identities.map(({ identity, bytes }) => ({ identity, bytes }));
   const listed = occupancies
     .filter(({ complete }) => complete)
@@ -502,7 +571,8 @@ export function summarize(observations, declarations) {
       minListedBytes: Math.min(...listed),
       peakListedBytes: Math.max(...listed),
       peakUsageBytes: Math.max(...reportedUsage),
-      peakPreservedBytes: preservedBytes,
+      peakPreservedLowerBytes: preservedLowerBytes,
+      peakPreservedUpperBytes: preservedUpperBytes,
       peakByFamily,
       series: occupancies.map(({ byFamily, ...row }) => ({
         ...row,
@@ -524,7 +594,13 @@ export function summarize(observations, declarations) {
     fit: Object.fromEntries(
       Object.entries(ALLOWANCE_READINGS).map(([name, allowanceBytes]) => [
         name,
-        evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeasured }),
+        evaluateFit({
+          allowanceBytes,
+          preservedLowerBytes,
+          preservedUpperBytes,
+          candidates,
+          unmeasured,
+        }),
       ]),
     ),
   };
@@ -563,11 +639,20 @@ async function main(argv) {
       "usage: ci-cache-fit.mjs collect --out <file> [options] | report --in <file> [--workflows <dir>]",
     );
   }
+  const count = (name) => {
+    const value = Number(values[name]);
+    if (!Number.isInteger(value) || value < 1)
+      throw new Error(`--${name} must be a positive integer`);
+    return value;
+  };
+  const samples = count("samples");
+  const intervalSeconds = count("interval-seconds");
+  const fullEvery = count("full-every");
   const token = values["token-env"] ? process.env[values["token-env"]] : undefined;
   await collect(createApi({ repo: values.repo, token }), {
-    samples: Number(values.samples),
-    intervalMs: Number(values["interval-seconds"]) * 1000,
-    fullEvery: Number(values["full-every"]),
+    samples,
+    intervalMs: intervalSeconds * 1000,
+    fullEvery,
     emit: (record) => {
       appendFileSync(values.out, `${JSON.stringify(record)}\n`);
       const { at, scope, listing, usage } = record;

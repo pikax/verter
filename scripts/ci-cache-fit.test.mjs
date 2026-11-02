@@ -2,7 +2,9 @@
 // waiting is injected, so nothing here reaches the network or really waits.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   ALLOWANCE_READINGS,
@@ -138,6 +140,14 @@ test("mainReachOf separates workflows that save from main on their own", () => {
       "none",
     ],
     ["on:\n  pull_request:\n    paths:\n      - main\njobs:\n", "none"],
+    ["on:\n  push:\n  pull_request:\njobs:\n", "automatic"],
+    ["on:\n  push:\n    paths: [a]\njobs:\n", "automatic"],
+    ["on: [push, pull_request]\njobs:\n", "automatic"],
+    ["on: push\njobs:\n", "automatic"],
+    ["on:\n  push:\n    branches-ignore:\n      - main\njobs:\n", "none"],
+    ["on:\n  push:\n    branches-ignore: [dev]\njobs:\n", "automatic"],
+    ["on:\n  push:\n    branches: [dev]\njobs:\n", "none"],
+    ["on: [pull_request, workflow_dispatch]\njobs:\n", "manual"],
   ];
   for (const [text, expected] of table) assert.equal(mainReachOf(text), expected, text);
 });
@@ -250,27 +260,48 @@ test("collect takes full observations on its cadence and waits only between samp
   assert.deepEqual(waits, [1000, 1000, 1000]);
 });
 
-test("evaluateFit resolves outcomes from recorded bytes at their exact boundaries", () => {
+test("evaluateFit certifies a fit only against an upper bound on preserved occupancy", () => {
   const small = { identity: "small", bytes: 10 };
   const large = { identity: "large", bytes: 30 };
-  const fit = (allowanceBytes, candidates, unmeasured = []) =>
-    evaluateFit({ allowanceBytes, preservedBytes: 60, candidates, unmeasured });
+  const fit = (allowanceBytes, candidates, unmeasured = [], upper = 60) =>
+    evaluateFit({
+      allowanceBytes,
+      preservedLowerBytes: 60,
+      preservedUpperBytes: upper,
+      candidates,
+      unmeasured,
+    });
 
   const exact = fit(100, [large, small]);
   assert.deepEqual(
-    [exact.outcome, exact.headroomBytes, exact.fitting],
+    [exact.outcome, exact.bounded.headroomBytes, exact.bounded.fitting],
     ["all-fit", 0, ["small", "large"]],
   );
 
   const short = fit(99, [large, small]);
-  assert.deepEqual([short.outcome, short.fitting], ["partial-fit", ["small"]]);
-  assert.deepEqual(short.excluded, [{ identity: "large", bytes: 30, budgetLeftBytes: 29 }]);
+  assert.deepEqual([short.outcome, short.bounded.fitting], ["unestablished", ["small"]]);
+  assert.deepEqual(short.bounded.excluded, [{ identity: "large", bytes: 30, budgetLeftBytes: 29 }]);
 
   const unknown = fit(1000, [small], ["never-observed"]);
-  assert.equal(unknown.outcome, "partial-fit", "an unmeasured identity is not assumed to fit");
+  assert.equal(unknown.outcome, "unestablished", "an unmeasured identity is not assumed to fit");
 
   const over = fit(50, [small]);
-  assert.deepEqual([over.outcome, over.budgetBytes, over.fitting], ["none-fit", -10, []]);
+  assert.deepEqual(
+    [over.outcome, over.bounded.budgetBytes, over.bounded.fitting],
+    ["unestablished", -10, []],
+  );
+
+  // A lower bound on preserved bytes admits more than the sampled moments allow.
+  const lowerOnly = fit(100, [large, small], [], 80);
+  assert.equal(lowerOnly.provisional.fitting.length, 2, "the lower bound is only a ceiling");
+  assert.deepEqual(
+    [lowerOnly.outcome, lowerOnly.bounded.fitting],
+    ["unestablished", ["small"]],
+    "the upper bound admits only what held at the sampled moments",
+  );
+
+  const unbounded = fit(100, [large, small], [], null);
+  assert.deepEqual([unbounded.outcome, unbounded.bounded], ["unestablished", null]);
 });
 
 test("summarize refuses to report occupancy without a complete repository listing", () => {
@@ -419,12 +450,53 @@ test("summarize attributes newest saves, counts everything in occupancy and leav
   assert.deepEqual(summary.unmeasuredPreserved, ["preserved:gradle"]);
 
   const fit = summary.fit["10 GB (decimal)"];
-  assert.equal(fit.preservedBytes, 3000, "the peaks of different moments are never added together");
-  assert.equal(fit.outcome, "partial-fit");
-  assert.deepEqual(fit.fitting, [
+  assert.equal(
+    fit.preservedLowerBytes,
+    3000,
+    "the peaks of different moments are never added together",
+  );
+  assert.equal(
+    fit.preservedUpperBytes,
+    3000 + (90_000 - 3000),
+    "a listing cut short is bounded from above by the usage it did not attribute",
+  );
+  assert.equal(fit.outcome, "unestablished", "sampled occupancy never certifies a partial fit");
+  const synthetic = [
     "compile-contracts:session@Linux-X64",
     "rust-target:rust-test-rust-test-build@Linux-x64#22222222",
     "rust-target:rust-test-rust-test-build@Linux-x64#986f06eb",
     "compile-contracts:core@Linux-X64",
-  ]);
+  ];
+  assert.deepEqual(fit.provisional.fitting, synthetic);
+  assert.deepEqual(fit.bounded.fitting, synthetic);
+  assert.deepEqual(
+    occupancy.series.map(({ preservedUpperBytes }) => preservedUpperBytes),
+    [2000 + 11 + 13, 3000 + 87_000, 1000 + 11],
+    "a complete listing is exact; one cut short adds the usage it never attributed",
+  );
+  assert.deepEqual(
+    occupancy.series.map(({ usageMatchesListing }) => usageMatchesListing),
+    [null, false, null],
+    "usage is compared with the listed bytes wherever both were read",
+  );
+});
+
+test("collect refuses sample options that would silently measure nothing", () => {
+  const script = fileURLToPath(new URL("./ci-cache-fit.mjs", import.meta.url));
+  for (const option of [
+    ["--samples", "x"],
+    ["--samples", "0"],
+    ["--full-every", "0"],
+    ["--interval-seconds=0"],
+  ]) {
+    const run = spawnSync(
+      process.execPath,
+      [script, "collect", "--out", "unused.jsonl", ...option],
+      {
+        encoding: "utf8",
+      },
+    );
+    assert.equal(run.status, 1, option.join(" "));
+    assert.match(run.stderr, /must be a positive integer/, option.join(" "));
+  }
 });
