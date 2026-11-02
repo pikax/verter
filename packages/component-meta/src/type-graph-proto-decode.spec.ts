@@ -784,19 +784,14 @@ describe("surface partial reason taxonomy parity", () => {
       );
     });
 
-    it("keeps decoding schema 14 payloads", () => {
-      expect(decodeTypedComponentMetaPayload(payloadAt(14, fanout)).resultCompleteness).toEqual({
-        kind: "partial",
-        reasons: ["fanoutLimit"],
-      });
-    });
-
-    it("keeps decoding schema 13 payloads", () => {
-      expect(
-        decodeTypedComponentMetaPayload(payloadAt(13, SurfacePartialReason.BUDGET_EXCEEDED))
-          .resultCompleteness,
-      ).toEqual({ kind: "partial", reasons: ["budgetExceeded"] });
-    });
+    it.each([13, 14])(
+      "refuses a schema %i payload instead of reporting its flat spans as absent",
+      (version) => {
+        expect(() => decodeTypedComponentMetaPayload(payloadAt(version, fanout))).toThrow(
+          new RegExp(`expected ${GRAPH_FORMAT_VERSION}, found ${version}`),
+        );
+      },
+    );
   });
 });
 

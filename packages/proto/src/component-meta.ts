@@ -271,7 +271,7 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
   } = body;
   const complete = { kind: 1 as const, causes: [] };
   return {
-    schemaVersion: 14,
+    schemaVersion: 15,
     typeGraph: legacy.typeGraph,
     body: {
       ...authored,

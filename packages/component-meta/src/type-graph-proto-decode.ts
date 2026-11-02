@@ -264,15 +264,6 @@ const GENERIC_RESOLUTION_FAILURE_UNSUPPORTED_EXPRESSION = 4;
 const GENERIC_RESOLUTION_FAILURE_MISSING_USAGE_LINK = 5;
 const GENERIC_RESOLUTION_FAILURE_UNRESOLVED_CHILD_GENERIC_SURFACE = 6;
 
-/**
- * Schemas this decoder reads beside the current one. Schema 15 replaced the
- * flat declaration/prop span fields with an optional tagged range, so a
- * schema 13 or 14 payload decodes with that span simply absent; a reader that
- * only knows the flat fields refuses 15 at the version gate instead of reading
- * zeros. Schema 14 only added the fan-out reason, so 13 decodes as it is.
- */
-const PREVIOUS_GRAPH_FORMAT_VERSIONS: readonly number[] = [14, 13];
-
 export function decodeTypedComponentMetaPayload(
   payload: ArrayBuffer | ArrayBufferView,
 ): NativeComponentMetaResult {
@@ -313,10 +304,11 @@ function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMeta
 }
 
 function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
-  if (
-    message.schemaVersion !== GRAPH_FORMAT_VERSION &&
-    !PREVIOUS_GRAPH_FORMAT_VERSIONS.includes(message.schemaVersion)
-  )
+  // Schema 15 replaced the flat declaration/prop span fields with a tagged
+  // range, and those field numbers are reserved: a schema 13 or 14 payload's
+  // authored spans cannot be read, so it is refused rather than decoded with
+  // its known spans reported as absent.
+  if (message.schemaVersion !== GRAPH_FORMAT_VERSION)
     throw graphError(
       `component-meta protobuf payload version mismatch: expected ${GRAPH_FORMAT_VERSION}, found ${message.schemaVersion}`,
     );
