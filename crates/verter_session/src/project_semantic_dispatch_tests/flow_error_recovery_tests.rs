@@ -167,6 +167,25 @@ fn assert_row(source: &str, rows: &[(&str, &str)], part: &Part, expected: &[Expe
     assert!(failures.is_empty(), "{source}\n{}", failures.join("\n"));
 }
 
+/// A literal-typed receiver reads its primitive wrapper, so a member that
+/// wrapper lacks is TS2339 at its name and `any`.
+#[test]
+fn an_absent_member_of_a_literal_is_the_checkers_error_type() {
+    for (source, within) in [
+        ("export function f() { const s = 'x'; return s.zz; }", ".zz"),
+        ("export function f(t: 'x' | 'y') { return t.zz; }", ".zz"),
+        ("export function f(t: true) { return t.zz; }", ".zz"),
+        ("export function f(t: 1) { return t.zz; }", ".zz"),
+    ] {
+        assert_row(
+            source,
+            &[("ReturnType<typeof f>", "any")],
+            &declaration("f"),
+            &[ts2339("zz", within)],
+        );
+    }
+}
+
 /// A member read off a local, a parameter, a primitive, a union no arm of
 /// which has it, and through an optional link is TS2339 at the member's name
 /// and `any`; a chain and a call read on through the error type and report
@@ -191,19 +210,6 @@ fn an_absent_member_is_the_checkers_error_type() {
         &declaration("f"),
         &[ts2339("nothing", ".nothing")],
     );
-    for (source, within) in [
-        ("export function f() { const s = 'x'; return s.zz; }", ".zz"),
-        ("export function f(t: 'x' | 'y') { return t.zz; }", ".zz"),
-        ("export function f(t: true) { return t.zz; }", ".zz"),
-        ("export function f(t: 1) { return t.zz; }", ".zz"),
-    ] {
-        assert_row(
-            source,
-            &[("ReturnType<typeof f>", "any")],
-            &declaration("f"),
-            &[ts2339("zz", within)],
-        );
-    }
     assert_row(
         "export function f(o: { a: 1 } | { a: 2 }) { return o.bb; }",
         &[("ReturnType<typeof f>", "any")],
