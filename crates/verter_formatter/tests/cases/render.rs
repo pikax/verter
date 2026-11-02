@@ -552,10 +552,47 @@ fn renderer_has_no_parser_semantic_or_routing_dependency() {
     assert_eq!(direct, ["regex", "verter_formatter"]);
 }
 
-/// A source-backed multiline literal behind a queued suffix stays one segment
-/// bound to exactly its authored bytes; the suffix flushes at the next line.
+/// A multi-line authored literal is supplied as one binding per line joined by
+/// raw newline text. A queued suffix flushes before the first newline exactly
+/// as for generated text, and every source segment keeps its exact authored
+/// bytes under a valid binding.
 #[test]
-fn multiline_source_text_keeps_one_exact_binding_behind_a_queued_suffix() {
+fn queued_suffix_orders_identically_for_source_backed_and_generated_multiline_text() {
+    const AUTHORED: &str = "a\nb";
+    let mut table = FormatProvenanceTable::new(3_u128);
+    let mut bind = |start, end| {
+        let at = |o| AuthoredFormatByteOffset::for_source(AUTHORED, o).unwrap();
+        let range = AuthoredFormatByteRange::for_source(AUTHORED, at(start), at(end)).unwrap();
+        AuthoredProvenance::new(table.bind_authored(range), range)
+    };
+    let (first, second) = (bind(0, 1), bind(2, 3));
+    let mut d = Doc::new();
+    let suffix = d.line_suffix("!");
+    let a = d.source(Provenanced::new("a".into(), first.clone()));
+    let newline = d.text("\n");
+    let b = d.source(Provenanced::new("b".into(), second.clone()));
+    let root = d.concat([suffix, a, newline, b]);
+    let source_backed = render(&d, root, RenderOptions::default()).unwrap();
+
+    let mut g = Doc::new();
+    let suffix = g.line_suffix("!");
+    let text = g.text(AUTHORED);
+    let root = g.concat([suffix, text]);
+    let generated = render(&g, root, RenderOptions::default()).unwrap();
+
+    assert_eq!(source_backed.text, "a!\nb");
+    assert_eq!(source_backed.text, generated.text);
+    assert_eq!(
+        source_segments(&source_backed),
+        [(first.clone(), "a"), (second.clone(), "b")]
+    );
+    table.validate(&3, &first).unwrap();
+    table.validate(&3, &second).unwrap();
+}
+
+#[test]
+#[should_panic(expected = "source text must be single-line")]
+fn source_text_refuses_embedded_newlines() {
     const AUTHORED: &str = "a\nb";
     let range = AuthoredFormatByteRange::for_source(
         AUTHORED,
@@ -565,14 +602,7 @@ fn multiline_source_text_keeps_one_exact_binding_behind_a_queued_suffix() {
     .unwrap();
     let mut table = FormatProvenanceTable::new(3_u128);
     let binding = AuthoredProvenance::new(table.bind_authored(range), range);
-    let mut d = Doc::new();
-    let suffix = d.line_suffix("!");
-    let text = d.source(Provenanced::new(AUTHORED.into(), binding.clone()));
-    let hard = d.line(Line::Hard);
-    let root = d.concat([suffix, text, hard]);
-    let output = render(&d, root, RenderOptions::default()).unwrap();
-    assert_eq!(output.text, "a\nb!\n");
-    assert_eq!(source_segments(&output), [(binding, AUTHORED)]);
+    Doc::new().source(Provenanced::new(AUTHORED.into(), binding));
 }
 
 #[test]

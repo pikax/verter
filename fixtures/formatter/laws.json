@@ -8,7 +8,7 @@
     "invalid_scalar_or_surrogate_boundary": "reject; never clamp"
   },
   "renderer": {
-    "group": "try flat using pinned Prettier string-width semantics: ANSI controls and combining U+0300-U+036F width 0, East Asian fullwidth and emoji width 2, other scalars width 1; tabs advance to next tabWidth stop; first hardline forces break; suffixes flush in source order before newline",
+    "group": "try flat using pinned Prettier string-width semantics: ANSI controls and combining U+0300-U+036F width 0, East Asian fullwidth and emoji width 2, other scalars width 1; tabs advance to next tabWidth stop; first hardline forces break; suffixes flush in source order before newline; source-backed text is single-line (a binding names one authored range its output must equal, so it is never split at a newline) and a multi-line authored literal is supplied as one binding per line joined by raw newline text",
     "group_fit": "a group measures its complete flat body and the pending line-suffix queue from the current column; ordinary following siblings are excluded, so print_width is not a guaranteed maximum emitted line length. At width 5, group('ab' + space-line + 'cd') followed by 'xy' renders 'ab cdxy'; with 'xy' inside the group it breaks",
     "newline": "configured LF/CRLF/CR, auto uses first source line ending; literal/raw/recovery bytes never normalized",
     "final_newline": "one configured final newline for nonempty formatted syntax; empty stays empty; retained islands unchanged",

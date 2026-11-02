@@ -108,8 +108,17 @@ impl Doc {
     }
 
     /// Source text carries its original binding unchanged to the output.
+    /// A binding names exactly one authored range whose bytes the output
+    /// segment must equal, so the renderer can never split it at a queued
+    /// suffix's newline. Source text is therefore single-line; a multi-line
+    /// authored literal is supplied as one binding per line joined by
+    /// generated raw newline text, which flushes suffixes like any raw newline.
     pub fn source(&mut self, text: Provenanced<String>) -> DocId {
         let (text, binding) = text.into_parts();
+        assert!(
+            !text.contains(['\r', '\n']),
+            "source text must be single-line"
+        );
         self.push(Node::Text(text, Some(binding)))
     }
 

@@ -329,15 +329,10 @@ pub fn render(doc: &Doc, root: DocId, options: RenderOptions) -> Result<Rendered
             |stack: &mut Vec<Command>, id, indent, flat| stack.push(Command { id, indent, flat });
         match &doc.nodes[cmd.id] {
             Node::Text(text, binding) => {
-                // Unbound raw text flushes queued suffixes before its first
-                // newline, splitting there only. A source-backed literal is
-                // atomic: one binding names exactly one authored range, so
-                // splitting it would bind both halves to bytes they are not,
-                // and its queued suffixes wait for the next line or EOF.
-                let split = match binding {
-                    None => text.find(['\r', '\n']).filter(|_| !suffixes.is_empty()),
-                    Some(_) => None,
-                };
+                // Raw text flushes queued suffixes before its first newline,
+                // splitting there only. Source-backed text is single-line by
+                // construction (`Doc::source`), so it never splits.
+                let split = text.find(['\r', '\n']).filter(|_| !suffixes.is_empty());
                 if let Some(at) = split {
                     sink.append(&text[..at], None, None)?;
                     flush(doc, &mut suffixes, &mut sink)?;
