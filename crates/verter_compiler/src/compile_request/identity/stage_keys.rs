@@ -1,13 +1,16 @@
 //! The stage identities declared by this module. See [`super`] for the
 //! composition law; [`ParseKey`] is re-exported there, never re-minted
-//! here. Every key is a `digest_identity!` newtype over the shared
+//! here. Every key is a `sealed_digest_identity!` newtype over the shared
 //! `Canonical` payload, built from a borrowed `ExactCanonicalEncode`
-//! descriptor: one allocation and one canonical-byte hash per key.
+//! descriptor: one allocation and one canonical-byte hash per key. Only the
+//! named composition constructors can mint keys; callers cannot supply an
+//! arbitrary descriptor or domain tag.
 
-use verter_identity::digest_identity;
+use verter_identity::canonical::Canonical;
 use verter_identity::encoding::CanonicalDigest;
 use verter_identity::exact::{CanonicalFieldSink, ExactCanonicalEncode};
 use verter_identity::identity::ParseKey;
+use verter_identity::sealed_digest_identity;
 
 /// Per-stage contract epoch of the default contract registry row a key
 /// composes: a revision that changes one stage advances only that stage's
@@ -15,7 +18,7 @@ use verter_identity::identity::ParseKey;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StageEpoch(pub u32);
 
-digest_identity!(
+sealed_digest_identity!(
     /// What semantic admission committed to answer: the demanded regions,
     /// the host-resolved facts it admitted, and the external style stages
     /// actually supplied. Field 5 of [`SemanticKey`].
@@ -54,15 +57,15 @@ impl SemanticAdmissionBasis {
         admitted_facts: &[CanonicalDigest],
         supplied_style_stages: &[CanonicalDigest],
     ) -> Self {
-        Self::from_exact(&SemanticAdmissionBasisDescriptor {
+        Self(Canonical::from_exact(&SemanticAdmissionBasisDescriptor {
             demanded_regions,
             admitted_facts,
             supplied_style_stages,
-        })
+        }))
     }
 }
 
-digest_identity!(
+sealed_digest_identity!(
     /// Semantic-stage identity: over which source units, under which
     /// framework profile, options, contract epoch and admission basis the
     /// semantic stage resolves.
@@ -112,17 +115,17 @@ impl SemanticKey {
         semantic_epoch: StageEpoch,
         admission_basis: &SemanticAdmissionBasis,
     ) -> Self {
-        Self::from_exact(&SemanticKeyDescriptor {
+        Self(Canonical::from_exact(&SemanticKeyDescriptor {
             source_units,
             framework_profile,
             semantic_options,
             semantic_epoch,
             admission_basis,
-        })
+        }))
     }
 }
 
-digest_identity!(
+sealed_digest_identity!(
     /// Compile-structure-stage identity: which structure the compile
     /// builds, over the semantic identity plus the product's demand
     /// closure, structure-class options and contract epoch.
@@ -164,16 +167,16 @@ impl CompileStructureKey {
         structure_options: &[u8],
         structure_epoch: StageEpoch,
     ) -> Self {
-        Self::from_exact(&CompileStructureKeyDescriptor {
+        Self(Canonical::from_exact(&CompileStructureKeyDescriptor {
             semantic,
             demand_closure,
             structure_options,
             structure_epoch,
-        })
+        }))
     }
 }
 
-digest_identity!(
+sealed_digest_identity!(
     /// Target-plan-stage identity: which per-target plan the compile
     /// executes, over the structure identity plus the target,
     /// target-plan-class options and contract epoch.
@@ -214,16 +217,16 @@ impl TargetPlanKey {
         target_plan_options: &[u8],
         target_epoch: StageEpoch,
     ) -> Self {
-        Self::from_exact(&TargetPlanKeyDescriptor {
+        Self(Canonical::from_exact(&TargetPlanKeyDescriptor {
             structure,
             target,
             target_plan_options,
             target_epoch,
-        })
+        }))
     }
 }
 
-digest_identity!(
+sealed_digest_identity!(
     /// Emit-stage identity: which emission the compile produces, over the
     /// target-plan identity plus the emit-class options, the map mode and
     /// the contract epoch. The emit planner keys its plans by this
@@ -266,16 +269,16 @@ impl EmitKey {
         map_mode: CanonicalDigest,
         emit_epoch: StageEpoch,
     ) -> Self {
-        Self::from_exact(&EmitKeyDescriptor {
+        Self(Canonical::from_exact(&EmitKeyDescriptor {
             target_plan,
             emit_options,
             map_mode,
             emit_epoch,
-        })
+        }))
     }
 }
 
-digest_identity!(
+sealed_digest_identity!(
     /// Terminal-stage identity: which terminal form the compile publishes,
     /// over the emit identity plus the terminal-class option bytes and the
     /// contract epoch. Output, presentation and serialization profile
@@ -309,10 +312,14 @@ impl TerminalKey {
     /// canonical bytes of the terminal-class option set, and the
     /// terminal-stage contract epoch.
     pub fn compose(emit: &EmitKey, terminal_options: &[u8], terminal_epoch: StageEpoch) -> Self {
-        Self::from_exact(&TerminalKeyDescriptor {
+        Self(Canonical::from_exact(&TerminalKeyDescriptor {
             emit,
             terminal_options,
             terminal_epoch,
-        })
+        }))
     }
 }
+
+#[cfg(test)]
+#[path = "stage_key_contract_tests.rs"]
+mod stage_key_contract_tests;

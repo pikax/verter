@@ -948,17 +948,47 @@ fn terminal_key_canonical_bytes_are_pinned() {
     assert_eq!(key.canonical_bytes(), &expected[..]);
 }
 
-// Every key is the shared `Canonical` payload and nothing else: a key
-// re-pointed at a compiler-local payload type changes its layout and
-// stops compiling here. Retention accounting below covers the behaviour
-// a same-layout local payload would still have to reproduce.
-static_assertions::assert_eq_size!(SemanticAdmissionBasis, Canonical);
-static_assertions::assert_eq_size!(SemanticKey, Canonical);
-static_assertions::assert_eq_size!(CompileStructureKey, Canonical);
-static_assertions::assert_eq_size!(TargetPlanKey, Canonical);
-static_assertions::assert_eq_size!(EmitKey, Canonical);
-static_assertions::assert_eq_size!(TerminalKey, Canonical);
-static_assertions::assert_eq_align!(SemanticKey, Canonical);
+// Bind the actual retained field type, not its layout. These witnesses reject
+// a local digest-plus-Arc payload even when its size and alignment match.
+const _: fn(&SemanticAdmissionBasis) -> &Canonical = |key| &key.0;
+const _: fn(&SemanticKey) -> &Canonical = |key| &key.0;
+const _: fn(&CompileStructureKey) -> &Canonical = |key| &key.0;
+const _: fn(&TargetPlanKey) -> &Canonical = |key| &key.0;
+const _: fn(&EmitKey) -> &Canonical = |key| &key.0;
+const _: fn(&TerminalKey) -> &Canonical = |key| &key.0;
+
+/// Inherent constructors take precedence over trait methods. The unit-typed
+/// result compiles only when arbitrary-descriptor minting is absent; an
+/// unsealed identity macro instead returns a key and fails type checking.
+#[test]
+fn stage_keys_reject_arbitrary_descriptors() {
+    use verter_identity::exact::{CanonicalFieldSink, ExactCanonicalEncode};
+
+    struct ForeignDescriptor;
+    impl ExactCanonicalEncode for ForeignDescriptor {
+        const DOMAIN_TAG: &'static str = "foreign-descriptor.v1";
+        fn exact_fields<S: CanonicalFieldSink>(&self, _: &mut S) {}
+    }
+    trait AbsentConstructor {
+        fn from_canonical(_: &ForeignDescriptor) {}
+        fn from_exact(_: &ForeignDescriptor) {}
+    }
+    macro_rules! assert_sealed {
+        ($($key:ty),+ $(,)?) => {$(
+            impl AbsentConstructor for $key {}
+            let (): () = <$key>::from_canonical(&ForeignDescriptor);
+            let (): () = <$key>::from_exact(&ForeignDescriptor);
+        )+};
+    }
+    assert_sealed!(
+        SemanticAdmissionBasis,
+        SemanticKey,
+        CompileStructureKey,
+        TargetPlanKey,
+        EmitKey,
+        TerminalKey,
+    );
+}
 
 /// Retention accounting flows through the shared payload: two owners of
 /// clones of one key charge its canonical bytes once, and the charge
@@ -1014,6 +1044,8 @@ fn construction_work_count_excludes_a_concurrent_sibling() {
         std::thread::spawn(move || {
             let inputs = SemanticKeyRow.prepare();
             started.wait();
+            composed.wait();
+            started.wait();
             for _ in 0..8 {
                 std::hint::black_box(SemanticKeyRow.compose_prepared(&inputs));
             }
@@ -1021,6 +1053,11 @@ fn construction_work_count_excludes_a_concurrent_sibling() {
         })
     };
 
+    // Initialize lazy platform mutex/condvar storage before measuring key work.
+    // The second rendezvous pair still fences all sibling composition inside
+    // the reset-to-read window.
+    started.wait();
+    composed.wait();
     reset_alloc_calls();
     reset_hash_passes();
     started.wait();

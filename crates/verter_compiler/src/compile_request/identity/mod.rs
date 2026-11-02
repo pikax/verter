@@ -9,8 +9,9 @@
 //! domain tag per stage with fixed field numbers: set-like fields sort
 //! and deduplicate, absent is distinct from present, and the bytes are
 //! the public compatibility contract. Every key is a
-//! `digest_identity!` newtype over the shared `Canonical` payload and is
-//! built from a borrowed `ExactCanonicalEncode` descriptor, so composing
+//! `sealed_digest_identity!` newtype over the shared `Canonical` payload and is
+//! minted only by its named composition constructor. A borrowed
+//! `ExactCanonicalEncode` descriptor supplies its fields, so composing
 //! one key performs one allocation and one canonical-byte hash. A stage key
 //! addresses a cache slot; it is not
 //! a host validity oracle — warm admission stays with the host store-view
@@ -50,9 +51,6 @@
 
 mod optimized_basis;
 mod stage_keys;
-
-#[cfg(test)]
-mod stage_key_contract_tests;
 
 pub use optimized_basis::{ArtifactBasis, OptimizationObservationSet, OptimizationRequestBasis};
 pub use stage_keys::{
