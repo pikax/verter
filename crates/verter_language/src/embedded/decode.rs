@@ -604,6 +604,7 @@ impl EmbeddedTextCodec {
                 elisions,
                 empty_anchor,
             },
+            &[],
         )
         .map_err(CodecRefusal::InconsistentMap)?;
         let text = match self.selection() {

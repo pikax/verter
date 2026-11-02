@@ -412,6 +412,18 @@ fn mapped_stage(
     output: BasisText<'_>,
     segments: Vec<MapSegment>,
 ) -> Arc<MapStage> {
+    mapped_stage_inlining(kind, certification, input, output, segments, &[])
+}
+
+/// A stage whose foreign origins index the given proven authored texts.
+fn mapped_stage_inlining(
+    kind: StageKind,
+    certification: EditCertification,
+    input: BasisText<'_>,
+    output: BasisText<'_>,
+    segments: Vec<MapSegment>,
+    foreign: &[BasisText<'_>],
+) -> Arc<MapStage> {
     Arc::new(
         MapStage::new(
             kind,
@@ -422,6 +434,7 @@ fn mapped_stage(
                 segments,
                 ..StageSegments::default()
             },
+            foreign,
         )
         .expect("a consistent stage"),
     )
@@ -1337,7 +1350,9 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
     let output = basis(host(), CoordinateDomain::Embedded, &expanded, "pug");
     let out = proven(&output, &expanded);
     let imported = unit_origin("import.scss", 4, 9);
-    let stage = mapped_stage(
+    let scss = "a { color: red }";
+    let scss_basis = basis(unit("import.scss"), CoordinateDomain::Source, scss, "scss");
+    let stage = mapped_stage_inlining(
         StageKind::Preprocessor,
         EditCertification::Reversible,
         proven(&input, "mixin body"),
@@ -1370,6 +1385,7 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
             },
             verbatim(embedded(20, 25), embedded(0, 5)),
         ],
+        &[proven(&scss_basis, scss)],
     );
     let chain = chain.then(stage).expect("joins");
 
@@ -1941,6 +1957,7 @@ fn discovery_order_never_changes_an_answer() {
                 segments,
                 ..StageSegments::default()
             },
+            &[],
         )
     };
     let a = verbatim(embedded(0, 2), authored(0, 2));
@@ -3057,6 +3074,7 @@ fn the_end_of_an_unmapped_suffix_has_no_authored_position() {
                 empty_anchor: Some(DomainOffset::Embedded(eo(1))),
                 ..StageSegments::default()
             },
+            &[],
         ),
         Err(MapStageError::AnchorOnNonEmptyOutput)
     );
@@ -3067,6 +3085,7 @@ fn a_provenance_run_must_name_an_origin_and_every_origin_contributes() {
     let (literal, chain) = syntax_chain_over("`ab`");
     let input = literal.stage().output().clone();
     let output = basis(host(), CoordinateDomain::Embedded, "ab", "stage");
+    let scss_basis = basis(unit("import.scss"), CoordinateDomain::Source, "ab", "scss");
     let build = |segments| {
         MapStage::new(
             StageKind::Preprocessor,
@@ -3077,6 +3096,7 @@ fn a_provenance_run_must_name_an_origin_and_every_origin_contributes() {
                 segments,
                 ..StageSegments::default()
             },
+            &[proven(&scss_basis, "ab")],
         )
     };
     let empty = MapSegment {
@@ -3285,7 +3305,11 @@ fn degenerate_policies_refuse_with_a_type() {
 /// counts: text it would join into syntax is refused, never written.
 #[test]
 fn reverse_encoding_refuses_what_its_neighbours_would_turn_into_syntax() {
-    let neighbours = |before, after| AuthoredNeighbours { before, after };
+    let neighbours = |before, after| AuthoredNeighbours {
+        before,
+        replaced: "",
+        after,
+    };
     let refused = Err(UnencodableReplacement::FormsSyntaxWithNeighbours);
     let template = template_cooked();
     // `$` before an authored `{` would open a hole; removing the text between
@@ -3474,6 +3498,7 @@ fn a_stage_endpoint_inside_a_scalar_is_refused_at_admission() {
                 elisions,
                 empty_anchor: None,
             },
+            &[],
         )
     };
     let whole = |input| MapSegment {
@@ -3534,6 +3559,7 @@ fn a_stage_endpoint_inside_a_scalar_is_refused_at_admission() {
                 empty_anchor: Some(DomainOffset::Embedded(eo(1))),
                 ..StageSegments::default()
             },
+            &[],
         ),
         inside
     );
@@ -3575,6 +3601,88 @@ fn a_stage_endpoint_inside_a_scalar_is_refused_at_admission() {
     }
 }
 
+/// A foreign origin indexes another unit's authored bytes, so a stage is
+/// admitted only over that unit's proven text as well: an origin inside one of
+/// its scalars or past its end, or one naming a unit with no proven text, is
+/// refused when the stage is built and never answers as exact provenance.
+#[test]
+fn a_foreign_origin_is_proven_against_its_own_unit_text() {
+    let (literal, chain) = syntax_chain_over("`ab`");
+    let input = literal.stage().output().clone();
+    let output = basis(host(), CoordinateDomain::Embedded, "ab", "stage");
+    let out = proven(&output, "ab");
+    let scss = "é{}";
+    let scss_basis = basis(unit("import.scss"), CoordinateDomain::Source, scss, "scss");
+    let other_scss = basis(unit("import.scss"), CoordinateDomain::Source, "ab", "scss");
+    let host_source = basis(host(), CoordinateDomain::Source, scss, "scss");
+    let inlined = |start, end| MapSegment {
+        output: embedded(0, 2),
+        origin: SegmentOrigin::Provenance {
+            origins: Box::new([OriginRef::Foreign(unit_origin("import.scss", start, end))]),
+        },
+    };
+    let build = |segment: MapSegment, foreign: &[BasisText<'_>]| {
+        MapStage::new(
+            StageKind::Preprocessor,
+            EditCertification::Reversible,
+            proven(&input, "ab"),
+            out,
+            StageSegments {
+                segments: vec![segment],
+                ..StageSegments::default()
+            },
+            foreign,
+        )
+    };
+    let scss_text = [proven(&scss_basis, scss)];
+    let inside = Err(MapStageError::InvalidBoundary(CoordError::NotCharBoundary));
+
+    // Starting or ending inside `é` of the inlined unit.
+    assert_eq!(build(inlined(1, 2), &scss_text), inside);
+    assert_eq!(build(inlined(0, 1), &scss_text), inside);
+    assert_eq!(
+        build(inlined(2, 9), &scss_text),
+        Err(MapStageError::InvalidBoundary(CoordError::InvalidBoundary))
+    );
+    // A conflict hides nothing from the proof.
+    let conflicted = MapSegment {
+        output: embedded(0, 2),
+        origin: SegmentOrigin::Conflicting {
+            origins: Box::new([
+                SegmentOrigin::Synthetic { hole: None },
+                inlined(1, 2).origin,
+            ]),
+        },
+    };
+    assert_eq!(build(conflicted, &scss_text), inside);
+    // No text for the unit, another unit's text, or two different texts for
+    // it: nothing proves the range.
+    let unproven = Err(MapStageError::UnprovenForeignOrigin);
+    assert_eq!(build(inlined(0, 2), &[]), unproven);
+    assert_eq!(
+        build(inlined(0, 2), &[proven(&host_source, scss)]),
+        unproven
+    );
+    assert_eq!(
+        build(
+            inlined(0, 2),
+            &[proven(&scss_basis, scss), proven(&other_scss, "ab")]
+        ),
+        unproven
+    );
+
+    // The proven origin answers exactly, as the whole scalar.
+    let stage = Arc::new(build(inlined(0, 2), &scss_text).expect("proven"));
+    let chain = chain.then(stage).expect("joins");
+    assert_eq!(
+        chain
+            .provenance(&out, embedded(0, 2))
+            .expect("inlined bytes")
+            .exact(),
+        Some(&unit_origin("import.scss", 0, 2))
+    );
+}
+
 /// An authored escape whose meaning depends on the character after it keeps
 /// that meaning only if the edit leaves it an allowed neighbour. A digit
 /// inserted after a zero escape, or the separation before a digit deleted,
@@ -3592,7 +3700,11 @@ fn reverse_encoding_refuses_edits_that_change_an_adjacent_escape() {
         backticks(),
         admit_holes(None),
     );
-    let neighbours = |before, after| AuthoredNeighbours { before, after };
+    let neighbours = |before, after| AuthoredNeighbours {
+        before,
+        replaced: "",
+        after,
+    };
     let joined = |codec: &EmbeddedTextCodec, before: &str, spelled: &str, after: &str| {
         let source = format!("{before}{spelled}{after}");
         decode_template(codec, &source).map(|literal| literal.text().to_owned())
@@ -3689,5 +3801,102 @@ fn reverse_encoding_refuses_edits_that_change_an_adjacent_escape() {
     assert_eq!(
         paired.encode_replacement("\r", neighbours("`a", "\nb`")),
         Err(UnencodableReplacement::ChangesAdjacentEscape)
+    );
+}
+
+/// Raw text keeps every byte, but an escaped closer or hole opener stays
+/// escaped only while its introducer still escapes it. An edit range the raw
+/// map certifies may fall between an introducer and the character it escapes;
+/// inserting there, or removing the introducer alone, would leave the closer or
+/// opener unescaped, so neither is spelled. Edits that leave each introducer
+/// escaping its own character are spelled and round trip.
+#[test]
+fn raw_reverse_encoding_keeps_each_authored_introducer_escaping_its_character() {
+    let raw = template_raw();
+    let edit = |codec: &EmbeddedTextCodec, source: &str, range, replacement: &str| {
+        let literal = decoded(codec, source);
+        let authored = literal.editable_range(range).expect("a certified range");
+        let (start, end) = (
+            authored.start().get() as usize,
+            authored.end().get() as usize,
+        );
+        let neighbours = AuthoredNeighbours {
+            before: &source[..start],
+            replaced: &source[start..end],
+            after: &source[end..],
+        };
+        let written = |spelled: &str| {
+            let source = format!("{}{spelled}{}", &source[..start], &source[end..]);
+            decode_template(codec, &source).map(|literal| literal.text().to_owned())
+        };
+        (
+            codec.encode_replacement(replacement, neighbours),
+            written(replacement),
+        )
+    };
+
+    for (codec, source, range, replacement, wanted) in [
+        // Between `\` and the closer it escapes.
+        (&raw, "`a\\`b`", er(2, 2), "x", "a\\x`b"),
+        // The introducer alone, removed or replaced.
+        (&raw, "`a\\`b`", er(1, 2), "", "a`b"),
+        (&raw, "`a\\`b`", er(1, 2), "y", "ay`b"),
+        // The same around an escaped hole opener.
+        (&raw, "`a\\${b`", er(2, 2), "x", "a\\x${b"),
+        (&raw, "`a\\${b`", er(1, 2), "", "a${b"),
+        // An escaped introducer before the closer: removing either half
+        // leaves the remaining introducer escaping the closer.
+        (&raw, "`a\\\\`", er(2, 3), "", "a\\"),
+        (&raw, "`a\\\\`", er(1, 2), "", "a\\"),
+    ] {
+        let label = format!("{source:?} {range:?} {replacement:?}");
+        let (spelled, unchecked) = edit(codec, source, range, replacement);
+        // Premise: written unchecked, the edit does not decode to its text.
+        assert_ne!(unchecked.as_deref(), Ok(wanted), "{label}");
+        assert_eq!(
+            spelled,
+            Err(UnencodableReplacement::ChangesAdjacentEscape),
+            "{label}"
+        );
+    }
+
+    // Edits beside a whole escape, or replacing it whole, are spelled.
+    for (source, range, replacement, wanted) in [
+        ("`a\\`b`", er(1, 1), "x", "ax\\`b"),
+        ("`a\\`b`", er(3, 3), "x", "a\\`xb"),
+        ("`a\\`b`", er(1, 3), "y", "ayb"),
+        ("`a\\`b`", er(1, 3), "", "ab"),
+        ("`a\\${b`", er(3, 3), "x", "a\\$x{b"),
+        ("`a\\\\`", er(1, 3), "", "a"),
+        ("`a\\\\`", er(3, 3), "x", "a\\\\x"),
+    ] {
+        let label = format!("{source:?} {range:?} {replacement:?}");
+        let (spelled, written) = edit(&raw, source, range, replacement);
+        assert_eq!(spelled.as_deref(), Ok(replacement), "{label}");
+        assert_eq!(written.as_deref(), Ok(wanted), "{label}");
+    }
+
+    // A cooked codec reads its introducer the same way at the end seam, so
+    // removing an introducer alone is refused whatever range certified it.
+    let cooked = template_cooked();
+    let split = AuthoredNeighbours {
+        before: "`a",
+        replaced: "\\",
+        after: "`b`",
+    };
+    assert_eq!(
+        cooked.encode_replacement("", split),
+        Err(UnencodableReplacement::ChangesAdjacentEscape)
+    );
+    assert_eq!(
+        cooked.encode_replacement(
+            "",
+            AuthoredNeighbours {
+                replaced: "\\`",
+                after: "b`",
+                ..split
+            }
+        ),
+        Ok(String::new())
     );
 }

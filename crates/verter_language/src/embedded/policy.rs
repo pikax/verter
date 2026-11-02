@@ -170,19 +170,23 @@ pub enum UnencodableReplacement {
     FormsSyntaxWithNeighbours,
     /// An escape at an edge of the edit, authored or spelled, would read
     /// differently in its new context: the character now after it is one the
-    /// escape forbids, or the text across the seam extends it into a longer
-    /// escape.
+    /// escape forbids, the text across the seam extends it into a longer
+    /// escape, or an authored introducer would escape another character than
+    /// it did before the edit.
     ChangesAdjacentEscape,
 }
 
-/// The authored bytes around an edit. Slices of the source reaching to its ends
-/// are always enough, and the delimiters count: a replacement ending in the
-/// start of a closer means something else beside it. An escape's meaning can
-/// depend on what follows it, so `before` must reach back past the escape
-/// introducers immediately preceding the edit.
+/// The authored bytes around and under an edit. Slices of the source reaching
+/// to its ends are always enough, and the delimiters count: a replacement
+/// ending in the start of a closer means something else beside it. An escape's
+/// meaning can depend on what follows it, so `before` must reach back past the
+/// escape introducers immediately preceding the edit. `replaced` is the
+/// authored text the edit removes: whether an introducer at its end escaped the
+/// first character of `after` is known only from it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AuthoredNeighbours<'a> {
     pub before: &'a str,
+    pub replaced: &'a str,
     pub after: &'a str,
 }
 
@@ -278,6 +282,11 @@ impl EmbeddedTextCodec {
         .any(|syntax| spans_a_seam(neighbours, &spelled, syntax));
         if formed {
             return Err(UnencodableReplacement::FormsSyntaxWithNeighbours);
+        }
+        if let Some(introducer) = self.delimiters.escape_introducer {
+            if !keeps_introducer_pairing(neighbours, &spelled, introducer) {
+                return Err(UnencodableReplacement::ChangesAdjacentEscape);
+            }
         }
         if let (Some(policy), Some(introducer)) = (cooked_policy, self.delimiters.escape_introducer)
         {
@@ -391,6 +400,45 @@ impl EscapeSeams<'_> {
             % 2
             == 0
     }
+}
+
+/// Whether every authored introducer beside the edit escapes the same character
+/// after it as before it. The introducer pairs as the decoder reads it under
+/// either selection: a run of introducers pairs from its start, and an
+/// introducer opening an escape escapes the character right after it. Raw text
+/// relies on this alone, so an escaped closer or hole opener stays escaped.
+fn keeps_introducer_pairing(
+    neighbours: AuthoredNeighbours<'_>,
+    spelled: &str,
+    introducer: char,
+) -> bool {
+    let before_run = trailing_run(neighbours.before, introducer);
+    // An introducer left open at the start seam escapes the first character
+    // after it, which the edit must leave in place.
+    if before_run % 2 == 1 {
+        let escaped = |text: &str| text.chars().chain(neighbours.after.chars()).next();
+        if escaped(neighbours.replaced) != escaped(spelled) {
+            return false;
+        }
+    }
+    // The parity at the end seam decides how every introducer after it pairs.
+    let run_through = |text: &str| {
+        let run = trailing_run(text, introducer);
+        if text.chars().all(|ch| ch == introducer) {
+            before_run + run
+        } else {
+            run
+        }
+    };
+    run_through(neighbours.replaced) % 2 == run_through(spelled) % 2
+}
+
+/// How many introducers `text` ends with.
+fn trailing_run(text: &str, introducer: char) -> usize {
+    text.chars()
+        .rev()
+        .take_while(|&ch| ch == introducer)
+        .count()
 }
 
 /// The largest scalar boundary of `text` at or before `at`.
