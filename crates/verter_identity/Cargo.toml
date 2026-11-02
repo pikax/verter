@@ -27,6 +27,16 @@ publish = false
 verter_retention = { path = "../verter_retention" }
 blake3 = { workspace = true }
 
+[features]
+# Scoped proof instrumentation for bounded-work construction proofs: a
+# thread-scoped canonical-byte hash counter
+# (`encoding::canonical_hash_calls`). Default-off so production builds
+# carry none of it; the self dev-dependency below turns it on for this
+# crate's own tests, and downstream owners of construction-work proofs
+# enable it the same way `verter_retention`'s `test-support` is consumed.
+test-support = []
+
 [dev-dependencies]
 serde_json = { workspace = true }
 verter_retention = { path = "../verter_retention", features = ["test-support"] }
+verter_identity = { path = ".", features = ["test-support"] }
