@@ -472,13 +472,43 @@ test("summarize attributes newest saves, counts everything in occupancy and leav
   assert.deepEqual(
     occupancy.series.map(({ preservedUpperBytes }) => preservedUpperBytes),
     [2000 + 11 + 13, 3000 + 87_000, 1000 + 11],
-    "a complete listing is exact; one cut short adds the usage it never attributed",
+    "a listing with no usage reading is exact when complete; one with usage adds the bytes it never attributed",
   );
   assert.deepEqual(
     occupancy.series.map(({ usageMatchesListing }) => usageMatchesListing),
     [null, false, null],
     "usage is compared with the listed bytes wherever both were read",
   );
+});
+
+test("a complete listing whose bytes fall short of the usage never certifies a fit", () => {
+  // A swap between pages (one entry evicted, another saved) leaves the counts
+  // consistent, so the listing reads complete while the usage figure holds bytes
+  // the listing never attributed. Those bytes may be preserved.
+  const preserved = entry(1, "sccache/0/0/0/a", 9_000_000_000);
+  const candidate = entry(2, RUST_KEY, 900_000_000);
+  const declarations = [
+    {
+      savePolicy: "main-only",
+      mainReach: "automatic",
+      identity: "rust-target:rust-test-rust-test-build",
+    },
+  ];
+  const run = (usageBytes) => {
+    const record = repositoryRecord([preserved, candidate]);
+    if (usageBytes !== undefined) record.usage = { bytes: usageBytes, count: 2 };
+    return summarize([record], declarations);
+  };
+
+  const mismatched = run(10_500_000_000);
+  const fit = mismatched.fit["10 GB (decimal)"];
+  assert.equal(fit.preservedUpperBytes, 9_000_000_000 + 600_000_000);
+  assert.equal(fit.outcome, "unestablished");
+  assert.equal(mismatched.occupancy.series[0].usageMatchesListing, false);
+
+  const matched = run(9_900_000_000);
+  assert.equal(matched.occupancy.series[0].usageMatchesListing, true);
+  assert.equal(matched.fit["10 GB (decimal)"].outcome, "all-fit");
 });
 
 test("collect refuses sample options that would silently measure nothing", () => {

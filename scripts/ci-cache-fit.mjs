@@ -358,12 +358,16 @@ function occupancyOf(record) {
   const usageBytes = record.usage?.bytes ?? null;
   // A listing cut short only sums what it read, so its preserved figure is a
   // lower bound. Whatever the service counted but the listing never attributed
-  // may be preserved, which bounds it from above. Usage and listing are read
-  // moments apart, so a listing that read more than the usage never lowers it.
-  const preservedUpperBytes = record.listing.complete
-    ? preservedBytes
-    : usageBytes === null
-      ? null
+  // may be preserved, which bounds it from above. A complete listing is no
+  // exception: a swap between pages (one entry evicted, another saved) keeps its
+  // counts consistent, so bytes the usage figure holds beyond the listed bytes
+  // are unattributed too. Usage and listing are read moments apart, so a listing
+  // that read more than the usage never lowers the bound.
+  const preservedUpperBytes =
+    usageBytes === null
+      ? record.listing.complete
+        ? preservedBytes
+        : null
       : preservedBytes + Math.max(0, usageBytes - listedBytes);
   return {
     at: record.at,
