@@ -329,14 +329,21 @@ pub fn render(doc: &Doc, root: DocId, options: RenderOptions) -> Result<Rendered
             |stack: &mut Vec<Command>, id, indent, flat| stack.push(Command { id, indent, flat });
         match &doc.nodes[cmd.id] {
             Node::Text(text, binding) => {
-                // Flush suffixes before the first raw newline as well. Split at
-                // that boundary only; the remaining literal stays one segment.
-                if let Some(at) = text.find(['\r', '\n']).filter(|_| !suffixes.is_empty()) {
-                    sink.append(&text[..at], binding.as_ref(), None)?;
+                // Unbound raw text flushes queued suffixes before its first
+                // newline, splitting there only. A source-backed literal is
+                // atomic: one binding names exactly one authored range, so
+                // splitting it would bind both halves to bytes they are not,
+                // and its queued suffixes wait for the next line or EOF.
+                let split = match binding {
+                    None => text.find(['\r', '\n']).filter(|_| !suffixes.is_empty()),
+                    Some(_) => None,
+                };
+                if let Some(at) = split {
+                    sink.append(&text[..at], None, None)?;
                     flush(doc, &mut suffixes, &mut sink)?;
                     pending_width = Width::default();
                     let measured = sink.summaries[cmd.id].body;
-                    sink.append(&text[at..], binding.as_ref(), Some(measured))?;
+                    sink.append(&text[at..], None, Some(measured))?;
                 } else {
                     let measured = sink.summaries[cmd.id].body;
                     sink.append(text, binding.as_ref(), Some(measured))?;

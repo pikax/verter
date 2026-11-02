@@ -551,3 +551,40 @@ fn renderer_has_no_parser_semantic_or_routing_dependency() {
     direct.dedup();
     assert_eq!(direct, ["regex", "verter_formatter"]);
 }
+
+/// A source-backed multiline literal behind a queued suffix stays one segment
+/// bound to exactly its authored bytes; the suffix flushes at the next line.
+#[test]
+fn multiline_source_text_keeps_one_exact_binding_behind_a_queued_suffix() {
+    const AUTHORED: &str = "a\nb";
+    let range = AuthoredFormatByteRange::for_source(
+        AUTHORED,
+        AuthoredFormatByteOffset::for_source(AUTHORED, 0).unwrap(),
+        AuthoredFormatByteOffset::for_source(AUTHORED, 3).unwrap(),
+    )
+    .unwrap();
+    let mut table = FormatProvenanceTable::new(3_u128);
+    let binding = AuthoredProvenance::new(table.bind_authored(range), range);
+    let mut d = Doc::new();
+    let suffix = d.line_suffix("!");
+    let text = d.source(Provenanced::new(AUTHORED.into(), binding.clone()));
+    let hard = d.line(Line::Hard);
+    let root = d.concat([suffix, text, hard]);
+    let output = render(&d, root, RenderOptions::default()).unwrap();
+    assert_eq!(output.text, "a\nb!\n");
+    assert_eq!(source_segments(&output), [(binding, AUTHORED)]);
+}
+
+#[test]
+fn output_beyond_the_offset_domain_is_refused_before_allocation() {
+    use verter_formatter::render::RenderError;
+    let mut d = Doc::new();
+    let hard = d.line(Line::Hard);
+    let x = d.text("x");
+    let body = d.concat([hard, x]);
+    let root = d.indent(usize::MAX, body);
+    assert_eq!(
+        render(&d, root, RenderOptions::default()),
+        Err(RenderError::OutputTooLarge)
+    );
+}
