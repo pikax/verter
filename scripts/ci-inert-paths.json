@@ -96,6 +96,18 @@
     "reason": "Documentation products the local DOC verifiers and the docs deploy read."
   },
   {
+    "glob": "tests/embedded-dialects/DIAL0/README.md",
+    "reason": "Dialect capability contract prose; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/embedded-dialects/DIAL0/products/dialect-inventory.v1.json",
+    "reason": "Dialect capability inventory for later dialect work; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/embedded-dialects/evidence/DIAL0/cases.md",
+    "reason": "Dialect contract review case table; no ci.yml job reads its contents."
+  },
+  {
     "glob": "tests/engine-provisioning/EPR0/products/*.json",
     "reason": "Provisioning contract data read by review and its receiving owners; no ci.yml job reads it."
   },

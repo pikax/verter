@@ -245,6 +245,17 @@ requested embedded region once, in authored order. JS/TS/JSX/TSX, CSS/SCSS/Less,
 HTML, Vue, Svelte and Pug contributions keep their separate grammar owners. Region
 roles and exact catalog rows select them, not tag spellings. The outer printer
 owns delimiters and boundary trivia; the child owns only its declared content.
+DIAL0 assigns planned indented-Sass views/printer contributions to FMTSA0 and
+Stylus views/printer contributions to FMTST0, both within this same authority.
+They consume the respective DIAL6S/DIAL6Y lossless frontend and FMTC0 shared
+formatting infrastructure; they are not SCSS/Less aliases. DIAL8 owns consumer
+cutover after these producers. Custom PostCSS formatting is unsupported unless
+DIAL8 binds the exact admitted provider to an existing native grammar/view owner
+with profile evidence; a PostCSS transform or stringifier is not a printer owner.
+These assignments do not assert delivered support. This applies FD06/FD08 to
+prevent plausible wrong-grammar formatting; CSS/SCSS/Less tests cannot establish
+layout-grammar or arbitrary provider conformance.
+
 Children return provenance-bearing Doc/view contributions for shared rendering,
 not preformatted strings for format-after-build surgery. Decode/project/re-encode
 only through EMB0I's declared codec and exact reversible map chain. Holes remain
