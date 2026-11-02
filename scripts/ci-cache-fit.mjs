@@ -1,0 +1,560 @@
+#!/usr/bin/env node
+
+/**
+ * ci-cache-fit.mjs — read-only measurement of the repository's Actions cache.
+ *
+ * `collect` appends one JSON line per observation from GitHub's cache REST API.
+ * It issues GET requests only. Listing a public repository's caches needs no
+ * credential, so it runs anonymously unless `--token-env NAME` names a variable
+ * holding a token; only the configured-limit endpoint then needs that token.
+ * An unavailable endpoint is recorded with its HTTP status, never as zero.
+ *
+ *   node scripts/ci-cache-fit.mjs collect --out obs.jsonl
+ *     [--repo owner/name] [--samples N] [--interval-seconds S] [--full-every K]
+ *
+ * `report` attributes those observations to the cache identities the workflows
+ * declare and evaluates them against the allowance. It prints JSON, reads only
+ * local files and never estimates: an identity without a recorded entry stays
+ * unmeasured, and an incomplete listing contributes no occupancy.
+ *
+ *   node scripts/ci-cache-fit.mjs report --in obs.jsonl [--workflows dir]
+ */
+
+import { appendFileSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import process from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
+
+const API_ROOT = "https://api.github.com";
+const PAGE_SIZE = 100;
+const REQUEST_TIMEOUT_MS = 30_000;
+const MAIN_REF = "refs/heads/main";
+
+/** The documented allowance in both byte readings; neither is assumed to be the live value. */
+export const ALLOWANCE_READINGS = Object.freeze({
+  "10 GB (decimal)": 10_000_000_000,
+  "10 GiB (binary)": 10 * 2 ** 30,
+});
+
+/** GET one API path; every outcome, including a transport failure, is data. */
+export function createApi({ repo, token, fetchImpl = fetch }) {
+  return async function get(path) {
+    const headers = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let response;
+    try {
+      response = await fetchImpl(`${API_ROOT}/repos/${repo}/${path}`, {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      return { ok: false, status: 0, message: String(error?.message ?? error) };
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      return { ok: false, status: response.status, message: "response body was not JSON" };
+    }
+    return response.ok
+      ? { ok: true, status: response.status, body }
+      : { ok: false, status: response.status, message: String(body?.message ?? "request failed") };
+  };
+}
+
+/**
+ * Read every page of one listing. `complete` holds only when the distinct
+ * entries read equal the count the service reported on every page, so an entry
+ * saved or evicted between pages never passes as a whole listing.
+ */
+export async function listCaches(get, { ref } = {}) {
+  const byId = new Map();
+  const reported = new Set();
+  const filter = ref ? `&ref=${encodeURIComponent(ref)}` : "";
+  for (let page = 1; ; page += 1) {
+    const result = await get(`actions/caches?per_page=${PAGE_SIZE}&page=${page}${filter}`);
+    if (!result.ok) {
+      return {
+        complete: false,
+        error: { page, status: result.status, message: result.message },
+        entries: [...byId.values()],
+      };
+    }
+    const { total_count: totalCount, actions_caches: items } = result.body;
+    reported.add(totalCount);
+    for (const item of items) byId.set(item.id, item);
+    if (items.length < PAGE_SIZE) break;
+  }
+  const totals = [...reported];
+  return {
+    complete: totals.length === 1 && totals[0] === byId.size,
+    reportedTotals: totals,
+    entries: [...byId.values()],
+  };
+}
+
+/** One observation: always the main-ref listing; everything else when `full`. */
+export async function observe(get, { full, now = () => new Date() }) {
+  const record = { at: now().toISOString(), scope: full ? "repository" : "main" };
+  if (full) {
+    const usage = await get("actions/cache/usage");
+    record.usage = usage.ok
+      ? { bytes: usage.body.active_caches_size_in_bytes, count: usage.body.active_caches_count }
+      : { status: usage.status, message: usage.message };
+    const limit = await get("actions/cache/storage-limit");
+    record.limit = limit.ok ? limit.body : { status: limit.status, message: limit.message };
+  }
+  record.listing = await listCaches(get, full ? {} : { ref: MAIN_REF });
+  return record;
+}
+
+/** Sample on a fixed cadence; `wait` is injected so a test never really waits. */
+export async function collect(get, { samples, intervalMs, fullEvery, emit, wait = delay, now }) {
+  for (let index = 0; index < samples; index += 1) {
+    if (index > 0) await wait(intervalMs);
+    emit(await observe(get, { full: index % fullEvery === 0, now }));
+  }
+}
+
+/**
+ * Name the consumer behind a service key. `candidate` marks a Rust build
+ * identity that keying could retain; every other family is occupancy that must
+ * be preserved. A key no rule recognises keeps its normalised spelling, so it
+ * still counts in occupancy rather than disappearing.
+ */
+export function classifyKey(key) {
+  const rust = /^v\d+-rust-(.+)-(Linux|macOS|Windows)-(\w+)-[0-9a-f]{8}-[0-9a-f]{8}$/.exec(key);
+  if (rust) {
+    return {
+      family: "rust-target",
+      candidate: true,
+      identity: `rust-target:${rust[1]}@${rust[2]}-${rust[3]}`,
+    };
+  }
+  const contract = /^(\w+)-(\w+)-compiler-contracts-v\d+-([a-z-]+?)-[0-9a-f]{64}/.exec(key);
+  if (contract) {
+    return {
+      family: "compile-contracts",
+      candidate: true,
+      identity: `compile-contracts:${contract[3]}@${contract[1]}-${contract[2]}`,
+    };
+  }
+  const cargo = /^(\w+)-([a-z-]*cargo[a-z-]*)-[0-9a-f]{64}$/.exec(key);
+  if (cargo) {
+    return {
+      family: "explicit-cargo",
+      candidate: true,
+      identity: `explicit-cargo:${cargo[2]}@${cargo[1]}`,
+    };
+  }
+  const preserved = [
+    [/^sccache\//, "sccache"],
+    [/^node-cache-/, "node-package-manager"],
+    [/^vscode-host-/, "vscode-host"],
+    [/-gradle-/, "gradle"],
+    [/-playwright-/, "playwright"],
+    [/-pnpm-/, "pnpm-store"],
+  ];
+  for (const [pattern, family] of preserved) {
+    if (pattern.test(key)) return { family, candidate: false, identity: family };
+  }
+  const normalized = key.replace(/[0-9a-f]{32,}/g, "<hash>");
+  return { family: "unclassified", candidate: false, identity: `unclassified:${normalized}` };
+}
+
+function declaredRows(workflow, job, groups, fields) {
+  const uses = fields.uses ?? "";
+  if (uses.startsWith("Swatinem/rust-cache@")) {
+    const saveIf = fields["save-if"] ?? "";
+    const savePolicy =
+      saveIf === "false" ? "never" : saveIf.includes(MAIN_REF) ? "main-only" : "any-ref";
+    const name = fields["shared-key"] ?? (fields.key ? `${fields.key}-${job}` : job);
+    return [
+      { workflow, job, mechanism: "rust-cache", savePolicy, identity: `rust-target:${name}` },
+    ];
+  }
+  if (!uses.startsWith("actions/cache/save@") && !uses.startsWith("actions/cache@")) return [];
+  const savePolicy = (fields.if ?? "").includes(MAIN_REF) ? "main-only" : "any-ref";
+  const key = fields.key ?? "";
+  const row = (identity) => ({ workflow, job, mechanism: "actions/cache", savePolicy, identity });
+  if (key.includes("compiler-contract")) {
+    return groups.map((group) => row(`compile-contracts:${group}`));
+  }
+  const cargo = /([a-z-]*cargo[a-z-]*)-\$\{\{/.exec(key);
+  if (cargo) return [row(`explicit-cargo:${cargo[1].replace(/^-/, "")}`)];
+  const preservedFamily = [
+    ["gradle", "gradle"],
+    ["playwright", "playwright"],
+    ["vscode", "vscode-host"],
+    ["pnpm", "pnpm-store"],
+  ].find(([spelling]) => key.includes(spelling))?.[1];
+  return [row(`preserved:${preservedFamily ?? job}`)];
+}
+
+/**
+ * Whether a workflow's own triggers run it from main: `automatic` on a schedule,
+ * an issue comment or a push to main (those events run with the main ref),
+ * `manual` when only a dispatch can, otherwise `none`.
+ */
+export function mainReachOf(text) {
+  const triggers = new Set();
+  let inOn = false;
+  let trigger = null;
+  let inBranches = false;
+  let pushesMain = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^on:\s*(#.*)?$/.test(line)) {
+      inOn = true;
+      continue;
+    }
+    if (!inOn) continue;
+    if (/^\S/.test(line)) break;
+    const named = /^ {2}([a-z_]+):/.exec(line);
+    if (named) {
+      trigger = named[1];
+      triggers.add(trigger);
+      inBranches = false;
+      continue;
+    }
+    if (trigger !== "push") continue;
+    const branches = /^\s+branches:\s*(.*)$/.exec(line);
+    if (branches) {
+      inBranches = true;
+      pushesMain ||= /\bmain\b/.test(branches[1]);
+    } else if (/^\s+[a-z_-]+:/.test(line)) {
+      inBranches = false;
+    } else if (inBranches) {
+      pushesMain ||= /\bmain\b/.test(line);
+    }
+  }
+  if (pushesMain || triggers.has("schedule") || triggers.has("issue_comment")) return "automatic";
+  return triggers.has("workflow_dispatch") ? "manual" : "none";
+}
+
+/**
+ * Read one workflow's save-capable cache declarations without a YAML dependency,
+ * one row per step or matrix group. Restore-only steps store nothing, and
+ * setup-node's `cache:` input is reached through occupancy instead.
+ */
+export function scanWorkflow(workflow, text) {
+  const rows = [];
+  const mainReach = mainReachOf(text);
+  let inJobs = false;
+  let job = null;
+  let groups = [];
+  let fields = null;
+  const flush = () => {
+    if (fields) {
+      for (const row of declaredRows(workflow, job, groups, fields))
+        rows.push({ ...row, mainReach });
+    }
+    fields = null;
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^jobs:/.test(line)) {
+      inJobs = true;
+      continue;
+    }
+    if (!inJobs) continue;
+    const jobHeader = /^ {2}([A-Za-z0-9_-]+):\s*(#.*)?$/.exec(line);
+    if (jobHeader) {
+      flush();
+      job = jobHeader[1];
+      groups = [];
+      continue;
+    }
+    const matrixGroup = /^\s+group:\s*\[(.*)\]/.exec(line);
+    if (matrixGroup) groups = matrixGroup[1].split(",").map((value) => value.trim());
+    if (/^ {6}- /.test(line)) {
+      flush();
+      fields = {};
+    }
+    if (!fields) continue;
+    const field = /^\s*(?:- )?(uses|if|id|key|shared-key|save-if):\s*(.*)$/.exec(line);
+    if (field && fields[field[1]] === undefined) fields[field[1]] = field[2].trim();
+  }
+  flush();
+  return rows;
+}
+
+export function scanWorkflowDirectory(directory) {
+  return readdirSync(directory)
+    .filter((name) => /\.ya?ml$/.test(name))
+    .sort()
+    .flatMap((name) => scanWorkflow(name, readFileSync(join(directory, name), "utf8")));
+}
+
+/** Occupancy of one complete listing, by consumer family and by ref class. */
+function occupancyOf(record) {
+  const byFamily = {};
+  let listedBytes = 0;
+  for (const entry of record.listing.entries) {
+    const { family } = classifyKey(entry.key);
+    const row = (byFamily[family] ??= {
+      bytes: 0,
+      count: 0,
+      mainBytes: 0,
+      otherRefBytes: 0,
+      oldestSave: entry.created_at,
+      newestSave: entry.created_at,
+    });
+    if (entry.created_at < row.oldestSave) row.oldestSave = entry.created_at;
+    if (entry.created_at > row.newestSave) row.newestSave = entry.created_at;
+    row.bytes += entry.size_in_bytes;
+    row.count += 1;
+    row[entry.ref === MAIN_REF ? "mainBytes" : "otherRefBytes"] += entry.size_in_bytes;
+    listedBytes += entry.size_in_bytes;
+  }
+  return {
+    at: record.at,
+    listedBytes,
+    listedCount: record.listing.entries.length,
+    usageBytes: record.usage?.bytes ?? null,
+    usageCount: record.usage?.count ?? null,
+    byFamily,
+  };
+}
+
+/**
+ * Attribute every main-saved entry seen in a complete listing to its identity.
+ * The size of an identity is its newest save; older generations stay visible
+ * through `generations` and in occupancy, and are never added to that size.
+ */
+function attributeMainEntries(observations) {
+  const samples = observations.map((record) => ({
+    at: record.at,
+    entries: record.listing.entries.filter((entry) => entry.ref === MAIN_REF),
+  }));
+  const identities = new Map();
+  for (const { entries } of samples) {
+    for (const entry of entries) {
+      const { family, candidate, identity } = classifyKey(entry.key);
+      if (!candidate) continue;
+      const row = identities.get(identity) ?? { identity, family, byId: new Map() };
+      row.byId.set(entry.id, entry);
+      identities.set(identity, row);
+    }
+  }
+  const last = samples.at(-1);
+  return [...identities.values()]
+    .map(({ identity, family, byId }) => {
+      const saves = [...byId.values()].sort(
+        (a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id,
+      );
+      const newest = saves.at(-1);
+      const seen = samples.filter((sample) => sample.entries.some((entry) => byId.has(entry.id)));
+      return {
+        identity,
+        family,
+        bytes: newest.size_in_bytes,
+        savedAt: newest.created_at,
+        generations: saves.length,
+        samplesSeen: seen.length,
+        firstSeen: seen[0].at,
+        lastSeen: seen.at(-1).at,
+        residentAtEnd: last.entries.some((entry) => byId.has(entry.id)),
+      };
+    })
+    .sort((a, b) => a.bytes - b.bytes || a.identity.localeCompare(b.identity));
+}
+
+/** A declaration names no platform and may hold a matrix expression, so it is a template. */
+function matchesDeclaration(declaredIdentity, measuredIdentity) {
+  const template = declaredIdentity
+    .split(/\$\{\{.*?\}\}/)
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".+");
+  return new RegExp(`^${template}@`).test(measuredIdentity);
+}
+
+/**
+ * Evaluate fit from recorded bytes only. The budget is the allowance minus the
+ * peak occupancy of everything that stays as it is. Measured candidates are
+ * admitted smallest first, which retains the most identities; no reserve is
+ * added, no eviction is assumed, and an unmeasured identity rules out `all-fit`.
+ */
+export function evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeasured }) {
+  const budgetBytes = allowanceBytes - preservedBytes;
+  const ordered = [...candidates].sort(
+    (a, b) => a.bytes - b.bytes || a.identity.localeCompare(b.identity),
+  );
+  const fitting = [];
+  const excluded = [];
+  let usedBytes = 0;
+  for (const { identity, bytes } of ordered) {
+    if (usedBytes + bytes <= budgetBytes) {
+      usedBytes += bytes;
+      fitting.push(identity);
+    } else {
+      excluded.push({ identity, bytes, budgetLeftBytes: budgetBytes - usedBytes });
+    }
+  }
+  const everyIdentityFits = excluded.length === 0 && unmeasured.length === 0;
+  const outcome = fitting.length === 0 ? "none-fit" : everyIdentityFits ? "all-fit" : "partial-fit";
+  return {
+    allowanceBytes,
+    preservedBytes,
+    budgetBytes,
+    usedBytes,
+    headroomBytes: budgetBytes - usedBytes,
+    outcome,
+    fitting,
+    excluded,
+  };
+}
+
+export function summarize(observations, declarations) {
+  const complete = observations.filter((record) => record.listing.complete);
+  const repository = complete.filter((record) => record.scope === "repository");
+  const failures = observations.flatMap((record) => {
+    const found = [];
+    if (!record.listing.complete) {
+      const reason = record.listing.error ?? { message: "entries changed while paging" };
+      found.push({ at: record.at, source: "listing", ...reason });
+    }
+    if (record.usage?.status) found.push({ at: record.at, source: "usage", ...record.usage });
+    return found;
+  });
+  const summary = {
+    window: {
+      first: observations[0]?.at ?? null,
+      last: observations.at(-1)?.at ?? null,
+      observations: observations.length,
+      completeRepositoryListings: repository.length,
+    },
+    failures,
+    limit: observations.findLast((record) => record.limit)?.limit ?? null,
+  };
+  if (repository.length === 0) return { ...summary, available: false };
+
+  const occupancies = repository.map(occupancyOf);
+  const latest = occupancies.at(-1);
+  const peakByFamily = {};
+  const peakPreservedCandidateRefs = { bytes: 0 };
+  const candidateFamilies = new Set(["rust-target", "compile-contracts", "explicit-cargo"]);
+  for (const { byFamily } of occupancies) {
+    let otherRefBytes = 0;
+    for (const [family, row] of Object.entries(byFamily)) {
+      peakByFamily[family] = Math.max(peakByFamily[family] ?? 0, row.bytes);
+      if (candidateFamilies.has(family)) otherRefBytes += row.otherRefBytes;
+    }
+    peakPreservedCandidateRefs.bytes = Math.max(peakPreservedCandidateRefs.bytes, otherRefBytes);
+  }
+  const identities = attributeMainEntries(complete);
+  const isPreserved = ({ identity }) => identity.startsWith("preserved:");
+  const declared = declarations.map((row) => {
+    const family = row.identity.slice("preserved:".length);
+    const measuredAs = isPreserved(row)
+      ? peakByFamily[family] === undefined
+        ? []
+        : [family]
+      : identities
+          .filter(({ identity }) => matchesDeclaration(row.identity, identity))
+          .map(({ identity }) => identity);
+    return { ...row, measuredAs };
+  });
+  const unmeasuredOf = (keep) => [
+    ...new Set(
+      declared
+        .filter((row) => row.savePolicy !== "never" && row.mainReach === "automatic")
+        .filter((row) => row.measuredAs.length === 0 && keep(row))
+        .map((row) => row.identity),
+    ),
+  ];
+  const unmeasured = unmeasuredOf((row) => !isPreserved(row)).sort();
+  const unmeasuredPreserved = unmeasuredOf(isPreserved).sort();
+  const preservedBytes =
+    Object.entries(peakByFamily)
+      .filter(([family]) => !candidateFamilies.has(family))
+      .reduce((total, [, bytes]) => total + bytes, 0) + peakPreservedCandidateRefs.bytes;
+  const candidates = identities.map(({ identity, bytes }) => ({ identity, bytes }));
+  const listed = occupancies.map(({ listedBytes }) => listedBytes);
+  return {
+    ...summary,
+    available: true,
+    occupancy: {
+      latest,
+      minListedBytes: Math.min(...listed),
+      peakListedBytes: Math.max(...listed),
+      peakByFamily,
+      peakCandidateBytesOnOtherRefs: peakPreservedCandidateRefs.bytes,
+      headroomAtLatest: Object.fromEntries(
+        Object.entries(ALLOWANCE_READINGS).map(([name, bytes]) => [
+          name,
+          bytes - latest.listedBytes,
+        ]),
+      ),
+    },
+    identities,
+    declared,
+    unmeasured,
+    unmeasuredPreserved,
+    fit: Object.fromEntries(
+      Object.entries(ALLOWANCE_READINGS).map(([name, allowanceBytes]) => [
+        name,
+        evaluateFit({ allowanceBytes, preservedBytes, candidates, unmeasured }),
+      ]),
+    ),
+  };
+}
+
+export function parseObservations(text) {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line));
+}
+
+async function main(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      out: { type: "string" },
+      in: { type: "string" },
+      repo: { type: "string", default: "pikax/verter" },
+      samples: { type: "string", default: "1" },
+      "interval-seconds": { type: "string", default: "240" },
+      "full-every": { type: "string", default: "1" },
+      "token-env": { type: "string" },
+      workflows: { type: "string", default: join(".github", "workflows") },
+    },
+  });
+  if (positionals[0] === "report" && values.in) {
+    const observations = parseObservations(readFileSync(values.in, "utf8"));
+    const summary = summarize(observations, scanWorkflowDirectory(values.workflows));
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+  if (positionals[0] !== "collect" || !values.out) {
+    throw new Error(
+      "usage: ci-cache-fit.mjs collect --out <file> [options] | report --in <file> [--workflows <dir>]",
+    );
+  }
+  const token = values["token-env"] ? process.env[values["token-env"]] : undefined;
+  await collect(createApi({ repo: values.repo, token }), {
+    samples: Number(values.samples),
+    intervalMs: Number(values["interval-seconds"]) * 1000,
+    fullEvery: Number(values["full-every"]),
+    emit: (record) => {
+      appendFileSync(values.out, `${JSON.stringify(record)}\n`);
+      const { at, scope, listing, usage } = record;
+      const total = usage?.bytes === undefined ? "" : ` usage=${usage.bytes}`;
+      console.log(
+        `${at} ${scope} entries=${listing.entries.length} complete=${listing.complete}${total}`,
+      );
+    },
+  });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
