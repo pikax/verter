@@ -97,9 +97,21 @@ process, workspace, origin) XSDK3 receives from XEC0 through XEC1. Core, not
 the manifest, mints T09 provenance from the admission path: declarative and
 data-only manifests yield `data-manifest`, isolated-executable ones
 `isolated-guest`, and `official-static` belongs only to statically registered
-first-party rows. Core computes the content digest over the admitted manifest
-bytes; a manifest-supplied provenance or digest is only an expectation that
-must match exactly. These are contract fields, not a claim that a wire schema
+first-party rows. A manifest-supplied provenance is only an expectation that
+must match the minted value exactly.
+
+Core computes the content digest over the admitted manifest bytes. The
+preimage is exactly the manifest file's bytes as admission received them:
+no decoding, re-serialization, field removal or line-ending or whitespace
+normalization. The digest uses the detached representation: the manifest never
+carries its own digest. An expected digest arrives beside the manifest, in the
+install request or package record XSDK7 inspects, and is compared with the
+digest core computes. A manifest field claiming the manifest's own digest is an
+unknown field and rejects; core never strips it to make a preimage. So the
+comparison cannot refer to itself. The value is algorithm-tagged
+(`<algorithm>:<lowercase hex>`). The manifest schema version fixes the
+algorithm, so an expectation tagged with another algorithm rejects and is never
+recomputed under it. These are contract fields, not a claim that a wire schema
 exists.
 
 **E02 (XSDK1, XSDK7).** Admission decides registration only: whether a T09 row

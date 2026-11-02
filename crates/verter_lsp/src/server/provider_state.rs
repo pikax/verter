@@ -1129,6 +1129,7 @@ impl VerterLanguageServer {
 
     pub(super) fn commit_provider_sync_state(&self, canonical_id: &str, state: ProviderSyncState) {
         commit_sync_transition(&self.provider_sync_states, canonical_id, state);
+        self.documents.settle_provider_surface(canonical_id);
     }
 
     /// Commit a CARRIER provider state through the coordinator's admission gate

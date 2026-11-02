@@ -46,3 +46,6 @@ tests/sfc-projection/STP19/probes/
 # intentional malformed syntax, CRLF and recovery trivia. Their catalogs own
 # hashes and geometry; automatic formatting must not rewrite the fixtures.
 fixtures/formatter/**
+
+# Verbatim release-tagged schema; the generator verifies its raw-byte digest.
+test-corpora/web-compat/schemas/browsers.schema.json
