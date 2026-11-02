@@ -85,13 +85,22 @@ export function validateClosure({ mode, plan, report, policy = POLICY, schema = 
   }
   if (errors.length > 0) return done();
 
-  const evidenceById = new Map();
-  for (const row of report.evidence) {
-    if (evidenceById.has(row.id)) {
-      errors.push({ code: "evidence-row-duplicate", subject: row.id, message: "two rows, one id" });
+  const add = (code, subject, message) => errors.push({ code, subject, message });
+  /**
+   * Indexes report rows by their logical identity. A second row with the same
+   * identity is rejected under `code`, so no row is ever silently shadowed by
+   * another: the decision cannot depend on which duplicate comes last.
+   */
+  const index = (rows, keyOf, code) => {
+    const out = new Map();
+    for (const row of rows ?? []) {
+      const key = keyOf(row);
+      if (out.has(key)) add(code, key, "two rows share this identity");
+      else out.set(key, row);
     }
-    evidenceById.set(row.id, row);
-  }
+    return out;
+  };
+  const evidenceById = index(report.evidence, (row) => row.id, "evidence-row-duplicate");
   const ctx = {
     mode,
     target,
@@ -101,7 +110,8 @@ export function validateClosure({ mode, plan, report, policy = POLICY, schema = 
     evidenceById,
     pending,
     advisories,
-    add: (code, subject, message) => errors.push({ code, subject, message }),
+    add,
+    index,
   };
 
   checkStructuralInventories(ctx);

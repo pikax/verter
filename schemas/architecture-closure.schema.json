@@ -163,6 +163,7 @@
             "complete": { "type": "boolean" },
             "selected": { "$ref": "#/$defs/count" },
             "executed": { "$ref": "#/$defs/count" },
+            "expectedSkips": { "$ref": "#/$defs/count" },
             "unexpectedSkips": { "$ref": "#/$defs/count" },
             "passed": { "type": "boolean" }
           }

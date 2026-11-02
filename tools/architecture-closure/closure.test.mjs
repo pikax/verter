@@ -15,6 +15,11 @@ const ledgerStatus = ({ plan }, slug) => plan.ledger.find(owner(slug))?.status;
 const planTask = ({ plan }, slug) => findRow(plan.tasks, owner(slug));
 const evidenceRow = ({ report }, id) => findRow(report.evidence, (row) => row.id === id);
 const hasOwner = ({ report }, slug) => report.owners.some(owner(slug));
+const metricRow = ({ report }, row) => findRow(report.metrics, (r) => r.row === row);
+const reviewRow = ({ report }, train) => findRow(report.trainReviews, (r) => r.train === train);
+const admission = ({ report }, id) =>
+  findRow(report.inventories.reuse.admissions, (a) => a.id === id);
+const countOf = (list, predicate) => list.filter(predicate).length;
 
 test("the complete fixture is accepted with its target implemented", () => {
   assert.equal(ledgerStatus(base, "L4"), "implemented");
@@ -517,6 +522,211 @@ const CONTROLS = [
     expect: ["exception-unexplained"],
   },
   {
+    name: "a failing metric row shadowed by a later passing copy",
+    mutate: (i) => {
+      i.report.metrics.push(structuredClone(metricRow(i, "wall/final")));
+      metricRow(i, "wall/final").result = "fail";
+    },
+    applied: ({ report }) =>
+      countOf(report.metrics, (r) => r.row === "wall/final") === 2 &&
+      report.metrics.find((r) => r.row === "wall/final").result === "fail",
+    expect: ["metric-failing", "metric-row-duplicate"],
+  },
+  {
+    name: "a duplicated metric row",
+    mutate: (i) => i.report.metrics.push(structuredClone(metricRow(i, "wall/final"))),
+    applied: ({ report }) => countOf(report.metrics, (r) => r.row === "wall/final") === 2,
+    expect: ["metric-row-duplicate"],
+  },
+  {
+    name: "a stale review with an open P0 shadowed by a clean review of the same train",
+    mutate: (i) => {
+      const clean = structuredClone(reviewRow(i, "rev11.structure"));
+      Object.assign(reviewRow(i, "rev11.structure"), {
+        candidate: "candidate-earlier",
+        findings: [{ id: "x", severity: "P0", status: "open" }],
+      });
+      i.report.trainReviews.push(clean);
+    },
+    applied: ({ report }) =>
+      countOf(report.trainReviews, (r) => r.train === "rev11.structure") === 2,
+    expect: ["train-review-duplicate", "train-review-stale", "train-review-unresolved-finding"],
+  },
+  {
+    name: "a duplicated train review",
+    mutate: (i) => i.report.trainReviews.push(structuredClone(reviewRow(i, "rev11.structure"))),
+    applied: ({ report }) =>
+      countOf(report.trainReviews, (r) => r.train === "rev11.structure") === 2,
+    expect: ["train-review-duplicate"],
+  },
+  {
+    name: "a duplicated capability row",
+    mutate: ({ report }) =>
+      report.capabilities.push(
+        structuredClone(findRow(report.capabilities, (r) => r.surface === "host-lint")),
+      ),
+    applied: ({ report }) => countOf(report.capabilities, (r) => r.surface === "host-lint") === 2,
+    expect: ["capability-row-duplicate"],
+  },
+  {
+    name: "a duplicated capability cell",
+    mutate: ({ report }) => {
+      const row = findRow(report.capabilities, (r) => r.surface === "svelte-compile");
+      row.cases.push(structuredClone(row.cases[0]));
+    },
+    applied: ({ report }) =>
+      findRow(report.capabilities, (r) => r.surface === "svelte-compile").cases.length === 2,
+    expect: ["capability-cell-duplicate"],
+  },
+  {
+    name: "a duplicated WSP6 count",
+    mutate: ({ report }) =>
+      report.inventories.observe.counts.push({
+        name: "live-leases",
+        accessor: "Leases::len",
+        availableWithCaptureOff: true,
+      }),
+    applied: ({ report }) =>
+      countOf(report.inventories.observe.counts, (r) => r.name === "live-leases") === 2,
+    expect: ["wsp6-count-duplicate"],
+  },
+  {
+    name: "a failing pressure outcome on an unavailable cell",
+    mutate: (i) =>
+      Object.assign(metricRow(i, "rss/soak"), {
+        result: "unavailable",
+        unavailableReason: "aggregate not computed",
+        outcomes: { normal: "pass", pressure: "fail" },
+      }),
+    applied: (i) => metricRow(i, "rss/soak").outcomes.pressure === "fail",
+    expect: ["metric-failing"],
+  },
+  {
+    name: "a pass whose modes were never measured",
+    mutate: (i) =>
+      (metricRow(i, "rss/soak").outcomes = { normal: "unavailable", pressure: "unavailable" }),
+    applied: (i) =>
+      metricRow(i, "rss/soak").result === "pass" &&
+      metricRow(i, "rss/soak").unavailableReason === undefined,
+    expect: ["metric-result-missing", "metric-unmeasured-pass"],
+  },
+  {
+    name: "unavailable lifecycle evidence",
+    mutate: (i) =>
+      Object.assign(metricRow(i, "lifecycle/soak-drain"), {
+        result: "unavailable",
+        unavailableReason: "not run",
+        outcomes: {},
+      }),
+    applied: ({ plan, report }) =>
+      findRow(plan.closure.metricCells, (c) => c.row === "lifecycle/soak-drain").evidenceKind ===
+        "lifecycle" && metricRow({ report }, "lifecycle/soak-drain").result === "unavailable",
+    expect: ["metric-required-evidence-unavailable"],
+  },
+  {
+    name: "an unavailable soak whose run's lifecycle evidence row is absent",
+    mutate: (i) => {
+      for (const name of ["rss/soak", "lifecycle/soak-drain"]) {
+        const row = metricRow(i, name);
+        Object.assign(row, { result: "unavailable", unavailableReason: "soak not run" });
+        delete row.outcomes;
+      }
+      dropRow(i.report.evidence, (r) => r.evidenceRun === "rev11-l1-soak");
+    },
+    applied: ({ report }) =>
+      !report.evidence.some((r) => r.evidenceRun === "rev11-l1-soak") &&
+      report.metrics.every((r) => r.evidenceRun !== "rev11-l1-soak" || r.result === "unavailable"),
+    expect: ["metric-required-evidence-unavailable", "metric-run-evidence-missing"],
+  },
+  {
+    name: "an evidence row that executed only part of its selected work",
+    mutate: (i) => (evidenceRow(i, "ev-wasm").terminalSummary.executed = 1),
+    applied: (i) =>
+      evidenceRow(i, "ev-wasm").terminalSummary.selected === 10 &&
+      evidenceRow(i, "ev-wasm").terminalSummary.executed === 1,
+    expect: ["evidence-partial-execution"],
+  },
+  {
+    name: "a preview surface reporting unsupported",
+    mutate: ({ report }) =>
+      (findRow(report.capabilities, (r) => r.surface === "host-lint").typedResult = "unsupported"),
+    applied: ({ report }) =>
+      findRow(report.capabilities, (r) => r.surface === "host-lint").typedResult === "unsupported",
+    expect: ["capability-preview-not-partial"],
+  },
+  {
+    name: "a required outcome moved onto the unselected optional owner",
+    mutate: (i) => {
+      ownerRow(i, "V9").outcomeIds = ownerRow(i, "P-COND").outcomeIds;
+      delete ownerRow(i, "P-COND").outcomeIds;
+    },
+    applied: (i) =>
+      planTask(i, "V9").selected === false && ownerRow(i, "V9").outcomeIds?.length > 0,
+    expect: ["outcome-owner-ineligible"],
+  },
+  {
+    name: "a detached task classed optional",
+    mutate: ({ report }) => report.owners.push({ slug: "DETACHED", classification: "optional" }),
+    applied: (i) => hasOwner(i, "DETACHED") && planTask(i, "DETACHED").optional === false,
+    expect: ["owner-pathless"],
+  },
+  {
+    name: "a refused result reused as a refusal under a non-refusal class",
+    mutate: (i) =>
+      Object.assign(admission(i, "complete-fact"), { result: "Refused", reusedAs: "refusal" }),
+    applied: (i) => admission(i, "complete-fact").reusedAs === "refusal",
+    expect: ["context-poisoned-reuse"],
+  },
+  {
+    name: "an admission class disagreeing with the export",
+    mutate: (i) => (admission(i, "certified").class = "CompleteFact"),
+    applied: (i) => admission(i, "certified").class === "CompleteFact",
+    expect: ["reuse-inventory-incomplete"],
+  },
+  {
+    name: "a typed-reuse inventory that omits its admissions",
+    mutate: ({ report }) => delete report.inventories.reuse.admissions,
+    applied: ({ report }) => report.inventories.reuse.admissions === undefined,
+    expect: ["reuse-inventory-incomplete"],
+  },
+  {
+    name: "a declared guard family omitted while another of its kind remains",
+    mutate: ({ plan, report }) => {
+      plan.closure.engineGuardFamilies.push({ family: "feature-family-2", kind: "feature" });
+      report.inventories.engine.guards.push({
+        ...findRow(report.inventories.engine.guards, (g) => g.kind === "feature"),
+        family: "feature-family-2",
+        executedTests: 0,
+      });
+      dropRow(report.inventories.engine.guards, (g) => g.family === "feature-family-2");
+    },
+    applied: ({ plan, report }) =>
+      plan.closure.engineGuardFamilies.some((g) => g.family === "feature-family-2") &&
+      report.inventories.engine.guards.some((g) => g.kind === "feature"),
+    expect: ["engine-inventory-incomplete"],
+  },
+  {
+    name: "a declared observe inventory file omitted",
+    mutate: ({ plan }) =>
+      plan.closure.observeOwners.push({
+        owner: "S-ENG",
+        path: "crates/engine/observe-inventory/S-ENG.md",
+      }),
+    applied: ({ report }) => !report.inventories.observe.files.some((f) => f.owner === "S-ENG"),
+    expect: ["observe-inventory-incomplete"],
+  },
+  {
+    name: "an observe inventory file the export does not declare",
+    mutate: ({ report }) =>
+      report.inventories.observe.files.push({
+        ...structuredClone(report.inventories.observe.files[0]),
+        owner: "INVENTED",
+        path: "crates/x/observe-inventory/INVENTED.md",
+      }),
+    applied: ({ report }) => report.inventories.observe.files.some((f) => f.owner === "INVENTED"),
+    expect: ["observe-inventory-incomplete"],
+  },
+  {
     name: "a report whose status claim contradicts the ledger",
     mutate: (i) => {
       ownerRow(i, "S-OBS").status = "implemented";
@@ -558,7 +768,40 @@ const EXPORT_FIELDS = [
   ["closure.capabilitySurfaces", ({ plan }) => delete plan.closure.capabilitySurfaces],
   ["closure.metricCells", ({ plan }) => delete plan.closure.metricCells],
   ["closure.wsp6Counts", ({ plan }) => delete plan.closure.wsp6Counts],
+  ["closure.engineRelocations", ({ plan }) => delete plan.closure.engineRelocations],
+  ["closure.engineGuardFamilies", ({ plan }) => delete plan.closure.engineGuardFamilies],
+  ["closure.futureCharterSurfaces", ({ plan }) => delete plan.closure.futureCharterSurfaces],
+  ["closure.observeOwners", ({ plan }) => delete plan.closure.observeOwners],
+  ["closure.reuseAdmissions", ({ plan }) => delete plan.closure.reuseAdmissions],
+  ["closure.metricCells[0].modes", ({ plan }) => delete plan.closure.metricCells[0].modes],
+  [
+    "closure.metricCells[0].evidenceKind",
+    ({ plan }) => delete plan.closure.metricCells[0].evidenceKind,
+  ],
+  [
+    "closure.capabilitySurfaces[1].cases",
+    ({ plan }) => delete plan.closure.capabilitySurfaces[1].cases,
+  ],
+  ["closure.metricCells[0]", ({ plan }) => (plan.closure.metricCells[0] = null)],
+  ["closure.capabilitySurfaces[0]", ({ plan }) => (plan.closure.capabilitySurfaces[0] = null)],
 ];
+
+const EMPTY_POPULATIONS = ["requiredOutcomes", "namedOwners", "capabilitySurfaces", "wsp6Counts"];
+
+for (const field of EMPTY_POPULATIONS) {
+  test(`an export whose closure.${field} is empty fails closed`, () => {
+    const decision = assertRejected("closure", base, {
+      name: field,
+      mutate: ({ plan }) => (plan.closure[field] = []),
+      applied: ({ plan }) => plan.closure[field].length === 0,
+      expect: ["plan-field-missing"],
+    });
+    assert.deepEqual(
+      decision.errors.map((e) => e.subject),
+      [`closure.${field}`],
+    );
+  });
+}
 
 for (const [subject, mutate] of EXPORT_FIELDS) {
   test(`an export without ${subject} fails closed instead of inferring the population`, () => {
@@ -583,6 +826,26 @@ test("an optional task with no selection mark fails closed", () => {
     expect: ["plan-field-missing"],
   });
   assert.match(decision.errors[0].subject, /\.selected$/);
+});
+
+test("a population listing one entry twice fails closed", () => {
+  const decision = assertRejected("closure", base, {
+    name: "doubled outcome",
+    mutate: ({ plan }) => plan.closure.requiredOutcomes.push("proposal-01"),
+    applied: ({ plan }) =>
+      countOf(plan.closure.requiredOutcomes, (id) => id === "proposal-01") === 2,
+    expect: ["plan-duplicate-entry"],
+  });
+  assert.deepEqual(
+    decision.errors.map((e) => e.subject),
+    ["closure.requiredOutcomes[3]"],
+  );
+});
+
+test("an evidence summary reconciles its declared expected skips", () => {
+  const inputs = structuredClone(base);
+  Object.assign(evidenceRow(inputs, "ev-wasm").terminalSummary, { executed: 9, expectedSkips: 1 });
+  assert.deepEqual(validateClosure({ mode: "closure", ...inputs }).errors, []);
 });
 
 test("a predecessor outside the export and a doubled ledger row fail closed", () => {
@@ -684,6 +947,16 @@ test("every named closure defect keeps a negative control", () => {
     "optional-default-hot-bookkeeping",
     "wsp6-count-absent",
     "moved-guard-not-executing",
+    "metric-row-duplicate",
+    "train-review-duplicate",
+    "capability-row-duplicate",
+    "metric-failing",
+    "metric-required-evidence-unavailable",
+    "metric-run-evidence-missing",
+    "evidence-partial-execution",
+    "outcome-owner-ineligible",
+    "observe-inventory-incomplete",
+    "reuse-inventory-incomplete",
   ]) {
     assert.ok(codes.has(code), `no control exercises ${code}`);
   }

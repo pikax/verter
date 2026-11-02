@@ -1,8 +1,33 @@
-// Engine relocation, semantic-observe and typed-reuse inventory rules.
+// Engine relocation, semantic-observe and typed-reuse inventory rules. Each
+// inventory population is declared by the export; the report's rows are
+// compared against it, so a report can neither omit a declared row (the one
+// that would fail) nor complete an inventory by listing fewer rows.
 
 const OBSERVE_FILE = /^crates\/[^/]+\/observe-inventory\/([^/]+)\.md$/;
 const OBSERVE_FIELDS = ["productionConsumer", "classification", "lifetime", "ownerModule", "gate"];
 const REFUSALS = new Set(["OperationRefusal", "IsolatedRootLedgerRefusal"]);
+
+/**
+ * Matches report rows to the export-declared population: each declared entry
+ * needs exactly one row, and a row the export does not declare is rejected.
+ * Returns the matched pairs `[declared, row]`.
+ */
+function matchDeclared(ctx, { declared, rows, keyOf, code, label }) {
+  const indexed = ctx.index(rows, keyOf, code);
+  const out = [];
+  const known = new Set();
+  for (const entry of declared) {
+    const key = keyOf(entry);
+    known.add(key);
+    const row = indexed.get(key);
+    if (row) out.push([entry, row]);
+    else ctx.add(code, key, `the declared ${label} has no report row`);
+  }
+  for (const key of indexed.keys()) {
+    if (!known.has(key)) ctx.add(code, key, `not a declared ${label}`);
+  }
+  return out;
+}
 
 function checkTestMapping(ctx, mapping) {
   const incomplete = (subject, message) => ctx.add("engine-inventory-incomplete", subject, message);
@@ -12,6 +37,10 @@ function checkTestMapping(ctx, mapping) {
   }
   const olds = new Set(mapping.rows.map((row) => row.old));
   if (olds.size !== mapping.rows.length) incomplete("testMapping", "a test is mapped twice");
+  const news = new Set(mapping.rows.map((row) => row.new));
+  if (news.size !== mapping.rows.length) {
+    incomplete("testMapping", "two tests map to one destination, so one was dropped");
+  }
   if (mapping.discoveredBefore !== mapping.rows.length) {
     incomplete("testMapping", "the mapping does not cover every discovered test");
   }
@@ -25,11 +54,28 @@ function checkTestMapping(ctx, mapping) {
 
 function checkGuards(ctx, guards) {
   const incomplete = (subject, message) => ctx.add("engine-inventory-incomplete", subject, message);
-  const kinds = new Set(guards?.map((guard) => guard.kind));
+  const declared = ctx.graph.closure.engineGuardFamilies;
+  const declaredKinds = new Set(declared.map((family) => family.kind));
   for (const kind of ctx.policy.engineGuardKinds) {
-    if (!kinds.has(kind)) incomplete(`guards/${kind}`, `no ${kind} enforcement family`);
+    if (!declaredKinds.has(kind)) {
+      ctx.add(
+        "plan-field-missing",
+        `closure.engineGuardFamilies/${kind}`,
+        `the export declares no ${kind} enforcement family`,
+      );
+    }
   }
-  for (const guard of guards ?? []) {
+  const matched = matchDeclared(ctx, {
+    declared,
+    rows: guards,
+    keyOf: (guard) => `guards/${guard.family}`,
+    code: "engine-inventory-incomplete",
+    label: "enforcement family",
+  });
+  for (const [family, guard] of matched) {
+    if (guard.kind !== family.kind) {
+      incomplete(`guards/${guard.family}`, `declared ${family.kind}, got ${guard.kind}`);
+    }
     if (guard.path === undefined || guard.plantedFixture === undefined) {
       incomplete(`guards/${guard.family}`, "names no location or planted fixture");
     }
@@ -45,7 +91,14 @@ function checkGuards(ctx, guards) {
 
 function checkEngineInventory(ctx, engine) {
   const incomplete = (subject, message) => ctx.add("engine-inventory-incomplete", subject, message);
-  if (!engine?.relocations?.length) incomplete("relocations", "no relocation inventory");
+  const { closure } = ctx.graph;
+  matchDeclared(ctx, {
+    declared: closure.engineRelocations,
+    rows: engine?.relocations,
+    keyOf: (row) => `relocations/${row.from} -> ${row.to}`,
+    code: "engine-inventory-incomplete",
+    label: "relocation",
+  });
   checkTestMapping(ctx, engine?.testMapping);
   checkGuards(ctx, engine?.guards);
   const updated = new Set(
@@ -54,8 +107,17 @@ function checkEngineInventory(ctx, engine) {
   for (const id of ctx.policy.engineFormatInventories) {
     if (!updated.has(id)) incomplete(`formatInventories/${id}`, "not updated with the moves");
   }
-  if (!engine?.futureCharterSurfaces?.length) {
-    incomplete("futureCharterSurfaces", "no affected future surface is named");
+  const surfaces = matchDeclared(ctx, {
+    declared: closure.futureCharterSurfaces,
+    rows: engine?.futureCharterSurfaces,
+    keyOf: (row) => `futureCharterSurfaces/${row.surface}`,
+    code: "engine-inventory-incomplete",
+    label: "affected future surface",
+  });
+  for (const [entry, row] of surfaces) {
+    if (row.owner !== entry.owner) {
+      incomplete(`futureCharterSurfaces/${row.surface}`, `declared owner ${entry.owner}`);
+    }
   }
 }
 
@@ -82,11 +144,20 @@ function checkObserveFile(ctx, file) {
 }
 
 function checkObserveInventory(ctx, observe) {
-  if (!observe?.files?.length) {
-    ctx.add("observe-inventory-incomplete", "files", "no per-owner inventory files");
+  const files = matchDeclared(ctx, {
+    declared: ctx.graph.closure.observeOwners,
+    rows: observe?.files,
+    keyOf: (file) => file.owner,
+    code: "observe-inventory-incomplete",
+    label: "per-owner inventory file",
+  });
+  for (const [declared, file] of files) {
+    if (file.path !== declared.path) {
+      ctx.add("observe-inventory-incomplete", file.path, `the declared file is ${declared.path}`);
+    }
+    checkObserveFile(ctx, file);
   }
-  for (const file of observe?.files ?? []) checkObserveFile(ctx, file);
-  const counts = new Map(observe?.counts?.map((row) => [row.name, row]));
+  const counts = ctx.index(observe?.counts, (row) => row.name, "wsp6-count-duplicate");
   for (const name of ctx.graph.closure.wsp6Counts) {
     const count = counts.get(name);
     if (!count || count.accessor === undefined) {
@@ -103,8 +174,15 @@ export function checkStructuralInventories(ctx) {
   checkObserveInventory(ctx, ctx.report.inventories.observe);
 }
 
-function checkAdmission(ctx, admission) {
+function checkAdmission(ctx, declared, admission) {
   const subject = admission.id;
+  if (admission.class !== declared.class) {
+    ctx.add(
+      "reuse-inventory-incomplete",
+      subject,
+      `declared ${declared.class}, got ${admission.class}`,
+    );
+  }
   const refusal = REFUSALS.has(admission.class) || admission.result === "Refused";
   if (refusal && admission.reusedAs === "complete") {
     ctx.add("refusal-as-complete", subject, "a retained refusal was served as a completed answer");
@@ -113,6 +191,12 @@ function checkAdmission(ctx, admission) {
   const incomplete = admission.result === "Approximate" || admission.result === "Unavailable";
   if (admission.class === "Never" || incomplete) {
     ctx.add("arbitrary-incomplete-reuse", subject, "only admitted classes may be reused");
+  } else if (admission.reusedAs === "refusal" && !REFUSALS.has(admission.class)) {
+    ctx.add(
+      "context-poisoned-reuse",
+      subject,
+      "only scoped operation and isolated-root ledger refusals may be reused as refusals",
+    );
   }
   if (admission.class === "OperationRefusal" && admission.profileScoped !== true) {
     ctx.add("context-poisoned-reuse", subject, "an operation refusal must be profile-scoped");
@@ -152,7 +236,14 @@ export function checkClosureInventories(ctx) {
     ctx.add("reuse-inventory-missing", "reuse", "the report has no typed-reuse inventory");
     return;
   }
-  for (const admission of reuse.admissions ?? []) checkAdmission(ctx, admission);
+  const admissions = matchDeclared(ctx, {
+    declared: ctx.graph.closure.reuseAdmissions,
+    rows: reuse.admissions,
+    keyOf: (admission) => admission.id,
+    code: "reuse-inventory-incomplete",
+    label: "reuse admission",
+  });
+  for (const [declared, admission] of admissions) checkAdmission(ctx, declared, admission);
   for (const dimension of ctx.policy.negativeCacheDimensions) {
     const proofs = reuse.negativeCacheTests?.filter((row) => row.dimension === dimension) ?? [];
     if (!proofs.some((row) => row.executedTests > 0 && row.passed === true)) {

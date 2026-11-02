@@ -300,6 +300,19 @@
       "result": "pass"
     },
     {
+      "row": "lifecycle/soak-drain",
+      "evidenceRun": "rev11-l1-soak",
+      "worker": {
+        "id": "worker-benchmark",
+        "tags": ["bench-m3"]
+      },
+      "outcomes": {
+        "normal": "pass",
+        "pressure": "pass"
+      },
+      "result": "pass"
+    },
+    {
       "row": "wall/final",
       "evidenceRun": "rev11-l2-final",
       "worker": {

@@ -48,11 +48,15 @@ function main(argv) {
   if (!values.plan) return usageFailure("--plan is required");
   if (!values.report) return usageFailure("--report is required");
 
-  const decision = validateClosure({
-    mode: values.mode,
-    plan: readInput("plan export", values.plan),
-    report: readInput("report", values.report),
-  });
+  const plan = readInput("plan export", values.plan);
+  const report = readInput("report", values.report);
+  let decision;
+  try {
+    decision = validateClosure({ mode: values.mode, plan, report });
+  } catch (error) {
+    // An input the validator could not evaluate is no decision, never a rejection.
+    return usageFailure(`cannot evaluate the inputs: ${error.stack ?? error}`);
+  }
   process.stdout.write(`${JSON.stringify(decision, null, 2)}\n`);
   process.exitCode = decision.ok ? 0 : 1;
 }

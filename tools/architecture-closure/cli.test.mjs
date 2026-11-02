@@ -111,6 +111,29 @@ test("invalid JSON input is a usage failure, not a decision", (t) => {
   assert.equal(result.stdout, "");
 });
 
+test("a malformed export element is a decision with its reason code, not a crash", (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "architecture-closure-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const plan = JSON.parse(readFileSync(fixturePath("plan-closure.json"), "utf8"));
+  plan.closure.metricCells.push(null);
+  const planFile = path.join(dir, "plan.json");
+  writeFileSync(planFile, JSON.stringify(plan));
+  const result = run([
+    "--mode",
+    "closure",
+    "--plan",
+    planFile,
+    "--report",
+    fileURLToPath(fixturePath("report-closure.json")),
+  ]);
+  assert.equal(result.status, 1, result.stderr);
+  const decision = JSON.parse(result.stdout);
+  assert.deepEqual(
+    decision.errors.map((error) => [error.code, error.subject]),
+    [["plan-field-missing", `closure.metricCells[${plan.closure.metricCells.length - 1}]`]],
+  );
+});
+
 test("every test file here is registered once through its script-test fragment", () => {
   const onDisk = readdirSync(HERE)
     .filter((name) => name.endsWith(".test.mjs"))

@@ -9,7 +9,7 @@ export function checkTrainReviews(ctx) {
     if (!members.has(task.train)) members.set(task.train, []);
     members.get(task.train).push(task);
   }
-  const reviews = new Map(report.trainReviews.map((row) => [row.train, row]));
+  const reviews = ctx.index(report.trainReviews, (row) => row.train, "train-review-duplicate");
   for (const [train, tasks] of members) {
     const review = reviews.get(train);
     if (!review) {
@@ -49,10 +49,14 @@ export function checkTrainReviews(ctx) {
 }
 
 function checkCapabilityCases(ctx, surface, row) {
-  const cases = new Map((row.cases ?? []).map((entry) => [entry.case, entry]));
-  for (const declared of surface.cases ?? []) {
-    const cell = cases.get(declared.case);
+  const cases = ctx.index(
+    row.cases,
+    (entry) => `${surface.surface}/${entry.case}`,
+    "capability-cell-duplicate",
+  );
+  for (const declared of surface.cases) {
     const subject = `${surface.surface}/${declared.case}`;
+    const cell = cases.get(subject);
     if (!cell) {
       ctx.add("capability-cell-missing", subject, `no cell for the declared ${declared.kind} case`);
     } else if (cell.typedResult !== declared.kind) {
@@ -71,7 +75,7 @@ function checkCapabilityCases(ctx, surface, row) {
 export function checkCapabilities(ctx) {
   const surfaces = ctx.graph.closure.capabilitySurfaces;
   const declared = new Set(surfaces.map((surface) => surface.surface));
-  const rows = new Map(ctx.report.capabilities.map((row) => [row.surface, row]));
+  const rows = ctx.index(ctx.report.capabilities, (row) => row.surface, "capability-row-duplicate");
   for (const surface of surfaces) {
     const row = rows.get(surface.surface);
     const subject = surface.surface;
@@ -109,6 +113,12 @@ export function checkCapabilities(ctx) {
         subject,
         `a ${surface.class} surface is partial`,
       );
+    } else if (surface.class !== "stable" && row.typedResult === "unsupported") {
+      ctx.add(
+        "capability-preview-not-partial",
+        subject,
+        `a ${surface.class} surface reports a truthful partial result, not unsupported`,
+      );
     }
     if (
       row.typedResult !== "complete" &&
@@ -125,6 +135,16 @@ export function checkCapabilities(ctx) {
   }
 }
 
+const MEASURED = new Set(["pass", "fail"]);
+
+/**
+ * One controlling cell. A cell is unavailable when its result or any mode
+ * outcome is `unavailable`: it is explicitly unmeasured, so it needs a reason,
+ * never counts as a measured pass, and is only allowed for a performance
+ * observation (correctness, lifecycle and accounting evidence is never
+ * optional). A failing result or outcome rejects whatever else the row says,
+ * and anything that was measured must come from a benchmark worker.
+ */
 function checkMetricRow(ctx, cell, row) {
   const { policy } = ctx;
   const subject = cell.row;
@@ -135,32 +155,56 @@ function checkMetricRow(ctx, cell, row) {
       `declared under ${cell.evidenceRun}, got ${row.evidenceRun}`,
     );
   }
-  if (row.result === "unavailable" && row.unavailableReason !== undefined) {
-    ctx.advisories.push({ code: "metric-unavailable", subject, message: row.unavailableReason });
-    return;
+  if (row.result === undefined) {
+    ctx.add("metric-result-missing", subject, "the cell has no result");
+  } else if (row.result === "fail") {
+    ctx.add("metric-failing", subject, "failing cell returns to its owner");
   }
-  if (row.result === undefined || row.result === "unavailable") {
-    ctx.add("metric-result-missing", subject, "the cell has no measured result");
-    return;
+  let unavailable = row.result === "unavailable";
+  const values = [row.result];
+  for (const mode of cell.modes) {
+    const outcome = row.outcomes?.[mode];
+    values.push(outcome);
+    if (outcome === undefined) {
+      if (row.result !== "unavailable") {
+        ctx.add("metric-outcome-missing", subject, `no ${mode} outcome`);
+      }
+    } else if (outcome === "fail") {
+      ctx.add("metric-failing", subject, `the ${mode} outcome failed`);
+    } else if (outcome === "unavailable") {
+      unavailable = true;
+    }
   }
-  if (!row.worker?.tags.includes(policy.metricWorkerTag)) {
+  if (unavailable) {
+    if (row.result === "pass") {
+      ctx.add("metric-unmeasured-pass", subject, "an unmeasured mode cannot make a measured pass");
+    }
+    if (cell.evidenceKind !== "performance") {
+      ctx.add(
+        "metric-required-evidence-unavailable",
+        subject,
+        `${cell.evidenceKind} evidence is required, never an optional performance observation`,
+      );
+    }
+    if (row.unavailableReason === undefined) {
+      ctx.add("metric-result-missing", subject, "an unavailable cell states no reason");
+    } else {
+      ctx.advisories.push({ code: "metric-unavailable", subject, message: row.unavailableReason });
+    }
+  }
+  const measured = values.some((value) => MEASURED.has(value));
+  if (measured && !row.worker?.tags.includes(policy.metricWorkerTag)) {
     ctx.add(
       "metric-worker-not-allowed",
       subject,
       `not measured on a ${policy.metricWorkerTag} worker`,
     );
   }
-  if (row.result === "fail")
-    ctx.add("metric-failing", subject, "failing cell returns to its owner");
-  for (const mode of cell.modes ?? []) {
-    const outcome = row.outcomes?.[mode];
-    if (outcome === undefined) {
-      ctx.add("metric-outcome-missing", subject, `no ${mode} outcome`);
-    } else if (outcome === "fail") {
-      ctx.add("metric-failing", subject, `the ${mode} outcome failed`);
-    }
-  }
-  if (!ctx.report.evidence.some((evidence) => evidence.evidenceRun === cell.evidenceRun)) {
+  const required = measured || cell.evidenceKind !== "performance";
+  if (
+    required &&
+    !ctx.report.evidence.some((evidence) => evidence.evidenceRun === cell.evidenceRun)
+  ) {
     ctx.add("metric-run-evidence-missing", subject, `no evidence row for run ${cell.evidenceRun}`);
   }
 }
@@ -178,7 +222,7 @@ export function checkMetrics(ctx) {
       );
     }
   }
-  const rows = new Map(ctx.report.metrics.map((row) => [row.row, row]));
+  const rows = ctx.index(ctx.report.metrics, (row) => row.row, "metric-row-duplicate");
   for (const cell of cells) {
     const row = rows.get(cell.row);
     if (!row) ctx.add("metric-cell-missing", cell.row, "a required cell has no row");
@@ -222,6 +266,12 @@ function checkEvidenceRow(ctx, evidence, knownOwner) {
   if (!summary.passed) ctx.add("evidence-failed", subject, "the terminal summary did not pass");
   if (!(summary.selected > 0) || !(summary.executed > 0)) {
     ctx.add("evidence-zero-work", subject, "selected or executed no work");
+  } else if (summary.executed + (summary.expectedSkips ?? 0) !== summary.selected) {
+    ctx.add(
+      "evidence-partial-execution",
+      subject,
+      `executed ${summary.executed} and expected to skip ${summary.expectedSkips ?? 0} of ${summary.selected} selected`,
+    );
   }
   if (summary.unexpectedSkips !== 0) {
     ctx.add("evidence-unexpected-skip", subject, "expected exactly zero unexpected skips");

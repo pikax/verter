@@ -2,15 +2,7 @@
 // dependency graph; a report row can never add to it or vouch for a status,
 // because the ledger is the only implementation authority.
 
-function indexRows(ctx) {
-  const rows = new Map();
-  for (const row of ctx.report.owners) {
-    if (rows.has(row.slug))
-      ctx.add("owner-row-duplicate", row.slug, "two owner rows for one owner");
-    rows.set(row.slug, row);
-  }
-  return rows;
-}
+const indexRows = (ctx) => ctx.index(ctx.report.owners, (row) => row.slug, "owner-row-duplicate");
 
 function checkStatusClaims(ctx, rows) {
   for (const [slug, row] of rows) {
@@ -93,8 +85,14 @@ function expectedClassification(ctx, slug) {
     : "required";
 }
 
-function checkOutcomePopulation(ctx) {
-  for (const id of ctx.graph.closure.requiredOutcomes) {
+/**
+ * Each required outcome has exactly one claimant, and that claimant is an
+ * implemented owner with a path to the target (or the target itself). An
+ * optional, pending or detached row can never carry a required outcome.
+ */
+function checkOutcomePopulation(ctx, inPopulation) {
+  const { graph, policy, target } = ctx;
+  for (const id of graph.closure.requiredOutcomes) {
     const claimants = ctx.report.owners.filter((row) => row.outcomeIds?.includes(id));
     if (claimants.length === 0) {
       ctx.add("outcome-unmapped", id, "no owner row carries this required outcome");
@@ -102,8 +100,20 @@ function checkOutcomePopulation(ctx) {
       const names = claimants.map((row) => row.slug).join(", ");
       ctx.add("outcome-multiple-owners", id, `claimed by ${names}; an outcome has one owner`);
     }
+    for (const { slug } of claimants) {
+      if (slug === target) continue;
+      if (!inPopulation(slug)) {
+        ctx.add("outcome-owner-ineligible", id, `${slug} has no dependency path to ${target}`);
+      } else if (graph.status(slug) !== policy.implementedStatus) {
+        ctx.add("outcome-owner-ineligible", id, `${slug} is not implemented`);
+      }
+    }
   }
 }
+
+/** Whether the export marks `slug` as an optional task that was not selected. */
+const isUnselectedOptional = (graph, slug) =>
+  graph.task(slug)?.optional === true && graph.task(slug).selected === false;
 
 /** The owner rules of the full closure population. */
 export function checkClosureOwners(ctx) {
@@ -161,19 +171,29 @@ export function checkClosureOwners(ctx) {
       checkRequiredRow(ctx, slug, row, inPopulation, namedEvidenceOwners);
     } else if (!graph.has(slug)) {
       ctx.add("owner-unknown", slug, "a report row names an owner outside the export");
-    } else if (!ancestors.has(slug) && row.classification !== "optional") {
+    } else if (ancestors.has(slug)) {
+      continue;
+    } else if (row.classification !== "optional") {
       ctx.add("owner-pathless", slug, "a report row names an owner with no path to the target");
+    } else if (!isUnselectedOptional(graph, slug) && !policy.conditionalOwners.includes(slug)) {
+      // A selected conditional owner without a path is conditional-owner-pathless above.
+      ctx.add("owner-pathless", slug, "only an unselected optional task may be classed optional");
     }
   }
 
   checkStatusClaims(ctx, rows);
-  checkOutcomePopulation(ctx);
+  checkOutcomePopulation(ctx, inPopulation);
 }
 
-/** Structural owners must be implemented; everything later is listed as pending, never failed. */
+/**
+ * Structural owners must be implemented; everything later is listed as pending,
+ * never failed. The structural population is the export's list of owners the
+ * lock names, never derived from the lock's own edges: an owner whose edge to
+ * the lock was dropped must surface as pathless, not vanish into a later owner.
+ */
 export function checkOwnerLockOwners(ctx) {
   const { graph, policy, target } = ctx;
-  const structural = new Set(graph.task(target).predecessors);
+  const structural = new Set(graph.closure.structuralOwners);
   const lockAncestors = graph.ancestorsOf(target);
   const rows = indexRows(ctx);
 
@@ -185,6 +205,14 @@ export function checkOwnerLockOwners(ctx) {
     );
   }
   for (const slug of structural) {
+    if (!graph.has(slug)) {
+      ctx.add("owner-unknown", slug, "a structural owner is not in the export");
+      continue;
+    }
+    if (!lockAncestors.has(slug)) {
+      ctx.add("owner-pathless", slug, `a structural owner has no dependency path to ${target}`);
+      requireImplemented(ctx, slug, "structural-owner-pending");
+    }
     const row = rows.get(slug);
     if (!row) {
       ctx.add("structural-owner-row-missing", slug, "a structural owner has no report row");

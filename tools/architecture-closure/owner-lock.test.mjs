@@ -12,6 +12,8 @@ const base = {
 const owner = (slug) => (row) => row.slug === slug;
 const ownerRow = ({ report }, slug) => findRow(report.owners, owner(slug));
 const ledgerStatus = ({ plan }, slug) => plan.ledger.find(owner(slug))?.status;
+const planTask = ({ plan }, slug) => findRow(plan.tasks, owner(slug));
+const without = (list, slug) => list.splice(list.indexOf(slug), 1);
 
 test("pending semantic-precision, performance and evidence owners are listed and accepted", () => {
   for (const slug of ["P-COND", "P-PERF", "CP-SEM"]) {
@@ -33,8 +35,15 @@ test("pending semantic-precision, performance and evidence owners are listed and
 
 test("owner-lock ignores the closure-only populations", () => {
   const inputs = structuredClone(base);
-  delete inputs.plan.closure.capabilitySurfaces;
-  delete inputs.plan.closure.metricCells;
+  for (const field of [
+    "namedOwners",
+    "requiredOutcomes",
+    "capabilitySurfaces",
+    "metricCells",
+    "reuseAdmissions",
+  ]) {
+    delete inputs.plan.closure[field];
+  }
   assert.equal(validateClosure({ mode: "owner-lock", ...inputs }).ok, true);
 });
 
@@ -86,6 +95,58 @@ const CONTROLS = [
     mutate: ({ report }) => report.owners.push({ slug: "DETACHED" }),
     applied: ({ report }) => report.owners.some(owner("DETACHED")),
     expect: ["owner-pathless"],
+  },
+  {
+    name: "a structural owner whose edges to the lock were dropped",
+    mutate: (i) => {
+      without(planTask(i, "L4-A").predecessors, "S-OBS");
+      without(planTask(i, "CP-STRUCT").predecessors, "S-OBS");
+      planTask(i, "L4").predecessors.push("S-OBS");
+      delete ownerRow(i, "S-OBS").dependencyPath;
+    },
+    applied: (i) =>
+      i.plan.closure.structuralOwners.includes("S-OBS") &&
+      !planTask(i, "L4-A").predecessors.includes("S-OBS") &&
+      !planTask(i, "CP-STRUCT").predecessors.includes("S-OBS"),
+    expect: ["owner-path-missing", "owner-pathless"],
+  },
+  {
+    name: "a structural owner the export names outside the plan",
+    mutate: ({ plan }) => plan.closure.structuralOwners.push("INVENTED"),
+    applied: ({ plan }) => plan.closure.structuralOwners.includes("INVENTED"),
+    expect: ["owner-unknown"],
+  },
+  {
+    name: "an export with no structural owner population",
+    mutate: ({ plan }) => delete plan.closure.structuralOwners,
+    applied: ({ plan }) => plan.closure.structuralOwners === undefined,
+    expect: ["plan-field-missing"],
+  },
+  {
+    name: "two discovered tests mapped onto one destination",
+    mutate: ({ report }) => {
+      const rows = report.inventories.engine.testMapping.rows;
+      rows[1].new = rows[0].new;
+    },
+    applied: ({ report }) => {
+      const rows = report.inventories.engine.testMapping.rows;
+      return rows.length === 2 && rows[0].new === rows[1].new && rows[0].old !== rows[1].old;
+    },
+    expect: ["engine-inventory-incomplete"],
+  },
+  {
+    name: "a declared relocation omitted",
+    mutate: ({ plan }) =>
+      plan.closure.engineRelocations.push({ from: "crates/a/src/x.rs", to: "crates/b/src/x.rs" }),
+    applied: ({ report }) => report.inventories.engine.relocations.length === 1,
+    expect: ["engine-inventory-incomplete"],
+  },
+  {
+    name: "a declared affected future surface omitted",
+    mutate: ({ plan }) =>
+      plan.closure.futureCharterSurfaces.push({ surface: "crates/b/src/y.rs", owner: "P-PERF" }),
+    applied: ({ report }) => report.inventories.engine.futureCharterSurfaces.length === 1,
+    expect: ["engine-inventory-incomplete"],
   },
   {
     name: "a later owner the report does not list",

@@ -2,14 +2,120 @@
 // A population the rules need and the export lacks is `plan-field-missing`;
 // nothing here falls back to prose, the repository or a live service.
 
-const POPULATION_FIELDS = {
-  "owner-lock": ["wsp6Counts"],
-  closure: ["namedOwners", "requiredOutcomes", "capabilitySurfaces", "metricCells", "wsp6Counts"],
-};
-
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isText = (v) => typeof v === "string" && v.length > 0;
 const isTextList = (v) => Array.isArray(v) && v.every(isText);
+const oneOf = (values) => (v) => values.includes(v);
+
+const STABILITY_CLASSES = ["stable", "preview", "experimental-unranked"];
+const CASE_KINDS = ["partial", "unsupported"];
+const EVIDENCE_KINDS = ["performance", "correctness", "lifecycle", "accounting"];
+const GUARD_KINDS = ["dependency", "feature", "capability", "owner"];
+const ADMISSION_CLASSES = [
+  "CompleteFact",
+  "CertifiedDivergence",
+  "OperationRefusal",
+  "IsolatedRootLedgerRefusal",
+  "Never",
+];
+
+/** Field name to predicate, for one record element of a population. */
+const record = (fields) => (element) =>
+  isObject(element)
+    ? Object.entries(fields)
+        .filter(([field, valid]) => !valid(element[field]))
+        .map(([field]) => `.${field}`)
+    : [""];
+const text = (element) => (isText(element) ? [] : [""]);
+const caseList = (cases) =>
+  Array.isArray(cases) &&
+  cases.every((entry) => record({ case: isText, kind: oneOf(CASE_KINDS) })(entry).length === 0);
+
+/**
+ * Every population the rules need, with its element shape and the key that
+ * makes an element unique. Each must be present, non-empty and well formed:
+ * an empty or partial population would let its rule pass vacuously.
+ */
+const POPULATIONS = {
+  structuralOwners: { element: text, key: (v) => v },
+  namedOwners: { element: text, key: (v) => v },
+  requiredOutcomes: { element: text, key: (v) => v },
+  capabilitySurfaces: {
+    element: record({ surface: isText, class: oneOf(STABILITY_CLASSES), cases: caseList }),
+    key: (v) => v.surface,
+  },
+  metricCells: {
+    element: record({
+      row: isText,
+      evidenceRun: isText,
+      modes: (v) => isTextList(v) && v.length > 0,
+      evidenceKind: oneOf(EVIDENCE_KINDS),
+    }),
+    key: (v) => v.row,
+  },
+  wsp6Counts: { element: text, key: (v) => v },
+  engineRelocations: {
+    element: record({ from: isText, to: isText }),
+    key: (v) => `${v.from} -> ${v.to}`,
+  },
+  engineGuardFamilies: {
+    element: record({ family: isText, kind: oneOf(GUARD_KINDS) }),
+    key: (v) => v.family,
+  },
+  futureCharterSurfaces: {
+    element: record({ surface: isText, owner: isText }),
+    key: (v) => v.surface,
+  },
+  observeOwners: { element: record({ owner: isText, path: isText }), key: (v) => v.owner },
+  reuseAdmissions: {
+    element: record({ id: isText, class: oneOf(ADMISSION_CLASSES) }),
+    key: (v) => v.id,
+  },
+};
+
+const STRUCTURAL_INVENTORIES = [
+  "wsp6Counts",
+  "engineRelocations",
+  "engineGuardFamilies",
+  "futureCharterSurfaces",
+  "observeOwners",
+];
+const POPULATION_FIELDS = {
+  "owner-lock": ["structuralOwners", ...STRUCTURAL_INVENTORIES],
+  closure: [
+    "namedOwners",
+    "requiredOutcomes",
+    "capabilitySurfaces",
+    "metricCells",
+    "reuseAdmissions",
+    ...STRUCTURAL_INVENTORIES,
+  ],
+};
+
+function populationProblems(closure, field) {
+  const at = `closure.${field}`;
+  const list = closure[field];
+  const missing = "plan-field-missing";
+  if (!Array.isArray(list)) return [[missing, at, `the export has no ${at} population`]];
+  if (list.length === 0) return [[missing, at, `the export's ${at} population is empty`]];
+  const { element, key } = POPULATIONS[field];
+  const out = [];
+  const seen = new Set();
+  list.forEach((entry, index) => {
+    const bad = element(entry);
+    for (const suffix of bad) {
+      const subject = `${at}[${index}]${suffix}`;
+      out.push([missing, subject, `a ${at} element lacks a valid ${suffix || "value"}`]);
+    }
+    if (bad.length > 0) return;
+    const identity = key(entry);
+    if (seen.has(identity)) {
+      out.push(["plan-duplicate-entry", `${at}[${index}]`, `${identity} is listed twice`]);
+    }
+    seen.add(identity);
+  });
+  return out;
+}
 
 function taskFieldProblems(task, index) {
   const at = `tasks[${index}]`;
@@ -104,8 +210,8 @@ export function readPlanExport(plan, mode) {
   if (!isObject(plan.closure)) missing("closure", "the export has no closure populations");
   else {
     for (const field of POPULATION_FIELDS[mode]) {
-      if (!Array.isArray(plan.closure[field])) {
-        missing(`closure.${field}`, `the export has no closure.${field} population`);
+      for (const [code, subject, message] of populationProblems(plan.closure, field)) {
+        problems.push({ code, subject, message });
       }
     }
   }
