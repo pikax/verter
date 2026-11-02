@@ -11,7 +11,7 @@ import {
   checkExpectation,
   compareRuns,
   loadCorpus,
-  readMetadata,
+  metadataDigest,
   replay,
   replayFixture,
   replayPlant,
@@ -19,12 +19,54 @@ import {
   validateCorpus,
   withoutEdges,
 } from "./ci-change-corpus.mjs";
+import { LANE_ROOTS } from "./ci-impact.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = join(ROOT, "scripts", "ci-change-corpus.mjs");
 
 const { corpus } = loadCorpus();
-const metadata = readMetadata(ROOT);
+
+// Crate-graph changes do not select the lane that runs this file, so no
+// assertion here may depend on the live workspace graph. The graph is a
+// synthetic `cargo metadata` document that holds every lane root plus the few
+// crates the selector plants name; replay and compare answer the real graph.
+function syntheticMetadata(workspaceRoot = "/repo") {
+  const edges = {
+    verter_wasm: [{ name: "verter_span" }],
+    verter_session: [{ name: "verter_span" }, { name: "verter_test_support", kind: "dev" }],
+    verter_lsp: [{ name: "verter_session" }, { name: "verter_test_support", kind: "dev" }],
+  };
+  const names = [
+    ...new Set([
+      ...Object.values(LANE_ROOTS).flat(),
+      "verter_span",
+      "verter_test_support",
+      ...Object.keys(edges),
+    ]),
+  ];
+  const idOf = (name) => `path+file://${workspaceRoot}/crates/${name}#0.0.0`;
+  return {
+    workspace_root: workspaceRoot,
+    workspace_members: names.map(idOf),
+    packages: names.map((name) => ({
+      id: idOf(name),
+      name,
+      manifest_path: `${workspaceRoot}/crates/${name}/Cargo.toml`,
+      targets: [{ kind: ["lib"] }],
+    })),
+    resolve: {
+      nodes: names.map((name) => ({
+        id: idOf(name),
+        deps: (edges[name] ?? []).map((dep) => ({
+          name: dep.name,
+          pkg: idOf(dep.name),
+          dep_kinds: [{ kind: dep.kind ?? null, target: null }],
+        })),
+      })),
+    },
+  };
+}
+const metadata = syntheticMetadata();
 const scenarios = (kind) => corpus.scenarios.filter((scenario) => scenario.kind === kind);
 
 function withTempDir(body) {
@@ -60,18 +102,6 @@ test("a corpus missing a required dimension, a stream or a live job is refused",
 
   const duplicate = { ...corpus, scenarios: [...corpus.scenarios, corpus.scenarios[0]] };
   assert.match(validateCorpus(duplicate, ROOT).join("\n"), /duplicate/);
-});
-
-test("every change sample answers as the corpus expects on the real crate graph", () => {
-  for (const scenario of scenarios("change")) {
-    for (const sample of scenario.samples) {
-      assert.deepEqual(
-        checkExpectation(answerFor(sample, metadata), sample.expect),
-        [],
-        `${scenario.id}/${sample.id}`,
-      );
-    }
-  }
 });
 
 test("a replayed answer is what the CI command publishes for the same input", () => {
@@ -154,7 +184,7 @@ test("removing a dependency edge removes only edges of that kind and leaves the 
   assert.equal(countEdges(metadata), before);
 });
 
-test("every selector plant answers correctly on the true graph and is caught on the planted one", () => {
+test("every selector plant answers correctly on the true graph and is caught on the planted one (synthetic graph)", () => {
   const plants = scenarios("selector-plant");
   assert.ok(plants.length >= 2);
   for (const scenario of plants) {
@@ -189,6 +219,22 @@ test("a fixture replay fails on a filtered-out name, a skip and a failed subject
   assert.equal(passed.rows[0].verdict, "passed");
   assert.equal(passed.rows[0].subject, "reject");
   assert.equal(passed.ok, true);
+
+  // A failure is not erased by a later same-named pass, a body-less TODO ran
+  // nothing, and a child that exits non-zero certifies none of its passes.
+  const laterPass = run("not ok 1 - a named case\nok 2 - a named case\n", 1);
+  assert.equal(laterPass.rows[0].verdict, "failed");
+  assert.equal(laterPass.ok, false);
+  assert.equal(run("ok 1 - a named case # TODO\n").rows[0].verdict, "no-matching-test");
+  const crashed = run("ok 1 - a named case\n", 1);
+  assert.equal(crashed.rows[0].verdict, "runner-failed");
+  assert.equal(crashed.ok, false);
+  const killed = replayFixture(
+    scenario,
+    { run: () => ({ status: null, stdout: "ok 1 - a named case\n", error: new Error("timeout") }) },
+    ROOT,
+  );
+  assert.equal(killed.ok, false);
 });
 
 test("a named fixture actually runs through the test runner", () => {
@@ -312,23 +358,40 @@ test("a plant refuses a dirty tree rather than discard someone's work", () => {
   });
 });
 
-const runResult = (overrides = {}) => ({
-  manifest: { corpus: "c/1", corpusDigest: "d", arm: "baseline", repetition: 1 },
-  ok: true,
-  selection: [
-    { scenario: "A", sample: "a", gatesOn: ["rust"], impactedCrates: ["x"], violations: [] },
-    { scenario: "A", sample: "b", gatesOn: ["js"], impactedCrates: [], violations: [] },
-  ],
-  fixtures: [{ scenario: "F", rows: [{ test: "t", verdict: "passed" }] }],
+const selectionRow = (sample, overrides = {}) => ({
+  scenario: "A",
+  sample,
+  class: "narrow",
+  gatesOn: ["rust"],
+  impactedCrates: [],
+  violations: [],
   ...overrides,
 });
 
-test("comparison pairs identical inputs and reports widened and narrowed selections", () => {
-  const candidate = runResult({
-    manifest: { corpus: "c/1", corpusDigest: "d", arm: "candidate", repetition: 1 },
+const runResult = (arm = "baseline", overrides = {}) => ({
+  manifest: { corpus: "c/1", corpusDigest: "d", definitionsDigest: "m", arm, repetition: 1 },
+  ok: true,
+  corpusProblems: [],
+  selection: [selectionRow("a", { impactedCrates: ["x"] }), selectionRow("b", { gatesOn: ["js"] })],
+  selectorPlants: [{ scenario: "SP", verdict: "rejected-as-expected" }],
+  fixtures: [
+    {
+      scenario: "F",
+      rows: [{ file: "f.mjs", test: "t", subject: "reject", verdict: "passed" }],
+    },
+  ],
+  ...overrides,
+});
+
+const fixtureRun = (verdict) => [
+  { scenario: "F", rows: [{ file: "f.mjs", test: "t", subject: "reject", verdict }] },
+];
+
+test("comparison pairs identical inputs and reports widened, narrowed and reclassified selections", () => {
+  const candidate = runResult("candidate", {
     selection: [
-      { scenario: "A", sample: "a", gatesOn: ["wasm"], impactedCrates: ["x", "y"], violations: [] },
-      { scenario: "A", sample: "b", gatesOn: ["js"], impactedCrates: [], violations: [] },
+      selectionRow("a", { gatesOn: ["wasm"], impactedCrates: ["x", "y"], class: "impact-full" }),
+      selectionRow("b", { gatesOn: ["js"] }),
     ],
   });
   const comparison = compareRuns(runResult(), candidate);
@@ -337,6 +400,7 @@ test("comparison pairs identical inputs and reports widened and narrowed selecti
     {
       scenario: "A",
       sample: "a",
+      classChanged: { from: "narrow", to: "impact-full" },
       gatesAdded: ["wasm"],
       gatesRemoved: ["rust"],
       cratesAdded: ["y"],
@@ -344,28 +408,30 @@ test("comparison pairs identical inputs and reports widened and narrowed selecti
     },
   ]);
   assert.equal(comparison.unchanged, 1);
+
+  const classOnly = runResult("candidate", {
+    selection: [
+      selectionRow("a", { impactedCrates: ["x"], class: "everything" }),
+      selectionRow("b", { gatesOn: ["js"] }),
+    ],
+  });
+  assert.equal(compareRuns(runResult(), classOnly).changed.length, 1);
 });
 
 test("comparison refuses different corpus bytes, unmatched samples and reports a violated candidate", () => {
-  const otherBytes = runResult();
+  const otherBytes = runResult("candidate");
   otherBytes.manifest = { ...otherBytes.manifest, corpusDigest: "other" };
   assert.equal(compareRuns(runResult(), otherBytes).comparable, false);
 
-  const dropped = runResult({ selection: runResult().selection.slice(1) });
+  const dropped = runResult("candidate", { selection: runResult().selection.slice(1) });
   const missing = compareRuns(runResult(), dropped);
   assert.equal(missing.comparable, false);
   assert.match(missing.problems.join(), /A\/a/);
 
-  const violated = runResult({
+  const violated = runResult("candidate", {
     ok: false,
     selection: [
-      {
-        scenario: "A",
-        sample: "a",
-        gatesOn: [],
-        impactedCrates: [],
-        violations: ["must select rust"],
-      },
+      selectionRow("a", { gatesOn: [], violations: ["must select rust"] }),
       runResult().selection[1],
     ],
   });
@@ -374,16 +440,75 @@ test("comparison refuses different corpus bytes, unmatched samples and reports a
   assert.deepEqual(comparison.candidateViolations, ["A/a: must select rust"]);
 });
 
+test("comparison refuses swapped arms, mismatched repetitions and arms that did not run the same fixtures", () => {
+  assert.match(compareRuns(runResult("candidate"), runResult()).problems.join(), /arms are/);
+  assert.match(compareRuns(runResult(), runResult("baseline")).problems.join(), /arms are/);
+
+  const later = runResult("candidate");
+  later.manifest = { ...later.manifest, repetition: 2 };
+  assert.match(compareRuns(runResult(), later).problems.join(), /repetition differs/);
+
+  const noFixtures = runResult("candidate", { fixtures: [] });
+  const lost = compareRuns(runResult(), noFixtures);
+  assert.equal(lost.comparable, false);
+  assert.match(lost.problems.join(), /candidate has no answer for fixture F\/f\.mjs\/t/);
+  assert.equal(compareRuns(noFixtures, runResult("candidate")).comparable, false);
+
+  const noPlants = runResult("candidate", { selectorPlants: [] });
+  assert.match(compareRuns(runResult(), noPlants).problems.join(), /selector plant SP/);
+});
+
+test("a candidate that lost a selector plant, a fixture or a clean corpus is a violation", () => {
+  const plant = runResult("candidate", {
+    ok: false,
+    selectorPlants: [{ scenario: "SP", verdict: "plant-not-effective" }],
+  });
+  const plantComparison = compareRuns(runResult(), plant);
+  assert.equal(plantComparison.comparable, true);
+  assert.deepEqual(plantComparison.candidateViolations, ["SP: selector plant plant-not-effective"]);
+  assert.deepEqual(plantComparison.selectorPlantChanges, [
+    "SP: rejected-as-expected -> plant-not-effective",
+  ]);
+
+  const fixture = runResult("candidate", { ok: false, fixtures: fixtureRun("failed") });
+  const fixtureComparison = compareRuns(runResult(), fixture);
+  assert.deepEqual(fixtureComparison.candidateViolations, ["F: t: failed"]);
+  assert.deepEqual(fixtureComparison.fixtureChanges, ["F/f.mjs/t: passed -> failed"]);
+
+  const corpusRun = runResult("candidate", { ok: false, corpusProblems: ["no entry covers x"] });
+  assert.deepEqual(compareRuns(runResult(), corpusRun).candidateViolations, [
+    "corpus: no entry covers x",
+  ]);
+  assert.deepEqual(
+    compareRuns(runResult(), runResult("candidate", { ok: false })).candidateViolations,
+    ["run reported ok=false"],
+  );
+});
+
+test("a crate graph digest ignores the checkout path and sees a graph change", () => {
+  const here = syntheticMetadata("/work/one");
+  assert.equal(metadataDigest(here), metadataDigest(syntheticMetadata("/other/two")));
+  assert.equal(
+    metadataDigest(syntheticMetadata("D:\\work\\one")),
+    metadataDigest(syntheticMetadata("/other/two")),
+  );
+  assert.notEqual(metadataDigest(here), metadataDigest(withoutEdges(here, { kind: "dev" })));
+});
+
 test("a replay records identities and answers, names unavailable evidence and never overwrites", () => {
   withTempDir((dir) => {
     const out = join(dir, "baseline-1");
     const options = { out, arm: "baseline", repetition: 1, metadata, fixtures: false, root: ROOT };
     const result = replay(options);
-    assert.equal(result.ok, true);
+    assert.deepEqual(result.corpusProblems, []);
     const stored = JSON.parse(readFileSync(join(out, "results.json"), "utf8"));
     assert.equal(stored.manifest.corpus, corpus.corpus);
     assert.match(stored.manifest.corpusDigest, /^[0-9a-f]{64}$/);
     assert.match(stored.manifest.configDigests[".github/workflows/ci.yml"], /^[0-9a-f]{64}$/);
+    assert.match(
+      stored.manifest.configDigests["scripts/provider-ci-internals.mjs"],
+      /^[0-9a-f]{64}$/,
+    );
     assert.equal(typeof stored.manifest.tree, "string");
     assert.ok(stored.selection.length > 0);
     assert.equal(
@@ -398,22 +523,102 @@ test("a replay records identities and answers, names unavailable evidence and ne
   });
 });
 
-test("the CLI exits non-zero when two runs cannot be compared", () => {
+test("a replay of an empty or incomplete corpus is not ok, in the library and the CLI", () => {
   withTempDir((dir) => {
-    const write = (name, value) => {
-      const run = join(dir, name);
-      mkdirSync(run);
-      writeFileSync(join(run, "results.json"), JSON.stringify(value));
-      return run;
-    };
-    const other = runResult();
-    other.manifest = { ...other.manifest, corpusDigest: "other" };
+    const corpusFile = join(dir, "empty.json");
+    writeFileSync(corpusFile, JSON.stringify({ corpus: "ci-change-corpus/0", scenarios: [] }));
+    const result = replay({
+      corpusFile,
+      out: join(dir, "library"),
+      arm: "baseline",
+      repetition: 1,
+      metadata,
+      fixtures: false,
+      root: ROOT,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.corpusProblems.join(), /no entry covers dimension/);
+
+    const metadataFile = join(dir, "metadata.json");
+    writeFileSync(metadataFile, JSON.stringify(metadata));
     const run = spawnSync(
       process.execPath,
-      [SCRIPT, "compare", "--baseline", write("a", runResult()), "--candidate", write("b", other)],
+      [
+        SCRIPT,
+        "replay",
+        "--out",
+        join(dir, "cli"),
+        "--arm",
+        "baseline",
+        "--repetition",
+        "1",
+        "--corpus",
+        corpusFile,
+        "--metadata",
+        metadataFile,
+        "--no-fixtures",
+      ],
       { cwd: ROOT, encoding: "utf8" },
     );
     assert.equal(run.status, 1, run.stdout + run.stderr);
+  });
+});
+
+test("a corpus naming a fixture the suite no longer holds is refused", () => {
+  const [first] = scenarios("fixture");
+  const renamed = {
+    ...corpus,
+    scenarios: corpus.scenarios.map((scenario) =>
+      scenario === first
+        ? { ...scenario, fixtures: [{ ...first.fixtures[0], test: "a case renamed away" }] }
+        : scenario,
+    ),
+  };
+  assert.match(validateCorpus(renamed, ROOT).join("\n"), /renamed away/);
+});
+
+function writeRun(dir, name, value) {
+  const run = join(dir, name);
+  mkdirSync(run);
+  writeFileSync(join(run, "results.json"), JSON.stringify(value));
+  return run;
+}
+
+const compareCli = (baseline, candidate) =>
+  spawnSync(
+    process.execPath,
+    [SCRIPT, "compare", "--baseline", baseline, "--candidate", candidate],
+    { cwd: ROOT, encoding: "utf8" },
+  );
+
+test("the CLI exits non-zero when two runs cannot be compared", () => {
+  withTempDir((dir) => {
+    const other = runResult("candidate");
+    other.manifest = { ...other.manifest, corpusDigest: "other" };
+    const run = compareCli(writeRun(dir, "a", runResult()), writeRun(dir, "b", other));
+    assert.equal(run.status, 1, run.stdout + run.stderr);
     assert.match(run.stdout + run.stderr, /digest/);
+  });
+});
+
+test("the CLI compare exits non-zero for a candidate that lost its plants or fixtures, and zero for a clean pair", () => {
+  withTempDir((dir) => {
+    const baseline = writeRun(dir, "base", runResult());
+    const clean = compareCli(baseline, writeRun(dir, "clean", runResult("candidate")));
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+
+    const failedPlant = runResult("candidate", {
+      ok: false,
+      selectorPlants: [{ scenario: "SP", verdict: "plant-not-effective" }],
+      fixtures: fixtureRun("failed"),
+    });
+    const failed = compareCli(baseline, writeRun(dir, "failed", failedPlant));
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+
+    const noFixtures = compareCli(
+      baseline,
+      writeRun(dir, "none", runResult("candidate", { fixtures: [] })),
+    );
+    assert.equal(noFixtures.status, 1, noFixtures.stdout + noFixtures.stderr);
   });
 });
