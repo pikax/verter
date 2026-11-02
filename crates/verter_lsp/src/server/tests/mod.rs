@@ -3422,11 +3422,24 @@ async fn await_workspace_scan_settled(server: &VerterLanguageServer) {
 /// the open itself. The import-dependency publication — the route that mints
 /// the DependencyReady receipt — is unaffected.
 async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationFixture {
+    scan_publication_fixture_with_unrelated(eager_import_warmup, 1, 0).await
+}
+
+/// The scan publication workspace with a loaded store-fill tail: `unrelated`
+/// carriers only the scan touches, plus `replayable` sibling carriers a
+/// restarted client replays as did_open commits while the scan runs.
+async fn scan_publication_fixture_with_unrelated(
+    eager_import_warmup: bool,
+    unrelated: usize,
+    replayable: usize,
+) -> ScanPublicationFixture {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::test_utils::canonical_test_path(temp.path());
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::create_dir_all(temp.path().join("far")).unwrap();
+    std::fs::create_dir_all(temp.path().join("sib")).unwrap();
     std::fs::write(temp.path().join("tsconfig.json"), "{}").unwrap();
+    let mut files = Vec::new();
     for (path, source) in [
         (
             "src/Child.vue",
@@ -3436,8 +3449,26 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
             "src/Target.vue",
             "<script setup lang=\"ts\">\nimport Child from './Child.vue';\n</script>\n<template><Child label=\"target\" /></template>",
         ),
-        ("far/Unrelated.vue", "<template><p>unrelated</p></template>"),
     ] {
+        files.push((path.to_string(), source));
+    }
+    for index in 0..unrelated {
+        // The first unrelated carrier keeps the historical name the parked-scan
+        // tests address it by.
+        let path = if index == 0 {
+            "far/Unrelated.vue".to_string()
+        } else {
+            format!("far/Unrelated{index}.vue")
+        };
+        files.push((path, "<template><p>unrelated</p></template>"));
+    }
+    for index in 0..replayable {
+        files.push((
+            format!("sib/Sibling{index}.vue"),
+            "<script setup lang=\"ts\">\nconst value = 1;\n</script>\n<template><p>{{ value }}</p></template>",
+        ));
+    }
+    for (path, source) in files {
         std::fs::write(temp.path().join(path), source).unwrap();
     }
 

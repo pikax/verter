@@ -55,12 +55,19 @@ mod delivered_receipts {
         }
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct DeliveredImportReceipt {
         key: (u64, u64),
         /// Exact proof that this document has no import/module-reference roots,
         /// so another document's edit cannot change its publication closure.
         rootless: bool,
+        /// The canonical ids whose content the minted delivery read: the
+        /// resolved import roots, barrel modules and dynamic carriers the pass
+        /// walked, whether it synced them or found them already delivered.
+        /// A per-canonical content transition on any of them — or on the
+        /// document itself — retires the receipt; a transition on anything
+        /// else never does.
+        roots: Arc<[String]>,
     }
 
     /// Closed mutation vocabulary for delivered import receipts. The storage
@@ -71,6 +78,7 @@ mod delivered_receipts {
             canonical_id: String,
             key: (u64, u64),
             rootless: bool,
+            roots: Arc<[String]>,
         },
         PromoteAfterIsolatedEdit {
             edited_canonical_id: &'a str,
@@ -90,8 +98,24 @@ mod delivered_receipts {
     }
 
     impl DeliveredReceipts {
+        /// Exact-key observation; production freshness goes through the
+        /// memo's root-aware [`super::ImportSyncMemo::is_current`].
+        #[cfg(test)]
         pub(super) fn is_fresh_at(&self, canonical_id: &str, key: (u64, u64)) -> bool {
             self.entries.get(canonical_id).map(|entry| entry.key) == Some(key)
+        }
+
+        /// The key `canonical_id`'s receipt was last minted at, if any.
+        pub(super) fn entry_key(&self, canonical_id: &str) -> Option<(u64, u64)> {
+            self.entries.get(canonical_id).map(|entry| entry.key)
+        }
+
+        /// The delivered dependency roots recorded with `canonical_id`'s
+        /// receipt, if any.
+        pub(super) fn entry_roots(&self, canonical_id: &str) -> Option<Arc<[String]>> {
+            self.entries
+                .get(canonical_id)
+                .map(|entry| Arc::clone(&entry.roots))
         }
 
         /// The only mutation gateway for delivered receipts. A promotion that
@@ -104,9 +128,16 @@ mod delivered_receipts {
                     canonical_id,
                     key,
                     rootless,
+                    roots,
                 } => {
-                    self.entries
-                        .insert(canonical_id, DeliveredImportReceipt { key, rootless });
+                    self.entries.insert(
+                        canonical_id,
+                        DeliveredImportReceipt {
+                            key,
+                            rootless,
+                            roots,
+                        },
+                    );
                     true
                 }
                 Mutation::PromoteAfterIsolatedEdit {
@@ -117,16 +148,16 @@ mod delivered_receipts {
                 } => {
                     let mut changed = false;
                     for mut entry in self.entries.iter_mut() {
-                        let receipt = *entry.value();
-                        if receipt.key != from {
+                        let (key, rootless) = (entry.value().key, entry.value().rootless);
+                        if key != from {
                             continue;
                         }
                         let unaffected = if entry.key() == edited_canonical_id {
                             edited_frontier_unchanged
                         } else {
-                            receipt.rootless
+                            rootless
                         };
-                        if unaffected && receipt.key != to {
+                        if unaffected && key != to {
                             entry.value_mut().key = to;
                             changed = true;
                         }
@@ -205,6 +236,30 @@ pub(crate) fn dependency_freshness_key(
     Some((content_generation, snapshot_generation))
 }
 
+/// Whether neither `canonical_id` nor any of `roots` made a per-canonical
+/// content transition after `generation`.
+///
+/// The receipt's content dimension exists to retire a delivery whose closure
+/// changed underneath it. The workspace's per-canonical transition ledger
+/// ([`verter_workspace::WorkspaceRead::last_content_transition_generation`])
+/// is the authoritative rail for exactly that question, so a delivery
+/// settled at `generation` survives later GLOBAL content advances that
+/// touched only unrelated canonicals — a sibling document's did_open commit
+/// inside a restarted session's replay burst retires nothing this document's
+/// publication delivered.
+pub(super) fn dependency_roots_untouched_since(
+    documents: &crate::documents::DocumentRegistry,
+    canonical_id: &str,
+    roots: &[String],
+    generation: u64,
+) -> bool {
+    let workspace = documents.host().workspace_read();
+    workspace.last_content_transition_generation(canonical_id) <= generation
+        && roots
+            .iter()
+            .all(|root| workspace.last_content_transition_generation(root) <= generation)
+}
+
 #[derive(Default)]
 struct PublicationReservationState {
     active: bool,
@@ -251,6 +306,10 @@ impl ImportSyncMemo {
     }
 
     /// Whether this document's import set was already delivered at `key`.
+    /// Exact-key observation for tests; production freshness goes through
+    /// [`Self::is_current`], which judges the content dimension against the
+    /// receipt's recorded dependency roots.
+    #[cfg(test)]
     pub(crate) fn is_fresh_at(&self, canonical_id: &str, key: (u64, u64)) -> bool {
         self.delivered.is_fresh_at(canonical_id, key)
     }
@@ -258,19 +317,45 @@ impl ImportSyncMemo {
     /// Whether this document's DependencyReady receipt is committed for the
     /// workspace as it is published NOW. `false` at bootstrap, before any
     /// resolver is published: no receipt can be current then.
+    ///
+    /// The content dimension is judged against the receipt's recorded
+    /// dependency roots (see [`dependency_roots_untouched_since`]): the
+    /// receipt retires when the resolver snapshot supersedes it, when the
+    /// document itself transitioned, or when a delivered root transitioned
+    /// after the mint — and SURVIVES global content advances that touched
+    /// only unrelated canonicals, a sibling document's open inside a
+    /// restarted session's replay burst, which is what otherwise parked a
+    /// demanded open document's first publication behind a loaded store-fill
+    /// scan for the scan's whole duration.
     pub(crate) fn is_current(
         &self,
         canonical_id: &str,
         documents: &crate::documents::DocumentRegistry,
         vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     ) -> bool {
-        dependency_freshness_key(documents, vfs_workspace)
-            .is_some_and(|key| self.is_fresh_at(canonical_id, key))
+        let Some((content_now, snapshot_now)) = dependency_freshness_key(documents, vfs_workspace)
+        else {
+            return false;
+        };
+        let Some(minted) = self.delivered.entry_key(canonical_id) else {
+            return false;
+        };
+        // The resolver dimension stays exact: a new resolver snapshot
+        // supersedes the delivered graph the receipt attests, whatever
+        // moved it.
+        if minted.1 != snapshot_now {
+            return false;
+        }
+        if minted.0 >= content_now {
+            return minted.0 == content_now;
+        }
+        let roots = self.delivered.entry_roots(canonical_id).unwrap_or_default();
+        dependency_roots_untouched_since(documents, canonical_id, &roots, minted.0)
     }
 
     #[cfg(test)]
     pub(crate) fn record_delivered(&self, canonical_id: String, key: (u64, u64)) {
-        self.record_delivered_with_rootless(canonical_id, key, false);
+        self.record_delivered_with_rootless(canonical_id, key, false, Vec::new());
     }
 
     pub(crate) fn record_delivered_with_rootless(
@@ -278,11 +363,13 @@ impl ImportSyncMemo {
         canonical_id: String,
         key: (u64, u64),
         rootless: bool,
+        delivered_roots: Vec<String>,
     ) {
         self.delivered.apply(ReceiptMutation::Record {
             canonical_id,
             key,
             rootless,
+            roots: delivered_roots.into(),
         });
     }
 
@@ -658,7 +745,7 @@ mod tests {
         let canonical = "/workspace/Comp.vue".to_string();
         let from = (7, 11);
         let to = (8, 12);
-        memo.record_delivered_with_rootless(canonical.clone(), from, true);
+        memo.record_delivered_with_rootless(canonical.clone(), from, true, Vec::new());
 
         let promote_after_read = || memo.promote_after_isolated_edit(&canonical, from, to, true);
         tokio::time::timeout(
