@@ -939,7 +939,14 @@ pub(crate) fn record_and_version_carrier_companions(
                 companion.map_json.as_deref(),
             )
         }
-        .ok_or(CompanionRecordSuperseded)?;
+        .ok_or_else(|| {
+            tracing::info!(
+                "provider_surface_store: refusing companions at {} — the source of {canonical_id} \
+                 is unavailable",
+                companion.provider_uri
+            );
+            CompanionRecordSuperseded
+        })?;
         companion.version = generation;
     }
     Ok(())

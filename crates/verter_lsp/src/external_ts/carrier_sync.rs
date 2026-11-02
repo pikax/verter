@@ -301,8 +301,10 @@ impl CarrierNotOwned {
             reason: NotOwnedReason::RetractFailed,
         }
     }
-    /// The SUPERSEDED non-owned outcome: the document moved after the pin, so
-    /// nothing was published this pass.
+    /// The SUPERSEDED non-owned outcome: a companion could not be recorded against
+    /// a current carrier source (the document moved after the pin, its compile
+    /// carries no pin, or the source is unavailable), so nothing was published
+    /// this pass.
     fn superseded() -> Self {
         Self {
             reason: NotOwnedReason::Superseded,
@@ -863,9 +865,9 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     // roles' content/map identity AND the IDE companion's `getScriptVersion` advances
     // on edits. The single publish-time recording+versioning path.
     //
-    // A refused IDE record means the open document moved after this compile's
-    // pin: the companions hold a revision the editor no longer has. Publish
-    // nothing. The store is the provider's view, while the LSP-side records
+    // A refused record means no current carrier source describes these
+    // companions: the open document moved after this compile's pin, the compile
+    // carries no pin, or the source is unavailable. Publish nothing. The store is the provider's view, while the LSP-side records
     // still describe the live revision; writing the stale content would leave
     // the two disagreeing, and an edit that returns the document to the
     // already-committed text (insert then undo) would find nothing to

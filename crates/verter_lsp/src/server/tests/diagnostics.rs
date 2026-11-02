@@ -339,6 +339,73 @@ async fn a_superseded_publish_whose_edit_returns_to_published_bytes_converges() 
     assert_ne!(ide_hash(), published_a, "a live edit must still publish");
 }
 
+/// A client cancelling the request that triggered an open-carrier publish drops
+/// only its wait. The publish keeps the document's sync lane until its store write
+/// settles, so the next lane holder is ordered after that write and can never have
+/// its own commit overwritten by it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_open_carrier_publish_holds_the_lane_until_its_store_write_settles() {
+    let workspace_root = unique_server_ws_root("cancelled_open_publish");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(provider);
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-b'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+    let ide_hash = || {
+        carrier_manifest_strict(&workspace_root)
+            .expect("a publish must have written a manifest")
+            .projects
+            .get(&tsconfig)
+            .and_then(|project| {
+                project.ready_files.iter().find_map(|(provider, ready)| {
+                    provider
+                        .ends_with(".vue.tsx")
+                        .then(|| ready.content_hash.clone())
+                })
+            })
+            .expect("the publish must materialize the IDE carrier")
+    };
+
+    let uri = open_test_vue(server, &canonical_id, SOURCE_A);
+    server.needs_ide_sync.insert(canonical_id.clone());
+    server.ensure_current_file_synced(&uri).await;
+    let published_a = ide_hash();
+
+    assert!(server.documents.did_change(&uri, 2, SOURCE_B).changed);
+    let (arrived, release) = server.pause_next_publish_carrier_after_compile(&canonical_id);
+    let caller = {
+        let server = server.clone();
+        let uri = uri.clone();
+        tokio::spawn(async move { server.publish_open_carrier_to_external_ts(&uri).await })
+    };
+    arrived.notified().await;
+    caller.abort();
+    assert!(
+        caller.await.is_err_and(|error| error.is_cancelled()),
+        "the caller must be cancelled while its publish is in flight"
+    );
+    release.notify_one();
+
+    let generation = server
+        .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .await
+        .expect("the document stays open");
+    let lease = server.ide_sync_repair_lease(&canonical_id, generation);
+    let _lane = lease.lock().await;
+    assert_ne!(
+        ide_hash(),
+        published_a,
+        "the lane must not free before the cancelled caller's publish has settled"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn edited_carrier_republishes_its_own_contract_after_an_isolated_edit() {
     // A document with no import roots keeps its delivered import receipt
