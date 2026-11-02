@@ -44,6 +44,15 @@ impl DomainOffset {
         }
     }
 
+    /// Check this offset against the exact text it indexes.
+    pub(super) fn validate(self, text: &str) -> Result<(), CoordError> {
+        match self {
+            DomainOffset::Source(offset) => offset.validate(text).map(drop),
+            DomainOffset::Embedded(offset) => offset.validate(text).map(drop),
+            DomainOffset::Generated(offset) => offset.validate(text).map(drop),
+        }
+    }
+
     /// The empty range at this offset.
     fn empty_range(self) -> DomainRange {
         match self {
@@ -68,6 +77,15 @@ impl DomainRange {
             DomainRange::Source(_) => CoordinateDomain::Source,
             DomainRange::Embedded(_) => CoordinateDomain::Embedded,
             DomainRange::Generated(_) => CoordinateDomain::Generated,
+        }
+    }
+
+    /// Check both endpoints against the exact text they index.
+    pub(super) fn validate(self, text: &str) -> Result<(), CoordError> {
+        match self {
+            DomainRange::Source(range) => range.validate(text).map(drop),
+            DomainRange::Embedded(range) => range.validate(text).map(drop),
+            DomainRange::Generated(range) => range.validate(text).map(drop),
         }
     }
 
@@ -251,6 +269,10 @@ pub enum MapStageError {
     OutOfExtent,
     /// Two segments overlap without coinciding.
     OverlappingSegments,
+    /// A provenance run names no origin, which would answer with nothing.
+    EmptyProvenance,
+    /// An empty-output anchor on an output that has bytes.
+    AnchorOnNonEmptyOutput,
 }
 
 /// Authored origins of a query, in output order.
@@ -395,16 +417,7 @@ impl MapStage {
 
     pub(super) fn push_foreign_units(&self, units: &mut Vec<SourceUnitId>) {
         for segment in self.segments() {
-            let SegmentOrigin::Provenance { origins } = &segment.origin else {
-                continue;
-            };
-            for origin in origins.iter() {
-                if let OriginRef::Foreign(foreign) = origin {
-                    if !units.contains(&foreign.unit) {
-                        units.push(foreign.unit.clone());
-                    }
-                }
-            }
+            push_origin_units(&segment.origin, units);
         }
     }
 
@@ -422,7 +435,7 @@ impl MapStage {
     }
 
     /// The input position of the scalar starting at `offset`, or at the end of
-    /// the output the input end of the last scalar.
+    /// the output the input end of the last scalar when a segment maps it.
     pub(super) fn position(&self, offset: DomainOffset) -> Result<DomainOffset, Unmappable> {
         let at = offset.raw();
         let parts = self.mapped(offset.domain(), at)?;
@@ -446,7 +459,12 @@ impl MapStage {
         if at < self.output_extent {
             return Err(Unmappable::MissingMap { stage: self.kind });
         }
-        if let Some(last) = index.checked_sub(1).and_then(|last| segments.get(last)) {
+        if at > 0 {
+            // Only a segment reaching the end maps the last scalar. An unmapped
+            // suffix has no last authored byte to borrow.
+            let Some(last) = segments.last().filter(|last| last.output.end() == at) else {
+                return Err(Unmappable::MissingMap { stage: self.kind });
+            };
             return match &last.origin {
                 SegmentOrigin::Verbatim { input } | SegmentOrigin::Whole { input, .. } => {
                     Ok(input.offset_at(input.end()))
@@ -567,6 +585,28 @@ impl MapStage {
     }
 }
 
+fn push_origin_units(origin: &SegmentOrigin, units: &mut Vec<SourceUnitId>) {
+    match origin {
+        SegmentOrigin::Provenance { origins } => {
+            for origin in origins.iter() {
+                if let OriginRef::Foreign(foreign) = origin {
+                    if !units.contains(&foreign.unit) {
+                        units.push(foreign.unit.clone());
+                    }
+                }
+            }
+        }
+        SegmentOrigin::Conflicting { origins } => {
+            for origin in origins.iter() {
+                push_origin_units(origin, units);
+            }
+        }
+        SegmentOrigin::Verbatim { .. }
+        | SegmentOrigin::Whole { .. }
+        | SegmentOrigin::Synthetic { .. } => {}
+    }
+}
+
 fn barrier_reason(kind: ElisionKind) -> Option<Unmappable> {
     match kind {
         // Delimiters sit outside the mapped text, so nothing crosses them.
@@ -607,11 +647,13 @@ fn validate_parts(
             Err(MapStageError::DomainMismatch)
         }
     };
-    if parts
-        .empty_anchor
-        .is_some_and(|anchor| anchor.domain() != input.domain)
-    {
-        return Err(MapStageError::DomainMismatch);
+    if let Some(anchor) = parts.empty_anchor {
+        if anchor.domain() != input.domain {
+            return Err(MapStageError::DomainMismatch);
+        }
+        if output_extent != 0 {
+            return Err(MapStageError::AnchorOnNonEmptyOutput);
+        }
     }
     for segment in &parts.segments {
         if segment.output.domain() != output.domain {
@@ -651,6 +693,9 @@ fn validate_origin(
         }
         SegmentOrigin::Whole { input, .. } => check_input(input)?,
         SegmentOrigin::Provenance { origins } => {
+            if origins.is_empty() {
+                return Err(MapStageError::EmptyProvenance);
+            }
             for origin in origins.iter() {
                 if let OriginRef::Input(input) = origin {
                     check_input(input)?;

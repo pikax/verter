@@ -163,6 +163,18 @@ pub enum UnencodableReplacement {
     NoReverseEncoding,
     /// This character has no authored spelling under the policy.
     Character(char),
+    /// The spelling and the authored bytes around it would form a closer, a
+    /// hole opener or a contracted terminator neither side spells alone.
+    FormsSyntaxWithNeighbours,
+}
+
+/// The authored bytes around an edit. Slices of the source reaching to its ends
+/// are always enough, and the delimiters count: a replacement ending in the
+/// start of a closer means something else beside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuthoredNeighbours<'a> {
+    pub before: &'a str,
+    pub after: &'a str,
 }
 
 /// A profile's complete, immutable text policy.
@@ -205,9 +217,13 @@ impl EmbeddedTextCodec {
         self.digest
     }
 
-    /// Spell `cooked` so that decoding it under this policy yields exactly
-    /// `cooked` again, or refuse.
-    pub fn encode_replacement(&self, cooked: &str) -> Result<String, UnencodableReplacement> {
+    /// Spell `cooked` so that decoding it between `neighbours` under this policy
+    /// yields exactly `cooked` again there, or refuse.
+    pub fn encode_replacement(
+        &self,
+        cooked: &str,
+        neighbours: AuthoredNeighbours<'_>,
+    ) -> Result<String, UnencodableReplacement> {
         let cooked_policy = match &self.selection {
             TextSelection::Raw => None,
             TextSelection::Cooked(policy) => {
@@ -238,8 +254,44 @@ impl EmbeddedTextCodec {
             spelled.push(introducer);
             spelled.push(escape_marker(&policy.escapes, ch)?);
         }
+        let contracts_terminators = cooked_policy
+            .is_some_and(|policy| policy.line_terminators == LineTerminatorPolicy::NormalizeToLf);
+        let formed = [
+            Some(&*self.delimiters.close),
+            self.holes.opener(),
+            contracts_terminators.then_some("\r\n"),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|syntax| spans_a_seam(neighbours, &spelled, syntax));
+        if formed {
+            return Err(UnencodableReplacement::FormsSyntaxWithNeighbours);
+        }
         Ok(spelled)
     }
+}
+
+/// Whether `syntax` occurs in `before + spelled + after` across either seam.
+fn spans_a_seam(neighbours: AuthoredNeighbours<'_>, spelled: &str, syntax: &str) -> bool {
+    let Some(reach) = syntax.len().checked_sub(1).filter(|reach| *reach > 0) else {
+        return false;
+    };
+    let mut tail_start = neighbours.before.len().saturating_sub(reach);
+    while !neighbours.before.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let mut head_end = reach.min(neighbours.after.len());
+    while !neighbours.after.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let tail = &neighbours.before[tail_start..];
+    let head = &neighbours.after[..head_end];
+    let window = [tail, spelled, head].concat();
+    let seams = [tail.len(), tail.len() + spelled.len()];
+    window.char_indices().any(|(start, _)| {
+        let end = start + syntax.len();
+        window[start..].starts_with(syntax) && seams.iter().any(|&seam| start < seam && seam < end)
+    })
 }
 
 fn line_terminator_needs_escape(policy: &CookedPolicy, ch: char) -> bool {
@@ -322,10 +374,90 @@ fn policy_digest(
 }
 
 fn encode_cooked_policy(encoder: &mut CanonicalEncoder, policy: &CookedPolicy) {
-    // The `Debug` spelling of plain tables is deterministic and these bytes
-    // only feed a digest; nothing parses them back.
-    encoder.field_str(9, &format!("{:?}", policy.escapes));
+    encoder.field_bytes(9, &escape_table_bytes(&policy.escapes));
     encoder.field_enum_discriminant(10, policy.line_terminators as u32);
     encoder.field_enum_discriminant(11, policy.reverse as u32);
-    encoder.field_str(12, &format!("{:?}", policy.indentation));
+    encoder.field_bytes(12, &indentation_bytes(&policy.indentation));
+}
+
+/// A table's canonical bytes: little-endian `u32` values, lists length-prefixed.
+#[derive(Default)]
+struct TableBytes(Vec<u8>);
+
+impl TableBytes {
+    fn value(&mut self, value: u32) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn scalar(&mut self, scalar: char) {
+        self.value(u32::from(scalar));
+    }
+
+    fn scalars(&mut self, scalars: &[char]) {
+        self.value(scalars.len() as u32);
+        for &scalar in scalars {
+            self.scalar(scalar);
+        }
+    }
+}
+
+fn escape_table_bytes(escapes: &EscapePolicy) -> Vec<u8> {
+    let mut bytes = TableBytes::default();
+    bytes.value(escapes.simple.len() as u32);
+    for simple in escapes.simple.iter() {
+        bytes.scalar(simple.marker);
+        bytes.scalar(simple.cooked);
+        bytes.scalars(&simple.invalid_before);
+    }
+    bytes.value(escapes.numeric.len() as u32);
+    for numeric in escapes.numeric.iter() {
+        match *numeric {
+            NumericEscape::Fixed {
+                marker,
+                radix,
+                digits,
+            } => {
+                bytes.value(0);
+                bytes.scalar(marker);
+                bytes.value(radix);
+                bytes.value(u32::from(digits));
+            }
+            NumericEscape::Braced {
+                marker,
+                open,
+                close,
+                radix,
+            } => {
+                bytes.value(1);
+                bytes.scalar(marker);
+                bytes.scalar(open);
+                bytes.scalar(close);
+                bytes.value(radix);
+            }
+        }
+    }
+    bytes.scalars(&escapes.invalid_markers);
+    bytes.value(escapes.identity as u32);
+    bytes.value(escapes.continuations.len() as u32);
+    for continuation in escapes.continuations.iter() {
+        bytes.value(continuation.len() as u32);
+        bytes.0.extend_from_slice(continuation.as_bytes());
+    }
+    bytes.0
+}
+
+fn indentation_bytes(indentation: &IndentationPolicy) -> Vec<u8> {
+    let mut bytes = TableBytes::default();
+    match indentation {
+        IndentationPolicy::Preserve => bytes.value(0),
+        IndentationPolicy::StripCommonLeading {
+            whitespace,
+            include_first_line,
+        } => {
+            bytes.value(1);
+            bytes.value(u32::from(*include_first_line));
+            bytes.scalars(whitespace);
+        }
+    }
+    bytes.0
 }

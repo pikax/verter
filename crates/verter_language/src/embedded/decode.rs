@@ -14,7 +14,7 @@ use verter_span::{
     CoordError, EmbeddedByteOffset, EmbeddedByteRange, SourceByteOffset, SourceByteRange,
 };
 
-use super::chain::MapBasis;
+use super::chain::{BasisText, MapBasis};
 use super::cooked::{CookedText, MissingCookedValue, NonUnicodeCookedLiteral, SurrogateKind};
 use super::lineage::RegionLineage;
 use super::map::{
@@ -49,9 +49,19 @@ pub struct LiteralGeometry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryError {
     BodyOutsideLiteral,
-    HoleOutsideBody { ordinal: u32 },
-    HoleOutOfOrder { ordinal: u32 },
-    ExpressionOutsideHole { ordinal: u32 },
+    HoleOutsideBody {
+        ordinal: u32,
+    },
+    HoleOutOfOrder {
+        ordinal: u32,
+    },
+    ExpressionOutsideHole {
+        ordinal: u32,
+    },
+    /// A hole's `outer` includes its delimiters, so it is never empty.
+    EmptyHole {
+        ordinal: u32,
+    },
 }
 
 impl LiteralGeometry {
@@ -67,6 +77,9 @@ impl LiteralGeometry {
         }
         let mut cursor = body.start();
         for (ordinal, hole) in (0u32..).zip(&holes) {
+            if hole.outer.is_empty() {
+                return Err(GeometryError::EmptyHole { ordinal });
+            }
             if hole.outer.start() < body.start() || hole.outer.end() > body.end() {
                 return Err(GeometryError::HoleOutsideBody { ordinal });
             }
@@ -121,15 +134,16 @@ impl LiteralGeometry {
 /// Everything one decode observes.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeRequest<'a> {
-    /// The whole authored file the geometry indexes.
-    pub source: &'a str,
+    /// The whole authored file the geometry indexes, proven against its basis.
+    /// One proof serves every literal of the file.
+    pub input: BasisText<'a>,
     pub geometry: &'a LiteralGeometry,
     pub lineage: &'a RegionLineage,
-    /// The authored basis of `source`.
-    pub input: &'a MapBasis,
 }
 
-/// A textual edit from the basis a previous decode observed.
+/// A textual edit from the basis a previous decode observed. The caller states
+/// that `range` and `inserted_len` take that basis to the requested source; a
+/// splice cannot re-derive this from the previous decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiteralEdit {
     pub base: MapBasis,
@@ -293,6 +307,11 @@ impl DecodedLiteral {
         &self.holes
     }
 
+    /// The decoded text as the proof a chain query over this literal needs.
+    pub fn output_text(&self) -> BasisText<'_> {
+        BasisText::already_proven(self.stage.output(), self.text())
+    }
+
     /// The syntax stage, ready to start or join an [`super::AuthoredMapChain`].
     pub fn stage(&self) -> &Arc<MapStage> {
         &self.stage
@@ -364,8 +383,9 @@ impl EmbeddedTextCodec {
     /// edited source, including which refusal comes first.
     ///
     /// `edit` must start from the basis `previous` observed; any other is a
-    /// stale edit and is refused. A refused splice leaves `previous` untouched,
-    /// still answering only for its own basis.
+    /// stale edit and is refused. The request must stay on that unit and region,
+    /// or the reused text would answer for another literal. A refused splice
+    /// leaves `previous` untouched, still answering only for its own basis.
     pub fn decode_splice(
         &self,
         previous: &DecodedLiteral,
@@ -378,6 +398,11 @@ impl EmbeddedTextCodec {
             .input()
             .require(&edit.base, StageKind::Syntax)
             .map_err(CodecRefusal::BasisRefused)?;
+        if request.input.basis().unit != edit.base.unit || *request.lineage != previous.lineage {
+            return Err(CodecRefusal::BasisRefused(Unmappable::MismatchedBasis {
+                stage: StageKind::Syntax,
+            }));
+        }
         let reuse = self.reuse_plan(previous, edit, request.geometry);
         self.assemble(request, reuse.as_ref(), interrupt)
     }
@@ -433,7 +458,7 @@ impl EmbeddedTextCodec {
     ) -> Result<DecodedLiteral, CodecRefusal> {
         self.check_request(request)?;
         let geometry = request.geometry;
-        let mut assembly = Assembly::new(request.source, geometry.body().len() as usize);
+        let mut assembly = Assembly::new(request.input.text(), geometry.body().len() as usize);
         let (open, close) = delimiter_ranges(geometry);
         if !open.is_empty() {
             assembly.push_elision(open, ElisionKind::Delimiter)?;
@@ -463,13 +488,12 @@ impl EmbeddedTextCodec {
     }
 
     fn check_request(&self, request: &DecodeRequest<'_>) -> Result<(), CodecRefusal> {
-        let source = request.source;
+        let source = request.input.text();
+        let input = request.input.basis();
         if u32::try_from(source.len()).is_err() {
             return Err(CodecRefusal::InvalidGeometry(CoordError::Overflow));
         }
-        if request.input.domain != CoordinateDomain::Source
-            || request.input.unit != *request.lineage.unit()
-        {
+        if input.domain != CoordinateDomain::Source || input.unit != *request.lineage.unit() {
             return Err(CodecRefusal::BasisRefused(Unmappable::MismatchedBasis {
                 stage: StageKind::Syntax,
             }));
@@ -503,7 +527,7 @@ impl EmbeddedTextCodec {
                     },
                 ..
             }) => common_indent(
-                request.source,
+                request.input.text(),
                 request.geometry,
                 whitespace,
                 *include_first_line,
@@ -549,14 +573,16 @@ impl EmbeddedTextCodec {
         let body = request.geometry.body();
         let empty_anchor =
             (body.is_empty() && text.is_empty()).then_some(DomainOffset::Source(body.start()));
+        let input = request.input.basis();
         let content = ContentId::from_content_bytes(text.as_bytes());
         let map_revision = MapRevision::from_canonical(&DecodedMapDescriptor {
             policy: self.policy_digest(),
-            input_content: request.input.content.digest(),
+            input_content: input.content.digest(),
             geometry: CanonicalDigest::of_bytes(&pack_stage_geometry(&segments, &elisions)),
         });
         let output = MapBasis {
-            unit: request.input.unit.clone(),
+            unit: input.unit.clone(),
+            region: Some(request.lineage.region().clone()),
             domain: CoordinateDomain::Embedded,
             content,
             map_revision,
@@ -570,7 +596,7 @@ impl EmbeddedTextCodec {
         let stage = MapStage::new(
             StageKind::Syntax,
             certification,
-            request.input.clone(),
+            input.clone(),
             output,
             output_extent,
             StageSegments {
@@ -887,8 +913,8 @@ impl<'s> Assembly<'s> {
                 run_start = pos;
                 continue;
             }
+            check_syntax_at(source, scan, pos, end)?;
             if ch != '\n' && ch != '\r' {
-                check_syntax_at(source, scan, pos, end)?;
                 pos += ch.len_utf8();
                 continue;
             }
@@ -1054,9 +1080,17 @@ fn scan_escape(escapes: &EscapePolicy, rest: &str) -> EscapeScan {
     }
 }
 
-/// The code point a numeric escape spells and the bytes its digits take.
+/// The code point a numeric escape spells and the bytes its digits take. A
+/// policy declaring a radix no digit exists in, or no digits at all, spells
+/// nothing.
 fn scan_numeric(numeric: &NumericEscape, rest: &str) -> Option<(u32, usize)> {
     match *numeric {
+        NumericEscape::Fixed { radix, .. } | NumericEscape::Braced { radix, .. }
+            if !(2..=36).contains(&radix) =>
+        {
+            None
+        }
+        NumericEscape::Fixed { digits: 0, .. } => None,
         NumericEscape::Fixed { radix, digits, .. } => {
             let mut value = 0u32;
             let mut chars = rest.chars();

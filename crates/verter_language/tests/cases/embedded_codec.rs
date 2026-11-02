@@ -18,16 +18,17 @@ use verter_identity::successor::{
     ReleaseCoordinates, ReleaseId,
 };
 use verter_language::embedded::{
-    AuthoredMapChain, BaseUri, CodecRefusal, CookedPartiality, CookedPolicy, CookedText,
-    CoordinateDomain, DecodeInterrupt, DecodeRequest, DecodedLiteral, DelimiterPolicy,
-    DomainOffset, DomainRange, DuplicateEmbeddedRegionRow, EditCertification, Elision, ElisionKind,
-    EmbeddedAttachment, EmbeddedRegionRow, EmbeddedRegionTable, EmbeddedTextCodec, EscapePolicy,
-    GeometryError, HoleGeometry, HolePolicy, IdentityEscapes, IndentationPolicy,
-    LineTerminatorPolicy, LiteralEdit, LiteralGeometry, MapBasis, MapSegment, MapStage,
-    MapStageError, MissingCookedValue, NestingBudget, NestingExhausted, NeverInterrupted,
-    NonUnicodeCookedLiteral, NumericEscape, OriginRef, PlaceholderSpelling, ProfileHoleClass,
-    RegionLineage, ReverseEncoding, SegmentOrigin, SimpleEscape, StageKind, StageSegments,
-    SurrogateKind, TextSelection, UnencodableReplacement, Unmappable, WholeKind,
+    AuthoredMapChain, AuthoredNeighbours, BaseUri, BasisText, BasisTextMismatch, CodecRefusal,
+    CookedPartiality, CookedPolicy, CookedText, CoordinateDomain, DecodeInterrupt, DecodeRequest,
+    DecodedLiteral, DelimiterPolicy, DomainOffset, DomainRange, DuplicateEmbeddedRegionRow,
+    EditCertification, Elision, ElisionKind, EmbeddedAttachment, EmbeddedRegionRow,
+    EmbeddedRegionTable, EmbeddedTextCodec, EscapePolicy, GeometryError, HoleGeometry, HolePolicy,
+    IdentityEscapes, IndentationPolicy, LineTerminatorPolicy, LiteralEdit, LiteralGeometry,
+    MapBasis, MapSegment, MapStage, MapStageError, MissingCookedValue, NestingBudget,
+    NestingExhausted, NeverInterrupted, NonUnicodeCookedLiteral, NumericEscape, OriginRef,
+    PlaceholderSpelling, ProfileHoleClass, RegionLineage, ReverseEncoding, SegmentOrigin,
+    SimpleEscape, StageKind, StageSegments, SurrogateKind, TextSelection, UnencodableReplacement,
+    Unmappable, WholeKind,
 };
 use verter_span::{
     CoordError, EmbeddedByteOffset, EmbeddedByteRange, GeneratedByteOffset, GeneratedByteRange,
@@ -114,6 +115,7 @@ fn host() -> SourceUnitId {
 fn basis_of(source: &str) -> MapBasis {
     MapBasis {
         unit: host(),
+        region: None,
         domain: CoordinateDomain::Source,
         content: ContentId::from_content_bytes(source.as_bytes()),
         map_revision: map_revision("authored"),
@@ -128,10 +130,16 @@ fn basis(
 ) -> MapBasis {
     MapBasis {
         unit,
+        region: None,
         domain,
         content: ContentId::from_content_bytes(content.as_bytes()),
         map_revision: map_revision(revision),
     }
+}
+
+/// `text`, proven to be what `basis` names.
+fn proven<'a>(basis: &'a MapBasis, text: &'a str) -> BasisText<'a> {
+    BasisText::new(basis, text).expect("the text its basis names")
 }
 
 fn root_lineage() -> RegionLineage {
@@ -341,10 +349,9 @@ fn decode_at(
 ) -> Result<DecodedLiteral, CodecRefusal> {
     codec.decode(
         &DecodeRequest {
-            source,
+            input: proven(&basis_of(source), source),
             geometry,
             lineage: &root_lineage(),
-            input: &basis_of(source),
         },
         &NeverInterrupted,
     )
@@ -1095,10 +1102,9 @@ fn hole_placeholders_are_synthetic_and_nested_literals_keep_lineage() {
     let nested = codec
         .decode(
             &DecodeRequest {
-                source: nested_source,
+                input: proven(&basis_of(nested_source), nested_source),
                 geometry: &nested_geometry,
                 lineage: &child,
-                input: &basis_of(nested_source),
             },
             &NeverInterrupted,
         )
@@ -1125,10 +1131,9 @@ fn nesting_past_the_admitted_depth_is_refused_before_any_work() {
     let at_limit_answer = template_cooked()
         .decode(
             &DecodeRequest {
-                source,
+                input: proven(&basis_of(source), source),
                 geometry: &parsed_template(source, 0),
                 lineage: &at_limit,
-                input: &basis_of(source),
             },
             &NeverInterrupted,
         )
@@ -1176,7 +1181,14 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
         ],
     );
     // The compiler keeps the text inside `out("…")`.
-    let compiled = basis(unit.clone(), CoordinateDomain::Generated, "c", "compiler");
+    let compiled_text = "out(\"[[é\nz]]\")";
+    let compiled = basis(
+        unit.clone(),
+        CoordinateDomain::Generated,
+        compiled_text,
+        "compiler",
+    );
+    let compiled_out = proven(&compiled, compiled_text);
     let compiler = mapped_stage(
         StageKind::Compiler,
         EditCertification::Reversible,
@@ -1185,7 +1197,14 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
         15,
         vec![verbatim(generated(5, 13), embedded(0, 8))],
     );
-    let runtime_output = basis(unit.clone(), CoordinateDomain::Generated, "r", "runtime");
+    let runtime_text = format!("{}{compiled_text}{}", "r".repeat(20), "r".repeat(5));
+    let runtime_output = basis(
+        unit.clone(),
+        CoordinateDomain::Generated,
+        &runtime_text,
+        "runtime",
+    );
+    let runtime_out = proven(&runtime_output, &runtime_text);
     let runtime = mapped_stage(
         StageKind::RuntimeBuild,
         EditCertification::ProvenanceOnly,
@@ -1213,7 +1232,7 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
 
     // Without a runtime stage: `é` at generated 7..9 is authored 1..3.
     let answer = chain
-        .provenance(&compiled, generated(7, 9))
+        .provenance(&compiled_out, generated(7, 9))
         .expect("an exact answer");
     let exact = answer.exact().expect("one origin");
     assert_eq!(exact.range, sr(1, 3));
@@ -1222,7 +1241,7 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
     // The whole escape, from the compiler's bytes.
     assert_eq!(
         chain
-            .provenance(&compiled, generated(9, 10))
+            .provenance(&compiled_out, generated(9, 10))
             .expect("exact")
             .exact()
             .map(|origin| origin.range),
@@ -1231,7 +1250,7 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
     assert_eq!(
         chain
             .authored_position(
-                &compiled,
+                &compiled_out,
                 DomainOffset::Generated(GeneratedByteOffset::new(10))
             )
             .map(|origin| origin.range),
@@ -1239,26 +1258,44 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
     );
     assert_eq!(
         chain
-            .editable_preimage(&compiled, generated(7, 11))
+            .editable_preimage(&compiled_out, generated(7, 11))
             .map(|origin| origin.range),
         Ok(sr(1, 6))
+    );
+    // Inside `é` at the end of the chain is no position at any stage, in every
+    // query: the same refusal the literal gives for the same bytes.
+    let inside = Unmappable::InvalidBoundary(CoordError::NotCharBoundary);
+    assert_eq!(
+        chain.authored_position(
+            &compiled_out,
+            DomainOffset::Generated(GeneratedByteOffset::new(8))
+        ),
+        Err(inside)
+    );
+    assert_eq!(
+        chain.provenance(&compiled_out, generated(8, 9)),
+        Err(inside)
+    );
+    assert_eq!(
+        chain.editable_preimage(&compiled_out, generated(7, 8)),
+        Err(inside)
     );
     // Generated bytes outside the kept text have no segment, and the wrapper is
     // synthetic: neither borrows the nearest authored byte.
     assert_eq!(
-        chain.provenance(&compiled, generated(0, 5)),
+        chain.provenance(&compiled_out, generated(0, 5)),
         Err(Unmappable::MissingMap {
             stage: StageKind::Compiler
         })
     );
     assert_eq!(
-        chain.provenance(&compiled, generated(5, 7)),
+        chain.provenance(&compiled_out, generated(5, 7)),
         Err(Unmappable::SyntheticOutput)
     );
 
     // An absent runtime map is absence: its basis names nothing in this chain.
     assert_eq!(
-        chain.provenance(&runtime_output, generated(27, 29)),
+        chain.provenance(&runtime_out, generated(27, 29)),
         Err(Unmappable::StaleBasis {
             stage: StageKind::Compiler
         })
@@ -1270,14 +1307,14 @@ fn composition_keeps_stages_distinct_and_lands_on_authored_bytes() {
     assert_eq!(kinds(&with_runtime).len(), 4);
     assert_eq!(
         with_runtime
-            .provenance(&runtime_output, generated(27, 29))
+            .provenance(&runtime_out, generated(27, 29))
             .expect("exact")
             .exact()
             .map(|origin| origin.range),
         Some(sr(1, 3))
     );
     assert_eq!(
-        with_runtime.editable_preimage(&runtime_output, generated(27, 29)),
+        with_runtime.editable_preimage(&runtime_out, generated(27, 29)),
         Err(Unmappable::NotEditable {
             stage: StageKind::RuntimeBuild
         })
@@ -1300,7 +1337,9 @@ fn syntax_chain_over(source: &str) -> (DecodedLiteral, AuthoredMapChain) {
 fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
     let (literal, chain) = syntax_chain_over("`mixin body`");
     let input = literal.stage().output().clone();
-    let output = basis(host(), CoordinateDomain::Embedded, "expanded", "pug");
+    let expanded = "e".repeat(40);
+    let output = basis(host(), CoordinateDomain::Embedded, &expanded, "pug");
+    let out = proven(&output, &expanded);
     let imported = unit_origin("import.scss", 4, 9);
     let stage = mapped_stage(
         StageKind::Preprocessor,
@@ -1340,50 +1379,50 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
     let chain = chain.then(stage).expect("joins");
 
     let repeated = chain
-        .provenance(&output, embedded(0, 5))
+        .provenance(&out, embedded(0, 5))
         .expect("ordered provenance");
     let ranges: Vec<_> = repeated.origins().iter().map(|o| o.range).collect();
     assert_eq!(ranges, [sr(7, 11), sr(1, 6)]);
     assert_eq!(repeated.exact(), None);
     assert_eq!(
-        chain.editable_preimage(&output, embedded(0, 5)),
+        chain.editable_preimage(&out, embedded(0, 5)),
         Err(Unmappable::AmbiguousPreimage)
     );
 
     assert_eq!(
         chain
-            .provenance(&output, embedded(5, 15))
+            .provenance(&out, embedded(5, 15))
             .expect("the whole rewrite")
             .exact()
             .map(|origin| origin.range),
         Some(sr(1, 6))
     );
     assert_eq!(
-        chain.provenance(&output, embedded(6, 9)),
+        chain.provenance(&out, embedded(6, 9)),
         Err(Unmappable::NonInvertibleExpansion)
     );
     assert_eq!(
-        chain.editable_preimage(&output, embedded(5, 15)),
+        chain.editable_preimage(&out, embedded(5, 15)),
         Err(Unmappable::NonInvertibleExpansion)
     );
     // Its start is a position; its interior never is, even with no text to check.
     assert_eq!(
         chain
-            .authored_position(&output, DomainOffset::Embedded(eo(5)))
+            .authored_position(&out, DomainOffset::Embedded(eo(5)))
             .map(|origin| origin.range),
         Ok(sr(1, 1))
     );
     assert_eq!(
-        chain.authored_position(&output, DomainOffset::Embedded(eo(9))),
+        chain.authored_position(&out, DomainOffset::Embedded(eo(9))),
         Err(Unmappable::NonInvertibleExpansion)
     );
 
     let inlined = chain
-        .provenance(&output, embedded(15, 20))
+        .provenance(&out, embedded(15, 20))
         .expect("another file's bytes");
     assert_eq!(inlined.exact(), Some(&imported));
     assert_eq!(
-        chain.editable_preimage(&output, embedded(15, 20)),
+        chain.editable_preimage(&out, embedded(15, 20)),
         Err(Unmappable::AmbiguousPreimage)
     );
     assert_eq!(chain.contributing_units(), [host(), unit("import.scss")]);
@@ -1391,7 +1430,7 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
     // Exact bytes remain exact beside all of that.
     assert_eq!(
         chain
-            .editable_preimage(&output, embedded(20, 25))
+            .editable_preimage(&out, embedded(20, 25))
             .map(|origin| origin.range),
         Ok(sr(1, 6))
     );
@@ -1405,6 +1444,7 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
         "a { color: red }",
         "css",
     );
+    let transformed_out = proven(&transformed, "a { color: red }");
     let missing = Arc::new(MapStage::missing(
         StageKind::Preprocessor,
         syntax_only.output_basis().clone(),
@@ -1415,13 +1455,16 @@ fn expansions_and_missing_maps_yield_provenance_or_a_reason_never_an_edit() {
     let refused = Unmappable::MissingMap {
         stage: StageKind::Preprocessor,
     };
-    assert_eq!(chain.provenance(&transformed, embedded(0, 4)), Err(refused));
     assert_eq!(
-        chain.editable_preimage(&transformed, embedded(0, 4)),
+        chain.provenance(&transformed_out, embedded(0, 4)),
         Err(refused)
     );
     assert_eq!(
-        chain.authored_position(&transformed, DomainOffset::Embedded(eo(0))),
+        chain.editable_preimage(&transformed_out, embedded(0, 4)),
+        Err(refused)
+    );
+    assert_eq!(
+        chain.authored_position(&transformed_out, DomainOffset::Embedded(eo(0))),
         Err(refused)
     );
 }
@@ -1454,6 +1497,7 @@ fn a_shared_external_resource_keeps_its_identity_across_component_contexts() {
     let codec = EmbeddedTextCodec::new(TextSelection::Raw, delimiters, HolePolicy::Absent);
     let input = MapBasis {
         unit: resource.clone(),
+        region: None,
         domain: CoordinateDomain::Source,
         content: ContentId::from_content_bytes(source.as_bytes()),
         map_revision: map_revision("authored"),
@@ -1463,10 +1507,9 @@ fn a_shared_external_resource_keeps_its_identity_across_component_contexts() {
     let literal = codec
         .decode(
             &DecodeRequest {
-                source,
+                input: proven(&input, source),
                 geometry: &geometry,
                 lineage: &lineage,
-                input: &input,
             },
             &NeverInterrupted,
         )
@@ -1510,9 +1553,10 @@ fn a_shared_external_resource_keeps_its_identity_across_component_contexts() {
         second.attachment().attachment()
     );
     assert_ne!(first, second);
-    let basis = literal.stage().output().clone();
     for chain in [&first, &second] {
-        let answer = chain.provenance(&basis, embedded(10, 17)).expect("exact");
+        let answer = chain
+            .provenance(&literal.output_text(), embedded(10, 17))
+            .expect("exact");
         let origin = answer.exact().expect("one origin");
         assert_eq!(origin.unit, resource);
         assert_eq!(origin.base_uri.as_str(), "file:///src/shared.html");
@@ -1610,10 +1654,9 @@ fn region_identity_and_geometry_survive_an_edit_of_a_sibling() {
                     codec
                         .decode(
                             &DecodeRequest {
-                                source,
+                                input: proven(&basis_of(source), source),
                                 geometry: &geometry,
                                 lineage: &lineage,
-                                input: &basis_of(source),
                             },
                             &NeverInterrupted,
                         )
@@ -1692,28 +1735,37 @@ fn stale_or_mismatched_bases_refuse_composition_and_queries() {
 
     // A query on an old basis is refused, never mapped approximately.
     let syntax = StageKind::Syntax;
-    for (basis, expected) in [
-        (&stale, Unmappable::StaleBasis { stage: syntax }),
-        (&wrong_unit, Unmappable::MismatchedBasis { stage: syntax }),
+    for (basis, text, expected) in [
+        (&stale, "abc", Unmappable::StaleBasis { stage: syntax }),
+        (
+            &old_content,
+            "older",
+            Unmappable::StaleBasis { stage: syntax },
+        ),
+        (
+            &wrong_unit,
+            "abc",
+            Unmappable::MismatchedBasis { stage: syntax },
+        ),
     ] {
-        assert_eq!(chain.provenance(basis, embedded(0, 3)), Err(expected));
+        let old = proven(basis, text);
+        assert_eq!(chain.provenance(&old, embedded(0, 3)), Err(expected));
+        assert_eq!(chain.editable_preimage(&old, embedded(0, 3)), Err(expected));
         assert_eq!(
-            chain.editable_preimage(basis, embedded(0, 3)),
-            Err(expected)
-        );
-        assert_eq!(
-            chain.authored_position(basis, DomainOffset::Embedded(eo(0))),
+            chain.authored_position(&old, DomainOffset::Embedded(eo(0))),
             Err(expected)
         );
     }
-    assert!(chain.provenance(&live, embedded(0, 3)).is_ok());
+    let live_text = proven(&live, "abc");
+    assert_eq!(BasisText::new(&live, "xyz"), Err(BasisTextMismatch));
+    assert!(chain.provenance(&live_text, embedded(0, 3)).is_ok());
     // A range in a domain the output basis does not name is refused too.
     assert_eq!(
-        chain.provenance(&live, generated(0, 3)),
+        chain.provenance(&live_text, generated(0, 3)),
         Err(Unmappable::MismatchedBasis { stage: syntax })
     );
     assert_eq!(
-        chain.provenance(&live, embedded(0, 4)),
+        chain.provenance(&live_text, embedded(0, 4)),
         Err(Unmappable::InvalidBoundary(CoordError::InvalidBoundary))
     );
 }
@@ -1725,6 +1777,7 @@ fn an_edit_needs_a_whole_range_proof_at_every_stage() {
     let (literal, chain) = syntax_chain_over("`abcd`");
     let input = literal.stage().output().clone();
     let output = basis(host(), CoordinateDomain::Embedded, "cdab", "relocated");
+    let out = proven(&output, "cdab");
     // `cdab`: two runs swapped, each exact on its own.
     let relocated = mapped_stage(
         StageKind::Preprocessor,
@@ -1741,23 +1794,21 @@ fn an_edit_needs_a_whole_range_proof_at_every_stage() {
 
     let position = |offset| {
         chain
-            .authored_position(&output, DomainOffset::Embedded(eo(offset)))
+            .authored_position(&out, DomainOffset::Embedded(eo(offset)))
             .map(|origin| origin.range.start())
     };
     assert_eq!(position(0), Ok(so(3)));
     assert_eq!(position(4), Ok(so(3)));
-    let across = chain
-        .provenance(&output, embedded(0, 4))
-        .expect("provenance");
+    let across = chain.provenance(&out, embedded(0, 4)).expect("provenance");
     let ranges: Vec<_> = across.origins().iter().map(|o| o.range).collect();
     assert_eq!(ranges, [sr(3, 5), sr(1, 3)]);
     assert_eq!(
-        chain.editable_preimage(&output, embedded(0, 4)),
+        chain.editable_preimage(&out, embedded(0, 4)),
         Err(Unmappable::AmbiguousPreimage)
     );
     assert_eq!(
         chain
-            .editable_preimage(&output, embedded(0, 2))
+            .editable_preimage(&out, embedded(0, 2))
             .map(|origin| origin.range),
         Ok(sr(3, 5))
     );
@@ -1781,7 +1832,7 @@ fn an_edit_needs_a_whole_range_proof_at_every_stage() {
         })
     );
     assert_eq!(
-        undeclared.encode_replacement("x"),
+        undeclared.encode_replacement("x", AuthoredNeighbours::default()),
         Err(UnencodableReplacement::NoReverseEncoding)
     );
 }
@@ -1802,7 +1853,7 @@ fn reverse_encoding_round_trips_or_refuses() {
     for codec in [template_cooked(), quoted_with_backticks()] {
         for replacement in replacements {
             let spelled = codec
-                .encode_replacement(replacement)
+                .encode_replacement(replacement, AuthoredNeighbours::default())
                 .expect("the policy spells it");
             let source = format!("`{spelled}`");
             let literal = decode_at(&codec, &source, &parsed_template(&source, 0))
@@ -1814,18 +1865,21 @@ fn reverse_encoding_round_trips_or_refuses() {
 
     // A marker with a following-character rule is not used as a spelling.
     assert_eq!(
-        template_cooked().encode_replacement("\0"),
+        template_cooked().encode_replacement("\0", AuthoredNeighbours::default()),
         Ok("\0".to_owned())
     );
 
     let raw = template_raw();
-    assert_eq!(raw.encode_replacement("plain"), Ok("plain".to_owned()));
     assert_eq!(
-        raw.encode_replacement("a`b"),
+        raw.encode_replacement("plain", AuthoredNeighbours::default()),
+        Ok("plain".to_owned())
+    );
+    assert_eq!(
+        raw.encode_replacement("a`b", AuthoredNeighbours::default()),
         Err(UnencodableReplacement::Character('`'))
     );
     assert_eq!(
-        raw.encode_replacement("${x}"),
+        raw.encode_replacement("${x}", AuthoredNeighbours::default()),
         Err(UnencodableReplacement::Character('$'))
     );
 
@@ -1848,7 +1902,7 @@ fn reverse_encoding_round_trips_or_refuses() {
         HolePolicy::Absent,
     );
     assert_eq!(
-        no_newline_escape.encode_replacement("a\nb"),
+        no_newline_escape.encode_replacement("a\nb", AuthoredNeighbours::default()),
         Err(UnencodableReplacement::Character('\n'))
     );
 }
@@ -1869,7 +1923,11 @@ fn quoted_with_backticks() -> EmbeddedTextCodec {
 #[test]
 fn discovery_order_never_changes_an_answer() {
     let input = basis(host(), CoordinateDomain::Source, "abcdefgh", "authored");
-    let output = basis(host(), CoordinateDomain::Embedded, "out", "out");
+    let output = MapBasis {
+        region: Some(root_lineage().region().clone()),
+        ..basis(host(), CoordinateDomain::Embedded, "outbytes", "out")
+    };
+    let out = proven(&output, "outbytes");
     let build = |segments: Vec<MapSegment>| {
         MapStage::new(
             StageKind::Preprocessor,
@@ -1923,11 +1981,11 @@ fn discovery_order_never_changes_an_answer() {
     let second_wins = conflicted(vec![other_a.clone(), a.clone()]);
     for chain in [&first_wins, &second_wins] {
         assert_eq!(
-            chain.provenance(&output, embedded(0, 2)),
+            chain.provenance(&out, embedded(0, 2)),
             Err(Unmappable::AmbiguousPreimage)
         );
         assert_eq!(
-            chain.authored_position(&output, DomainOffset::Embedded(eo(0))),
+            chain.authored_position(&out, DomainOffset::Embedded(eo(0))),
             Err(Unmappable::AmbiguousPreimage)
         );
     }
@@ -2009,10 +2067,9 @@ fn literal_geometry_is_refused_rather_than_repaired() {
     assert_eq!(
         template_raw().decode(
             &DecodeRequest {
-                source,
+                input: proven(&foreign, source),
                 geometry: &parsed_template(source, 0),
                 lineage: &root_lineage(),
-                input: &foreign,
             },
             &NeverInterrupted,
         ),
@@ -2046,10 +2103,9 @@ fn splice_decode(
         previous,
         edit,
         &DecodeRequest {
-            source,
+            input: proven(&basis_of(source), source),
             geometry: &parsed_template(source, literal_start),
             lineage: &root_lineage(),
-            input: &basis_of(source),
         },
         &NeverInterrupted,
     )
@@ -2321,10 +2377,9 @@ fn degraded_decodes_produce_nothing_to_retain() {
             &previous,
             &edit,
             &DecodeRequest {
-                source: &edited,
+                input: proven(&basis_of(&edited), &edited),
                 geometry: &parsed_template(&edited, 0),
                 lineage: &root_lineage(),
-                input: &basis_of(&edited),
             },
             &interrupt,
         );
@@ -2332,10 +2387,9 @@ fn degraded_decodes_produce_nothing_to_retain() {
     }
     let interrupted_fresh = codec.decode(
         &DecodeRequest {
-            source: good,
+            input: proven(&basis_of(good), good),
             geometry: &parsed_template(good, 0),
             lineage: &root_lineage(),
-            input: &basis_of(good),
         },
         &InterruptAfter {
             allowed: Cell::new(1),
@@ -2361,13 +2415,13 @@ fn degraded_decodes_produce_nothing_to_retain() {
     .expect("starts");
     let current = decoded(&codec, &repaired);
     assert_eq!(
-        chain.provenance(current.stage().output(), embedded(0, 1)),
+        chain.provenance(&current.output_text(), embedded(0, 1)),
         Err(Unmappable::StaleBasis {
             stage: StageKind::Syntax
         })
     );
     assert!(chain
-        .provenance(previous.stage().output(), embedded(0, 1))
+        .provenance(&previous.output_text(), embedded(0, 1))
         .is_ok());
 }
 
@@ -2603,7 +2657,6 @@ fn composed_lookups_agree_with_directly_composed_byte_tables() {
             let revision: &'static str = ["s0", "s1", "s2"][stage_index];
             let output = MapBasis {
                 map_revision: map_revision(revision),
-                content: ContentId::from_content_bytes(format!("{seed}/{revision}").as_bytes()),
                 ..basis.clone()
             };
             let stage = mapped_stage(
@@ -2618,11 +2671,12 @@ fn composed_lookups_agree_with_directly_composed_byte_tables() {
             basis = output;
         }
 
+        let out = proven(&basis, &text);
         for _ in 0..24 {
             let start = rng.below(LEN as usize) as u32;
             let end = start + 1 + rng.below((LEN - start) as usize) as u32;
             let answer = chain
-                .provenance(&basis, embedded(start, end))
+                .provenance(&out, embedded(start, end))
                 .expect("a permutation always answers");
             let bytes: Vec<u32> = answer
                 .origins()
@@ -2639,7 +2693,7 @@ fn composed_lookups_agree_with_directly_composed_byte_tables() {
                 .all(|pair| pair[1] == pair[0] + 1);
             // A stage may split a run the table sees as contiguous only by
             // keeping it adjacent, which still joins. Anything else is refused.
-            let edit = chain.editable_preimage(&basis, embedded(start, end));
+            let edit = chain.editable_preimage(&out, embedded(start, end));
             if !contiguous {
                 assert_eq!(edit, Err(Unmappable::AmbiguousPreimage), "seed {seed}");
             }
@@ -2652,7 +2706,7 @@ fn composed_lookups_agree_with_directly_composed_byte_tables() {
             }
             assert_eq!(
                 chain
-                    .authored_position(&basis, DomainOffset::Embedded(eo(start)))
+                    .authored_position(&out, DomainOffset::Embedded(eo(start)))
                     .map(|origin| origin.range.start()),
                 Ok(so(table[start as usize]))
             );
@@ -2777,14 +2831,15 @@ fn chain_lookup_cost_follows_depth_not_text_size() {
             chain = chain.then(stage).expect("joins");
             basis = output;
         }
-        (chain, basis)
+        (chain, basis, text)
     };
     let cost = |len: u32, depth: usize| {
-        let (chain, basis) = build(len, depth);
+        let (chain, basis, text) = build(len, depth);
+        let out = proven(&basis, &text);
         let (answer, calls, _) =
-            measured(|| chain.authored_position(&basis, DomainOffset::Embedded(eo(len / 2))));
+            measured(|| chain.authored_position(&out, DomainOffset::Embedded(eo(len / 2))));
         assert_eq!(answer.map(|o| o.range.start()), Ok(so(len / 2 + 1)));
-        let (range, range_calls, _) = measured(|| chain.provenance(&basis, embedded(1, 3)));
+        let (range, range_calls, _) = measured(|| chain.provenance(&out, embedded(1, 3)));
         assert_eq!(
             range.expect("exact").exact().map(|o| o.range),
             Some(sr(2, 4))
@@ -2854,10 +2909,9 @@ fn selection_alone_does_no_decode_work() {
         .codec
         .decode(
             &DecodeRequest {
-                source,
+                input: proven(&basis_of(source), source),
                 geometry: &parsed_template(source, 0),
                 lineage: &root_lineage(),
-                input: &basis_of(source),
             },
             &NeverInterrupted,
         )
@@ -2882,4 +2936,517 @@ fn counting_allocator_counts_this_threads_allocations() {
     assert!(calls >= 1 && bytes >= 4096, "{calls} calls, {bytes} bytes");
     let (_, calls, _) = measured(|| 1 + 1);
     assert_eq!(calls, 0);
+}
+
+// ---------------------------------------------------------------- exactness
+
+/// The bytes inside a scalar of a chain's output are no position, whichever
+/// query asks. The chain and the literal agree about the same geometry.
+#[test]
+fn a_chain_refuses_the_inside_of_a_scalar_as_the_literal_does() {
+    let (literal, chain) = syntax_chain_over("`é z`");
+    let out = literal.output_text();
+    let inside = Unmappable::InvalidBoundary(CoordError::NotCharBoundary);
+    assert_eq!(literal.map_position(eo(1)), Err(inside));
+    assert_eq!(
+        chain.authored_position(&out, DomainOffset::Embedded(eo(1))),
+        Err(inside)
+    );
+    assert_eq!(chain.provenance(&out, embedded(1, 2)), Err(inside));
+    assert_eq!(chain.provenance(&out, embedded(0, 1)), Err(inside));
+    assert_eq!(chain.editable_preimage(&out, embedded(1, 2)), Err(inside));
+    // The boundaries either side remain exact.
+    assert_eq!(
+        chain
+            .authored_position(&out, DomainOffset::Embedded(eo(2)))
+            .map(|origin| origin.range),
+        Ok(sr(3, 3))
+    );
+    assert_eq!(
+        chain
+            .editable_preimage(&out, embedded(0, 2))
+            .map(|origin| origin.range),
+        Ok(sr(1, 3))
+    );
+
+    // A stage declaring an extent its own text does not have answers nothing:
+    // its idea of the end of the output is not the text's.
+    let text = "hello+tail";
+    let output = basis(host(), CoordinateDomain::Embedded, text, "short");
+    let short = mapped_stage(
+        StageKind::Preprocessor,
+        EditCertification::Reversible,
+        literal.stage().output().clone(),
+        output.clone(),
+        5,
+        vec![verbatim(embedded(0, 4), embedded(0, 4))],
+    );
+    assert_eq!(
+        chain
+            .then(short)
+            .expect("joins")
+            .authored_position(&proven(&output, text), DomainOffset::Embedded(eo(5))),
+        Err(Unmappable::MismatchedBasis {
+            stage: StageKind::Preprocessor
+        })
+    );
+}
+
+/// The end of an output whose tail no segment maps is one more unmapped byte,
+/// not the end of the last run that was mapped.
+#[test]
+fn the_end_of_an_unmapped_suffix_has_no_authored_position() {
+    let (literal, chain) = syntax_chain_over("`hello`");
+    let input = literal.stage().output().clone();
+    let compiler = |extent: u32, text: &str, segments| {
+        let output = basis(host(), CoordinateDomain::Generated, text, "gen");
+        let stage = mapped_stage(
+            StageKind::Compiler,
+            EditCertification::Reversible,
+            input.clone(),
+            output.clone(),
+            extent,
+            segments,
+        );
+        (chain.clone().then(stage).expect("joins"), output)
+    };
+    let at = |offset| DomainOffset::Generated(GeneratedByteOffset::new(offset));
+
+    let text = "hello+tail";
+    let (suffixed, output) = compiler(10, text, vec![verbatim(generated(0, 5), embedded(0, 5))]);
+    let out = proven(&output, text);
+    let refused = Err(Unmappable::MissingMap {
+        stage: StageKind::Compiler,
+    });
+    assert_eq!(
+        suffixed
+            .authored_position(&out, at(4))
+            .map(|origin| origin.range),
+        Ok(sr(5, 5))
+    );
+    for offset in [5, 9, 10] {
+        assert_eq!(suffixed.authored_position(&out, at(offset)), refused);
+    }
+    assert_eq!(
+        suffixed.provenance(&out, generated(10, 10)),
+        Err(Unmappable::MissingMap {
+            stage: StageKind::Compiler
+        })
+    );
+    assert_eq!(suffixed.editable_preimage(&out, generated(10, 10)), refused);
+
+    // A segment that does reach the end owns it.
+    let text = "hello";
+    let (covered, output) = compiler(5, text, vec![verbatim(generated(0, 5), embedded(0, 5))]);
+    assert_eq!(
+        covered
+            .authored_position(&proven(&output, text), at(5))
+            .map(|origin| origin.range),
+        Ok(sr(6, 6))
+    );
+
+    // An anchor belongs to an empty output, and only to one.
+    assert_eq!(
+        MapStage::new(
+            StageKind::Compiler,
+            EditCertification::Reversible,
+            input.clone(),
+            basis(host(), CoordinateDomain::Generated, "ab", "anchored"),
+            2,
+            StageSegments {
+                empty_anchor: Some(DomainOffset::Embedded(eo(1))),
+                ..StageSegments::default()
+            },
+        ),
+        Err(MapStageError::AnchorOnNonEmptyOutput)
+    );
+}
+
+#[test]
+fn a_provenance_run_must_name_an_origin_and_every_origin_contributes() {
+    let (literal, chain) = syntax_chain_over("`ab`");
+    let input = literal.stage().output().clone();
+    let output = basis(host(), CoordinateDomain::Embedded, "ab", "stage");
+    let build = |segments| {
+        MapStage::new(
+            StageKind::Preprocessor,
+            EditCertification::Reversible,
+            input.clone(),
+            output.clone(),
+            2,
+            StageSegments {
+                segments,
+                ..StageSegments::default()
+            },
+        )
+    };
+    let empty = MapSegment {
+        output: embedded(0, 2),
+        origin: SegmentOrigin::Provenance {
+            origins: Box::new([]),
+        },
+    };
+    assert_eq!(
+        build(vec![empty]),
+        Err(MapStageError::EmptyProvenance),
+        "a run with no origin would answer with nothing"
+    );
+
+    // A conflict still names every unit it could have come from.
+    let inlined = MapSegment {
+        output: embedded(0, 2),
+        origin: SegmentOrigin::Provenance {
+            origins: Box::new([OriginRef::Foreign(unit_origin("import.scss", 0, 2))]),
+        },
+    };
+    let synthetic = MapSegment {
+        output: embedded(0, 2),
+        origin: SegmentOrigin::Synthetic { hole: None },
+    };
+    let conflicted = chain
+        .then(Arc::new(build(vec![inlined, synthetic]).expect("stage")))
+        .expect("joins");
+    assert_eq!(
+        conflicted.provenance(&proven(&output, "ab"), embedded(0, 2)),
+        Err(Unmappable::AmbiguousPreimage)
+    );
+    assert_eq!(
+        conflicted.contributing_units(),
+        [host(), unit("import.scss")]
+    );
+}
+
+/// Two regions of one unit are two coordinate spaces, even over equal text.
+#[test]
+fn sibling_regions_of_one_unit_never_answer_for_each_other() {
+    let source = "`ab` `ab`";
+    let sibling = RegionLineage::root(host(), RegionId::from_region_role(&host(), "sibling"));
+    let authored_basis = basis_of(source);
+    let decode = |outer, body, lineage| {
+        let geometry = LiteralGeometry::new(outer, body, Vec::new()).expect("geometry");
+        template_raw()
+            .decode(
+                &DecodeRequest {
+                    input: proven(&authored_basis, source),
+                    geometry: &geometry,
+                    lineage,
+                },
+                &NeverInterrupted,
+            )
+            .expect("decodes")
+    };
+    let root = root_lineage();
+    let first = decode(sr(0, 4), sr(1, 3), &root);
+    let second = decode(sr(5, 9), sr(6, 8), &sibling);
+    let syntax = Unmappable::MismatchedBasis {
+        stage: StageKind::Syntax,
+    };
+    assert_eq!(
+        AuthoredMapChain::new(attachment_for(root_lineage(), None), second.stage().clone()),
+        Err(syntax),
+        "an attachment cannot claim another region's stage"
+    );
+    let chain = AuthoredMapChain::new(attachment_for(root_lineage(), None), first.stage().clone())
+        .expect("its own region");
+    assert_eq!(
+        chain.provenance(&second.output_text(), embedded(0, 1)),
+        Err(syntax),
+        "a sibling is not a stale version of this region"
+    );
+    assert!(chain
+        .provenance(&first.output_text(), embedded(0, 1))
+        .is_ok());
+}
+
+/// A splice reuses the previous text, so it may only continue that literal.
+#[test]
+fn a_splice_refuses_a_request_for_another_unit_or_region() {
+    let codec = template_raw();
+    let source = "`abc`";
+    let previous = decoded(&codec, source);
+    let (edited, edit) = splice(source, 1, 2, "z");
+    let refused = Err(CodecRefusal::BasisRefused(Unmappable::MismatchedBasis {
+        stage: StageKind::Syntax,
+    }));
+
+    let other = unit("other.ts");
+    let other_lineage = RegionLineage::root(other.clone(), RegionId::from_region_role(&other, "x"));
+    let other_basis = MapBasis {
+        unit: other,
+        ..basis_of(&edited)
+    };
+    let sibling = RegionLineage::root(host(), RegionId::from_region_role(&host(), "sibling"));
+    let edited_basis = basis_of(&edited);
+    for (input, lineage) in [(&other_basis, &other_lineage), (&edited_basis, &sibling)] {
+        assert_eq!(
+            codec.decode_splice(
+                &previous,
+                &edit,
+                &DecodeRequest {
+                    input: proven(input, &edited),
+                    geometry: &parsed_template(&edited, 0),
+                    lineage,
+                },
+                &NeverInterrupted,
+            ),
+            refused
+        );
+    }
+    assert!(splice_decode(&codec, &previous, &edit, &edited, 0).is_ok());
+}
+
+/// Policy data no digit exists in spells nothing; the decode still answers with
+/// a typed refusal, and raw and cooked read the same delimiters.
+#[test]
+fn degenerate_policies_refuse_with_a_type() {
+    for numeric in [
+        NumericEscape::Fixed {
+            marker: 'q',
+            radix: 99,
+            digits: 1,
+        },
+        NumericEscape::Fixed {
+            marker: 'q',
+            radix: 16,
+            digits: 0,
+        },
+        NumericEscape::Braced {
+            marker: 'q',
+            open: '{',
+            close: '}',
+            radix: 1,
+        },
+    ] {
+        let codec = EmbeddedTextCodec::new(
+            TextSelection::Cooked(CookedPolicy {
+                escapes: EscapePolicy {
+                    numeric: Box::new([numeric]),
+                    ..js_escapes()
+                },
+                line_terminators: LineTerminatorPolicy::Preserve,
+                indentation: IndentationPolicy::Preserve,
+                reverse: ReverseEncoding::ThroughEscapes,
+            }),
+            backticks(),
+            HolePolicy::Absent,
+        );
+        let source = "`\\q{1}`";
+        assert!(
+            matches!(
+                decode_at(&codec, source, &parsed_template(source, 0)),
+                Err(CodecRefusal::MissingCookedValue(_))
+            ),
+            "{numeric:?}"
+        );
+    }
+
+    let closes_on_a_line = DelimiterPolicy {
+        open: "<".into(),
+        close: "\n--".into(),
+        escape_introducer: None,
+    };
+    let source = "<a\n--b\n--";
+    let geometry = LiteralGeometry::new(sr(0, 9), sr(1, 6), Vec::new()).expect("geometry");
+    let raw = EmbeddedTextCodec::new(
+        TextSelection::Raw,
+        closes_on_a_line.clone(),
+        HolePolicy::Absent,
+    );
+    let cooked = EmbeddedTextCodec::new(
+        cooked_policy(
+            LineTerminatorPolicy::Preserve,
+            IndentationPolicy::Preserve,
+            ReverseEncoding::ThroughEscapes,
+        ),
+        closes_on_a_line,
+        HolePolicy::Absent,
+    );
+    for codec in [raw, cooked] {
+        assert_eq!(
+            decode_at(&codec, source, &geometry),
+            Err(CodecRefusal::UnescapedDelimiter { authored: sr(2, 5) })
+        );
+    }
+
+    assert_eq!(
+        LiteralGeometry::new(
+            sr(0, 4),
+            sr(1, 3),
+            vec![HoleGeometry {
+                outer: sr(2, 2),
+                expression: sr(2, 2),
+                region: hole_region(0),
+            }],
+        ),
+        Err(GeometryError::EmptyHole { ordinal: 0 })
+    );
+}
+
+/// A replacement lands between authored bytes, and what it means there is what
+/// counts: text it would join into syntax is refused, never written.
+#[test]
+fn reverse_encoding_refuses_what_its_neighbours_would_turn_into_syntax() {
+    let neighbours = |before, after| AuthoredNeighbours { before, after };
+    let refused = Err(UnencodableReplacement::FormsSyntaxWithNeighbours);
+    let template = template_cooked();
+    // `$` before an authored `{` would open a hole; removing the text between
+    // the two would too.
+    assert_eq!(
+        template.encode_replacement("$", neighbours("`", "{b}`")),
+        refused
+    );
+    assert_eq!(
+        template.encode_replacement("", neighbours("`$", "{b}`")),
+        refused
+    );
+    assert_eq!(
+        template.encode_replacement("{", neighbours("`$", "b}`")),
+        refused
+    );
+    // A short spelling can sit inside a longer syntax, touching both seams.
+    let long_closer = EmbeddedTextCodec::new(
+        TextSelection::Raw,
+        DelimiterPolicy {
+            open: "<".into(),
+            close: "---".into(),
+            escape_introducer: None,
+        },
+        HolePolicy::Absent,
+    );
+    assert_eq!(
+        long_closer.encode_replacement("-", neighbours("<a-", "-b---")),
+        refused
+    );
+    assert_eq!(
+        long_closer.encode_replacement("-", neighbours("<ab", "---")),
+        refused
+    );
+    assert_eq!(
+        long_closer.encode_replacement("-", neighbours("<a", "b---")),
+        Ok("-".to_owned())
+    );
+
+    // A line feed after an authored CR would contract into one terminator where
+    // the policy normalizes them, and means itself where it preserves them.
+    let normalizing = template_cooked();
+    assert_eq!(
+        normalizing.encode_replacement("x", neighbours("`a\r", "\nb`")),
+        Ok("x".to_owned())
+    );
+    let (spelled_before, spelled_after) = ("`a\r", "b`");
+    assert_eq!(
+        normalizing.encode_replacement("\n", neighbours(spelled_before, spelled_after)),
+        refused
+    );
+    let preserving = EmbeddedTextCodec::new(
+        cooked_policy(
+            LineTerminatorPolicy::Preserve,
+            IndentationPolicy::Preserve,
+            ReverseEncoding::ThroughEscapes,
+        ),
+        backticks(),
+        admit_holes(None),
+    );
+    let spelled = preserving
+        .encode_replacement("\n", neighbours(spelled_before, spelled_after))
+        .expect("nothing contracts");
+    let source = format!("{spelled_before}{spelled}{spelled_after}");
+    assert_eq!(
+        decode_at(&preserving, &source, &parsed_template(&source, 0))
+            .expect("decodes")
+            .text(),
+        "a\r\nb"
+    );
+
+    // Neighbours split inside a scalar are read from the scalar's own edge.
+    assert_eq!(
+        template.encode_replacement("x", neighbours("é", "é")),
+        Ok("x".to_owned())
+    );
+}
+
+/// Every table field is part of a policy's identity, with its own boundaries.
+#[test]
+fn a_policy_digest_covers_each_escape_and_indentation_field() {
+    let digest = |escapes: EscapePolicy, indentation: IndentationPolicy| {
+        EmbeddedTextCodec::new(
+            TextSelection::Cooked(CookedPolicy {
+                escapes,
+                line_terminators: LineTerminatorPolicy::Preserve,
+                indentation,
+                reverse: ReverseEncoding::ThroughEscapes,
+            }),
+            backticks(),
+            HolePolicy::Absent,
+        )
+        .policy_digest()
+    };
+    let preserve = || IndentationPolicy::Preserve;
+    let base = digest(js_escapes(), preserve());
+    assert_eq!(base, digest(js_escapes(), preserve()));
+    let variants = [
+        digest(
+            EscapePolicy {
+                simple: Box::new([]),
+                ..js_escapes()
+            },
+            preserve(),
+        ),
+        digest(
+            EscapePolicy {
+                numeric: Box::new([]),
+                ..js_escapes()
+            },
+            preserve(),
+        ),
+        digest(
+            EscapePolicy {
+                invalid_markers: Box::new(['1']),
+                ..js_escapes()
+            },
+            preserve(),
+        ),
+        digest(
+            EscapePolicy {
+                identity: IdentityEscapes::Invalid,
+                ..js_escapes()
+            },
+            preserve(),
+        ),
+        // One list of two spellings is not one spelling of their concatenation.
+        digest(
+            EscapePolicy {
+                continuations: Box::new(["\n".into(), "\r".into()]),
+                ..js_escapes()
+            },
+            preserve(),
+        ),
+        digest(
+            EscapePolicy {
+                continuations: Box::new(["\n\r".into()]),
+                ..js_escapes()
+            },
+            preserve(),
+        ),
+        digest(
+            js_escapes(),
+            IndentationPolicy::StripCommonLeading {
+                whitespace: Box::new([' ']),
+                include_first_line: false,
+            },
+        ),
+        digest(
+            js_escapes(),
+            IndentationPolicy::StripCommonLeading {
+                whitespace: Box::new([' ']),
+                include_first_line: true,
+            },
+        ),
+    ];
+    for (index, variant) in variants.iter().enumerate() {
+        assert_ne!(*variant, base, "{index}");
+        for later in &variants[index + 1..] {
+            assert_ne!(variant, later, "{index}");
+        }
+    }
 }

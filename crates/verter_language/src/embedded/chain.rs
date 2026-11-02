@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use verter_identity::identity::{ContentId, SourceUnitId};
 use verter_identity::mapping::MapRevision;
+use verter_identity::successor::RegionId;
 use verter_span::SourceByteRange;
 
 use super::lineage::EmbeddedAttachment;
@@ -12,27 +13,72 @@ use super::map::{
     OriginRef, StageKind, Unmappable,
 };
 
-/// The exact basis of one map endpoint: unit, domain, content and map
+/// The exact basis of one map endpoint: unit, region, domain, content and map
 /// revision. A position is valid only against the basis it was computed on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MapBasis {
     pub unit: SourceUnitId,
+    /// The embedded region this coordinate space belongs to. Authored bytes
+    /// belong to the unit, so a source basis names none.
+    pub region: Option<RegionId>,
     pub domain: CoordinateDomain,
     pub content: ContentId,
     pub map_revision: MapRevision,
 }
 
 impl MapBasis {
-    /// Refuse anything but the exact expected basis: same unit and domain with
-    /// another content or map revision is stale, anything else mismatched.
+    /// Refuse anything but the exact expected basis: same unit, region and
+    /// domain with another content or map revision is stale, anything else
+    /// mismatched.
     pub(super) fn require(&self, actual: &MapBasis, stage: StageKind) -> Result<(), Unmappable> {
         if self == actual {
             Ok(())
-        } else if self.unit == actual.unit && self.domain == actual.domain {
+        } else if self.unit == actual.unit
+            && self.region == actual.region
+            && self.domain == actual.domain
+        {
             Err(Unmappable::StaleBasis { stage })
         } else {
             Err(Unmappable::MismatchedBasis { stage })
         }
+    }
+}
+
+/// Text proven to be the content its basis names.
+///
+/// Offsets index bytes, and only the text knows where a scalar starts, so an
+/// answer about a basis's bytes needs this proof. Proving hashes the text once;
+/// the proof then serves any number of decodes and queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasisText<'a> {
+    basis: &'a MapBasis,
+    text: &'a str,
+}
+
+/// The text is not the content its basis names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasisTextMismatch;
+
+impl<'a> BasisText<'a> {
+    pub fn new(basis: &'a MapBasis, text: &'a str) -> Result<Self, BasisTextMismatch> {
+        if ContentId::from_content_bytes(text.as_bytes()) == basis.content {
+            Ok(Self::already_proven(basis, text))
+        } else {
+            Err(BasisTextMismatch)
+        }
+    }
+
+    /// For a caller that derived `basis.content` from exactly this text.
+    pub(super) fn already_proven(basis: &'a MapBasis, text: &'a str) -> Self {
+        Self { basis, text }
+    }
+
+    pub fn basis(&self) -> &'a MapBasis {
+        self.basis
+    }
+
+    pub fn text(&self) -> &'a str {
+        self.text
     }
 }
 
@@ -49,10 +95,13 @@ pub struct AuthoredMapChain {
 }
 
 impl AuthoredMapChain {
-    /// Start a chain at authored bytes of the attachment's source unit.
+    /// Start a chain at authored bytes of the attachment's source unit, from a
+    /// stage that produced the attachment's own region.
     pub fn new(attachment: EmbeddedAttachment, first: Arc<MapStage>) -> Result<Self, Unmappable> {
+        let lineage = attachment.lineage();
         if first.input().domain != CoordinateDomain::Source
-            || first.input().unit != *attachment.lineage().unit()
+            || first.input().unit != *lineage.unit()
+            || first.output().region.as_ref() != Some(lineage.region())
         {
             return Err(Unmappable::MismatchedBasis {
                 stage: first.kind(),
@@ -94,20 +143,37 @@ impl AuthoredMapChain {
         units
     }
 
-    fn require_query(&self, basis: &MapBasis) -> Result<(), Unmappable> {
+    /// Refuse a query unless `output` is this chain's exact output, in the
+    /// queried domain. Verbatim runs are byte-identical, so a scalar boundary
+    /// of the final output stays one at every hop back to authored bytes.
+    fn require_query(
+        &self,
+        output: &BasisText<'_>,
+        domain: CoordinateDomain,
+    ) -> Result<(), Unmappable> {
         let last = &self.stages[self.stages.len() - 1];
-        self.output_basis().require(basis, last.kind())
+        let stage = last.kind();
+        self.output_basis().require(output.basis, stage)?;
+        if domain != output.basis.domain
+            || u32::try_from(output.text.len()).ok() != Some(last.output_extent())
+        {
+            return Err(Unmappable::MismatchedBasis { stage });
+        }
+        Ok(())
     }
 
-    /// The authored position of the scalar starting at `offset`; at the end of
-    /// the output, the authored end of the last scalar. The answer is an empty
-    /// authored range.
+    /// The authored position of the scalar starting at `offset` of `output`; at
+    /// the end of the output, the authored end of the last scalar when a stage
+    /// maps it. The answer is an empty authored range.
     pub fn authored_position(
         &self,
-        basis: &MapBasis,
+        output: &BasisText<'_>,
         offset: DomainOffset,
     ) -> Result<AuthoredOrigin, Unmappable> {
-        self.require_query(basis)?;
+        self.require_query(output, offset.domain())?;
+        offset
+            .validate(output.text)
+            .map_err(Unmappable::InvalidBoundary)?;
         let mut current = offset;
         for stage in self.stages.iter().rev() {
             current = stage.position(current)?;
@@ -125,10 +191,13 @@ impl AuthoredMapChain {
     /// exact origin is still not edit authority.
     pub fn provenance(
         &self,
-        basis: &MapBasis,
+        output: &BasisText<'_>,
         range: DomainRange,
     ) -> Result<AuthoredProvenance, Unmappable> {
-        self.require_query(basis)?;
+        self.require_query(output, range.domain())?;
+        range
+            .validate(output.text)
+            .map_err(Unmappable::InvalidBoundary)?;
         let origins = provenance_through(&self.stages, range)?
             .into_iter()
             .map(|origin| match origin {
@@ -146,10 +215,13 @@ impl AuthoredMapChain {
     /// the profile's reverse encoding.
     pub fn editable_preimage(
         &self,
-        basis: &MapBasis,
+        output: &BasisText<'_>,
         range: DomainRange,
     ) -> Result<AuthoredOrigin, Unmappable> {
-        self.require_query(basis)?;
+        self.require_query(output, range.domain())?;
+        range
+            .validate(output.text)
+            .map_err(Unmappable::InvalidBoundary)?;
         let mut current = range;
         for stage in self.stages.iter().rev() {
             current = stage.editable_preimage(current)?;

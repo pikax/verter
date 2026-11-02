@@ -17,6 +17,9 @@
 //!   authored UTF-8 geometry or a typed [`Unmappable`]. Syntax, preprocessor,
 //!   compiler, runtime-build and code-generation stages stay distinct, and a
 //!   stage joins only an exactly matching [`MapBasis`].
+//! - [`BasisText`] proves text against the basis naming it, once per text: a
+//!   decode reads only proven source, and a chain query answers only for a scalar
+//!   boundary of its proven output.
 //!
 //! Hole and literal geometry is parser-minted input ([`LiteralGeometry`]): the
 //! codec never rediscovers where an expression ends. Offsets use the checked
@@ -30,7 +33,7 @@ mod lineage;
 mod map;
 mod policy;
 
-pub use chain::{AuthoredMapChain, MapBasis};
+pub use chain::{AuthoredMapChain, BasisText, BasisTextMismatch, MapBasis};
 pub use cooked::{
     CookedPartiality, CookedText, MissingCookedValue, NonUnicodeCookedLiteral, SurrogateKind,
 };
@@ -48,7 +51,7 @@ pub use map::{
     SegmentOrigin, StageKind, StageSegments, Unmappable, WholeKind,
 };
 pub use policy::{
-    CookedPolicy, DelimiterPolicy, EmbeddedTextCodec, EscapePolicy, HolePolicy, IdentityEscapes,
-    IndentationPolicy, LineTerminatorPolicy, NumericEscape, PlaceholderSpelling, ProfileHoleClass,
-    ReverseEncoding, SimpleEscape, TextSelection, UnencodableReplacement,
+    AuthoredNeighbours, CookedPolicy, DelimiterPolicy, EmbeddedTextCodec, EscapePolicy, HolePolicy,
+    IdentityEscapes, IndentationPolicy, LineTerminatorPolicy, NumericEscape, PlaceholderSpelling,
+    ProfileHoleClass, ReverseEncoding, SimpleEscape, TextSelection, UnencodableReplacement,
 };
