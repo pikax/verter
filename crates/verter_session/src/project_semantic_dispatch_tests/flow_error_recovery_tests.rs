@@ -518,12 +518,11 @@ fn an_instantiated_access_of_an_absent_key_is_unknown() {
     let failures = project.mismatches(&rows);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     let host = project.host(ALL[0].options, &unknown);
-    for probe in 0..unknown.len() {
+    for (ordinal, probe) in unknown.iter().enumerate() {
         assert_eq!(
-            named_answer(&host, probe).checker_recovery_code(),
+            named_answer(&host, ordinal).checker_recovery_code(),
             None,
-            "{}",
-            unknown[probe]
+            "{probe}"
         );
     }
     let host = project.host(ALL[0].options, &["Own<1>"]);
