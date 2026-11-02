@@ -237,6 +237,19 @@ async fn publish_carrier_pin_is_captured_before_the_compile_not_after() {
     );
 }
 
+/// End-to-end convergence witness for the "type a character, undo" race: a
+/// publish pass pins revision B, the buffer returns to A's exact bytes while
+/// that pass is parked after its compile, and the pass resumes. Its fenced IDE
+/// record is refused (the pin no longer matches the live document), so the
+/// recorded surface still describes A, and the gateway must publish none of
+/// B's companions. The oracle is the plugin-read IDE carrier hash: it holds
+/// only while a refused record publishes nothing. Delivering the companions
+/// despite the refusal leaves the store on B while every LSP-side record says
+/// A, and interactive repair then trusts that record and never republishes.
+/// The two companion-producer regressions beside
+/// [`crate::provider_surface_store::record_and_version_carrier_companions`]
+/// cover the refusal paths this witness does not reach: an open carrier
+/// compiled without a pin, and an unavailable carrier source.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_superseded_publish_whose_edit_returns_to_published_bytes_converges() {
     let workspace_root = unique_server_ws_root("publish_return_to_content");
