@@ -109,15 +109,12 @@ async function closeAllEditors(): Promise<void> {
  * Start a clean provider epoch for a state-sensitive parity suite, ready for
  * what the suite asserts: its entry document's own merged diagnostics.
  *
- * A plain caller awaits nothing workspace-wide: the restarted server certifies
- * a document once the document's own sync and its import closure are current,
- * and announces level 2 of the readiness ladder (`typeProviderSyncComplete`)
- * without a workspace scan. But a restart DOES re-arm the workspace scan
- * whenever the client negotiated the store-fill demand (this runner always
- * does), and while that scan runs the server holds a first publication until
- * the document's imports are delivered — so a `workspaceWide` suite settles
- * the inventory BEFORE waiting its entry (see the reorder note in the body).
- * The entry is opened FIRST, straight after the restart. A document VS
+ * Nothing workspace-wide is awaited. The restarted server never walks the
+ * workspace on its own: it certifies a document once the document's own sync
+ * and its import closure are current, and announces level 2 of the readiness
+ * ladder (`typeProviderSyncComplete`) without a workspace scan, so neither
+ * level 2 nor the replay of every document VS Code still holds stands between
+ * the suite and its entry. The entry is opened FIRST, straight after the restart. A document VS
  * Code still holds is not re-opened — its replayed open is all the server has,
  * and nothing about that open singles it out — so the priority comes from the
  * diagnostics-status poll instead: `verter._getDiagnosticStatus` first awaits
@@ -129,11 +126,10 @@ async function closeAllEditors(): Promise<void> {
  * A suite that asserts workspace-wide state (closed-file references, project
  * rename, workspace symbols) passes `workspaceWide` with the reason: the server
  * answers those requests only once its workspace inventory is built, and that
- * scan starts on the first such demand — level 2 does not imply it. The
- * harness demands the inventory and polls until the server stops answering it
- * as pending; for these callers that demand runs before the entry wait, so
- * neither the scan nor the replay of every document VS Code still holds parks
- * the entry's certification behind workspace work.
+ * scan starts on the first such demand — level 2 does not imply it. So after
+ * level 2 (the restart invalidated the cached fact, so that wait is for the
+ * new server's own announcement) the harness demands the inventory and polls
+ * until the server stops answering it as pending.
  */
 export async function restartParityReady(
   entry: string,
@@ -156,52 +152,25 @@ export async function restartParityReady(
     (progress) => progress !== "awaiting-ready",
     remaining(),
   );
-  if (options?.workspaceWide) {
-    // The inventory settle comes BEFORE the entry wait, not after. A restart
-    // re-arms the workspace scan at init whenever the client negotiated the
-    // store-fill demand (this runner always does), and while that scan runs the
-    // server holds a document's FIRST diagnostics publication until its imports
-    // are delivered — a hold the whole scan gates under the replay burst that
-    // follows a restart. Waiting the entry first parks its certification behind
-    // the scan for the scan's full duration (44s measured on a 16-core host,
-    // longer on a loaded CI runner), which expires `restartEntryDiagnostics`
-    // while the publication is merely parked, not late. A `workspaceWide` suite
-    // demands the inventory anyway, so demanding it here only reorders work it
-    // already owed; once the scan settles, the entry's dependency receipts mint
-    // and its certification completes immediately.
-    //
-    // Every wait from here on draws from ONE shared window — the entry budget's
-    // deadline plus the sync budget — so the sequence consumed is exactly the
-    // sum `restartedWorkspaceSuiteSetup` models (30s + 45s under its 90s hook),
-    // never a fresh budget per wait: level 2, the inventory settle and the
-    // entry certification all bound the same remaining time, and a slow phase
-    // leaves less for the next instead of opening a new deadline.
-    const settleDeadline = deadline + pollBudget("restartTypeProviderSync");
-    const settleRemaining = () => Math.max(settleDeadline - Date.now(), 1_000);
-    await ensureTypeProviderSynced({ syncBudgetMs: settleRemaining() });
-    await awaitWorkspaceInventory(settleRemaining());
-    await waitForDiagnosticsSettled(doc.uri, { timeoutMs: settleRemaining() });
-    return doc;
-  }
   await waitForDiagnosticsSettled(doc.uri, { timeoutMs: remaining() });
+  if (options?.workspaceWide) {
+    await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+    await awaitWorkspaceInventory();
+  }
   return doc;
 }
 
 /**
  * Demand the complete workspace inventory and wait until the server stops
  * answering it as pending. Level 2 of the readiness ladder does not imply it:
- * the scan starts on this demand. A caller inside a shared settle window
- * passes that window's remaining time so this wait bounds the sequence it
- * belongs to instead of opening a fresh budget.
+ * the scan starts on this demand.
  */
-export async function awaitWorkspaceInventory(
-  timeoutMs: number = pollBudget("restartTypeProviderSync"),
-): Promise<void> {
+export async function awaitWorkspaceInventory(): Promise<void> {
   await pollUntilWithin(
     "workspace inventory built",
     async () => vscode.commands.executeCommand<boolean>("verter._workspaceInventoryReady"),
     (ready) => ready === true,
-    timeoutMs,
+    pollBudget("restartTypeProviderSync"),
   );
 }
 

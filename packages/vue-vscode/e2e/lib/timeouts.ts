@@ -209,10 +209,9 @@ export const POLL_BUDGETS = {
     reason:
       "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
       "level-1 announcement, and the entry document's own merged diagnostics under its sync and " +
-      "import closure — for a plain caller all three share this ONE window. A `workspaceWide` " +
-      "caller restarts and announces level 1 inside this window, then settles the re-armed " +
-      "workspace scan and certifies the entry from the remaining time of the combined window " +
-      "`restartedWorkspaceSuiteSetup` models, never a second fresh budget",
+      "import closure. It takes the cold root handshake's 30s and nothing wider: the restarted " +
+      "server certifies the entry while its workspace scan is still running, so neither the scan " +
+      "nor the replay of every held document is on this path",
   },
   restartTypeProviderSync: {
     budgetMs: 45_000,
@@ -381,13 +380,9 @@ export const POLL_SEQUENCES = {
     members: ["restartEntryDiagnostics", "restartTypeProviderSync"],
     parentTimeoutMs: 90_000,
     reason:
-      "a suite that asserts workspace-wide state restarts the language server, announces the " +
-      "new server's level 1, settles the re-armed workspace scan (level 2 plus inventory — a " +
-      "reorder of the demand those suites already make, so the scan cannot park the entry's " +
-      "first publication behind it), and certifies the entry document. Both budgets are " +
-      "consumed as ONE shared window — the second starts where the first ends and every later " +
-      "wait draws its remaining time — so the sum this sequence checks is exactly what the " +
-      "hook's declared 90s deadline must hold",
+      "a suite that asserts workspace-wide state restarts the language server, waits for the NEW " +
+      "server to certify its entry document, then for its level-2 announcement — in series " +
+      "under the hook's declared 90s deadline",
   },
   restartedWorkspaceReferences: {
     members: ["restartTypeProviderSync"],

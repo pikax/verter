@@ -270,25 +270,33 @@ impl VerterLanguageServer {
         let lock = self.import_sync.lock_for(canonical_id);
         let _guard = lock.lock().await;
 
-        let key = self.import_sync_freshness_key();
-        if let Some(key) = key {
-            if self.import_sync.is_fresh_at(canonical_id, key)
-                && self.imported_child_contracts_current_for_parent(canonical_id)
-                && self.own_carrier_contract_current(canonical_id)
-            {
-                return; // Every leg of this pass is delivered at this generation.
-            }
+        if self
+            .import_sync
+            .is_current(canonical_id, &self.documents, &self.vfs_workspace)
+            && self.imported_child_contracts_current_for_parent(canonical_id)
+            && self.own_carrier_contract_current(canonical_id)
+        {
+            return; // Every leg of this pass is delivered at this generation.
         }
+        let key = self.import_sync_freshness_key();
 
         // Register the in-flight join handle only once this task IS the pass
         // (post-lock, post-freshness). Dropped at scope end — after the receipt
         // write below — so a woken joiner re-reads a settled memo.
         let _in_flight = self.import_sync.begin_in_flight(canonical_id);
 
+        // The canonical ids whose content this delivery reads, collected by
+        // the legs as they walk the closure — synced or already delivered,
+        // both are members. Recorded with the receipt so its freshness can be
+        // judged per-closure instead of per-workspace.
+        let mut delivered_roots: Vec<String> = Vec::new();
         let mut outcome = self
-            .ensure_imported_carrier_apis_synced(uri)
+            .ensure_imported_carrier_apis_synced(uri, &mut delivered_roots)
             .await
-            .and(self.ensure_barrel_imports_synced(uri).await);
+            .and(
+                self.ensure_barrel_imports_synced(uri, &mut delivered_roots)
+                    .await,
+            );
 
         // An open carrier is itself a future imported child. Publish its own
         // contract on the same debounced background lane after its dependency
@@ -300,22 +308,44 @@ impl VerterLanguageServer {
             outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
         }
 
-        // Publish the receipt only when the whole pass DELIVERED under a stable
-        // key — never warm a torn generation, and never warm over a leg that has
-        // still to be retried.
-        if let Some(key) = key {
-            if outcome.is_complete() && self.import_sync_freshness_key() == Some(key) {
-                let rootless = self
-                    .dependency_frontier_signature(canonical_id)
-                    .is_some_and(|frontier| frontier.is_rootless());
-                self.import_sync.record_delivered_with_rootless(
-                    canonical_id.to_string(),
-                    key,
-                    rootless,
-                );
-                // A publication the workspace scan held back for want of this
-                // receipt is owed now, not when the whole scan ends.
-                self.sync_coordinator.dependencies_settled();
+        // Publish the receipt only when the whole pass DELIVERED over a closure
+        // the workspace has not since moved — never warm a torn generation, and
+        // never warm over a leg that has still to be retried. Stability is the
+        // document's own dependency-root closure, not the global key: a sibling
+        // document's open during the pass advances the global content
+        // generation without touching this closure, and discarding the
+        // completed delivery for it is what parked a demanded entry's first
+        // publication behind a loaded store-fill scan for the scan's whole
+        // duration. The receipt is minted at the CURRENT key so its content
+        // dimension starts as fresh as the workspace.
+        if let Some(captured) = key {
+            if outcome.is_complete() {
+                delivered_roots.sort_unstable();
+                delivered_roots.dedup();
+                let current = self.import_sync_freshness_key();
+                let closure_stable = current.is_some_and(|current| {
+                    current.1 == captured.1
+                        && super::import_sync_state::dependency_roots_untouched_since(
+                            &self.documents,
+                            canonical_id,
+                            &delivered_roots,
+                            captured.0,
+                        )
+                });
+                if let Some(mint_key) = current.filter(|_| closure_stable) {
+                    let rootless = self
+                        .dependency_frontier_signature(canonical_id)
+                        .is_some_and(|frontier| frontier.is_rootless());
+                    self.import_sync.record_delivered_with_rootless(
+                        canonical_id.to_string(),
+                        mint_key,
+                        rootless,
+                        delivered_roots,
+                    );
+                    // A publication the workspace scan held back for want of this
+                    // receipt is owed now, not when the whole scan ends.
+                    self.sync_coordinator.dependencies_settled();
+                }
             }
         }
     }
@@ -333,14 +363,17 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return DependencyReadiness::Ready;
         };
-        let Some(key) = self.import_sync_freshness_key() else {
+        if self.import_sync_freshness_key().is_none() {
             // Bootstrap: no receipt dimension yet. Enqueue best-effort
             // delivery and report the honest not-ready state; rename fails
             // closed while navigation still queries its current provider view.
             self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
             return DependencyReadiness::NotReady;
-        };
-        if self.import_sync.is_fresh_at(&canonical_id, key) {
+        }
+        if self
+            .import_sync
+            .is_current(&canonical_id, &self.documents, &self.vfs_workspace)
+        {
             return DependencyReadiness::Ready;
         }
         self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
@@ -370,14 +403,21 @@ impl VerterLanguageServer {
     /// through [`Self::publish_import_dependencies`].
     #[cfg(test)]
     pub(super) async fn ensure_barrel_imports_synced_for_test(&self, uri: &Uri) {
-        let _ = self.ensure_barrel_imports_synced(uri).await;
+        let mut roots = Vec::new();
+        let _ = self.ensure_barrel_imports_synced(uri, &mut roots).await;
     }
 
     /// Deliver the imported framework-carrier public-API surfaces (`import X
     /// from './X.vue'` plus dynamically referenced carriers) to the type
-    /// provider. PRIVATE to the background publication pass: handlers must
-    /// never run this inline (a compile error here is the architectural guard).
-    async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) -> ImportSyncOutcome {
+    /// provider. Every closure member discovered — synced or already
+    /// delivered — is appended to `delivered_roots` for the receipt. PRIVATE
+    /// to the background publication pass: handlers must never run this
+    /// inline (a compile error here is the architectural guard).
+    async fn ensure_imported_carrier_apis_synced(
+        &self,
+        uri: &Uri,
+        delivered_roots: &mut Vec<String>,
+    ) -> ImportSyncOutcome {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return ImportSyncOutcome::Complete;
         };
@@ -416,6 +456,7 @@ impl VerterLanguageServer {
                 import_ids.push(import_id);
             }
         }
+        delivered_roots.extend(import_ids.iter().cloned());
 
         let mut outcome = ImportSyncOutcome::Complete;
         for import_id in import_ids {
@@ -504,8 +545,14 @@ impl VerterLanguageServer {
     /// and the terminal carrier is reached at any depth), syncs the discovered carrier
     /// dependencies first, then publishes only non-carrier modules whose provider projection
     /// differs from their on-disk bytes. Ordinary imports and unchanged compiled output remain
-    /// provider-resolved from disk. PRIVATE to the background publication pass.
-    async fn ensure_barrel_imports_synced(&self, uri: &Uri) -> ImportSyncOutcome {
+    /// provider-resolved from disk. Every barrel and carrier discovered — synced or
+    /// already delivered — is appended to `delivered_roots` for the receipt.
+    /// PRIVATE to the background publication pass.
+    async fn ensure_barrel_imports_synced(
+        &self,
+        uri: &Uri,
+        delivered_roots: &mut Vec<String>,
+    ) -> ImportSyncOutcome {
         let Some(snapshot) = self.published_resolver() else {
             return ImportSyncOutcome::Complete;
         };
@@ -647,6 +694,11 @@ impl VerterLanguageServer {
             }
             frontier = next;
         }
+
+        // The BFS is complete: every barrel and carrier this closure spans is
+        // now discovered, whatever the sync loops below do with each.
+        delivered_roots.extend(barrel_ids.iter().cloned());
+        delivered_roots.extend(barrel_carrier_deps.iter().cloned());
 
         let mut outcome = ImportSyncOutcome::Complete;
 
