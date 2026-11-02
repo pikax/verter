@@ -843,6 +843,7 @@ pub(crate) async fn sync_self_file_shadow_state(
                     canonical_id,
                     state,
                 );
+                documents.settle_provider_surface(canonical_id);
                 return true;
             }
 
@@ -855,6 +856,7 @@ pub(crate) async fn sync_self_file_shadow_state(
             state.owner_binding = delivered_owner_binding;
             state.mark_shadow_delivered(&source);
             crate::provider_sync::commit_sync_transition(provider_sync_states, canonical_id, state);
+            documents.settle_provider_surface(canonical_id);
             true
         }
         Err(error) => {

@@ -1,0 +1,1825 @@
+{
+  "schema": "dialect-inventory/v1",
+  "kind": "contract-only",
+  "productionChanges": false,
+  "currentNativeSource": {
+    "package": "verter_css_syntax",
+    "version": "0.0.1-beta.7",
+    "versionSource": "Cargo.toml [workspace.package]",
+    "grammarSource": "crates/verter_css_syntax/src/dialect.rs",
+    "grammarConformance": "not established by package version",
+    "grammarEpoch": 1,
+    "grammarEpochSource": "crates/verter_css_syntax/src/version.rs::CssSyntaxGrammarVersion::CURRENT"
+  },
+  "dependencies": [
+    {
+      "package": "vite",
+      "version": "8.3.5",
+      "source": "pnpm-lock.yaml importers packages/unplugin and packages/vue-vscode",
+      "role": "external transform orchestration, not dialect grammar"
+    },
+    {
+      "package": "vscode-css-languageservice",
+      "version": "6.3.10",
+      "source": "pnpm-lock.yaml importer packages/vue-vscode",
+      "role": "host-local direct CSS/SCSS/Less service, not shared semantic authority"
+    },
+    {
+      "package": "postcss",
+      "version": "8.5.31",
+      "source": "pnpm-lock.yaml vite@8.3.5 snapshot",
+      "role": "external plugin pipeline; does not identify custom grammar"
+    }
+  ],
+  "dialects": [
+    {
+      "id": "pug",
+      "spellings": ["pug", "jade"],
+      "parser": {
+        "current": null,
+        "target": "verter_pug_syntax",
+        "decision": "PAR CL09 / H09 NewParser",
+        "owner": "DIAL1"
+      },
+      "facts": {
+        "current": "none for authored Pug",
+        "target": "canonical template facts with lexical binding contexts, holes and many-to-many origins",
+        "owner": "DIAL2"
+      },
+      "operationsOwner": "DIAL3",
+      "formatOwner": "DIAL4",
+      "transform": {
+        "route": "packages/unplugin/src/core/preprocessor.ts::preprocessTemplate",
+        "engine": "pug",
+        "version": null,
+        "versionReason": "Optional workspace import; no pug lock entry. No supported release qualified here.",
+        "output": "HTML",
+        "map": "Default pug.render producer returns no map; host-overrides separately accepts a supplied validated Pug map"
+      },
+      "grammarEvidence": "PAR-T07 and DIAL1-AC2; exact corpus/release must be pinned by DIAL1",
+      "capabilityCells": [
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredParse", "recovery"],
+          "resultClass": "unsupported",
+          "detail": "No authored native grammar/facts for this dialect",
+          "evidence": ["crates/verter_compiler/src/compile/mod.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["diagnostics"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect diagnostics qualified",
+          "evidence": ["crates/verter_compiler/src/compile/mod.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["completion"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_compiler/src/compile/mod.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["hover"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/hover.rs",
+            "crates/verter_compiler/src/compile/mod.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["definition"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/definition.rs",
+            "crates/verter_compiler/src/compile/mod.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["references"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/references.rs",
+            "crates/verter_compiler/src/compile/mod.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["renameAndEdits"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/rename.rs",
+            "crates/verter_compiler/src/compile/mod.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["formatting"],
+          "resultClass": "unsupported",
+          "detail": "SFC whitespace formatting exists but is not dialect content formatting",
+          "evidence": ["crates/verter_lsp/src/features/formatting.rs::format_document"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This static authored profile does not execute a dialect engine",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "No native authored origin chain qualified",
+          "evidence": ["crates/verter_compiler/src/compile/mod.rs"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredParse", "recovery", "completion", "hover"],
+          "resultClass": "unsupported",
+          "detail": "No service: Sass/Stylus are not reparsed after transformation; Pug is not a style block",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::getServiceForLang",
+            "packages/vue-vscode/src/css/cssService.ts::doComplete",
+            "packages/vue-vscode/src/css/cssService.ts::doHover",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["diagnostics"],
+          "resultClass": "unsupported",
+          "detail": "No Pug diagnostics in CSS adapter",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::doValidation",
+            "packages/vue-vscode/src/css/cssService.spec.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["definition", "references", "renameAndEdits", "formatting"],
+          "resultClass": "unsupported",
+          "detail": "No dialect definition/reference/rename/format provider in this adapter. Completion text edits and local document highlights are distinct operations.",
+          "evidence": ["packages/vue-vscode/src/css/cssService.ts"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This adapter has no runtime compiler for this dialect",
+          "evidence": [
+            "packages/vue-vscode/src/css/transpiler.ts",
+            "packages/vue-vscode/src/css/cssService.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "Generated CSS maps are not consumed for authored operations",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "pug.render returns HTML only; see separate host-overrides supplied-map capability",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "pug.render returns HTML only; see separate host-overrides supplied-map capability",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "diagnostics",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting",
+            "runtimeCompile"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Admission-only boundary; it neither executes engines nor provides authored parse/semantic/format operations",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Supplied map admission is independent of default producer output: validates map coordinates and captured identities. Does not prove unique reversible origins or supply missing bindings.",
+          "evidence": [
+            "crates/verter_session/src/block_content.rs::valid_source_map_v3",
+            "crates/verter_session/tests/cases/native_content_handoff.rs::supplied_output_has_distinct_artifact_and_source_space_identity"
+          ]
+        }
+      ],
+      "grammarIdentity": {
+        "syntaxProfile": "Pug/jade template",
+        "grammarVersion": "No full language release conformance qualified",
+        "parserEpoch": null,
+        "epochBasis": "No native parser admitted; external service grammar is bounded by hostProfiles engine version, not this epoch"
+      },
+      "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
+      "fullAuthoredIntelligence": false
+    },
+    {
+      "id": "scss",
+      "spellings": ["scss"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/scss.rs",
+        "decision": "PAR CL05 Dialect of CSS",
+        "owner": "DIAL5"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts; dynamic evaluation is incomplete",
+        "target": "SCSS authored semantic syntax contributions",
+        "owner": "DIAL5"
+      },
+      "operationsOwner": "CSS6",
+      "formatOwner": "FMTCS0",
+      "transform": {
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: preprocessBlock -> preprocessStyle optional Sass -> applyBlockOverrides. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
+        "engine": "sass / sass-embedded",
+        "version": "1.106.1",
+        "versionReason": "Both exact lock entries; workspace-resolved engines still require actual version evidence.",
+        "output": "CSS",
+        "map": "optional Source Map V3, validated before authored use"
+      },
+      "grammarEvidence": "PAR-T01/PAR-T02; current crate tests are bounded, not whole-release conformance",
+      "capabilityCells": [
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredParse", "recovery"],
+          "resultClass": "partial",
+          "detail": "Lossless native structural dialect parsing/recovery; no whole-release coverage claim",
+          "evidence": [
+            "crates/verter_css_syntax/src/dialect/scss.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "Native structural facts are available; exact per-dialect LSP diagnostic results have no execution evidence in this inventory.",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["completion"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["hover"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/hover.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["definition"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/definition.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["references"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/references.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["renameAndEdits"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/rename.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["formatting"],
+          "resultClass": "unsupported",
+          "detail": "SFC whitespace formatting exists but is not dialect content formatting",
+          "evidence": ["crates/verter_lsp/src/features/formatting.rs::format_document"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This static authored profile does not execute a dialect engine",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Authored structural spans only; no reversible external expansion inferred",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredParse", "recovery", "completion", "hover"],
+          "resultClass": "partial",
+          "detail": "Direct SCSS/Less service over verbatim authored slice; host-local, not shared language intelligence",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::getServiceForLang",
+            "packages/vue-vscode/src/css/cssService.ts::doComplete",
+            "packages/vue-vscode/src/css/cssService.ts::doHover",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["diagnostics"],
+          "resultClass": "partial",
+          "detail": "Direct SCSS/Less validation of authored bytes",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::doValidation",
+            "packages/vue-vscode/src/css/cssService.spec.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["definition", "references", "renameAndEdits", "formatting"],
+          "resultClass": "unsupported",
+          "detail": "No dialect definition/reference/rename/format provider in this adapter. Completion text edits and local document highlights are distinct operations.",
+          "evidence": ["packages/vue-vscode/src/css/cssService.ts"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This adapter has no runtime compiler for this dialect",
+          "evidence": [
+            "packages/vue-vscode/src/css/transpiler.ts",
+            "packages/vue-vscode/src/css/cssService.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Verbatim block-to-carrier offsets only; no transform map",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "diagnostics",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting",
+            "runtimeCompile"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Admission-only boundary; it neither executes engines nor provides authored parse/semantic/format operations",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Supplied map admission is independent of default producer output: validates map coordinates and captured identities. Does not prove unique reversible origins or supply missing bindings.",
+          "evidence": [
+            "crates/verter_session/src/block_content.rs::valid_source_map_v3",
+            "crates/verter_session/tests/cases/native_content_handoff.rs::supplied_output_has_distinct_artifact_and_source_space_identity"
+          ]
+        }
+      ],
+      "grammarIdentity": {
+        "syntaxProfile": "scss authored style",
+        "grammarVersion": "No full language release conformance qualified",
+        "parserEpoch": 1,
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
+      },
+      "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
+      "fullAuthoredIntelligence": false
+    },
+    {
+      "id": "less",
+      "spellings": ["less"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/less.rs",
+        "decision": "PAR CL06 Dialect of CSS",
+        "owner": "DIAL5"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts; dynamic evaluation is incomplete",
+        "target": "Less authored semantic syntax contributions",
+        "owner": "DIAL5"
+      },
+      "operationsOwner": "CSS6",
+      "formatOwner": "FMTCL0",
+      "transform": {
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in less preprocessStyle compiler branch. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
+        "engine": "less",
+        "version": "4.9.1",
+        "versionReason": "pnpm lock entry; not a Verter grammar support declaration.",
+        "output": "CSS",
+        "map": "optional pipeline map"
+      },
+      "grammarEvidence": "PAR-T01/PAR-T02; exact dialect recovery is not inherited from plain CSS",
+      "capabilityCells": [
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredParse", "recovery"],
+          "resultClass": "partial",
+          "detail": "Lossless native structural dialect parsing/recovery; no whole-release coverage claim",
+          "evidence": [
+            "crates/verter_css_syntax/src/dialect/less.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "Native structural facts are available; exact per-dialect LSP diagnostic results have no execution evidence in this inventory.",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["completion"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["hover"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/hover.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["definition"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/definition.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["references"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/references.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["renameAndEdits"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/rename.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["formatting"],
+          "resultClass": "unsupported",
+          "detail": "SFC whitespace formatting exists but is not dialect content formatting",
+          "evidence": ["crates/verter_lsp/src/features/formatting.rs::format_document"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This static authored profile does not execute a dialect engine",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Authored structural spans only; no reversible external expansion inferred",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredParse", "recovery", "completion", "hover"],
+          "resultClass": "partial",
+          "detail": "Direct SCSS/Less service over verbatim authored slice; host-local, not shared language intelligence",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::getServiceForLang",
+            "packages/vue-vscode/src/css/cssService.ts::doComplete",
+            "packages/vue-vscode/src/css/cssService.ts::doHover",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["diagnostics"],
+          "resultClass": "partial",
+          "detail": "Direct SCSS/Less validation of authored bytes",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::doValidation",
+            "packages/vue-vscode/src/css/cssService.spec.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["definition", "references", "renameAndEdits", "formatting"],
+          "resultClass": "unsupported",
+          "detail": "No dialect definition/reference/rename/format provider in this adapter. Completion text edits and local document highlights are distinct operations.",
+          "evidence": ["packages/vue-vscode/src/css/cssService.ts"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This adapter has no runtime compiler for this dialect",
+          "evidence": [
+            "packages/vue-vscode/src/css/transpiler.ts",
+            "packages/vue-vscode/src/css/cssService.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Verbatim block-to-carrier offsets only; no transform map",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unsupported",
+          "detail": "No built-in non-Vite compiler branch for this dialect",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "No built-in transform map producer",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "diagnostics",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting",
+            "runtimeCompile"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Admission-only boundary; it neither executes engines nor provides authored parse/semantic/format operations",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Supplied map admission is independent of default producer output: validates map coordinates and captured identities. Does not prove unique reversible origins or supply missing bindings.",
+          "evidence": [
+            "crates/verter_session/src/block_content.rs::valid_source_map_v3",
+            "crates/verter_session/tests/cases/native_content_handoff.rs::supplied_output_has_distinct_artifact_and_source_space_identity"
+          ]
+        }
+      ],
+      "grammarIdentity": {
+        "syntaxProfile": "less authored style",
+        "grammarVersion": "No full language release conformance qualified",
+        "parserEpoch": 1,
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
+      },
+      "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
+      "fullAuthoredIntelligence": false
+    },
+    {
+      "id": "sass-indented",
+      "spellings": ["sass"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/sass.rs",
+        "decision": "PAR CL07 dedicated layout frontend in CSS owner",
+        "owner": "DIAL6S"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts without preprocessing",
+        "target": "indented-Sass variables, mixins, imports and interpolation with exact origins",
+        "owner": "DIAL6SF"
+      },
+      "operationsOwner": "CSS6",
+      "formatOwner": "FMTSA0",
+      "transform": {
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: preprocessBlock -> preprocessStyle optional Sass -> applyBlockOverrides. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
+        "engine": "sass / sass-embedded",
+        "version": "1.106.1",
+        "versionReason": "Locked build tools; VS Code resolves workspace sass and records its banner version separately.",
+        "output": "CSS and qualified producer diagnostics",
+        "map": "optional; producer input diagnostics and generated output use distinct spaces"
+      },
+      "grammarEvidence": "PAR-T03/PAR-T04; indentation edit/recovery corpus owned by DIAL6S",
+      "capabilityCells": [
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredParse", "recovery"],
+          "resultClass": "partial",
+          "detail": "Lossless native structural dialect parsing/recovery; no whole-release coverage claim",
+          "evidence": [
+            "crates/verter_css_syntax/src/dialect/sass.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "Native structural facts are available; exact per-dialect LSP diagnostic results have no execution evidence in this inventory.",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["completion"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["hover"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/hover.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["definition"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/definition.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["references"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/references.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["renameAndEdits"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/rename.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["formatting"],
+          "resultClass": "unsupported",
+          "detail": "SFC whitespace formatting exists but is not dialect content formatting",
+          "evidence": ["crates/verter_lsp/src/features/formatting.rs::format_document"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This static authored profile does not execute a dialect engine",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Authored structural spans only; no reversible external expansion inferred",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredParse", "recovery", "completion", "hover"],
+          "resultClass": "unsupported",
+          "detail": "No service: Sass/Stylus are not reparsed after transformation; Pug is not a style block",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::getServiceForLang",
+            "packages/vue-vscode/src/css/cssService.ts::doComplete",
+            "packages/vue-vscode/src/css/cssService.ts::doHover",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["diagnostics"],
+          "resultClass": "partial",
+          "detail": "Qualified workspace compiler diagnostics only; authored positions map to carrier, unknown coordinate spaces anchor at block start",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::doValidation",
+            "packages/vue-vscode/src/css/cssService.spec.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["definition", "references", "renameAndEdits", "formatting"],
+          "resultClass": "unsupported",
+          "detail": "No dialect definition/reference/rename/format provider in this adapter. Completion text edits and local document highlights are distinct operations.",
+          "evidence": ["packages/vue-vscode/src/css/cssService.ts"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unqualified",
+          "detail": "Optional workspace compiler runs for diagnostics; actual engine version, trust/config and execution unqualified here",
+          "evidence": [
+            "packages/vue-vscode/src/css/transpiler.ts",
+            "packages/vue-vscode/src/css/cssService.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "Generated CSS maps are not consumed for authored operations",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "diagnostics",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting",
+            "runtimeCompile"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Admission-only boundary; it neither executes engines nor provides authored parse/semantic/format operations",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Supplied map admission is independent of default producer output: validates map coordinates and captured identities. Does not prove unique reversible origins or supply missing bindings.",
+          "evidence": [
+            "crates/verter_session/src/block_content.rs::valid_source_map_v3",
+            "crates/verter_session/tests/cases/native_content_handoff.rs::supplied_output_has_distinct_artifact_and_source_space_identity"
+          ]
+        }
+      ],
+      "grammarIdentity": {
+        "syntaxProfile": "sass-indented authored style",
+        "grammarVersion": "No full language release conformance qualified",
+        "parserEpoch": 1,
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
+      },
+      "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
+      "fullAuthoredIntelligence": false
+    },
+    {
+      "id": "stylus",
+      "spellings": ["stylus", "styl"],
+      "parser": {
+        "current": "crates/verter_css_syntax/src/dialect/stylus.rs",
+        "decision": "PAR CL08 dedicated layout frontend in CSS owner",
+        "owner": "DIAL6Y"
+      },
+      "facts": {
+        "current": "StyleSyntaxIr authored structural facts without preprocessing",
+        "target": "conservative Stylus symbols and preprocessor provenance with exact origins",
+        "owner": "DIAL6YF"
+      },
+      "operationsOwner": "CSS6",
+      "formatOwner": "FMTST0",
+      "transform": {
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in stylus preprocessStyle compiler branch. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
+        "engine": "stylus",
+        "version": null,
+        "versionReason": "No stylus lock entry; workspace version is observed, not assumed.",
+        "output": "CSS and qualified producer diagnostics",
+        "map": "optional producer map; not a guessed authored mapping"
+      },
+      "grammarEvidence": "PAR-T05/PAR-T06; Stylus precedence/recovery must use its own corpus",
+      "capabilityCells": [
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredParse", "recovery"],
+          "resultClass": "partial",
+          "detail": "Lossless native structural dialect parsing/recovery; no whole-release coverage claim",
+          "evidence": [
+            "crates/verter_css_syntax/src/dialect/stylus.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "Native structural facts are available; exact per-dialect LSP diagnostic results have no execution evidence in this inventory.",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["completion"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["hover"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/hover.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["definition"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/definition.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["references"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/references.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["renameAndEdits"],
+          "resultClass": "partial",
+          "detail": "Existing CSS property/selector and template class/id routes over authored structural facts; dialect variables, mixins and evaluation-dependent bindings remain unqualified",
+          "evidence": [
+            "crates/verter_lsp/src/features/rename.rs",
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["formatting"],
+          "resultClass": "unsupported",
+          "detail": "SFC whitespace formatting exists but is not dialect content formatting",
+          "evidence": ["crates/verter_lsp/src/features/formatting.rs::format_document"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This static authored profile does not execute a dialect engine",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Authored structural spans only; no reversible external expansion inferred",
+          "evidence": [
+            "crates/verter_session/tests/cases/style_native_analysis_preprocessor_boundary.rs::native_style_analysis_available_without_preprocessor"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredParse", "recovery", "completion", "hover"],
+          "resultClass": "unsupported",
+          "detail": "No service: Sass/Stylus are not reparsed after transformation; Pug is not a style block",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::getServiceForLang",
+            "packages/vue-vscode/src/css/cssService.ts::doComplete",
+            "packages/vue-vscode/src/css/cssService.ts::doHover",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["diagnostics"],
+          "resultClass": "partial",
+          "detail": "Qualified workspace compiler diagnostics only; authored positions map to carrier, unknown coordinate spaces anchor at block start",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::doValidation",
+            "packages/vue-vscode/src/css/cssService.spec.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["definition", "references", "renameAndEdits", "formatting"],
+          "resultClass": "unsupported",
+          "detail": "No dialect definition/reference/rename/format provider in this adapter. Completion text edits and local document highlights are distinct operations.",
+          "evidence": ["packages/vue-vscode/src/css/cssService.ts"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unqualified",
+          "detail": "Optional workspace compiler runs for diagnostics; actual engine version, trust/config and execution unqualified here",
+          "evidence": [
+            "packages/vue-vscode/src/css/transpiler.ts",
+            "packages/vue-vscode/src/css/cssService.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "Generated CSS maps are not consumed for authored operations",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unsupported",
+          "detail": "No built-in non-Vite compiler branch for this dialect",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "No built-in transform map producer",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "diagnostics",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting",
+            "runtimeCompile"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Admission-only boundary; it neither executes engines nor provides authored parse/semantic/format operations",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Supplied map admission is independent of default producer output: validates map coordinates and captured identities. Does not prove unique reversible origins or supply missing bindings.",
+          "evidence": [
+            "crates/verter_session/src/block_content.rs::valid_source_map_v3",
+            "crates/verter_session/tests/cases/native_content_handoff.rs::supplied_output_has_distinct_artifact_and_source_space_identity"
+          ]
+        }
+      ],
+      "grammarIdentity": {
+        "syntaxProfile": "stylus authored style",
+        "grammarVersion": "No full language release conformance qualified",
+        "parserEpoch": 1,
+        "epochBasis": "currentNativeSource; applies to native-engine cells only (rust-lsp). vue-vscode-css and unplugin cells are bounded by their hostProfiles engine, and host-overrides runs no parser"
+      },
+      "formatStatus": "No current native view qualified; owner names denote planned delivery, not support",
+      "fullAuthoredIntelligence": false
+    },
+    {
+      "id": "custom-postcss",
+      "spellings": ["postcss", "pcss", "provider-defined exact syntax id"],
+      "parser": {
+        "current": null,
+        "decision": "Explicit syntax provider; postcss is a pipeline name, not a grammar",
+        "owner": "DIAL7"
+      },
+      "facts": {
+        "current": "no native custom-syntax facts; ProcessedContentRequired",
+        "target": "provider-qualified authored contributions or typed partiality",
+        "owner": "DIAL7"
+      },
+      "operationsOwner": "CSS6",
+      "formatOwner": null,
+      "transform": {
+        "route": "Vue Vite: index.ts styleBlockCache -> raw style subrequest -> Vite CSS pipeline -> transformVueStyle. Outside Vite: no built-in custom-postcss preprocessStyle compiler branch. core/style-preprocess-worker.mjs is unreferenced, not a route (README).",
+        "engine": "postcss plus explicit provider/plugin chain",
+        "version": "8.5.31",
+        "versionReason": "Vite 8.3.5 lock dependency; 8.5.20 also exists transitively. Neither pins arbitrary custom syntax.",
+        "output": "provider-specific CSS",
+        "map": "captured per stage; absent mapping remains explicit"
+      },
+      "grammarEvidence": "No universal custom grammar/release. DIAL7 records exact provider, options, syntax epoch and source/license before admission",
+      "capabilityCells": [
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredParse", "recovery"],
+          "resultClass": "unsupported",
+          "detail": "No authored native grammar/facts for this dialect",
+          "evidence": ["crates/verter_session/tests/cases/style_dialect_admission.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["diagnostics"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect diagnostics qualified",
+          "evidence": ["crates/verter_session/tests/cases/style_dialect_admission.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["completion"],
+          "resultClass": "unqualified",
+          "detail": "Compatibility route, not authored dialect completion: css_completions selects the block by tag with no lang check, and class_extraction_dialect reads PostCss/Unknown as CSS for CSS-module class names. No exact grammar evidence",
+          "evidence": [
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_lsp/src/css/mod.rs",
+            "crates/verter_compiler/src/compile/mod.rs",
+            "crates/verter_session/tests/cases/style_dialect_admission.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["hover"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/hover.rs",
+            "crates/verter_session/tests/cases/style_dialect_admission.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["definition"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/definition.rs",
+            "crates/verter_session/tests/cases/style_dialect_admission.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["references"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/references.rs",
+            "crates/verter_session/tests/cases/style_dialect_admission.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["renameAndEdits"],
+          "resultClass": "unsupported",
+          "detail": "No authored dialect operation qualified; generated output is insufficient",
+          "evidence": [
+            "crates/verter_lsp/src/features/rename.rs",
+            "crates/verter_session/tests/cases/style_dialect_admission.rs"
+          ]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["formatting"],
+          "resultClass": "unsupported",
+          "detail": "SFC whitespace formatting exists but is not dialect content formatting",
+          "evidence": ["crates/verter_lsp/src/features/formatting.rs::format_document"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This static authored profile does not execute a dialect engine",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "rust-lsp",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "No native authored origin chain qualified",
+          "evidence": ["crates/verter_session/tests/cases/style_dialect_admission.rs"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredParse", "recovery", "completion", "hover"],
+          "resultClass": "unqualified",
+          "detail": "postcss selects plain CSS service; this is observable compatibility behavior, not custom grammar support",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::getServiceForLang",
+            "packages/vue-vscode/src/css/cssService.ts::doComplete",
+            "packages/vue-vscode/src/css/cssService.ts::doHover",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "Plain CSS diagnostics on postcss bytes are not custom grammar qualification",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts::doValidation",
+            "packages/vue-vscode/src/css/cssService.spec.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["definition", "references", "renameAndEdits", "formatting"],
+          "resultClass": "unsupported",
+          "detail": "No dialect definition/reference/rename/format provider in this adapter. Completion text edits and local document highlights are distinct operations.",
+          "evidence": ["packages/vue-vscode/src/css/cssService.ts"]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["runtimeCompile"],
+          "resultClass": "unsupported",
+          "detail": "This adapter has no runtime compiler for this dialect",
+          "evidence": [
+            "packages/vue-vscode/src/css/transpiler.ts",
+            "packages/vue-vscode/src/css/cssService.ts"
+          ]
+        },
+        {
+          "hostProfile": "vue-vscode-css",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Verbatim CSS compatibility slice offsets do not qualify arbitrary custom grammar",
+          "evidence": [
+            "packages/vue-vscode/src/css/cssService.ts",
+            "packages/vue-vscode/src/css/styleDocumentText.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unqualified",
+          "detail": "External transform route exists conditionally; provider/config/trust and actual execution are not qualified here. Producer failure is not authored diagnostic intelligence.",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-vite",
+          "operations": ["authoredMaps"],
+          "resultClass": "unqualified",
+          "detail": "Pipeline map is optional and stage/config-specific; map presence does not establish authored invertibility",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Build orchestration supplies no authored language service or native format view",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["runtimeCompile", "diagnostics"],
+          "resultClass": "unsupported",
+          "detail": "No built-in non-Vite compiler branch for this dialect",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "unplugin-direct",
+          "operations": ["authoredMaps"],
+          "resultClass": "unsupported",
+          "detail": "No built-in transform map producer",
+          "evidence": [
+            "packages/unplugin/src/index.ts",
+            "packages/unplugin/src/core/preprocessor.ts"
+          ]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": [
+            "authoredParse",
+            "recovery",
+            "diagnostics",
+            "completion",
+            "hover",
+            "definition",
+            "references",
+            "renameAndEdits",
+            "formatting",
+            "runtimeCompile"
+          ],
+          "resultClass": "unsupported",
+          "detail": "Admission-only boundary; it neither executes engines nor provides authored parse/semantic/format operations",
+          "evidence": ["crates/verter_session/src/block_content.rs"]
+        },
+        {
+          "hostProfile": "host-overrides",
+          "operations": ["authoredMaps"],
+          "resultClass": "partial",
+          "detail": "Supplied map admission is independent of default producer output: validates map coordinates and captured identities. Does not prove unique reversible origins or supply missing bindings.",
+          "evidence": [
+            "crates/verter_session/src/block_content.rs::valid_source_map_v3",
+            "crates/verter_session/tests/cases/native_content_handoff.rs::supplied_output_has_distinct_artifact_and_source_space_identity"
+          ]
+        }
+      ],
+      "grammarIdentity": {
+        "syntaxProfile": "Provider-specific custom syntax; postcss/pcss identifies a pipeline, not a grammar",
+        "grammarVersion": "No full language release conformance qualified",
+        "parserEpoch": null,
+        "epochBasis": "No native parser admitted; external service grammar is bounded by hostProfiles engine version, not this epoch"
+      },
+      "formatStatus": "Unsupported for arbitrary custom grammars in 0.1.0. DIAL8 admits only a provider with an exact existing native grammar/view owner and evidence; no admitted provider is inventoried here. PostCSS transforms/stringifiers are not format owners.",
+      "fullAuthoredIntelligence": false
+    }
+  ],
+  "receivingContracts": {
+    "syntax": "PAR PD01-PD09; DIAL1, DIAL5, DIAL6S, DIAL6Y",
+    "origins": "EMB0I primitives, DIAL2 Pug integration, DIAL7 transform integration",
+    "semantics": "DIAL2 canonical template facts; DIAL3 Vue Pug operations; DIAL5/DIAL6SF/DIAL6YF style facts; DIAL7 custom provider admission; DIAL8 symbol/format consumer cutover; CSS6 authored style navigation, references and admitted renames, including Stylus and explicitly admitted custom PostCSS facts",
+    "format": "DIAL4 Pug; FMTCS0 SCSS; FMTCL0 Less; FMTSA0 indented Sass; FMTST0 Stylus. DIAL8 owns consumer handoff and per-provider custom format admission; arbitrary custom grammars stay unsupported.",
+    "lint": "DIAL4L Pug; LCS8 SCSS/Less semantic correctness; no new dialect lint service here",
+    "transformIdentity": "STP38; DIAL7 adapters",
+    "publicDelivery": "each producer AC4: VIM/DX exact cells, DOC1-tested examples/reference, permissions/uncertainty/migration; DIAL10 checks real completed artifacts, not templates or screenshots",
+    "hostAdmission": "Existing VerterHost block_content admission with its NAPI binding survives; STP38 transform identity and DIAL7 adapters integrate this boundary, using EMB0I map composition. WASM exports no admission today; DIAL7 owns adding one thin binding over this boundary or recording it unsupported"
+  },
+  "deletionSet": [],
+  "deletionRationale": "Additive contract data only; current runtime routes are retained. README assigns concrete later reconciliation/cutover owners.",
+  "conditions": [
+    "Formatter or generated-output evidence alone cannot qualify full authored language intelligence.",
+    "Authored automatic edits require an exact reversible current origin chain.",
+    "Runtime compilation requires explicit trust and actual producer/config/build/session evidence.",
+    "DIAL1 retains the neutral Pug home H09 and proves its dependency boundary with a discriminating executable check.",
+    "Custom provider formatting requires an exact native grammar/view owner; DIAL8 rejects wrong-grammar and transform-only admission with a discriminating executable integration check."
+  ],
+  "conditionJustifications": [
+    {
+      "condition": "DIAL1 retains the neutral Pug home H09 and proves its dependency boundary with a discriminating executable check.",
+      "concern": "correctness",
+      "prevents": "The planned neutral parser entering the vertical carrier or parser-free dependency closure.",
+      "notCoveredBecause": "Ordinary parse fixtures cannot enforce PAR PD08/CL09/H09 placement."
+    },
+    {
+      "condition": "Custom provider formatting requires an exact native grammar/view owner; DIAL8 rejects wrong-grammar and transform-only admission with a discriminating executable integration check.",
+      "concern": "correctness",
+      "prevents": "Plausible false formatting support inferred from a successful PostCSS transform/stringifier.",
+      "notCoveredBecause": "Compilation evidence does not prove the lossless view and edit provenance required by FD06/FD08/FD09."
+    },
+    {
+      "condition": "Formatter or generated-output evidence alone cannot qualify full authored language intelligence.",
+      "concern": "correctness",
+      "prevents": "Plausible false authored rename/reference support inferred from a working printer or renderer (charter AC2).",
+      "notCoveredBecause": "Compilation/format tests do not prove authored bindings; producer AC4 must qualify operation projection."
+    },
+    {
+      "condition": "Authored automatic edits require an exact reversible current origin chain.",
+      "concern": "correctness",
+      "prevents": "Plausible wrong-source edits for mixin expansions or unmapped generated CSS (EMB contract and charter forbidden offset approximation).",
+      "notCoveredBecause": "A successful external transform does not prove map invertibility or revision validity."
+    },
+    {
+      "condition": "Runtime compilation requires explicit trust and actual producer/config/build/session evidence.",
+      "concern": "security",
+      "prevents": "Plausible execution of workspace code under a static-only support claim (charter runtime clause).",
+      "notCoveredBecause": "Static syntax CI does not establish permission or identify the actual workspace compiler."
+    }
+  ],
+  "cellEncoding": "Each row expands operations into separate cells. Dialect grammarIdentity plus hostProfiles[hostProfile] supply the grammar/version, parser epoch, syntax profile, host/profile and source/config/build basis, with the parser epoch applying only where the host profile's engine runs that parser; each expanded cell has one resultClass, detail and evidence. Every listed operation occurs exactly once per host per dialect. Evidence is static current-source inspection and named existing tests, not a claim those tests or external engines ran in DIAL0.",
+  "requiredOperations": [
+    "authoredParse",
+    "recovery",
+    "diagnostics",
+    "completion",
+    "hover",
+    "definition",
+    "references",
+    "renameAndEdits",
+    "formatting",
+    "runtimeCompile",
+    "authoredMaps"
+  ],
+  "hostProfiles": {
+    "rust-lsp": {
+      "host": "verter_lsp over verter_session",
+      "profile": "Vue SFC inline authored blocks; native structural facts only",
+      "engine": "currentNativeSource for native styles; no native Pug/custom grammar",
+      "sourceBasis": "Current repository source and current authored snapshot; source-backed structural facts",
+      "configBasis": "Native dialect selection, no external compiler",
+      "buildBasis": "Repository implementation; no cross-platform or whole-language qualification"
+    },
+    "vue-vscode-css": {
+      "host": "packages/vue-vscode CssService",
+      "profile": "Vue inline style blocks with admitted current structure/open epoch; Pug is outside this adapter",
+      "engine": "vscode-css-languageservice 6.3.10 for SCSS/Less and CSS compatibility on postcss; workspace Sass/Stylus for diagnostics only",
+      "sourceBasis": "Verbatim authored block slice; sealed block identity; external-src inline slices excluded",
+      "configBasis": "Workspace resolution for optional compilers; actual version/config/trust must be observed for runtime claims",
+      "buildBasis": "pnpm-lock.yaml and current adapter source; no real editor/engine run qualified here"
+    },
+    "unplugin-vite": {
+      "host": "@verter/unplugin with Vite 8.3.5",
+      "profile": "Vue build; style subrequests returned raw to Vite CSS pipeline; Pug through preprocessBlock",
+      "engine": "Dialect transform record; workspace providers not pinned by Vite version",
+      "sourceBasis": "Current carrier block and Vite style subrequest",
+      "configBasis": "Resolved Vite CSS/PostCSS/preprocessor configuration, explicit runtime trust required",
+      "buildBasis": "Current index.ts route and lock entries only; no engine execution evidence"
+    },
+    "unplugin-direct": {
+      "host": "@verter/unplugin outside Vite",
+      "profile": "Vue host preprocessorRequests -> preprocessBlock -> applyBlockOverrides",
+      "engine": "Optional Pug or Sass imports; no built-in Less/Stylus/custom PostCSS compiler branch",
+      "sourceBasis": "Current captured request echo and block source",
+      "configBasis": "No Vite config; per-call compiler options in preprocessor.ts; runtime trust required",
+      "buildBasis": "Current route source only; optional workspace engines unqualified"
+    },
+    "host-overrides": {
+      "host": "VerterHost via the NAPI binding; WASM surfaces requests but exports no admission",
+      "profile": "HostPreprocessorRequest / applyBlockOverrides admission, independent of producer availability",
+      "engine": "No compiler or authored language service in this boundary",
+      "sourceBasis": "Host-captured owner/artifact/block/basis identity and supplied code/map",
+      "configBasis": "Captured expected language and current source-map validation",
+      "buildBasis": "crates/verter_session/src/block_content.rs; crates/verter_napi/src/lib.rs",
+      "bindingScope": "applyBlockOverrides is exported by crates/verter_napi/src/lib.rs only, so these cells resolve for that binding alone. WasmVerterHost::upsert returns preprocessorRequests through crates/verter_ffi/src/convert/output.rs, but crates/verter_wasm/src/lib.rs lists the handshake as NAPI-only, so a WASM caller cannot supply code or a map for a processed block. DIAL7 owns the disposition: add one thin binding over this same boundary or record WASM admission unsupported."
+    }
+  }
+}
