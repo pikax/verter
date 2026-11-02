@@ -63,6 +63,16 @@ subblocks = ["EPR4-SB3"]
 acceptance = "EPR4-AC-CANDIDATES"
 
 [[rows]]
+id = "EngineOriginAuthorization"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
 id = "EngineArtifactDescriptor"
 role = "outcome"
 sourceRef = "docs/arch/engine-provisioning.md#artifact-identity"
@@ -224,6 +234,16 @@ acceptance = "EPR4-AC-CONTRACT"
 
 [[rows]]
 id = "EngineRevocation"
+role = "outcome"
+sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+applicability = "required"
+owner = "EPR4"
+path = ["EPR1", "EPR4"]
+subblocks = ["EPR4-SB3"]
+acceptance = "EPR4-AC-CANDIDATES"
+
+[[rows]]
+id = "EngineRevocationCatalog"
 role = "outcome"
 sourceRef = "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
 applicability = "required"

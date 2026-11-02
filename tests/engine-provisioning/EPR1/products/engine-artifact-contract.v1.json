@@ -9,8 +9,33 @@
     "canonicalJson": "RFC 8785 member order; safe integers only; NFC strings; no duplicate keys",
     "artifactKeyDomain": "verter.engine-artifact-id.v1",
     "closureManifestDomain": "verter.engine-closure-manifest.v1",
+    "declarationDomain": "verter.engine-compatibility-declaration.v1",
+    "requirementDomain": "verter.engine-compatibility-requirement.v1",
+    "revocationCatalogDomain": "verter.engine-revocation-catalog.v1",
     "receiptDomain": "verter.engine-validation-receipt.v1",
-    "digest": "sha256 over the domain, one NUL byte and the canonical JSON"
+    "digest": "sha256 over the domain, one NUL byte and the canonical JSON",
+    "closureManifest": "The canonical object of declarationDigest, entryPoint and files, with files ascending by the UTF-8 bytes of their path. RFC 8785 orders object members, not this array, and JavaScript string order differs from UTF-8 order outside the basic plane.",
+    "schemaDialect": "Schemas are draft 2020-12 and close every object with additionalProperties: false, so a standard validator refuses an added field. Refusing non-NFC text is the one rule the dialect cannot state; it belongs to the canonical encoding above.",
+    "closureOrderGolden": {
+      "declarationDigest": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896",
+      "entryPoint": "lib/～",
+      "files": [
+        {
+          "path": "lib/😀",
+          "digest": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896",
+          "size": 1,
+          "role": "sidecar"
+        },
+        {
+          "path": "lib/～",
+          "digest": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896",
+          "size": 1,
+          "role": "executable"
+        }
+      ],
+      "utf8Order": ["lib/～", "lib/😀"],
+      "digest": "sha256:27a4af3aa162c41005707c2030399d4a85b6cd260b2a2737670dc6bc9c52c6c0"
+    }
   },
   "identity": {
     "base": {
@@ -22,9 +47,9 @@
       "protocol": "lsp-3.17",
       "build": "publisher-build-1",
       "origin": "npm-typescript-darwin-arm64",
-      "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+      "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
     },
-    "baseKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
+    "baseKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
     "axisMutations": [
       {
         "field": "engine",
@@ -121,7 +146,7 @@
           "rootSetRevision": 3,
           "policyEpoch": 7
         },
-        "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
       },
       "second": {
         "receiptId": "origin-receipt-2",
@@ -138,7 +163,7 @@
           "rootSetRevision": 3,
           "policyEpoch": 7
         },
-        "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
       },
       "law": "Two locators of one verified artifact share one key and keep two origin receipts."
     }
@@ -185,12 +210,51 @@
       "aliases": []
     }
   ],
-  "flavorFamilies": {
-    "native-tsgo": ["native"],
-    "node-tsserver": ["native"],
-    "wasm-single": ["browser"],
-    "wasm-threaded": ["browser"],
-    "js-worker": ["browser"]
+  "flavorHosts": {
+    "native-tsgo": {
+      "platforms": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc"
+      ],
+      "host": "native-process",
+      "moduleFormats": ["native"],
+      "requiredHostFeatures": []
+    },
+    "node-tsserver": {
+      "platforms": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc"
+      ],
+      "host": "native-process",
+      "moduleFormats": ["node-commonjs", "esm"],
+      "requiredHostFeatures": []
+    },
+    "wasm-single": {
+      "platforms": ["wasm32-browser"],
+      "host": "browser-worker",
+      "moduleFormats": ["wasm"],
+      "requiredHostFeatures": []
+    },
+    "wasm-threaded": {
+      "platforms": ["wasm32-browser"],
+      "host": "browser-worker",
+      "moduleFormats": ["wasm"],
+      "requiredHostFeatures": ["SharedArrayBuffer", "cross-origin-isolated"]
+    },
+    "js-worker": {
+      "platforms": ["js-browser"],
+      "host": "browser-worker",
+      "moduleFormats": ["esm"],
+      "requiredHostFeatures": []
+    }
   },
   "compatibility": {
     "requirement": {
@@ -230,7 +294,7 @@
       "protocol": "lsp-3.17",
       "build": "publisher-build-1",
       "origin": "npm-typescript-darwin-arm64",
-      "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+      "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
     },
     "hostFeatures": [],
     "verdicts": [
@@ -312,7 +376,45 @@
         "expected": "TooNew"
       },
       {
+        "id": "other-engine",
+        "artifact": {
+          "engine": "other-engine"
+        },
+        "expected": "WrongEngine"
+      },
+      {
+        "id": "artifact-protocol-differs",
+        "artifact": {
+          "protocol": "lsp-3.18"
+        },
+        "expected": "UnsupportedProtocol"
+      },
+      {
+        "id": "requirement-needs-a-missing-host-feature",
+        "requirement": {
+          "hostFeatures": ["SharedArrayBuffer"]
+        },
+        "expected": "HostUnsupported"
+      },
+      {
+        "id": "requirement-host-feature-present",
+        "requirement": {
+          "hostFeatures": ["SharedArrayBuffer"]
+        },
+        "hostFeatures": ["SharedArrayBuffer"],
+        "expected": "Compatible"
+      },
+      {
         "id": "threaded-without-isolation",
+        "requirement": {
+          "platform": "wasm32-browser",
+          "allowedFlavors": ["wasm-threaded"]
+        },
+        "artifact": {
+          "flavor": "wasm-threaded",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1"
+        },
         "declaration": {
           "hostConstraints": {
             "host": "browser-worker",
@@ -325,6 +427,15 @@
       },
       {
         "id": "threaded-with-isolation",
+        "requirement": {
+          "platform": "wasm32-browser",
+          "allowedFlavors": ["wasm-threaded"]
+        },
+        "artifact": {
+          "flavor": "wasm-threaded",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1"
+        },
         "declaration": {
           "hostConstraints": {
             "host": "browser-worker",
@@ -336,7 +447,16 @@
         "expected": "Compatible"
       },
       {
-        "id": "single-threaded-needs-no-shared-memory",
+        "id": "threaded-cannot-drop-its-host-features",
+        "requirement": {
+          "platform": "wasm32-browser",
+          "allowedFlavors": ["wasm-threaded"]
+        },
+        "artifact": {
+          "flavor": "wasm-threaded",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1"
+        },
         "declaration": {
           "hostConstraints": {
             "host": "browser-worker",
@@ -344,7 +464,124 @@
             "requiredHostFeatures": []
           }
         },
+        "hostFeatures": ["SharedArrayBuffer"],
+        "expected": "HostUnsupported"
+      },
+      {
+        "id": "single-threaded-needs-no-shared-memory",
+        "requirement": {
+          "platform": "wasm32-browser",
+          "allowedFlavors": ["wasm-single"]
+        },
+        "artifact": {
+          "flavor": "wasm-single",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "wasm",
+            "requiredHostFeatures": []
+          }
+        },
+        "hostFeatures": [],
         "expected": "Compatible"
+      },
+      {
+        "id": "js-worker-on-a-browser",
+        "requirement": {
+          "platform": "js-browser",
+          "allowedFlavors": ["js-worker"]
+        },
+        "artifact": {
+          "flavor": "js-worker",
+          "platform": "js-browser",
+          "abi": "browser-worker-v1"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "esm",
+            "requiredHostFeatures": []
+          }
+        },
+        "hostFeatures": [],
+        "expected": "Compatible"
+      },
+      {
+        "id": "wasm-flavor-on-the-js-platform",
+        "requirement": {
+          "platform": "js-browser",
+          "allowedFlavors": ["wasm-single"]
+        },
+        "artifact": {
+          "flavor": "wasm-single",
+          "platform": "js-browser",
+          "abi": "browser-worker-v1"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "wasm",
+            "requiredHostFeatures": []
+          }
+        },
+        "hostFeatures": [],
+        "expected": "WrongFlavor"
+      },
+      {
+        "id": "wasm-flavor-declaring-a-script-module",
+        "requirement": {
+          "platform": "wasm32-browser",
+          "allowedFlavors": ["wasm-single"]
+        },
+        "artifact": {
+          "flavor": "wasm-single",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1"
+        },
+        "declaration": {
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "esm",
+            "requiredHostFeatures": []
+          }
+        },
+        "hostFeatures": [],
+        "expected": "HostUnsupported"
+      },
+      {
+        "id": "native-flavor-on-a-browser-platform",
+        "requirement": {
+          "platform": "wasm32-browser"
+        },
+        "artifact": {
+          "platform": "wasm32-browser"
+        },
+        "expected": "WrongFlavor"
+      },
+      {
+        "id": "native-artifact-declaring-a-browser-host",
+        "declaration": {
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "wasm",
+            "requiredHostFeatures": []
+          }
+        },
+        "expected": "HostUnsupported"
+      },
+      {
+        "id": "native-artifact-declaring-a-script-module",
+        "declaration": {
+          "hostConstraints": {
+            "host": "native-process",
+            "moduleFormat": "esm",
+            "requiredHostFeatures": []
+          }
+        },
+        "expected": "HostUnsupported"
       }
     ],
     "versionWindow": {
@@ -382,8 +619,8 @@
       ]
     },
     "policyChange": {
-      "law": "A compatibility policy or requirement change alters the cache key, so a stale receipt cannot authorize the new basis.",
-      "keyFields": ["requirementId", "compatibilityPolicyId"]
+      "law": "The key carries a digest of the whole requirement and the host's features, so a changed bound, feature or host cannot reuse a receipt even under unchanged IDs.",
+      "keyFields": ["requirementId", "requirementDigest", "compatibilityPolicyId", "hostFeatures"]
     }
   },
   "sourceEvidence": [
@@ -433,7 +670,11 @@
       "source": "BrowserArtifact",
       "trustClasses": ["published-browser-manifest", "development-browser-manifest"],
       "mutation": "browser-loader-only",
-      "required": ["origin", "closure", "compatibility", "worker-manifest", "host-constraints"]
+      "required": ["origin", "closure", "compatibility", "worker-manifest", "host-constraints"],
+      "requiredByTrustClass": {
+        "published-browser-manifest": ["signature", "provenance"],
+        "development-browser-manifest": ["development-policy"]
+      }
     }
   ],
   "evidence": {
@@ -448,7 +689,7 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
       },
       "originReceipts": [
         {
@@ -466,7 +707,7 @@
             "rootSetRevision": 3,
             "policyEpoch": 7
           },
-          "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
         }
       ],
       "locators": [
@@ -477,7 +718,9 @@
       ],
       "integrity": {
         "algorithm": "sha256",
-        "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
+        "entryPoint": "lib/tsc",
         "files": [
           {
             "path": "lib/tsc",
@@ -491,13 +734,13 @@
             "size": 13,
             "role": "sidecar"
           }
-        ]
+        ],
+        "archiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw=="
       },
       "signature": {
-        "requirement": "required",
         "signatures": [
           {
-            "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+            "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -510,17 +753,16 @@
         ]
       },
       "provenance": {
-        "requirement": "required",
         "references": [
           {
             "kind": "sbom",
             "referenceId": "sbom-1",
-            "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           },
           {
             "kind": "license",
             "referenceId": "license-1",
-            "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           }
         ]
       },
@@ -537,7 +779,93 @@
         }
       }
     },
-    "authorizedOrigins": ["npm-typescript-darwin-arm64"],
+    "entryPointRoles": ["executable", "script", "worker-js", "worker-wasm"],
+    "obligations": [
+      {
+        "evidence": "origin",
+        "check": "originBound",
+        "proof": "structural"
+      },
+      {
+        "evidence": "closure",
+        "check": "closureComplete",
+        "proof": "structural"
+      },
+      {
+        "evidence": "compatibility",
+        "check": "schemaValid",
+        "proof": "structural"
+      },
+      {
+        "evidence": "approval",
+        "check": "originBound",
+        "proof": "observed"
+      },
+      {
+        "evidence": "attestation",
+        "check": "originBound",
+        "proof": "observed"
+      },
+      {
+        "evidence": "ready-marker",
+        "check": "closureComplete",
+        "proof": "observed"
+      },
+      {
+        "evidence": "shipping-manifest",
+        "check": "closureComplete",
+        "proof": "observed"
+      },
+      {
+        "evidence": "worker-manifest",
+        "check": "closureComplete",
+        "proof": "observed"
+      },
+      {
+        "evidence": "archive-integrity",
+        "check": "bytesMatch",
+        "proof": "compared"
+      },
+      {
+        "evidence": "host-constraints",
+        "check": "schemaValid",
+        "proof": "compared"
+      },
+      {
+        "evidence": "signature",
+        "check": "signatureValid",
+        "proof": "compared"
+      },
+      {
+        "evidence": "provenance",
+        "check": "provenanceComplete",
+        "proof": "compared"
+      },
+      {
+        "evidence": "development-policy",
+        "check": "artifactClassPermitted",
+        "proof": "compared"
+      }
+    ],
+    "authorizedSources": ["ManagedCache"],
+    "authorizedOrigins": [
+      {
+        "originId": "npm-typescript-darwin-arm64",
+        "sourceKind": "ManagedCache",
+        "trustClass": "registry-integrity",
+        "authorizedChannel": "project-opt-in-install"
+      }
+    ],
+    "policyRequiredEvidence": ["signature", "provenance"],
+    "observedEvidence": [
+      "approval",
+      "attestation",
+      "ready-marker",
+      "shipping-manifest",
+      "worker-manifest"
+    ],
+    "observedArchiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw==",
+    "developmentPermitted": false,
     "approvedRoots": [
       {
         "rootSetIdentity": "system-ca",
@@ -668,6 +996,158 @@
           "integrity.files.0.path": "../tsc"
         },
         "expected": "InvalidSchema"
+      },
+      {
+        "id": "executable-dropped",
+        "set": {
+          "integrity.files": [
+            {
+              "path": "lib/sidecar.bin",
+              "digest": "sha256:2a708564b7d4940d983e7aae40151cfdc1d6e2f05ca881687aadad4be1bba8e0",
+              "size": 13,
+              "role": "sidecar"
+            }
+          ]
+        },
+        "removeObserved": "lib/tsc",
+        "expected": "ManifestIncomplete"
+      },
+      {
+        "id": "entry-point-names-a-sidecar",
+        "set": {
+          "integrity.entryPoint": "lib/sidecar.bin"
+        },
+        "expected": "ManifestIncomplete"
+      },
+      {
+        "id": "entry-point-unlisted",
+        "set": {
+          "integrity.entryPoint": "lib/other"
+        },
+        "expected": "ManifestIncomplete"
+      },
+      {
+        "id": "receipt-names-an-unlisted-locator",
+        "set": {
+          "originReceipts.0.locatorId": "not-a-listed-locator"
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "declaration-api-forged",
+        "set": {
+          "declaration.api": "tsgo-api-v9"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "declaration-feature-claimed",
+        "set": {
+          "declaration.features": ["integer-snapshot", "claimed"]
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "signature-waiver-claimed",
+        "set": {
+          "signature": {
+            "requirement": "not-required",
+            "signatures": []
+          }
+        },
+        "expected": "InvalidSchema"
+      },
+      {
+        "id": "provenance-waiver-claimed",
+        "set": {
+          "provenance": {
+            "requirement": "not-required",
+            "references": []
+          }
+        },
+        "expected": "InvalidSchema"
+      },
+      {
+        "id": "self-asserted-trust",
+        "set": {
+          "trusted": true
+        },
+        "expected": "InvalidSchema"
+      },
+      {
+        "id": "unsigned-where-policy-does-not-require-it",
+        "set": {
+          "signature.signatures": []
+        },
+        "context": {
+          "policyRequiredEvidence": ["provenance"]
+        },
+        "expected": null
+      },
+      {
+        "id": "archive-other-than-observed",
+        "context": {
+          "observedArchiveIntegrity": "sha512-JPehMotduyI8qyX0cP4l9M9oabrxnAIzBADOtyqOvSTY5zjaKlaCxYwYOrf2ZBCOnT7H3sqKkmlbjcnFtW8JxA=="
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "bytes-outrank-an-unapproved-root",
+        "set": {
+          "originReceipts.0.trustRoot.rootSetRevision": 2
+        },
+        "observed": {
+          "lib/tsc": "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa"
+        },
+        "expected": "IntegrityFailure"
+      },
+      {
+        "id": "source-not-authorized",
+        "context": {
+          "authorizedSources": []
+        },
+        "expected": "SourceForbidden"
+      },
+      {
+        "id": "origin-authorized-under-another-channel",
+        "context": {
+          "authorizedOrigins": [
+            {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "registry-integrity",
+              "authorizedChannel": "other-channel"
+            }
+          ]
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "origin-authorized-twice",
+        "context": {
+          "authorizedOrigins": [
+            {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "registry-integrity",
+              "authorizedChannel": "project-opt-in-install"
+            },
+            {
+              "originId": "npm-typescript-darwin-arm64",
+              "sourceKind": "ManagedCache",
+              "trustClass": "local-approval",
+              "authorizedChannel": "project-opt-in-install"
+            }
+          ]
+        },
+        "expected": "OriginMismatch"
+      },
+      {
+        "id": "revocation-catalog-absent",
+        "context": {
+          "revocation": null
+        },
+        "expected": "RevocationDataUnavailable"
       }
     ],
     "closurePathHazards": [
@@ -680,9 +1160,288 @@
       ["lib/tsc.exe:stream", "illegal-character"],
       ["lib/tsc.", "illegal-character"],
       ["lib/NUL", "reserved-name"],
-      ["lib/COM1.dll", "reserved-name"]
+      ["lib/COM1.dll", "reserved-name"],
+      ["lib/COM¹", "reserved-name"],
+      ["lib/lpt²", "reserved-name"]
     ],
-    "closureCollision": ["lib/TSC", "lib/tsc"]
+    "closureCollision": ["lib/TSC", "lib/tsc"],
+    "browser": {
+      "published": {
+        "schema": 1,
+        "id": {
+          "engine": "typescript",
+          "version": "7.1.0-beta",
+          "flavor": "wasm-single",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1",
+          "protocol": "lsp-3.17",
+          "build": "publisher-build-1",
+          "origin": "browser-cdn-1",
+          "contentDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+        },
+        "originReceipts": [
+          {
+            "receiptId": "browser-cdn-1-receipt",
+            "origin": {
+              "originId": "browser-cdn-1",
+              "sourceKind": "BrowserArtifact",
+              "trustClass": "published-browser-manifest",
+              "authorizedChannel": "published-release"
+            },
+            "locatorId": "worker-url-1",
+            "authorityReceiptId": "authority-1",
+            "trustRoot": {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            },
+            "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+          }
+        ],
+        "locators": [
+          {
+            "locatorId": "worker-url-1",
+            "mutability": "immutable-ready"
+          }
+        ],
+        "integrity": {
+          "algorithm": "sha256",
+          "declarationDigest": "sha256:2d54b33eb26e0d6d32100904a37c98a3e277f6f1882251ef7a68548cd63d25b6",
+          "entryPoint": "worker.js",
+          "files": [
+            {
+              "path": "engine.wasm",
+              "digest": "sha256:2a708564b7d4940d983e7aae40151cfdc1d6e2f05ca881687aadad4be1bba8e0",
+              "size": 13,
+              "role": "worker-wasm"
+            },
+            {
+              "path": "worker.js",
+              "digest": "sha256:c66243794e2df3a6f1aa3845aebf84fd38b0fb66c12525c5768727237bab22d0",
+              "size": 12,
+              "role": "worker-js"
+            }
+          ],
+          "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+        },
+        "signature": {
+          "signatures": [
+            {
+              "manifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb",
+              "scheme": "policy-approved-scheme",
+              "signerId": "signer-1",
+              "trustRoot": {
+                "rootSetIdentity": "system-ca",
+                "rootSetRevision": 3,
+                "policyEpoch": 7
+              },
+              "validityId": "validity-1"
+            }
+          ]
+        },
+        "provenance": {
+          "references": [
+            {
+              "kind": "attestation",
+              "referenceId": "attestation-1",
+              "subjectDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+            }
+          ]
+        },
+        "declaration": {
+          "protocol": "lsp-3.17",
+          "api": "tsgo-api-v1",
+          "commands": ["lsp"],
+          "features": ["integer-snapshot"],
+          "toolchainFamily": "typescript-7",
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "wasm",
+            "requiredHostFeatures": []
+          }
+        }
+      },
+      "development": {
+        "schema": 1,
+        "id": {
+          "engine": "typescript",
+          "version": "7.1.0-beta",
+          "flavor": "wasm-single",
+          "platform": "wasm32-browser",
+          "abi": "browser-worker-v1",
+          "protocol": "lsp-3.17",
+          "build": "local-development-1",
+          "origin": "local-dev-server-1",
+          "contentDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+        },
+        "originReceipts": [
+          {
+            "receiptId": "local-dev-server-1-receipt",
+            "origin": {
+              "originId": "local-dev-server-1",
+              "sourceKind": "BrowserArtifact",
+              "trustClass": "development-browser-manifest",
+              "authorizedChannel": "development-policy"
+            },
+            "locatorId": "worker-url-1",
+            "authorityReceiptId": "authority-1",
+            "trustRoot": {
+              "rootSetIdentity": "system-ca",
+              "rootSetRevision": 3,
+              "policyEpoch": 7
+            },
+            "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+          }
+        ],
+        "locators": [
+          {
+            "locatorId": "worker-url-1",
+            "mutability": "immutable-ready"
+          }
+        ],
+        "integrity": {
+          "algorithm": "sha256",
+          "declarationDigest": "sha256:2d54b33eb26e0d6d32100904a37c98a3e277f6f1882251ef7a68548cd63d25b6",
+          "entryPoint": "worker.js",
+          "files": [
+            {
+              "path": "engine.wasm",
+              "digest": "sha256:2a708564b7d4940d983e7aae40151cfdc1d6e2f05ca881687aadad4be1bba8e0",
+              "size": 13,
+              "role": "worker-wasm"
+            },
+            {
+              "path": "worker.js",
+              "digest": "sha256:c66243794e2df3a6f1aa3845aebf84fd38b0fb66c12525c5768727237bab22d0",
+              "size": 12,
+              "role": "worker-js"
+            }
+          ],
+          "closureManifestDigest": "sha256:27e2c55e680e9e117c08be4f4370b3b73e5c60bf5f3b85b1be0bf78518c256bb"
+        },
+        "signature": {
+          "signatures": []
+        },
+        "provenance": {
+          "references": []
+        },
+        "declaration": {
+          "protocol": "lsp-3.17",
+          "api": "tsgo-api-v1",
+          "commands": ["lsp"],
+          "features": ["integer-snapshot"],
+          "toolchainFamily": "typescript-7",
+          "hostConstraints": {
+            "host": "browser-worker",
+            "moduleFormat": "wasm",
+            "requiredHostFeatures": []
+          }
+        }
+      },
+      "authorizedSources": ["BrowserArtifact"],
+      "authorizedOrigins": [
+        {
+          "originId": "browser-cdn-1",
+          "sourceKind": "BrowserArtifact",
+          "trustClass": "published-browser-manifest",
+          "authorizedChannel": "published-release"
+        },
+        {
+          "originId": "local-dev-server-1",
+          "sourceKind": "BrowserArtifact",
+          "trustClass": "development-browser-manifest",
+          "authorizedChannel": "development-policy"
+        }
+      ],
+      "policyRequiredEvidence": [],
+      "observedClosure": {
+        "engine.wasm": "sha256:2a708564b7d4940d983e7aae40151cfdc1d6e2f05ca881687aadad4be1bba8e0",
+        "worker.js": "sha256:c66243794e2df3a6f1aa3845aebf84fd38b0fb66c12525c5768727237bab22d0"
+      },
+      "vectors": [
+        {
+          "id": "published-needs-no-development-policy",
+          "descriptor": "published",
+          "expected": null
+        },
+        {
+          "id": "development-under-development-policy",
+          "descriptor": "development",
+          "context": {
+            "developmentPermitted": true
+          },
+          "expected": null
+        },
+        {
+          "id": "development-without-development-policy",
+          "descriptor": "development",
+          "expected": "DevelopmentForbidden"
+        },
+        {
+          "id": "development-relabelled-published",
+          "descriptor": "development",
+          "set": {
+            "originReceipts.0.origin.trustClass": "published-browser-manifest"
+          },
+          "context": {
+            "developmentPermitted": true
+          },
+          "expected": "OriginMismatch"
+        },
+        {
+          "id": "development-bytes-under-the-published-origin",
+          "descriptor": "development",
+          "set": {
+            "id.origin": "browser-cdn-1",
+            "originReceipts.0.origin": {
+              "originId": "browser-cdn-1",
+              "sourceKind": "BrowserArtifact",
+              "trustClass": "published-browser-manifest",
+              "authorizedChannel": "published-release"
+            }
+          },
+          "context": {
+            "developmentPermitted": true
+          },
+          "expected": "SignatureFailure"
+        },
+        {
+          "id": "published-relabelled-development",
+          "descriptor": "published",
+          "set": {
+            "originReceipts.0.origin.trustClass": "development-browser-manifest"
+          },
+          "context": {
+            "developmentPermitted": true
+          },
+          "expected": "OriginMismatch"
+        },
+        {
+          "id": "published-signature-stripped",
+          "descriptor": "published",
+          "set": {
+            "signature.signatures": []
+          },
+          "expected": "SignatureFailure"
+        },
+        {
+          "id": "published-provenance-stripped",
+          "descriptor": "published",
+          "set": {
+            "provenance.references": []
+          },
+          "expected": "ProvenanceIncomplete"
+        },
+        {
+          "id": "native-host-on-a-browser-source",
+          "descriptor": "published",
+          "set": {
+            "declaration.hostConstraints.host": "native-process"
+          },
+          "expected": "InvalidSchema"
+        }
+      ]
+    }
   },
   "validationOrder": {
     "trust": [
@@ -733,7 +1492,7 @@
     ],
     "precedence": [
       {
-        "id": "revocation-outranks-incompatibility",
+        "id": "revocation-outranks-integrity",
         "failing": ["notRevoked", "bytesMatch"],
         "expected": "Revoked"
       },
@@ -746,9 +1505,14 @@
         "id": "integrity-outranks-signature",
         "failing": ["bytesMatch", "signatureValid"],
         "expected": "IntegrityFailure"
+      },
+      {
+        "id": "bytes-outrank-trust-root",
+        "failing": ["bytesMatch", "rootApproved"],
+        "expected": "IntegrityFailure"
       }
     ],
-    "law": "Every check runs before candidate code. A trust row fails before any compatibility verdict is consulted, and compatibility is read from declarations, never by executing the candidate."
+    "law": "Every check runs before candidate code. One ordered table decides the evidence verdict, and a reader's revocation and byte checks keep its relative order. A trust row fails before any compatibility verdict is consulted, and compatibility is read from declarations, never by executing the candidate."
   },
   "rejections": [
     {
@@ -861,6 +1625,12 @@
     },
     {
       "reason": "Unsupported",
+      "state": "Incompatible",
+      "selection": "AdvanceIfPolicyPermits",
+      "remediation": "choose-compatible"
+    },
+    {
+      "reason": "WrongEngine",
       "state": "Incompatible",
       "selection": "AdvanceIfPolicyPermits",
       "remediation": "choose-compatible"
@@ -1108,12 +1878,12 @@
         "reason": "CorruptEntry"
       },
       {
-        "check": "closureMatches",
-        "reason": "IntegrityFailure"
-      },
-      {
         "check": "notRevoked",
         "reason": "Revoked"
+      },
+      {
+        "check": "bytesMatch",
+        "reason": "IntegrityFailure"
       }
     ],
     "readerScenarios": [
@@ -1159,13 +1929,18 @@
       },
       {
         "id": "bytes-replaced-after-ready",
-        "failing": ["closureMatches"],
+        "failing": ["bytesMatch"],
         "expected": "IntegrityFailure"
       },
       {
         "id": "unsafe-path-outranks-missing-marker",
         "failing": ["noLinkComponents", "readyPresent"],
         "expected": "UnsafeLinkComponent"
+      },
+      {
+        "id": "revoked-and-corrupt",
+        "failing": ["bytesMatch", "notRevoked"],
+        "expected": "Revoked"
       }
     ],
     "writers": [
@@ -1177,13 +1952,20 @@
       },
       {
         "when": {
-          "lockOwnerAlive": true,
+          "holdsLock": false,
+          "lockOwnerAlive": false
+        },
+        "verdict": "TakeLockThenRetry"
+      },
+      {
+        "when": {
           "holdsLock": false
         },
         "verdict": "WaitOrFailClosed"
       },
       {
         "when": {
+          "holdsLock": true,
           "winnerState": "Ready",
           "winnerSameIdentity": true,
           "winnerValidOnCurrentBasis": true
@@ -1192,21 +1974,35 @@
       },
       {
         "when": {
+          "holdsLock": true,
           "winnerState": "Ready"
         },
         "verdict": "RejectWinnerDiscardOwnTemp"
       },
       {
         "when": {
+          "holdsLock": true,
           "winnerState": "Renamed"
         },
-        "verdict": "LeaveForInstallerRecovery"
+        "verdict": "QuarantineLeftoverThenRetry"
       },
       {
         "when": {
+          "holdsLock": true,
           "winnerState": "Absent"
         },
         "verdict": "PublishNoReplace"
+      },
+      {
+        "when": {
+          "holdsLock": true,
+          "winnerState": "Quarantined"
+        },
+        "verdict": "PublishNoReplace"
+      },
+      {
+        "when": {},
+        "verdict": "WaitOrFailClosed"
       }
     ],
     "writerVectors": [
@@ -1254,7 +2050,7 @@
           "holdsLock": true,
           "winnerState": "Renamed"
         },
-        "expected": "LeaveForInstallerRecovery"
+        "expected": "QuarantineLeftoverThenRetry"
       },
       {
         "id": "no-winner",
@@ -1286,6 +2082,43 @@
           "winnerState": "Absent"
         },
         "expected": "WaitOrFailClosed"
+      },
+      {
+        "id": "non-holder-of-a-dead-lock",
+        "facts": {
+          "ownsTemp": true,
+          "lockOwnerAlive": false,
+          "holdsLock": false,
+          "winnerState": "Absent"
+        },
+        "expected": "TakeLockThenRetry"
+      },
+      {
+        "id": "non-holder-with-unknown-liveness",
+        "facts": {
+          "ownsTemp": true,
+          "holdsLock": false,
+          "winnerState": "Absent"
+        },
+        "expected": "WaitOrFailClosed"
+      },
+      {
+        "id": "holder-after-a-quarantine",
+        "facts": {
+          "ownsTemp": true,
+          "holdsLock": true,
+          "winnerState": "Quarantined"
+        },
+        "expected": "PublishNoReplace"
+      },
+      {
+        "id": "holder-seeing-a-temporary-state",
+        "facts": {
+          "ownsTemp": true,
+          "holdsLock": true,
+          "winnerState": "PrivateTemp"
+        },
+        "expected": "WaitOrFailClosed"
       }
     ],
     "extraction": [
@@ -1295,7 +2128,6 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "file",
           "path": "package/lib/tsc"
         },
@@ -1307,7 +2139,6 @@
           "entries": 16385,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "file",
           "path": "package/lib/tsc"
         },
@@ -1319,7 +2150,6 @@
           "entries": 10,
           "expandedBytes": 536870913,
           "compressedBytes": 268435456,
-          "pathComponents": 3,
           "entryKind": "file",
           "path": "package/lib/tsc"
         },
@@ -1331,7 +2161,6 @@
           "entries": 10,
           "expandedBytes": 201000,
           "compressedBytes": 1000,
-          "pathComponents": 3,
           "entryKind": "file",
           "path": "package/lib/tsc"
         },
@@ -1343,9 +2172,8 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 65,
           "entryKind": "file",
-          "path": "package/lib/tsc"
+          "path": "d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d"
         },
         "expected": "too-deep"
       },
@@ -1355,7 +2183,6 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "symlink",
           "path": "package/lib/tsc"
         },
@@ -1367,7 +2194,6 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "hardlink",
           "path": "package/lib/tsc"
         },
@@ -1379,7 +2205,6 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "device",
           "path": "package/lib/tsc"
         },
@@ -1391,7 +2216,6 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "file",
           "path": "../../evil"
         },
@@ -1403,7 +2227,6 @@
           "entries": 10,
           "expandedBytes": 1000,
           "compressedBytes": 100,
-          "pathComponents": 3,
           "entryKind": "file",
           "path": "/etc/evil"
         },
@@ -1417,7 +2240,20 @@
         "exclusiveCreate": "mkdirat 0700, openat O_CREAT O_EXCL O_NOFOLLOW",
         "atomicNoReplace": "renameat2 RENAME_NOREPLACE; a filesystem refusing it fails closed",
         "privateRoot": "owner equals euid and mode has no group or world write",
-        "durability": "fsync files and parent directory"
+        "durability": "fsync files and parent directory",
+        "citations": {
+          "noFollowOpen": [
+            "https://man7.org/linux/man-pages/man2/open.2.html",
+            "https://man7.org/linux/man-pages/man2/stat.2.html"
+          ],
+          "exclusiveCreate": [
+            "https://man7.org/linux/man-pages/man2/mkdir.2.html",
+            "https://man7.org/linux/man-pages/man2/open.2.html"
+          ],
+          "atomicNoReplace": ["https://man7.org/linux/man-pages/man2/rename.2.html"],
+          "privateRoot": ["https://man7.org/linux/man-pages/man2/stat.2.html"],
+          "durability": ["https://man7.org/linux/man-pages/man2/fsync.2.html"]
+        }
       },
       {
         "os": "darwin",
@@ -1425,7 +2261,26 @@
         "exclusiveCreate": "mkdirat 0700, openat O_CREAT O_EXCL O_NOFOLLOW",
         "atomicNoReplace": "renameatx_np RENAME_EXCL; a filesystem refusing it fails closed",
         "privateRoot": "owner equals euid and mode has no group or world write",
-        "durability": "fcntl F_FULLFSYNC on files and parent directory"
+        "durability": "fcntl F_FULLFSYNC on files and parent directory",
+        "citations": {
+          "noFollowOpen": [
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/open.2",
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/stat.2"
+          ],
+          "exclusiveCreate": [
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mkdir.2",
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/open.2"
+          ],
+          "atomicNoReplace": [
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/rename.2"
+          ],
+          "privateRoot": [
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/stat.2"
+          ],
+          "durability": [
+            "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/fcntl.2"
+          ]
+        }
       },
       {
         "os": "windows",
@@ -1433,7 +2288,26 @@
         "exclusiveCreate": "CreateDirectoryW and CREATE_NEW with an owner-only protected DACL",
         "atomicNoReplace": "MoveFileExW without MOVEFILE_REPLACE_EXISTING on one volume",
         "privateRoot": "owner is the current user or an administrator and the DACL grants nobody else write",
-        "durability": "FlushFileBuffers on files and directory handles"
+        "durability": "FlushFileBuffers on files and directory handles",
+        "citations": {
+          "noFollowOpen": [
+            "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew",
+            "https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points"
+          ],
+          "exclusiveCreate": [
+            "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createdirectoryw",
+            "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew"
+          ],
+          "atomicNoReplace": [
+            "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw"
+          ],
+          "privateRoot": [
+            "https://learn.microsoft.com/en-us/windows/win32/secauthz/access-control-lists"
+          ],
+          "durability": [
+            "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers"
+          ]
+        }
       }
     ],
     "corruption": [
@@ -1489,14 +2363,16 @@
   },
   "cache": {
     "key": {
-      "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
-      "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
       "originReceiptId": "origin-receipt-1",
       "locatorStatIdentity": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d",
       "project": "project-1",
       "profile": "profile-1",
       "host": "host-1",
+      "hostFeatures": [],
       "requirementId": "tsgo-lsp-api",
+      "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
       "compatibilityPolicyId": "ts7.1",
       "validationSchema": 1,
       "policyEpoch": 7,
@@ -1609,6 +2485,14 @@
       {
         "change": "other-host",
         "field": "host"
+      },
+      {
+        "change": "requirement-content-changed",
+        "field": "requirementDigest"
+      },
+      {
+        "change": "host-features-changed",
+        "field": "hostFeatures"
       }
     ],
     "admission": {
@@ -1704,7 +2588,167 @@
         "ownerMember": "activation-revocation-race"
       }
     ],
-    "forbiddenActions": ["ReuseReceipt", "FallBack", "ReclassifyNotFound"]
+    "forbiddenActions": ["ReuseReceipt", "FallBack", "ReclassifyNotFound"],
+    "catalog": {
+      "body": {
+        "schema": 1,
+        "issuerId": "issuer-1",
+        "revocationEpoch": 2,
+        "notAfter": 1893456000,
+        "entries": [
+          {
+            "entryId": "revocation-1",
+            "target": {
+              "kind": "artifact",
+              "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+            },
+            "reasonId": "advisory-1",
+            "issuerId": "issuer-1",
+            "revocationEpoch": 2
+          }
+        ],
+        "signature": {
+          "manifestDigest": "sha256:6e8a7b2f11137bc8c09e35f445170f62dd26a3a1fb5cf2eeb61710fc4f1f26f5",
+          "scheme": "policy-approved-scheme",
+          "signerId": "signer-1",
+          "trustRoot": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          "validityId": "validity-1"
+        }
+      },
+      "view": {
+        "issuers": ["issuer-1"],
+        "lastSeenEpoch": 2,
+        "now": 1893456000
+      },
+      "hazards": [
+        {
+          "id": "current",
+          "expected": null
+        },
+        {
+          "id": "older-signed-catalog-replayed",
+          "view": {
+            "lastSeenEpoch": 3
+          },
+          "expected": "epoch-regressed"
+        },
+        {
+          "id": "past-its-freshness",
+          "view": {
+            "now": 1893456001
+          },
+          "expected": "expired"
+        },
+        {
+          "id": "issuer-not-trusted",
+          "view": {
+            "issuers": []
+          },
+          "expected": "issuer-unknown"
+        },
+        {
+          "id": "entry-removed-after-signing",
+          "catalog": {
+            "entries": []
+          },
+          "expected": "signature-other-content"
+        },
+        {
+          "id": "epoch-raised-after-signing",
+          "catalog": {
+            "revocationEpoch": 9
+          },
+          "expected": "signature-other-content"
+        },
+        {
+          "id": "signed-under-an-unapproved-root",
+          "root": {
+            "rootSetIdentity": "attacker-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          },
+          "expected": "root-not-approved"
+        }
+      ]
+    },
+    "targets": [
+      {
+        "id": "this-artifact",
+        "target": {
+          "kind": "artifact",
+          "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686"
+        },
+        "matches": true
+      },
+      {
+        "id": "another-artifact",
+        "target": {
+          "kind": "artifact",
+          "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+        },
+        "matches": false
+      },
+      {
+        "id": "this-origin",
+        "target": {
+          "kind": "origin",
+          "originId": "npm-typescript-darwin-arm64"
+        },
+        "matches": true
+      },
+      {
+        "id": "another-origin",
+        "target": {
+          "kind": "origin",
+          "originId": "enterprise-mirror-1"
+        },
+        "matches": false
+      },
+      {
+        "id": "this-signer",
+        "target": {
+          "kind": "signer",
+          "signerId": "signer-1"
+        },
+        "matches": true
+      },
+      {
+        "id": "another-signer",
+        "target": {
+          "kind": "signer",
+          "signerId": "signer-2"
+        },
+        "matches": false
+      },
+      {
+        "id": "this-trust-root",
+        "target": {
+          "kind": "trust-root",
+          "root": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 3,
+            "policyEpoch": 7
+          }
+        },
+        "matches": true
+      },
+      {
+        "id": "another-trust-root",
+        "target": {
+          "kind": "trust-root",
+          "root": {
+            "rootSetIdentity": "system-ca",
+            "rootSetRevision": 2,
+            "policyEpoch": 7
+          }
+        },
+        "matches": false
+      }
+    ]
   },
   "publicStatus": {
     "allowlist": [
@@ -1726,7 +2770,7 @@
           "state": "IntegrityFailure",
           "reason": "IntegrityFailure",
           "remediation": "repair-input",
-          "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
+          "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
           "completion": "Complete",
           "privateRoot": "/Users/private/.cache/verter/v1",
           "diagnostic": "digest mismatch at C:\\Users\\private\\engine.exe",
@@ -1740,7 +2784,7 @@
           "state": "IntegrityFailure",
           "reason": "IntegrityFailure",
           "remediation": "repair-input",
-          "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
+          "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
           "completion": "Complete"
         }
       },
@@ -1772,14 +2816,21 @@
       "https://user:hunter2@registry.internal/typescript",
       "token=abc123",
       "Bearer abc123",
-      "-----BEGIN CERTIFICATE-----"
+      "-----BEGIN CERTIFICATE-----",
+      "/tmp",
+      "~/engine",
+      "$HOME/engine",
+      "%USERPROFILE%\\engine",
+      "user:hunter2@registry.internal/x",
+      "npm_abc123",
+      "[REDACTED]"
     ],
     "portable": [
       "7.1.0-beta",
       "ManagedCache",
       "IntegrityFailure",
       "repair-input",
-      "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4"
+      "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686"
     ]
   },
   "work": {
@@ -1960,7 +3011,7 @@
       "protocol": "lsp-3.17",
       "build": "publisher-build-1",
       "origin": "npm-typescript-darwin-arm64",
-      "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+      "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
     },
     "EngineVersion": "7.1.0-beta",
     "EngineFlavor": "native-tsgo",
@@ -1968,7 +3019,7 @@
     "EngineSourceKind": "ManagedCache",
     "EngineTrustClass": "registry-integrity",
     "EngineLocatorMutability": "immutable-ready",
-    "Digest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+    "Digest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
     "OpaqueId": "opaque-1",
     "OpaqueIdList": ["opaque-1"],
     "EngineTrustRootId": {
@@ -2010,7 +3061,7 @@
         "rootSetRevision": 3,
         "policyEpoch": 7
       },
-      "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
     },
     "EngineClosureFile": {
       "path": "lib/tsc",
@@ -2020,7 +3071,9 @@
     },
     "EngineIntegrityEvidence": {
       "algorithm": "sha256",
-      "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+      "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
+      "entryPoint": "lib/tsc",
       "files": [
         {
           "path": "lib/tsc",
@@ -2034,10 +3087,11 @@
           "size": 13,
           "role": "sidecar"
         }
-      ]
+      ],
+      "archiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw=="
     },
     "EngineSignature": {
-      "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+      "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
       "scheme": "policy-approved-scheme",
       "signerId": "signer-1",
       "trustRoot": {
@@ -2048,10 +3102,9 @@
       "validityId": "validity-1"
     },
     "EngineSignatureEvidence": {
-      "requirement": "required",
       "signatures": [
         {
-          "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+          "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
           "scheme": "policy-approved-scheme",
           "signerId": "signer-1",
           "trustRoot": {
@@ -2064,17 +3117,16 @@
       ]
     },
     "EngineProvenanceEvidence": {
-      "requirement": "required",
       "references": [
         {
           "kind": "sbom",
           "referenceId": "sbom-1",
-          "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+          "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
         },
         {
           "kind": "license",
           "referenceId": "license-1",
-          "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+          "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
         }
       ]
     },
@@ -2106,7 +3158,7 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
       },
       "originReceipts": [
         {
@@ -2124,7 +3176,7 @@
             "rootSetRevision": 3,
             "policyEpoch": 7
           },
-          "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
         }
       ],
       "locators": [
@@ -2135,7 +3187,9 @@
       ],
       "integrity": {
         "algorithm": "sha256",
-        "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
+        "entryPoint": "lib/tsc",
         "files": [
           {
             "path": "lib/tsc",
@@ -2149,13 +3203,13 @@
             "size": 13,
             "role": "sidecar"
           }
-        ]
+        ],
+        "archiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw=="
       },
       "signature": {
-        "requirement": "required",
         "signatures": [
           {
-            "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+            "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -2168,17 +3222,16 @@
         ]
       },
       "provenance": {
-        "requirement": "required",
         "references": [
           {
             "kind": "sbom",
             "referenceId": "sbom-1",
-            "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           },
           {
             "kind": "license",
             "referenceId": "license-1",
-            "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           }
         ]
       },
@@ -2228,7 +3281,7 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
       },
       "originReceipts": [
         {
@@ -2246,12 +3299,14 @@
             "rootSetRevision": 3,
             "policyEpoch": 7
           },
-          "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
         }
       ],
       "integrity": {
         "algorithm": "sha256",
-        "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+        "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
+        "entryPoint": "lib/tsc",
         "files": [
           {
             "path": "lib/tsc",
@@ -2265,13 +3320,13 @@
             "size": 13,
             "role": "sidecar"
           }
-        ]
+        ],
+        "archiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw=="
       },
       "signature": {
-        "requirement": "required",
         "signatures": [
           {
-            "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+            "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
             "scheme": "policy-approved-scheme",
             "signerId": "signer-1",
             "trustRoot": {
@@ -2284,21 +3339,22 @@
         ]
       },
       "provenance": {
-        "requirement": "required",
         "references": [
           {
             "kind": "sbom",
             "referenceId": "sbom-1",
-            "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           },
           {
             "kind": "license",
             "referenceId": "license-1",
-            "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           }
         ]
       },
+      "hostFeatures": [],
       "requirementId": "tsgo-lsp-api",
+      "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
       "compatibilityPolicyId": "ts7.1",
       "compatibilityVerdict": "Compatible",
       "project": "project-1",
@@ -2321,7 +3377,7 @@
       "layoutVersion": 1,
       "rootClass": "managed-private-root",
       "platform": "aarch64-apple-darwin",
-      "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
+      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
       "entries": ["manifest.json", "closure", "validation", "READY.json"]
     },
     "EngineReadyMarker": {
@@ -2335,20 +3391,22 @@
         "protocol": "lsp-3.17",
         "build": "publisher-build-1",
         "origin": "npm-typescript-darwin-arm64",
-        "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+        "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
       },
-      "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+      "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
       "installGeneration": 1
     },
     "EngineCacheKey": {
-      "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
-      "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+      "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
       "originReceiptId": "origin-receipt-1",
       "locatorStatIdentity": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d",
       "project": "project-1",
       "profile": "profile-1",
       "host": "host-1",
+      "hostFeatures": [],
       "requirementId": "tsgo-lsp-api",
+      "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
       "compatibilityPolicyId": "ts7.1",
       "validationSchema": 1,
       "policyEpoch": 7,
@@ -2357,14 +3415,16 @@
     },
     "EngineCacheEntry": {
       "key": {
-        "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
-        "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+        "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
+        "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
         "originReceiptId": "origin-receipt-1",
         "locatorStatIdentity": "sha256:6f88375d4df878177fe47130b433db5e62e410e1a9eb00ff23872042056b4a9d",
         "project": "project-1",
         "profile": "profile-1",
         "host": "host-1",
+        "hostFeatures": [],
         "requirementId": "tsgo-lsp-api",
+        "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
         "compatibilityPolicyId": "ts7.1",
         "validationSchema": 1,
         "policyEpoch": 7,
@@ -2382,7 +3442,7 @@
           "protocol": "lsp-3.17",
           "build": "publisher-build-1",
           "origin": "npm-typescript-darwin-arm64",
-          "contentDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+          "contentDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
         },
         "originReceipts": [
           {
@@ -2400,12 +3460,14 @@
               "rootSetRevision": 3,
               "policyEpoch": 7
             },
-            "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+            "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "closureManifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+          "closureManifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
+          "declarationDigest": "sha256:71cf1552bdd782ba8f62d3d48a7de53523dbab3b4dda3dd7bfdf2f18759a4b33",
+          "entryPoint": "lib/tsc",
           "files": [
             {
               "path": "lib/tsc",
@@ -2419,13 +3481,13 @@
               "size": 13,
               "role": "sidecar"
             }
-          ]
+          ],
+          "archiveIntegrity": "sha512-Ev6JTG3Xb8PQF4t94gic3SmLp7x5lXRWhN8fXP7hM45v90EEgOH5FMKw20bG9X5ouCvVreoUn31adfUxsLssxw=="
         },
         "signature": {
-          "requirement": "required",
           "signatures": [
             {
-              "manifestDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04",
+              "manifestDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e",
               "scheme": "policy-approved-scheme",
               "signerId": "signer-1",
               "trustRoot": {
@@ -2438,21 +3500,22 @@
           ]
         },
         "provenance": {
-          "requirement": "required",
           "references": [
             {
               "kind": "sbom",
               "referenceId": "sbom-1",
-              "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+              "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
             },
             {
               "kind": "license",
               "referenceId": "license-1",
-              "subjectDigest": "sha256:a6030f285b3dc772fa868b4124eafa90d7ab2fc198f2ca46c4aee653d7379f04"
+              "subjectDigest": "sha256:365fa743af83401917081d450a02f3a7096ffcae8acf28edecfdb4c108717f5e"
             }
           ]
         },
+        "hostFeatures": [],
         "requirementId": "tsgo-lsp-api",
+        "requirementDigest": "sha256:d84373a8bc7a09763776219d273bad5a427fc9090b9abd9207473be5ec5d64f4",
         "compatibilityPolicyId": "ts7.1",
         "compatibilityVerdict": "Compatible",
         "project": "project-1",
@@ -2481,17 +3544,19 @@
       "state": "IntegrityFailure",
       "source": "ManagedCache",
       "stage": "validate",
-      "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
+      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
       "completion": "Complete",
       "remediation": "repair-input"
     },
     "EngineRevocation": {
       "entryId": "revocation-1",
-      "targetKind": "artifact",
-      "targetId": "artifact-1",
+      "target": {
+        "kind": "artifact",
+        "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+      },
       "reasonId": "advisory-1",
       "issuerId": "issuer-1",
-      "revocationEpoch": 3
+      "revocationEpoch": 2
     },
     "EnginePublicStatus": {
       "source": "ManagedCache",
@@ -2499,7 +3564,7 @@
       "state": "IntegrityFailure",
       "reason": "IntegrityFailure",
       "remediation": "repair-input",
-      "artifactKey": "sha256:1aeb25c95b0dd41bcefc4439485f0c34f4487231fab70715002b898f638938e4",
+      "artifactKey": "sha256:fe07a5f90f81d10cb886cf08e4f409c859c0b76456f84832932e8dafb1dcb686",
       "completion": "Complete"
     },
     "EngineValidationWorkCounters": {
@@ -2517,10 +3582,50 @@
       "retainedEntries": 0,
       "networkAttempts": 0,
       "processSpawns": 0
+    },
+    "EngineHostFeatures": [],
+    "EngineOriginAuthorization": {
+      "originId": "npm-typescript-darwin-arm64",
+      "sourceKind": "ManagedCache",
+      "trustClass": "registry-integrity",
+      "authorizedChannel": "project-opt-in-install"
+    },
+    "EngineRevocationTarget": {
+      "kind": "artifact",
+      "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+    },
+    "EngineRevocationCatalog": {
+      "schema": 1,
+      "issuerId": "issuer-1",
+      "revocationEpoch": 2,
+      "notAfter": 1893456000,
+      "entries": [
+        {
+          "entryId": "revocation-1",
+          "target": {
+            "kind": "artifact",
+            "artifactKey": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+          },
+          "reasonId": "advisory-1",
+          "issuerId": "issuer-1",
+          "revocationEpoch": 2
+        }
+      ],
+      "signature": {
+        "manifestDigest": "sha256:6e8a7b2f11137bc8c09e35f445170f62dd26a3a1fb5cf2eeb61710fc4f1f26f5",
+        "scheme": "policy-approved-scheme",
+        "signerId": "signer-1",
+        "trustRoot": {
+          "rootSetIdentity": "system-ca",
+          "rootSetRevision": 3,
+          "policyEpoch": 7
+        },
+        "validityId": "validity-1"
+      }
     }
   },
   "receiptGolden": {
-    "digest": "sha256:00620df81afbb3b5f778c2ba4db7e6b3d65507cef28364cba869643dffed1b61",
+    "digest": "sha256:a170092116201e2e00ff639af458ca3bab71a47d9992cad2fe997ea245ad660d",
     "mutations": [
       {
         "id": "other-policy-epoch",
@@ -2550,6 +3655,18 @@
         "id": "other-project",
         "set": {
           "project": "project-2"
+        }
+      },
+      {
+        "id": "other-requirement-content",
+        "set": {
+          "requirementDigest": "sha256:1242b880ddd0ddfe4a4f9d812baa52e8780bf7313a52d21f1cab54a1a6f0f896"
+        }
+      },
+      {
+        "id": "other-host-features",
+        "set": {
+          "hostFeatures": ["SharedArrayBuffer"]
         }
       }
     ],
@@ -2615,6 +3732,11 @@
       },
       {
         "id": "EngineOriginReceipt",
+        "role": "outcome",
+        "sourceRef": "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
+      },
+      {
+        "id": "EngineOriginAuthorization",
         "role": "outcome",
         "sourceRef": "docs/arch/engine-provisioning.md#origin-integrity-and-signature-evidence"
       },
@@ -2700,6 +3822,11 @@
       },
       {
         "id": "EngineRevocation",
+        "role": "outcome",
+        "sourceRef": "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
+      },
+      {
+        "id": "EngineRevocationCatalog",
         "role": "outcome",
         "sourceRef": "docs/arch/engine-provisioning.md#revocation-corruption-and-quarantine"
       },
@@ -3077,6 +4204,36 @@
       "concern": "process",
       "prevents": "A runtime obligation falling between successors while the contract reads as complete",
       "notCoveredBecause": "The controller checks node dependencies, not this contract's obligation population"
+    },
+    {
+      "condition": "The declaration and entry point are inside the signed manifest digest",
+      "concern": "security",
+      "prevents": "A producer claiming any API or feature over signed bytes, or a receipt for a closure that omits what a locator launches, both reproduced by review",
+      "notCoveredBecause": "Nothing else reads a declaration before selection, and later execution checks run too late to refuse it"
+    },
+    {
+      "condition": "Required evidence comes from the source row and captured policy, and the descriptor has no field to waive it",
+      "concern": "security",
+      "prevents": "Stripping a signature and asserting it was not required, reproduced deterministically against the earlier table",
+      "notCoveredBecause": "No shared validator exists yet, so review of this table is the only check before its owners implement it"
+    },
+    {
+      "condition": "An origin holds exactly one authorization, naming its source, trust class and channel",
+      "concern": "security",
+      "prevents": "A development browser artifact presenting as published under one key",
+      "notCoveredBecause": "Trust classes were asserted by the receipt, and the published and development rows share one source"
+    },
+    {
+      "condition": "The cache key carries a digest of the requirement and the host's features",
+      "concern": "correctness",
+      "prevents": "A raised version floor, or a host losing cross-origin isolation, reusing a Compatible receipt under unchanged IDs",
+      "notCoveredBecause": "ID discipline is unenforceable across producers, and no runtime cache exists for CI to exercise"
+    },
+    {
+      "condition": "A revocation catalog is signed, epoch-monotonic and fresh, or fails closed",
+      "concern": "security",
+      "prevents": "Replaying an older signed catalog to hide a revocation",
+      "notCoveredBecause": "The epoch alone only forces fresh validation against the stale data"
     }
   ]
 }

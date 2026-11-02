@@ -80,6 +80,7 @@
         "compatibilityPolicyId",
         "authorizationProvenance"
       ],
+      "additionalProperties": false,
       "properties": {
         "schemaVersion": {
           "const": 1
@@ -146,6 +147,7 @@
         "origin",
         "contentDigest"
       ],
+      "additionalProperties": false,
       "properties": {
         "engine": {
           "$ref": "#/$defs/OpaqueId"
@@ -179,6 +181,7 @@
     "EngineTrustRootId": {
       "type": "object",
       "required": ["rootSetIdentity", "rootSetRevision", "policyEpoch"],
+      "additionalProperties": false,
       "properties": {
         "rootSetIdentity": {
           "$ref": "#/$defs/OpaqueId"
@@ -202,6 +205,7 @@
         "trustRootIds",
         "authorizationProvenance"
       ],
+      "additionalProperties": false,
       "properties": {
         "originId": {
           "$ref": "#/$defs/OpaqueId"
@@ -233,6 +237,7 @@
     "EngineOrigin": {
       "type": "object",
       "required": ["originId", "sourceKind", "trustClass", "authorizedChannel"],
+      "additionalProperties": false,
       "properties": {
         "originId": {
           "$ref": "#/$defs/OpaqueId"
@@ -258,6 +263,7 @@
         "trustRoot",
         "closureManifestDigest"
       ],
+      "additionalProperties": false,
       "properties": {
         "receiptId": {
           "$ref": "#/$defs/OpaqueId"
@@ -282,6 +288,7 @@
     "EngineClosureFile": {
       "type": "object",
       "required": ["path", "digest", "size", "role"],
+      "additionalProperties": false,
       "properties": {
         "path": {
           "type": "string",
@@ -309,13 +316,27 @@
     },
     "EngineIntegrityEvidence": {
       "type": "object",
-      "required": ["algorithm", "closureManifestDigest", "files"],
+      "required": [
+        "algorithm",
+        "closureManifestDigest",
+        "declarationDigest",
+        "entryPoint",
+        "files"
+      ],
+      "additionalProperties": false,
       "properties": {
         "algorithm": {
           "const": "sha256"
         },
         "closureManifestDigest": {
           "$ref": "#/$defs/Digest"
+        },
+        "declarationDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "entryPoint": {
+          "type": "string",
+          "minLength": 1
         },
         "files": {
           "type": "array",
@@ -333,6 +354,7 @@
     "EngineSignature": {
       "type": "object",
       "required": ["manifestDigest", "scheme", "signerId", "trustRoot", "validityId"],
+      "additionalProperties": false,
       "properties": {
         "manifestDigest": {
           "$ref": "#/$defs/Digest"
@@ -353,11 +375,9 @@
     },
     "EngineSignatureEvidence": {
       "type": "object",
-      "required": ["requirement", "signatures"],
+      "required": ["signatures"],
+      "additionalProperties": false,
       "properties": {
-        "requirement": {
-          "enum": ["required", "not-required"]
-        },
         "signatures": {
           "type": "array",
           "items": {
@@ -368,16 +388,15 @@
     },
     "EngineProvenanceEvidence": {
       "type": "object",
-      "required": ["requirement", "references"],
+      "required": ["references"],
+      "additionalProperties": false,
       "properties": {
-        "requirement": {
-          "enum": ["required", "not-required"]
-        },
         "references": {
           "type": "array",
           "items": {
             "type": "object",
             "required": ["kind", "referenceId", "subjectDigest"],
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "enum": ["sbom", "license", "attestation"]
@@ -396,6 +415,7 @@
     "EngineHostConstraints": {
       "type": "object",
       "required": ["host", "moduleFormat", "requiredHostFeatures"],
+      "additionalProperties": false,
       "properties": {
         "host": {
           "enum": ["native-process", "browser-worker"]
@@ -404,17 +424,14 @@
           "enum": ["native", "node-commonjs", "esm", "wasm"]
         },
         "requiredHostFeatures": {
-          "type": "array",
-          "items": {
-            "enum": ["SharedArrayBuffer", "cross-origin-isolated"]
-          },
-          "uniqueItems": true
+          "$ref": "#/$defs/EngineHostFeatures"
         }
       }
     },
     "EngineCompatibilityDeclaration": {
       "type": "object",
       "required": ["protocol", "api", "commands", "features", "toolchainFamily", "hostConstraints"],
+      "additionalProperties": false,
       "properties": {
         "protocol": {
           "$ref": "#/$defs/OpaqueId"
@@ -448,6 +465,7 @@
         "provenance",
         "declaration"
       ],
+      "additionalProperties": false,
       "properties": {
         "schema": {
           "const": 1
@@ -468,6 +486,7 @@
           "items": {
             "type": "object",
             "required": ["locatorId", "mutability"],
+            "additionalProperties": false,
             "properties": {
               "locatorId": {
                 "$ref": "#/$defs/OpaqueId"
@@ -510,6 +529,7 @@
         "toolchainFamily",
         "hostFeatures"
       ],
+      "additionalProperties": false,
       "properties": {
         "requirementId": {
           "$ref": "#/$defs/OpaqueId"
@@ -559,17 +579,14 @@
           "$ref": "#/$defs/OpaqueId"
         },
         "hostFeatures": {
-          "type": "array",
-          "items": {
-            "enum": ["SharedArrayBuffer", "cross-origin-isolated"]
-          },
-          "uniqueItems": true
+          "$ref": "#/$defs/EngineHostFeatures"
         }
       }
     },
     "EngineCompatibilityVerdict": {
       "enum": [
         "Compatible",
+        "WrongEngine",
         "TooOld",
         "TooNew",
         "Unsupported",
@@ -587,6 +604,7 @@
     "EngineLocatorBasis": {
       "type": "object",
       "required": ["locatorId", "mutability", "statFingerprint"],
+      "additionalProperties": false,
       "properties": {
         "locatorId": {
           "$ref": "#/$defs/OpaqueId"
@@ -608,7 +626,9 @@
         "integrity",
         "signature",
         "provenance",
+        "hostFeatures",
         "requirementId",
+        "requirementDigest",
         "compatibilityPolicyId",
         "compatibilityVerdict",
         "project",
@@ -621,6 +641,7 @@
         "completion",
         "observedBasis"
       ],
+      "additionalProperties": false,
       "properties": {
         "schema": {
           "const": 1
@@ -644,8 +665,14 @@
         "provenance": {
           "$ref": "#/$defs/EngineProvenanceEvidence"
         },
+        "hostFeatures": {
+          "$ref": "#/$defs/EngineHostFeatures"
+        },
         "requirementId": {
           "$ref": "#/$defs/OpaqueId"
+        },
+        "requirementDigest": {
+          "$ref": "#/$defs/Digest"
         },
         "compatibilityPolicyId": {
           "$ref": "#/$defs/OpaqueId"
@@ -692,6 +719,7 @@
     "EngineInstallLayout": {
       "type": "object",
       "required": ["layoutVersion", "rootClass", "platform", "artifactKey", "entries"],
+      "additionalProperties": false,
       "properties": {
         "layoutVersion": {
           "const": 1
@@ -718,6 +746,7 @@
     "EngineReadyMarker": {
       "type": "object",
       "required": ["schema", "artifact", "manifestDigest", "installGeneration"],
+      "additionalProperties": false,
       "properties": {
         "schema": {
           "const": 1
@@ -744,13 +773,16 @@
         "project",
         "profile",
         "host",
+        "hostFeatures",
         "requirementId",
+        "requirementDigest",
         "compatibilityPolicyId",
         "validationSchema",
         "policyEpoch",
         "trustEpoch",
         "revocationEpoch"
       ],
+      "additionalProperties": false,
       "properties": {
         "artifactKey": {
           "$ref": "#/$defs/Digest"
@@ -773,8 +805,14 @@
         "host": {
           "$ref": "#/$defs/OpaqueId"
         },
+        "hostFeatures": {
+          "$ref": "#/$defs/EngineHostFeatures"
+        },
         "requirementId": {
           "$ref": "#/$defs/OpaqueId"
+        },
+        "requirementDigest": {
+          "$ref": "#/$defs/Digest"
         },
         "compatibilityPolicyId": {
           "$ref": "#/$defs/OpaqueId"
@@ -799,6 +837,7 @@
     "EngineCacheEntry": {
       "type": "object",
       "required": ["key", "receipt", "mutability", "retainedBytes"],
+      "additionalProperties": false,
       "properties": {
         "key": {
           "$ref": "#/$defs/EngineCacheKey"
@@ -836,6 +875,7 @@
         "TooOld",
         "TooNew",
         "Unsupported",
+        "WrongEngine",
         "WrongPlatform",
         "WrongFlavor",
         "UnsupportedProtocol",
@@ -850,6 +890,7 @@
     "EngineRejection": {
       "type": "object",
       "required": ["schema", "reason", "state", "source", "stage", "completion", "remediation"],
+      "additionalProperties": false,
       "properties": {
         "schema": {
           "const": 1
@@ -892,16 +933,14 @@
     },
     "EngineRevocation": {
       "type": "object",
-      "required": ["entryId", "targetKind", "targetId", "reasonId", "issuerId", "revocationEpoch"],
+      "required": ["entryId", "target", "reasonId", "issuerId", "revocationEpoch"],
+      "additionalProperties": false,
       "properties": {
         "entryId": {
           "$ref": "#/$defs/OpaqueId"
         },
-        "targetKind": {
-          "enum": ["artifact", "origin", "signer", "trust-root"]
-        },
-        "targetId": {
-          "$ref": "#/$defs/OpaqueId"
+        "target": {
+          "$ref": "#/$defs/EngineRevocationTarget"
         },
         "reasonId": {
           "$ref": "#/$defs/OpaqueId"
@@ -918,6 +957,7 @@
     "EnginePublicStatus": {
       "type": "object",
       "required": ["source", "state", "completion", "remediation"],
+      "additionalProperties": false,
       "properties": {
         "source": {
           "$ref": "#/$defs/EngineSourceKind"
@@ -986,6 +1026,7 @@
         "networkAttempts",
         "processSpawns"
       ],
+      "additionalProperties": false,
       "properties": {
         "candidates": {
           "type": "integer",
@@ -1042,6 +1083,118 @@
         "processSpawns": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "EngineHostFeatures": {
+      "type": "array",
+      "items": {
+        "enum": ["SharedArrayBuffer", "cross-origin-isolated"]
+      },
+      "uniqueItems": true
+    },
+    "EngineOriginAuthorization": {
+      "type": "object",
+      "required": ["originId", "sourceKind", "trustClass", "authorizedChannel"],
+      "additionalProperties": false,
+      "properties": {
+        "originId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "sourceKind": {
+          "$ref": "#/$defs/EngineSourceKind"
+        },
+        "trustClass": {
+          "$ref": "#/$defs/EngineTrustClass"
+        },
+        "authorizedChannel": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "EngineRevocationTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "artifactKey"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "artifactKey": {
+              "$ref": "#/$defs/Digest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "originId"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "origin"
+            },
+            "originId": {
+              "$ref": "#/$defs/OpaqueId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "signerId"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "signer"
+            },
+            "signerId": {
+              "$ref": "#/$defs/OpaqueId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "root"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "trust-root"
+            },
+            "root": {
+              "$ref": "#/$defs/EngineTrustRootId"
+            }
+          }
+        }
+      ]
+    },
+    "EngineRevocationCatalog": {
+      "type": "object",
+      "required": ["schema", "issuerId", "revocationEpoch", "notAfter", "entries", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "issuerId": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "revocationEpoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "notAfter": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EngineRevocation"
+          }
+        },
+        "signature": {
+          "$ref": "#/$defs/EngineSignature"
         }
       }
     }

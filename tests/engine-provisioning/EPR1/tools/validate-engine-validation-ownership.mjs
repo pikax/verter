@@ -102,6 +102,133 @@ export function validateOwnership(inventory, population, authority, contractNode
 }
 
 /**
+ * The obligations this contract's charter requires, held apart from the population in
+ * the product: removing a member from both the product and the catalog stays visible.
+ * A later addition to the population is welcome; this list is only its floor.
+ */
+const REQUIRED_MEMBERS = {
+  boundary: [
+    "EngineArtifactId",
+    "EnginePlatform",
+    "EngineFlavor",
+    "EngineVersion",
+    "EngineOrigin",
+    "EngineOriginReceipt",
+    "EngineArtifactDescriptor",
+    "EngineCompatibilityRequirement",
+    "EngineCompatibilityVerdict",
+    "EngineIntegrityEvidence",
+    "EngineSignatureEvidence",
+    "EngineValidationReceipt",
+    "EngineInstallLayout",
+    "EngineReadyMarker",
+    "EngineCacheKey",
+    "EngineCacheEntry",
+    "EngineRejection",
+    "EngineRejectionReason",
+    "EngineRevocation",
+    "EnginePublicStatus",
+    "EngineValidationWorkCounters",
+  ],
+  outcome: [
+    "identity-type-migration",
+    "compatibility-evaluator",
+    "normalized-receipt-construction",
+    "managed-acquisition-evidence",
+    "shipping-provenance-evidence",
+    "readonly-ready-validation",
+    "managed-atomic-install",
+    "managed-concurrent-writers",
+    "installed-package-layout",
+    "receipt-cache-invalidation",
+    "receipt-incremental-equals-fresh",
+    "validation-budgets-and-counters",
+    "warm-identical-request-control",
+    "revocation-aware-validation",
+    "revocation-cache-invalidation",
+    "revocation-reporting",
+    "activation-revocation-race",
+    "activation-incremental-equals-fresh",
+    "managed-quarantine",
+    "bundled-withdrawal",
+    "public-validation-status",
+    "redaction-adapters",
+    "activation-status",
+    "activation-lifecycle-work",
+    "acquisition-work",
+    "shipping-zero-work",
+    "browser-artifact-rejection",
+    "browser-development-artifact-distinction",
+  ],
+  consumer: [
+    "source-environment-manual",
+    "source-project-local",
+    "source-system-path",
+    "source-editor-shared",
+    "source-managed-cache",
+    "source-managed-download",
+    "source-bundled-closed",
+    "source-bundled-opened",
+    "source-browser-artifact",
+    "resolution-consumer",
+    "acquisition-consumer",
+    "shipping-consumer",
+    "activation-consumer",
+    "browser-loader-consumer",
+    "local-companion-consumer",
+  ],
+  displaced: [
+    "path-version-candidate-identity",
+    "execute-before-validation",
+    "untyped-candidate-rejection",
+    "first-working-candidate-selection",
+    "unbound-ready-marker",
+    "check-then-follow-cache-path",
+    "bundle-path-manifest-trust",
+    "tsserver-version-only-compatibility",
+    "tsserver-independent-tier-validation",
+    "editor-sdk-candidate-probe",
+    "extension-typescript-trust-shortcut",
+    "second-engine-selection-authority",
+    "raw-path-engine-connect",
+    "relay-shim-raw-path-execution",
+    "coarse-provider-status",
+  ],
+};
+
+const REQUIRED_POLICY_ROUTES = [
+  "R01",
+  "R02",
+  "R03",
+  "R04",
+  "R05",
+  "R06",
+  "R07",
+  "R08",
+  "R09",
+  "R10",
+  "R11",
+];
+
+/** Refuses a population that no longer holds every member the charter requires. */
+export function validatePopulationFloor(population) {
+  const present = new Set(population.map((member) => member.id));
+  for (const [role, ids] of Object.entries(REQUIRED_MEMBERS)) {
+    for (const id of ids) {
+      if (!present.has(id)) throw new OwnershipRefusal("required-member-missing", id, role);
+    }
+  }
+}
+
+/** The same floor for the routes the provisioning policy transfers. */
+export function validatePolicyFloor(policy) {
+  const present = new Set(policy.displacedRoutes.map((route) => route.id));
+  for (const id of REQUIRED_POLICY_ROUTES) {
+    if (!present.has(id)) throw new OwnershipRefusal("required-member-missing", id, "policy route");
+  }
+}
+
+/**
  * Reads the provisioning policy's own source and route rows as a transfer, so its
  * catalog stays the one authority for them: nothing here restates an owner. Every
  * source kind the policy governs must be classified, and every route must name the
@@ -215,15 +342,24 @@ export function nodeAuthority(task, charter) {
   };
 }
 
+/** An answer, null when the controller says the node does not exist, or a refusal for an outage. */
+export function controllerOutput({ status, stdout, stderr, error }) {
+  if (error === undefined && status === 0) return stdout;
+  if (error === undefined && /^no task\b/mu.test(stderr ?? "")) return null;
+  const detail = (stderr ?? "").trim() || (error?.message ?? `exit ${status}`);
+  throw new OwnershipRefusal("controller-unavailable", "tama-plan-verter", detail);
+}
+
 function runController(args) {
   // The controller CLI is a shell shim on every platform. Node identifiers are
   // checked by the caller and every other argument is a literal.
-  const result = spawnSync(`tama-plan-verter ${args.join(" ")}`, {
-    encoding: "utf8",
-    maxBuffer: 2 ** 24,
-    shell: true,
-  });
-  return result.status === 0 ? result.stdout : null;
+  return controllerOutput(
+    spawnSync(`tama-plan-verter ${args.join(" ")}`, {
+      encoding: "utf8",
+      maxBuffer: 2 ** 24,
+      shell: true,
+    }),
+  );
 }
 
 export function controllerAuthority(run = runController) {
@@ -292,6 +428,8 @@ export function main(argv, authorityFor = controllerAuthority) {
   }
   const { inventory, population, schema, policy, policySourceKinds } = loadContract();
   validate(inventory, schema);
+  validatePopulationFloor(population);
+  validatePolicyFloor(policy);
   validateDocumentRefs(population);
   const live = mode === "--live" ? authorityFor() : null;
   validateOwnership(inventory, population, live ?? selfDeclaredAuthority(inventory));

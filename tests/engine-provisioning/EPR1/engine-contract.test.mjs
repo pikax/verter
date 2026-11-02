@@ -6,17 +6,24 @@ import { fileURLToPath } from "node:url";
 
 import {
   artifactKey,
+  cacheKeyFor,
   canonicalJson,
   closureManifestDigest,
   closurePathHazard,
   compatibilityVerdict,
+  declarationDigest,
   evidenceVerdict,
   extractionHazard,
   firstFailure,
   firstMatch,
+  matchingRevocation,
   publicProjection,
   receiptDigest,
+  requirementDigest,
   reuseVerdict,
+  revocationCatalogDigest,
+  revocationCatalogHazard,
+  sortedClosureFiles,
   transitionAllowed,
   unportableString,
   validate,
@@ -24,6 +31,7 @@ import {
 } from "./tools/engine-contract-model.mjs";
 import {
   controllerAuthority,
+  controllerOutput,
   main,
   nodeAuthority,
   OwnershipRefusal,
@@ -33,6 +41,8 @@ import {
   validateDocumentRefs,
   validateOwnership,
   validatePolicyTransfer,
+  validatePolicyFloor,
+  validatePopulationFloor,
 } from "./tools/validate-engine-validation-ownership.mjs";
 
 const local = (name) => new URL(name, import.meta.url);
@@ -75,6 +85,26 @@ test("every schema definition has a conforming fixture and refuses omissions and
 
 test("the validator refuses a schema keyword it does not implement", () => {
   assert.throws(() => validate(1, { type: "integer", maximum: 0 }), /unsupported keyword/);
+});
+
+test("the published schemas close their objects under the dialect they declare", () => {
+  // An object stays open unless its schema closes it, as any draft 2020-12 validator reads it.
+  const open = { type: "object", properties: {} };
+  validate({ trusted: true }, open);
+  assert.throws(() => validate({ trusted: true }, { ...open, additionalProperties: false }));
+  const objectSchemas = function* (node) {
+    if (node === null || typeof node !== "object") return;
+    if (Object.hasOwn(node, "properties") && typeof node.properties === "object") yield node;
+    for (const value of Object.values(node)) yield* objectSchemas(value);
+  };
+  for (const published of [schema, ownershipSchema]) {
+    assert.match(published.$schema, /draft\/2020-12/u);
+    for (const object of objectSchemas(published)) {
+      assert.equal(object.additionalProperties, false, Object.keys(object.properties).join());
+    }
+  }
+  const row = { ...inventory.rows[0], trusted: true };
+  assert.throws(() => validate({ ...inventory, rows: [row] }, ownershipSchema));
 });
 
 test("the contract defines each boundary the provisioning policy assigned to it", () => {
@@ -130,11 +160,23 @@ test("platforms canonicalize through the manifest and flavors stay on their host
     for (const alias of aliases) assert.ok(!triples.includes(alias), `${alias} is not canonical`);
   }
   assert.deepEqual(
-    Object.keys(contract.flavorFamilies).sort(),
+    Object.keys(contract.flavorHosts).sort(),
     [...schema.$defs.EngineFlavor.enum].sort(),
   );
-  assert.deepEqual(contract.flavorFamilies["native-tsgo"], ["native"]);
-  assert.ok(contract.flavorFamilies["wasm-single"].includes("browser"));
+  const familyOf = new Map(contract.platforms.map((row) => [row.triple, row.family]));
+  const hostOfFamily = { native: "native-process", browser: "browser-worker" };
+  for (const [flavor, row] of Object.entries(contract.flavorHosts)) {
+    assert.ok(row.platforms.length > 0, flavor);
+    for (const platform of row.platforms) {
+      assert.equal(hostOfFamily[familyOf.get(platform)], row.host, `${flavor} on ${platform}`);
+    }
+  }
+  assert.ok(!contract.flavorHosts["native-tsgo"].platforms.includes("wasm32-browser"));
+  assert.deepEqual(contract.flavorHosts["wasm-single"].requiredHostFeatures, []);
+  assert.deepEqual(
+    [...contract.flavorHosts["wasm-threaded"].requiredHostFeatures].sort(),
+    [...schema.$defs.EngineHostFeatures.items.enum].sort(),
+  );
 });
 
 test("compatibility mutations each reach a distinct typed verdict", () => {
@@ -143,15 +185,39 @@ test("compatibility mutations each reach a distinct typed verdict", () => {
   conforms(declaration, "EngineCompatibilityDeclaration");
   const reached = new Set();
   for (const vector of verdicts) {
+    const merged = {
+      requirement: { ...requirement, ...vector.requirement },
+      declaration: { ...declaration, ...vector.declaration },
+      artifact: { ...artifact, ...vector.artifact },
+    };
+    conforms(merged.requirement, "EngineCompatibilityRequirement");
+    conforms(merged.declaration, "EngineCompatibilityDeclaration");
+    conforms(merged.artifact, "EngineArtifactId");
     const actual = compatibilityVerdict(
-      { ...requirement, ...vector.requirement },
-      { ...declaration, ...vector.declaration },
-      { ...artifact, ...vector.artifact },
+      contract,
+      merged.requirement,
+      merged.declaration,
+      merged.artifact,
       vector.hostFeatures ?? hostFeatures,
     );
     assert.equal(actual, vector.expected, vector.id);
     conforms(actual, "EngineCompatibilityVerdict");
     reached.add(actual);
+    if (actual === "Compatible") {
+      const { host, moduleFormat } = merged.declaration.hostConstraints;
+      const flavor = contract.flavorHosts[merged.artifact.flavor];
+      assert.ok(flavor.platforms.includes(merged.artifact.platform), vector.id);
+      assert.equal(host, flavor.host, vector.id);
+      assert.ok(flavor.moduleFormats.includes(moduleFormat), vector.id);
+    }
+  }
+  const compatibleFlavors = new Set(
+    verdicts
+      .filter((vector) => vector.expected === "Compatible")
+      .map((vector) => vector.artifact?.flavor ?? artifact.flavor),
+  );
+  for (const flavor of ["native-tsgo", "wasm-single", "wasm-threaded", "js-worker"]) {
+    assert.ok(compatibleFlavors.has(flavor), `no positive vector runs ${flavor}`);
   }
   const { versionWindow, versionBoundaries, stableFloorBoundaries } = contract.compatibility;
   for (const [version, expected] of versionBoundaries) {
@@ -188,37 +254,185 @@ test("every source class has its own evidence obligation", () => {
       row.source,
     );
   }
+  const obligations = new Set(contract.evidence.obligations.map((row) => row.evidence));
+  const trustChecks = new Set(contract.validationOrder.trust.map((row) => row.check));
+  for (const row of contract.evidence.obligations) assert.ok(trustChecks.has(row.check), row.check);
+  for (const row of rows) {
+    const demanded = [...row.required, ...Object.values(row.requiredByTrustClass ?? {}).flat()];
+    for (const token of demanded) assert.ok(obligations.has(token), `${row.source} ${token}`);
+  }
 });
 
-const evidenceContext = (observed = contract.evidence.observedClosure) => ({
-  sourceEvidence: Object.fromEntries(
-    contract.sourceEvidence.map((row) => [row.source, row.trustClasses]),
-  ),
-  authorizedOrigins: contract.evidence.authorizedOrigins,
+const revocationView = (overrides = {}) => ({
+  catalog: contract.revocation.catalog.body,
   approvedRoots: contract.evidence.approvedRoots,
-  observedClosure: observed,
+  ...contract.revocation.catalog.view,
+  ...overrides,
 });
+
+const evidenceContext = (overrides = {}) => ({
+  schema,
+  flavorHosts: contract.flavorHosts,
+  sourceEvidence: contract.sourceEvidence,
+  evidenceObligations: contract.evidence.obligations,
+  entryPointRoles: contract.evidence.entryPointRoles,
+  authorizedSources: contract.evidence.authorizedSources,
+  authorizedOrigins: contract.evidence.authorizedOrigins,
+  policyRequiredEvidence: contract.evidence.policyRequiredEvidence,
+  observedEvidence: contract.evidence.observedEvidence,
+  observedArchiveIntegrity: contract.evidence.observedArchiveIntegrity,
+  developmentPermitted: contract.evidence.developmentPermitted,
+  approvedRoots: contract.evidence.approvedRoots,
+  observedClosure: contract.evidence.observedClosure,
+  revocation: revocationView(),
+  ...overrides,
+});
+
+const browserContext = (overrides = {}) =>
+  evidenceContext({
+    authorizedSources: contract.evidence.browser.authorizedSources,
+    authorizedOrigins: contract.evidence.browser.authorizedOrigins,
+    policyRequiredEvidence: contract.evidence.browser.policyRequiredEvidence,
+    observedClosure: contract.evidence.browser.observedClosure,
+    ...overrides,
+  });
+
+const verdictOf = (descriptor, context) =>
+  evidenceVerdict(contract.validationOrder.trust, descriptor, context);
 
 test("byte, origin, signature and manifest mutations are refused before execution", () => {
   const { descriptor, mutations } = contract.evidence;
   conforms(descriptor, "EngineArtifactDescriptor");
-  assert.equal(evidenceVerdict(descriptor, evidenceContext()), null);
-  assert.equal(closureManifestDigest(descriptor.integrity.files), descriptor.id.contentDigest);
+  assert.equal(verdictOf(descriptor, evidenceContext()), null);
+  assert.equal(closureManifestDigest(descriptor.integrity), descriptor.id.contentDigest);
   assert.equal(
-    closureManifestDigest([...descriptor.integrity.files].reverse()),
+    closureManifestDigest({
+      ...descriptor.integrity,
+      files: [...descriptor.integrity.files].reverse(),
+    }),
     descriptor.id.contentDigest,
   );
   for (const mutation of mutations) {
     const changed = clone(descriptor);
     for (const [path, value] of Object.entries(mutation.set ?? {})) setPath(changed, path, value);
-    const observed = { ...contract.evidence.observedClosure, ...mutation.observed };
-    if (mutation.removeObserved !== undefined) delete observed[mutation.removeObserved];
-    assert.equal(
-      evidenceVerdict(changed, evidenceContext(observed)),
-      mutation.expected,
-      mutation.id,
-    );
+    const observedClosure = { ...contract.evidence.observedClosure, ...mutation.observed };
+    if (mutation.removeObserved !== undefined) delete observedClosure[mutation.removeObserved];
+    const context = evidenceContext({ observedClosure, ...mutation.context });
+    assert.equal(verdictOf(changed, context), mutation.expected, mutation.id);
   }
+});
+
+test("a declaration recomputed over signed bytes loses the signature and the key", () => {
+  const { descriptor } = contract.evidence;
+  const forged = clone(descriptor);
+  forged.declaration.api = "tsgo-api-v9";
+  forged.integrity.declarationDigest = declarationDigest(forged.declaration);
+  const digest = closureManifestDigest(forged.integrity);
+  assert.notEqual(digest, descriptor.id.contentDigest);
+  forged.integrity.closureManifestDigest = digest;
+  forged.id.contentDigest = digest;
+  assert.equal(verdictOf(forged, evidenceContext()), "OriginMismatch", "receipt covers old bytes");
+  forged.originReceipts[0].closureManifestDigest = digest;
+  assert.equal(verdictOf(forged, evidenceContext()), "SignatureFailure");
+  assert.notEqual(artifactKey(forged.id), artifactKey(descriptor.id));
+  forged.signature.signatures[0].manifestDigest = digest;
+  forged.provenance.references.forEach((reference) => (reference.subjectDigest = digest));
+  assert.equal(verdictOf(forged, evidenceContext()), null, "a publisher's own re-signing is valid");
+});
+
+test("the trust table alone orders the evidence verdict", () => {
+  const changed = clone(contract.evidence.descriptor);
+  changed.originReceipts[0].trustRoot.rootSetRevision = 2;
+  const context = evidenceContext({
+    observedClosure: {
+      ...contract.evidence.observedClosure,
+      "lib/tsc": contract.identity.axisMutations.at(-1).value,
+    },
+  });
+  const { trust } = contract.validationOrder;
+  const facts = Object.fromEntries(trust.map((row) => [row.check, true]));
+  const expected = firstFailure(trust, { ...facts, bytesMatch: false, rootApproved: false });
+  assert.equal(evidenceVerdict(trust, changed, context), expected);
+  const swapped = trust.map((row) =>
+    row.check === "bytesMatch"
+      ? trust.find((other) => other.check === "rootApproved")
+      : row.check === "rootApproved"
+        ? trust.find((other) => other.check === "bytesMatch")
+        : row,
+  );
+  assert.equal(evidenceVerdict(swapped, changed, context), "TrustFailure");
+  assert.equal(
+    evidenceVerdict([{ check: "notAKnownCheck", reason: "InvalidSchema" }], changed, context),
+    "InvalidSchema",
+  );
+});
+
+test("each source's own required evidence is demanded, and only policy can add to it", () => {
+  const { trust } = contract.validationOrder;
+  const reasonOf = (check) => trust.find((row) => row.check === check).reason;
+  const strip = {
+    signature: (descriptor) => (descriptor.signature.signatures = []),
+    provenance: (descriptor) => (descriptor.provenance.references = []),
+    "archive-integrity": (descriptor) => delete descriptor.integrity.archiveIntegrity,
+    "host-constraints": (descriptor) => {
+      descriptor.declaration.hostConstraints.host = "native-process";
+    },
+  };
+  let exercised = 0;
+  for (const row of contract.sourceEvidence) {
+    const classes = row.trustClasses.map((trustClass) => {
+      if (row.source === "BrowserArtifact") {
+        const name = trustClass.startsWith("published") ? "published" : "development";
+        return { trustClass, base: contract.evidence.browser[name], context: browserContext };
+      }
+      const base = clone(contract.evidence.descriptor);
+      base.originReceipts[0].origin = {
+        ...base.originReceipts[0].origin,
+        sourceKind: row.source,
+        trustClass,
+      };
+      const origin = base.originReceipts[0].origin;
+      const context = (overrides) =>
+        evidenceContext({
+          authorizedSources: [row.source],
+          authorizedOrigins: [origin],
+          policyRequiredEvidence: [],
+          ...overrides,
+        });
+      return { trustClass, base, context };
+    });
+    for (const { trustClass, base, context } of classes) {
+      const permits = { developmentPermitted: true };
+      assert.equal(verdictOf(base, context(permits)), null, `${row.source} ${trustClass}`);
+      const demanded = [...row.required, ...(row.requiredByTrustClass?.[trustClass] ?? [])];
+      for (const token of demanded) {
+        const obligation = contract.evidence.obligations.find((item) => item.evidence === token);
+        if (obligation.proof === "structural") continue;
+        const stripped = clone(base);
+        const overrides = { ...permits };
+        if (token === "development-policy") overrides.developmentPermitted = false;
+        else if (obligation.proof === "observed") {
+          overrides.observedEvidence = contract.evidence.observedEvidence.filter(
+            (item) => item !== token,
+          );
+        } else strip[token](stripped);
+        assert.equal(
+          verdictOf(stripped, context(overrides)),
+          reasonOf(obligation.check),
+          `${row.source} ${trustClass} without ${token}`,
+        );
+        exercised++;
+      }
+    }
+  }
+  const proved = contract.evidence.obligations.filter((item) => item.proof !== "structural");
+  assert.ok(exercised >= proved.length, `only ${exercised} evidence cases ran`);
+
+  const unsigned = clone(contract.evidence.descriptor);
+  unsigned.signature.signatures = [];
+  assert.equal(verdictOf(unsigned, evidenceContext()), "SignatureFailure");
+  refuses({ requirement: "not-required", signatures: [] }, "EngineSignatureEvidence");
+  refuses({ requirement: "not-required", references: [] }, "EngineProvenanceEvidence");
 });
 
 test("a browser development artifact can never present as a published one", () => {
@@ -227,16 +441,23 @@ test("a browser development artifact can never present as a published one", () =
     "published-browser-manifest",
     "development-browser-manifest",
   ]);
-  const { descriptor } = contract.evidence;
-  const development = clone(descriptor);
-  development.originReceipts[0].origin = {
-    ...development.originReceipts[0].origin,
-    sourceKind: "ManagedCache",
-    trustClass: "development-browser-manifest",
-  };
-  assert.equal(evidenceVerdict(development, evidenceContext()), "OriginMismatch");
-  const key = (build) => artifactKey({ ...descriptor.id, build });
-  assert.notEqual(key("local-development-1"), key("publisher-build-1"));
+  const { published, development, vectors, authorizedOrigins } = contract.evidence.browser;
+  conforms(published, "EngineArtifactDescriptor");
+  conforms(development, "EngineArtifactDescriptor");
+  // One set of bytes under two origins, each authorized for exactly one class, never one key.
+  assert.equal(published.id.contentDigest, development.id.contentDigest);
+  assert.notEqual(artifactKey(published.id), artifactKey(development.id));
+  const ids = authorizedOrigins.map((row) => row.originId);
+  assert.equal(new Set(ids).size, ids.length);
+  for (const row of authorizedOrigins) conforms(row, "EngineOriginAuthorization");
+  assert.ok(browser.requiredByTrustClass["published-browser-manifest"].includes("signature"));
+  assert.ok(browser.requiredByTrustClass["published-browser-manifest"].includes("provenance"));
+
+  for (const vector of vectors) {
+    const changed = clone(contract.evidence.browser[vector.descriptor]);
+    for (const [path, value] of Object.entries(vector.set ?? {})) setPath(changed, path, value);
+    assert.equal(verdictOf(changed, browserContext(vector.context)), vector.expected, vector.id);
+  }
 });
 
 test("closure paths refuse traversal, absolute, reserved and colliding names", () => {
@@ -244,6 +465,21 @@ test("closure paths refuse traversal, absolute, reserved and colliding names", (
     assert.equal(closurePathHazard([path]), expected, path);
   }
   assert.equal(closurePathHazard(contract.evidence.closureCollision), "collision");
+});
+
+test("closure order is UTF-8 bytes, so another implementation's digest agrees", () => {
+  const { closureOrderGolden: golden } = contract.encoding;
+  assert.deepEqual(
+    sortedClosureFiles(golden.files).map((file) => file.path),
+    golden.utf8Order,
+  );
+  // JavaScript's default string order places the supplementary-plane path first.
+  assert.deepEqual([...golden.utf8Order].sort(), [...golden.utf8Order].reverse());
+  assert.equal(closureManifestDigest(golden), golden.digest);
+  assert.equal(
+    closureManifestDigest({ ...golden, files: [...golden.files].reverse() }),
+    golden.digest,
+  );
 });
 
 test("trust checks are ordered and each failure keeps its own reason", () => {
@@ -261,6 +497,31 @@ test("trust checks are ordered and each failure keeps its own reason", () => {
   const checks = trust.map((row) => row.check);
   assert.ok(checks.indexOf("sourceAuthorized") < checks.indexOf("bytesMatch"));
   assert.ok(checks.indexOf("bytesMatch") < checks.indexOf("signatureValid"));
+});
+
+test("a reader and the trust table give one answer for a shared failure", () => {
+  const { trust } = contract.validationOrder;
+  const { readerChecks } = contract.install;
+  const trustChecks = trust.map((row) => row.check);
+  const shared = readerChecks.map((row) => row.check).filter((row) => trustChecks.includes(row));
+  assert.deepEqual(shared, ["notRevoked", "bytesMatch"]);
+  assert.deepEqual(
+    trustChecks.filter((check) => shared.includes(check)),
+    shared,
+  );
+  for (const check of shared) {
+    assert.equal(
+      readerChecks.find((row) => row.check === check).reason,
+      trust.find((row) => row.check === check).reason,
+      check,
+    );
+  }
+  const passing = (rows) => Object.fromEntries(rows.map((row) => [row.check, true]));
+  const failing = { notRevoked: false, bytesMatch: false };
+  assert.equal(
+    firstFailure(readerChecks, { ...passing(readerChecks), ...failing }),
+    firstFailure(trust, { ...passing(trust), ...failing }),
+  );
 });
 
 test("every rejection has one typed row and none degrades to not-found", () => {
@@ -329,8 +590,34 @@ test("a reader refuses unsafe, incomplete and replaced entries with typed reason
 });
 
 test("concurrent writers converge without overwriting or breaking a live lock", () => {
-  for (const vector of contract.install.writerVectors) {
-    assert.equal(firstMatch(contract.install.writers, vector.facts), vector.expected, vector.id);
+  const { writers, writerVectors, machine } = contract.install;
+  for (const vector of writerVectors) {
+    assert.equal(firstMatch(writers, vector.facts), vector.expected, vector.id);
+  }
+  // Every reachable combination has a verdict, and only a lock holder with its own temp mutates.
+  const mutating = new Set([
+    "PublishNoReplace",
+    "QuarantineLeftoverThenRetry",
+    "AdoptWinnerDiscardOwnTemp",
+    "RejectWinnerDiscardOwnTemp",
+  ]);
+  for (const ownsTemp of [true, false]) {
+    for (const holdsLock of [true, false, undefined]) {
+      for (const lockOwnerAlive of [true, false, undefined]) {
+        for (const winnerState of machine.states) {
+          for (const winnerSameIdentity of [true, false, undefined]) {
+            const facts = { ownsTemp, holdsLock, lockOwnerAlive, winnerState, winnerSameIdentity };
+            const verdict = firstMatch(writers, facts);
+            const label = JSON.stringify(facts);
+            assert.notEqual(verdict, undefined, label);
+            if (mutating.has(verdict)) assert.ok(ownsTemp && holdsLock === true, label);
+            if (holdsLock !== true && lockOwnerAlive !== false) {
+              assert.ok(["DoNotMutate", "WaitOrFailClosed"].includes(verdict), label);
+            }
+          }
+        }
+      }
+    }
   }
 });
 
@@ -356,6 +643,10 @@ test("each supported operating system has private no-follow atomic primitives", 
       "durability",
     ]) {
       assert.ok(row[column].length > 0, `${row.os} ${column}`);
+      assert.ok(row.citations[column].length > 0, `${row.os} ${column} cites no contract`);
+      for (const citation of row.citations[column]) {
+        assert.match(citation, /^https:\/\/\S+$/u, `${row.os} ${column}`);
+      }
     }
   }
   const natives = contract.platforms.filter((row) => row.family === "native");
@@ -389,7 +680,11 @@ test("reuse needs an equal key, and each changed basis forces fresh validation",
   assert.deepEqual(changedBasis.map((row) => row.field).sort(), Object.keys(key).sort());
   for (const { change, field } of changedBasis) {
     const value = key[field];
-    const other = typeof value === "number" ? value + 1 : `${value}0`;
+    const other = Array.isArray(value)
+      ? [...value, "SharedArrayBuffer"]
+      : typeof value === "number"
+        ? value + 1
+        : `${value}0`;
     assert.equal(
       reuseVerdict(reuse, key, { ...key, [field]: other }, warm),
       "ValidateFresh",
@@ -410,6 +705,54 @@ test("reuse needs an equal key, and each changed basis forces fresh validation",
       "RehashThroughVerifiedHandles",
     );
   }
+});
+
+test("a key derived from content misses when a requirement or host changes under one ID", () => {
+  const { key, reuse } = contract.cache;
+  const { requirement, declaration, artifact, hostFeatures } = contract.compatibility;
+  const facts = {
+    descriptor: contract.evidence.descriptor,
+    originReceiptId: key.originReceiptId,
+    locatorStatIdentity: key.locatorStatIdentity,
+    project: key.project,
+    profile: key.profile,
+    host: key.host,
+    hostFeatures,
+    requirement,
+    validationSchema: key.validationSchema,
+    epochs: { policy: key.policyEpoch, trust: key.trustEpoch, revocation: key.revocationEpoch },
+  };
+  assert.deepEqual(cacheKeyFor(facts), key);
+  assert.equal(key.requirementDigest, requirementDigest(requirement));
+  const warm = { mutability: "immutable-ready", boundary: "retained-verified-handle" };
+  assert.equal(reuseVerdict(reuse, key, cacheKeyFor(facts), warm), "ReuseZeroWork");
+
+  const raised = { ...requirement, versionFloor: "7.1.5" };
+  assert.equal(raised.requirementId, requirement.requirementId);
+  assert.equal(raised.compatibilityPolicyId, requirement.compatibilityPolicyId);
+  assert.equal(
+    compatibilityVerdict(contract, raised, declaration, artifact, hostFeatures),
+    "Unsupported",
+  );
+  assert.equal(
+    reuseVerdict(reuse, key, cacheKeyFor({ ...facts, requirement: raised }), warm),
+    "ValidateFresh",
+  );
+  assert.equal(
+    reuseVerdict(reuse, key, cacheKeyFor({ ...facts, hostFeatures: ["SharedArrayBuffer"] }), warm),
+    "ValidateFresh",
+  );
+
+  // A second declaration over the same files is a second artifact, not a shared key.
+  const forged = clone(contract.evidence.descriptor);
+  forged.declaration.features = [...forged.declaration.features, "claimed"];
+  forged.integrity.declarationDigest = declarationDigest(forged.declaration);
+  forged.integrity.closureManifestDigest = closureManifestDigest(forged.integrity);
+  forged.id.contentDigest = forged.integrity.closureManifestDigest;
+  assert.equal(
+    reuseVerdict(reuse, key, cacheKeyFor({ ...facts, descriptor: forged }), warm),
+    "ValidateFresh",
+  );
 });
 
 test("only a complete compatible result is admitted", () => {
@@ -438,6 +781,53 @@ test("revocation has an action at every stage and none reuses or falls back", ()
     assert.ok(!forbiddenActions.includes(row.action), row.action);
     assert.ok(members.has(row.ownerMember), row.ownerMember);
   }
+});
+
+test("a revocation catalog is verified before use and names each target by its own identity", () => {
+  const { body, hazards } = contract.revocation.catalog;
+  conforms(body, "EngineRevocationCatalog");
+  assert.equal(body.signature.manifestDigest, revocationCatalogDigest(body));
+  assert.equal(revocationCatalogHazard(null), "catalog-absent");
+  for (const vector of hazards) {
+    const catalog = { ...clone(body), ...vector.catalog };
+    if (vector.root !== undefined) catalog.signature.trustRoot = vector.root;
+    const view = revocationView({ catalog, ...vector.view });
+    assert.equal(revocationCatalogHazard(view), vector.expected, vector.id);
+    if (vector.expected !== null) {
+      const context = evidenceContext({ revocation: view });
+      assert.equal(
+        verdictOf(contract.evidence.descriptor, context),
+        "RevocationDataUnavailable",
+        vector.id,
+      );
+    }
+  }
+
+  const { descriptor } = contract.evidence;
+  const entry = body.entries[0];
+  const kinds = new Set();
+  for (const { id, target, matches } of contract.revocation.targets) {
+    const revoking = { ...entry, target };
+    conforms(revoking, "EngineRevocation");
+    kinds.add(target.kind);
+    assert.equal(matchingRevocation([revoking], descriptor) !== null, matches, id);
+    if (matches) {
+      const catalog = { ...clone(body), entries: [revoking] };
+      catalog.signature.manifestDigest = revocationCatalogDigest(catalog);
+      const context = evidenceContext({ revocation: revocationView({ catalog }) });
+      assert.equal(verdictOf(descriptor, context), "Revoked", id);
+    }
+  }
+  assert.deepEqual([...kinds].sort(), ["artifact", "origin", "signer", "trust-root"]);
+  refuses(
+    { ...entry, target: { kind: "artifact", artifactKey: "artifact-1" } },
+    "EngineRevocation",
+  );
+  refuses({ ...entry, target: { kind: "trust-root", root: "system-ca" } }, "EngineRevocation");
+  refuses(
+    { ...entry, target: { kind: "origin", artifactKey: entry.target.artifactKey } },
+    "EngineRevocation",
+  );
 });
 
 test("receipts are deterministic and bind their whole basis", () => {
@@ -703,6 +1093,29 @@ test("the population holds every named boundary, source class and displaced rout
   }
 });
 
+test("the population's floor is held apart from the population it checks", () => {
+  validatePopulationFloor(population);
+  for (const removed of ["coarse-provider-status", "revocation-reporting", "EngineCacheKey"]) {
+    const remaining = population.filter((member) => member.id !== removed);
+    const rows = inventory.rows.filter((row) => row.id !== removed);
+    assert.equal(refusalCode({ ...inventory, rows }, remaining), null, "self-consistent");
+    assert.throws(
+      () => validatePopulationFloor(remaining),
+      (error) => error.code === "required-member-missing" && error.member === removed,
+    );
+  }
+  assert.throws(
+    () => validatePopulationFloor([]),
+    (error) => error.code === "required-member-missing",
+  );
+  validatePolicyFloor(policy);
+  const withoutRoute = { ...policy, displacedRoutes: policy.displacedRoutes.slice(1) };
+  assert.throws(
+    () => validatePolicyFloor(withoutRoute),
+    (error) => error.code === "required-member-missing",
+  );
+});
+
 test("a required candidate boundary never depends on an optional channel", () => {
   const required = [
     "EngineInstallLayout",
@@ -771,6 +1184,22 @@ test("controller answers yield known-node, edge, production and acceptance facts
   assert.equal(resolve("NODE").production, true);
   assert.equal(calls.filter((args) => args.includes("NODE")).length, 2);
   assert.ok(!calls.some((args) => args.join(" ").includes("rm -rf")));
+});
+
+test("a controller outage is reported as an outage, not as an unknown owner", () => {
+  assert.equal(controllerOutput({ status: 0, stdout: "{}", stderr: "" }), "{}");
+  const absent = { status: 2, stdout: "", stderr: 'no task "NODE" in the mirror' };
+  assert.equal(controllerOutput(absent), null);
+  for (const outage of [
+    { status: 1, stdout: "", stderr: "connection refused" },
+    { status: 127, stdout: "", stderr: "command not found" },
+    { status: null, stdout: "", stderr: "", error: new Error("spawn failed") },
+  ]) {
+    assert.throws(
+      () => controllerOutput(outage),
+      (error) => error.code === "controller-unavailable",
+    );
+  }
 });
 
 test("the provisioning policy's sources and routes transfer without restating an owner", () => {

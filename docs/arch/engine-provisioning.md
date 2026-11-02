@@ -312,7 +312,12 @@ Different origins never alias, even over identical bytes.
 Canonical bytes are RFC 8785 member order over safe integers and NFC strings. A
 key, closure manifest or receipt digest is SHA-256 over a domain string, one NUL
 byte and those bytes; the domains are in the product, and the goldens let a Rust
-implementation prove byte agreement. `EngineVersion` is strict SemVer and keeps
+implementation prove byte agreement. Closure files sort by the UTF-8 bytes of their
+path, which is Rust's `str` order and differs from JavaScript string order outside
+the basic plane, so one golden uses a supplementary-plane path. The schemas are
+draft 2020-12 and close every object with `additionalProperties: false`, so a
+standard validator refuses an added claim; refusing non-NFC text is the one rule the
+dialect cannot state, and it belongs to the canonical encoding. `EngineVersion` is strict SemVer and keeps
 build metadata as an identity axis, unlike the precedence comparison in
 `toolchain/policy.rs`. `EnginePlatform` uses the Rust target triples of the shared
 platform manifest plus `wasm32-browser` and `js-browser`. An npm-style alias is
@@ -325,29 +330,42 @@ refused rather than guessed.
 engine, allowed flavors, platform, version window, optional exact pin, protocol,
 API, commands, features, toolchain family and host features. The verdict compares
 it with declarations and never executes a candidate; the bounded handshake stays
-with activation. Checks run platform, flavor, host, protocol, API, command,
+with activation. Checks run engine, platform, flavor, host, protocol, API, command,
 feature, toolchain, version window, then pin, so a structural mismatch is never
 reported as a version problem and a pin cannot override the window.
 
+The product's `flavorHosts` table says where each flavor runs: its platforms, host and
+module formats, plus the host features it always needs. A declaration cannot move an
+artifact off that row. The host must offer every feature the flavor row, the
+declaration and the requirement name, and both the artifact's identity and its
+declaration must state the required protocol.
+
 `EngineCompatibilityVerdict` is `Compatible`, `TooOld`, `TooNew`, `Unsupported`,
-`WrongPlatform`, `WrongFlavor`, `UnsupportedProtocol`, `UnsupportedApi`,
+`WrongEngine`, `WrongPlatform`, `WrongFlavor`, `UnsupportedProtocol`, `UnsupportedApi`,
 `MissingCommand`, `MissingFeature`, `ToolchainIncompatible`, `HostUnsupported` or
 `UnknownCompatibility`. Unknown is ineligible, including an unreadable version.
 Version boundaries restate the current tsgo line law without moving a pin or floor;
-tsserver serving tiers remain a separately identified requirement input. A policy
-or requirement change alters the cache key, so a stale receipt cannot answer it.
+tsserver serving tiers remain a separately identified requirement input. The cache key
+and receipt carry a digest of the whole requirement and the host's features, so a
+raised bound or a host losing isolation cannot reuse a receipt, even under unchanged
+IDs and without relying on anyone minting a new one.
 
 ### Origin, integrity and signature evidence
 
 `EngineIntegrityEvidence` lists every file in the execution closure: executable,
-interpreter, scripts, libraries, worker code and critical sidecars. The closure
-digest binds that sorted list, so an archive digest or package metadata alone
-proves nothing about installed bytes. Registry SHA-512 additionally binds an
-archive. Paths must be relative, portable and free of traversal, reserved names,
-alternate streams and case collisions. `EngineSignatureEvidence` and provenance
-references bind the same digest; `EngineOriginReceipt` binds it to an authorized
-channel and `EngineTrustRootId`. `TrustedEngineOrigin` and
+interpreter, scripts, libraries, worker code and critical sidecars. It names the one
+`entryPoint` a launch starts from, which must be a listed runnable file, and the digest
+of the compatibility declaration. The closure digest binds all three, and it is the
+artifact's content digest, so forging a declaration or dropping the executable changes
+the key and invalidates every signature, receipt and origin receipt over it. An archive
+digest or package metadata alone proves nothing about installed bytes. Registry SHA-512
+additionally binds an archive. Paths must be relative, portable and free of traversal,
+reserved names, alternate streams and case collisions. `EngineSignatureEvidence` and
+provenance references bind the same digest; `EngineOriginReceipt` binds it to a listed
+locator, an authorized channel and `EngineTrustRootId`. `TrustedEngineOrigin` and
 `EngineProvisioningPolicy` keep the fields the policy above defines.
+`EngineOriginAuthorization` is the captured policy row that gives one origin its one
+source, trust class and channel, so a receipt cannot choose its own class.
 
 `EngineValidationReceipt` is immutable and exists only for a complete, compatible
 result on one current basis, so its verdict and completion are constants. It binds
@@ -356,7 +374,9 @@ host, policy, trust and revocation epochs, and it has no `trusted` field to asse
 Facts come from what the shared validator observed, never from a producer's claim.
 Checks run in the order in the product's `validationOrder`, ahead of any candidate
 code: a schema failure, unauthorized source, revocation, origin, closure, bytes,
-root, signature, provenance, then artifact class. An unauthorized source receives
+root, signature, provenance, then artifact class. That one table orders the evidence
+verdict, and a reader of an installed entry keeps its relative order for revocation
+and bytes, so a corrupt revoked entry has one answer. An unauthorized source receives
 no validation work at all.
 
 ### Source evidence obligations
@@ -378,16 +398,24 @@ or authorized: the shipping prohibition above is unchanged. Missing evidence is 
 typed rejection and never lowers a trust class. No source lacks evidence for its
 authorized class, because each class above names evidence that source can produce.
 
+What must be present comes from this table and captured policy, which may add a
+signature or provenance requirement. The descriptor has no field that can waive one.
+The product's `obligations` table assigns each kind of evidence to the trust check, and
+so the rejection, that reports its absence.
+
 ### Browser worker artifacts
 
 WASM and JS worker artifacts use the same descriptor as native sidecars, with
 `wasm-single`, `wasm-threaded` or `js-worker` flavor. The manifest binds provenance,
 integrity, ABI/schema, engine version and host constraints. A locally built artifact
-has its own build identity and trust class, needs explicit development policy, and
-cannot become a verified published artifact. Native flavors never run on a browser
-platform, and no contract assumes tsgo has a browser artifact. Baseline operation
-needs neither `SharedArrayBuffer` nor cross-origin isolation; a threaded artifact
-without them is `HostUnsupported`.
+has its own build identity, origin and trust class, needs explicit development policy,
+and cannot become a verified published artifact. Its origin is authorized for the
+development class alone, so relabelling it is `OriginMismatch`, and identical bytes keep
+a distinct key. Presenting it under a published origin still needs the signature and
+provenance that class demands, without which it is refused. Native flavors never run on
+a browser platform, and no contract assumes tsgo has a browser artifact. Baseline
+operation needs neither `SharedArrayBuffer` nor cross-origin isolation; a threaded
+artifact without them is `HostUnsupported`, even if it declares none.
 
 ### Installation layout and concurrent writers
 
@@ -406,11 +434,14 @@ reopened. A symlink, junction, foreign owner, group- or world-writable mode or a
 non-owner-only ACL rejects with its own reason. Writers take an artifact-scoped lock
 and create a private exclusive sibling. A loser adopts a winner only if it has the
 same identity and validates on the current basis, and it removes only its own
-temporary output. Lock age never licenses breaking a live writer; recovery first
-establishes owner death.
+temporary output. Only the lock holder publishes or quarantines. Lock age never
+licenses breaking a live writer; recovery first establishes owner death, and unknown
+liveness or any unlisted state waits or fails closed. The holder that finds a READY-less
+entry quarantines the leftover and retries, so a crashed install cannot block the key.
 
 Each supported platform has the required primitives, so no install abort condition
-applies. The `platformPrimitives` table names them: `openat` with `O_NOFOLLOW` on
+applies. The `platformPrimitives` table cites the operating system's own documentation
+for each and names them: `openat` with `O_NOFOLLOW` on
 Linux and macOS and `FILE_FLAG_OPEN_REPARSE_POINT` on Windows; exclusive private
 creation; `RENAME_NOREPLACE`, `RENAME_EXCL` or `MoveFileExW` without replacement;
 and the durable flush each one requires. A filesystem refusing no-replace fails
@@ -421,8 +452,8 @@ and traversal entries.
 ### Validation cache and invalidation
 
 `EngineCacheKey` holds artifact key, closure digest, origin receipt, locator stat
-identity, project, profile, host, requirement, compatibility policy, schema and
-policy, trust and revocation epochs. Any field change validates fresh.
+identity, project, profile, host and its features, requirement and its digest,
+compatibility policy, schema and policy, trust and revocation epochs. Any field change validates fresh.
 `EngineCacheEntry` retains one complete receipt. Only `Complete` with `Compatible`
 is admitted; no negative result is cached, so a rejected or unknown answer cannot
 outlive a fact that could change it. Cancelled, partial and stale results never warm.
@@ -448,10 +479,14 @@ decide acceptance, and this contract makes no runtime performance claim.
 
 ### Revocation, corruption and quarantine
 
-`EngineRevocation` binds an artifact, origin, signer or trust root to a reason,
-issuer and rising epoch. A revocation catalog is verified before use, and a required
-catalog without current freshness fails closed as `RevocationDataUnavailable`. The
-product has one action for each stage and event: validation rejects; selection
+`EngineRevocation` names its target by that target's own identity: an artifact by its
+key, an origin or signer by its ID, a trust root by its `EngineTrustRootId`. It adds a
+reason, issuer and epoch. `EngineRevocationCatalog` is signed over a domain digest of its
+issuer, epoch, freshness limit and entries. A catalog that is absent, altered, signed
+under an unapproved root, from an unknown issuer, past its limit, or older than the last
+epoch seen fails closed as `RevocationDataUnavailable`, so replaying an older signed
+catalog cannot hide a revocation. The product lists these cases and which entries match
+a descriptor. The product has one action for each stage and event: validation rejects; selection
 publication cancels; pending activation cancels; an active provider withdraws its
 capabilities. None reuses a receipt, falls back or reports not-found.
 
@@ -501,8 +536,10 @@ owners may delete those sources without invalidating the contract.
 
 The validator also reads the policy catalog's own source, route and consumer rows
 and applies the same refusals, adding an unclassified source and a route with no
-source files or symbols. It restates none of them, so that catalog stays their one
-authority.
+source files or symbols. It restates no owner, so that catalog stays their one
+authority. The validator does hold the identifiers the charter requires of both
+populations as a floor, so removing an obligation from the product and the catalog
+together is refused rather than read as a smaller universe.
 
 Run from the repository root:
 
@@ -515,5 +552,5 @@ node tests/engine-provisioning/EPR1/tools/validate-engine-validation-ownership.m
 CI runs the first command, which includes the structural mode and every refusal
 fixture over synthetic authority. `--live` resolves owners, edges, production
 authority and acceptance IDs against the plan controller, which holds the DAG, and
-fails if the controller is unavailable. It accepts pending owners: it verifies the
+reports `controller-unavailable` if the controller cannot answer. It accepts pending owners: it verifies the
 transfer, not their implementation. Neither mode reads a repository copy of the DAG.
