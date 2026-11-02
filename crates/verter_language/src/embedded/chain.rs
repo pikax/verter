@@ -144,8 +144,10 @@ impl AuthoredMapChain {
     }
 
     /// Refuse a query unless `output` is this chain's exact output, in the
-    /// queried domain. Verbatim runs are byte-identical, so a scalar boundary
-    /// of the final output stays one at every hop back to authored bytes.
+    /// queried domain. Every mapped stage proved its endpoints against the
+    /// texts its bases name and its verbatim runs byte-identical, and each join
+    /// matches bases exactly, so a scalar boundary of the final output stays
+    /// one at every hop back to authored bytes.
     fn require_query(
         &self,
         output: &BasisText<'_>,
