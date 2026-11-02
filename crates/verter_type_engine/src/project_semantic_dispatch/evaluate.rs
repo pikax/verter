@@ -487,9 +487,11 @@ enum DeferredEvaluationStage {
     },
     AwaitIndexedObject {
         index: IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
     },
     AwaitIndexedIndex {
         object: SemanticNodeId,
+        origin: crate::semantic_query::IndexedAccessOrigin,
     },
     AwaitValueChildren {
         data: crate::semantic_query_memo::NodeData,
@@ -1240,13 +1242,188 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.resolve_structural_fact_demand(node, context, true, false)
     }
 
-    /// The checker's error type for a written indexed access its object
-    /// proves absent: TS2339, which the read recovers from as `any`.
-    pub(super) fn absent_index_recovery(&self) -> SemanticNodeId {
-        crate::semantic_query::checker_policy::checker_recovery(
-            self.graph(),
-            crate::semantic_query::checker_policy::absent_member(),
-        )
+    /// What an access answers when its object proves a key absent, as the
+    /// checker's `getIndexedAccessType` does: a written access is TS2339 and
+    /// its error type, read as `any`; an instantiation has no access to report
+    /// on and is `unknown`. An access the engine composed has no such answer,
+    /// and neither has one whose absence is not proven.
+    pub(super) fn absent_access_answer(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        object: SemanticNodeId,
+        index: &IndexKey,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        use crate::semantic_query::IndexedAccessOrigin;
+        if origin == IndexedAccessOrigin::Composed {
+            return None;
+        }
+        // An access of the error type is the error type, and no new report.
+        if let Some(error) = self
+            .normalize_node_for_structural_fact_demand(object, context)
+            .into_complete_node()
+            .filter(|node| {
+                matches!(
+                    self.graph().node_data(*node).as_deref(),
+                    Some(SemanticNodeData::Opaque(error)) if super::build::is_certified_recovery(error)
+                )
+            })
+        {
+            return Some(error);
+        }
+        let keys = match index {
+            IndexKey::Computed(node) => self.finite_index_keys(*node)?,
+            key => vec![clone_index_key(key)],
+        };
+        if !keys
+            .iter()
+            .any(|key| self.indexed_access_proves_absence(object, key, context))
+        {
+            return None;
+        }
+        Some(match origin {
+            IndexedAccessOrigin::Composed => unreachable!("answered above"),
+            IndexedAccessOrigin::Written => {
+                crate::semantic_query::checker_policy::checker_recovery(
+                    self.graph(),
+                    crate::semantic_query::checker_policy::absent_member(),
+                )
+            }
+            IndexedAccessOrigin::Instantiated => self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+        })
+    }
+
+    /// [`Self::absent_read_answer`] as one operation of this dispatcher, for a
+    /// request whose own builder owns what it constructs.
+    pub fn published_absent_read_answer(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        value: SemanticNodeId,
+        object: SemanticNodeId,
+        index: &IndexKey,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let _operation = self.enter_operation(false);
+        self.absent_read_answer(origin, value, object, index, context)
+    }
+
+    /// The answer of an access whose complete read gave `value`, when that
+    /// read found nothing.
+    pub(super) fn absent_read_answer(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        value: SemanticNodeId,
+        object: SemanticNodeId,
+        index: &IndexKey,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !self.read_holds_miss(value) {
+            return None;
+        }
+        self.absent_access_answer(origin, object, index, context)
+    }
+
+    /// Whether the read `value` of an access found nothing for a key: the
+    /// typed miss, whole or as an arm of a union index's answer, or the access
+    /// kept as a shell for want of an object the walk could read.
+    fn read_holds_miss(&self, value: SemanticNodeId) -> bool {
+        let miss = |data: Option<&SemanticNodeData>| {
+            matches!(data, Some(SemanticNodeData::Opaque(QueryError::Miss)))
+        };
+        let data = self.graph().node_data(value);
+        match data.as_deref() {
+            Some(SemanticNodeData::IndexedAccess { .. }) => true,
+            Some(SemanticNodeData::Union(arms)) => arms
+                .iter()
+                .any(|arm| miss(self.graph().node_data(*arm).as_deref())),
+            other => miss(other),
+        }
+    }
+
+    /// What an access the instantiation of `object[index]` produces stands
+    /// for. The checker decides an access's fate where it is written: over a
+    /// generic object or index it defers the access, and instantiating that
+    /// has no access node. Over anything else it answers there, so what it
+    /// holds instantiates as the written access it is. Whether the object is
+    /// generic can be undecided (`Foo<T>['k']` depends on what `Foo` is), and
+    /// such an access keeps no answer of its own.
+    pub(super) fn instantiated_access_origin(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        object: SemanticNodeId,
+        index: &IndexKey,
+    ) -> crate::semantic_query::IndexedAccessOrigin {
+        use crate::semantic_query::IndexedAccessOrigin;
+        if origin != IndexedAccessOrigin::Written {
+            return origin;
+        }
+        match self.access_is_generic(object, index) {
+            Some(true) => IndexedAccessOrigin::Instantiated,
+            Some(false) => IndexedAccessOrigin::Written,
+            None => IndexedAccessOrigin::Composed,
+        }
+    }
+
+    /// The checker's `isGenericObjectType` of `object` or
+    /// `isGenericIndexType` of `index` over an authored access; `None` when
+    /// an application over a free parameter leaves it undecided.
+    fn access_is_generic(&self, object: SemanticNodeId, index: &IndexKey) -> Option<bool> {
+        let free = |node| super::symbolic_root::node_contains_free_type_param(self, node);
+        if let IndexKey::Computed(index) = index {
+            if free(*index) {
+                return Some(true);
+            }
+        }
+        let mut undecided = false;
+        let mut pending = vec![object];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let data = self.graph().node_data(node);
+            match data.as_deref() {
+                Some(
+                    SemanticNodeData::TypeParam { .. }
+                    | SemanticNodeData::Infer { .. }
+                    | SemanticNodeData::InferRef { .. },
+                ) => return Some(true),
+                Some(SemanticNodeData::Union(arms)) => pending.extend(arms.iter().copied()),
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Alias(inner)) => pending.push(*inner),
+                Some(SemanticNodeData::IndexedAccess { object, index, .. }) => {
+                    if let IndexKey::Computed(index) = index {
+                        if free(*index) {
+                            return Some(true);
+                        }
+                    }
+                    pending.push(*object);
+                }
+                Some(SemanticNodeData::Conditional { check, extends, .. }) => {
+                    if free(*check) || free(*extends) {
+                        return Some(true);
+                    }
+                }
+                Some(SemanticNodeData::Mapped { mapper, .. }) => {
+                    if free(mapper.key_space) {
+                        return Some(true);
+                    }
+                }
+                Some(SemanticNodeData::InstantiationRef { args, .. }) => {
+                    undecided |= args.iter().any(|argument| free(*argument));
+                }
+                _ => {}
+            }
+        }
+        if undecided {
+            None
+        } else {
+            Some(false)
+        }
     }
 
     /// The named declaration an indexed access reads, when its terminal is
@@ -1268,7 +1445,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
     ) -> Option<EvaluateDeferredOutcome> {
         let (object, index) = match self.graph().node_data(node)?.as_ref() {
-            SemanticNodeData::IndexedAccess { object, index }
+            SemanticNodeData::IndexedAccess { object, index, .. }
                 if !matches!(index, IndexKey::Computed(_)) =>
             {
                 (*object, clone_index_key(index))
@@ -2395,6 +2572,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// authority here; `observe_component_meta_read_suppress` is retained
     /// PURELY to propagate the same partiality to the request /
     /// cold-compute scope (the component-meta / materialize warm gates).
+    /// Read the access `object[index]` a shell stands for. A complete read
+    /// that found no value answers as the shell's origin says.
+    fn indexed_read_action(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        object: SemanticNodeId,
+        index: IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+    ) -> DeferredEvaluationAction {
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: object,
+            index: clone_index_key(&index),
+            mode: indexed_read_mode(frame.demand.value_source_context(frame.context)),
+        });
+        let found_no_value = !read.result_is_partial()
+            && matches!(&read.value, QueryResult::Value(value) if self.read_holds_miss(*value));
+        if found_no_value {
+            if let Some(answer) = self.absent_access_answer(origin, object, &index, frame.context) {
+                frame.merge_read(&read);
+                return DeferredEvaluationAction::Finish(answer);
+            }
+        }
+        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
+    }
+
     fn deferred_read_action(
         &self,
         frame: &mut DeferredEvaluationFrame,
@@ -2907,10 +3109,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         });
                         self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                     }
-                    DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
+                    DeferredEvaluationStage::AwaitIndexedObject { index, origin } => match index {
                         IndexKey::Computed(index_node) => {
-                            frame.stage =
-                                DeferredEvaluationStage::AwaitIndexedIndex { object: child.node };
+                            frame.stage = DeferredEvaluationStage::AwaitIndexedIndex {
+                                object: child.node,
+                                origin,
+                            };
                             DeferredEvaluationAction::Push {
                                 node: index_node,
                                 context: ProjectionReductionContext::published(
@@ -2919,41 +3123,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .with_orthogonal_axes_from(frame.context),
                             }
                         }
-                        // A settled object answers without the walk. Any other
-                        // object is the walk's to read, as far as it demands.
-                        index
-                            if matches!(
-                                self.graph().node_data(child.node).as_deref(),
-                                Some(SemanticNodeData::Object(_))
-                            ) && self.indexed_access_proves_absence(
-                                child.node,
-                                &index,
-                                frame.context,
-                            ) =>
-                        {
-                            DeferredEvaluationAction::Finish(self.absent_index_recovery())
-                        }
-                        index => {
-                            let read = self.execute_read(SemanticQueryKey::IndexedAccess {
-                                base: child.node,
-                                index,
-                                mode: indexed_read_mode(
-                                    frame.demand.value_source_context(frame.context),
-                                ),
-                            });
-                            self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
-                        }
+                        index => self.indexed_read_action(frame, child.node, index, origin),
                     },
-                    DeferredEvaluationStage::AwaitIndexedIndex { object } => {
+                    DeferredEvaluationStage::AwaitIndexedIndex { object, origin } => {
                         let index = self.normalized_index_key_from_evaluated_node(child.node);
-                        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
-                            base: object,
-                            index,
-                            mode: indexed_read_mode(
-                                frame.demand.value_source_context(frame.context),
-                            ),
-                        });
-                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
+                        self.indexed_read_action(frame, object, index, origin)
                     }
                     DeferredEvaluationStage::AwaitValueChildren {
                         data,
@@ -3028,10 +3202,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 }
                             }
-                            SemanticNodeData::IndexedAccess { object, index } => {
+                            SemanticNodeData::IndexedAccess {
+                                object,
+                                index,
+                                origin,
+                            } => {
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 frame.stage = DeferredEvaluationStage::AwaitIndexedObject {
                                     index: clone_index_key(index),
+                                    origin: *origin,
                                 };
                                 DeferredEvaluationAction::Push {
                                     node: *object,

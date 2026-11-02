@@ -177,9 +177,13 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }) => *instance,
             _ => receiver,
         };
-        if let Some(printed) = self.dispatch.print_checker_type(printed) {
-            self.record_member_diagnostic(name, &printed, span);
-        }
+        // A type the checker's abbreviation is not reproduced for still has
+        // its report at this position: only the printed text is approximate.
+        let printed = self
+            .dispatch
+            .print_checker_type(printed)
+            .unwrap_or_else(|| self.dispatch.print_checker_type_clipped(printed));
+        self.record_member_diagnostic(name, &printed, span);
     }
 
     /// Report each `this` member read of the body the return did not select
@@ -270,14 +274,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     }
 
     /// Whether a chain rooted at `root`, evaluated to `node`, reads an object
-    /// literal's own `this`.
+    /// literal's own `this`, its own or a contextual one holding the type the
+    /// literal itself infers: printing either needs the return being inferred.
     #[inline(never)]
     pub(super) fn reads_own_literal(&self, root: &SliceExpr, node: SemanticNodeId) -> bool {
         match root {
             SliceExpr::This(verter_session_query::flow::slice::SliceThis::Value { .. }) => true,
-            SliceExpr::This(_) => self.receiver.as_ref().is_some_and(|bound| {
-                bound.infer_literal_members && bound.base.is_none() && bound.binder == node
-            }),
+            SliceExpr::This(_) => self
+                .receiver
+                .as_ref()
+                .is_some_and(|bound| bound.infer_literal_members && bound.binder == node),
             _ => false,
         }
     }

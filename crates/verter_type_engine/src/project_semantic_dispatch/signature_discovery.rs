@@ -2183,6 +2183,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Some(graph.intern_node(SemanticNodeData::IndexedAccess {
                         object: rest,
                         index: crate::semantic_query::IndexKey::Computed(index),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }))
                 }
                 RawPosition::Remaining(elements) => {

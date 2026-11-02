@@ -259,6 +259,7 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("a"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     // Deferred shell on source → Unknown.
     let before = graph.relation_memo_count();
@@ -442,6 +443,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
         index: IndexKey::Computed(parameter_node),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let mapper = MapperKey {
         over_type_variable: false,
@@ -486,7 +488,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
             "per-key value must not collapse to Opaque after failed evaluation — \
              the substituted node is required for re-dispatch"
         ),
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             assert_eq!(
                 *object, source,
                 "substituted IndexedAccess must preserve the source operand"
@@ -1552,12 +1554,14 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("a"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("b"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
 
     let before = graph.relation_memo_count();
@@ -1590,12 +1594,14 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("c"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let seed_target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("d"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let seed_key = dispatch.relate_key_for(seed_source, seed_target);
     // Empty carrier + empty self-roots validate trivially; stamp the live
@@ -3427,6 +3433,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
         index: IndexKey::Computed(parameter_node),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let mapper = MapperKey {
         over_type_variable: false,
@@ -3544,6 +3551,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
         index: IndexKey::Computed(parameter_node),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let mapper = MapperKey {
         over_type_variable: false,

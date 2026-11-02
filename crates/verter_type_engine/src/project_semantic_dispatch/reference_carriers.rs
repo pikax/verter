@@ -104,7 +104,7 @@ pub fn walk_reference_carriers<C: crate::resolver_core::ResolverCapabilities>(
                 worklist.push(*return_type);
                 worklist.extend(predicate.and_then(|predicate| predicate.ty));
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 worklist.push(*object);
                 if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);

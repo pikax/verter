@@ -2079,7 +2079,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// the checker's abbreviation is not known exactly
     /// ([`Self::print_diagnostic_type`] is `None`) the type prints every
     /// part, clipped where `typeToString` clips.
-    fn print_diagnostic_type_clipped(&self, node: SemanticNodeId) -> String {
+    pub(in crate::project_semantic_dispatch) fn print_diagnostic_type_clipped(
+        &self,
+        node: SemanticNodeId,
+    ) -> String {
         self.print_diagnostic_type(node).unwrap_or_else(|| {
             let strict_null_checks = self.relation_strict_config().strict_null_checks;
             crate::semantic_query::display::clip_checker_text(

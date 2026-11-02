@@ -1341,6 +1341,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         SemanticNodeData::IndexedAccess {
                             object: value,
                             index,
+                            origin: crate::semantic_query::IndexedAccessOrigin::Written,
                         },
                         scope.clone(),
                     )),
@@ -1355,6 +1356,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     SemanticNodeData::IndexedAccess {
                         object,
                         index: IndexKey::Computed(value),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Written,
                     },
                     scope.clone(),
                 ))

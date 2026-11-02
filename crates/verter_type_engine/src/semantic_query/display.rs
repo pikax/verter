@@ -304,7 +304,7 @@ fn pattern_declares_infer(
                     stack.push((remap, scoped, depth - 1));
                 }
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 children.push(*object);
                 if let IndexKey::Computed(index) = index {
                     children.push(*index);
@@ -1179,7 +1179,7 @@ fn display_resolved_type_node(
             let inner = render_operand(store, *base, needs, child_depth, visited, Prec::Prefix);
             format!("keyof {inner}")
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             let obj = render_operand(store, *object, needs, child_depth, visited, Prec::Postfix);
             let key = match index {
                 IndexKey::String(s) => {

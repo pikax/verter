@@ -11060,6 +11060,9 @@ pub(super) trait FlowDemandDriver {
     /// One type as the checker prints it in a message; `None` when its
     /// print is not known exactly.
     fn print_checker_type(&self, node: SemanticNodeId) -> Option<String>;
+    /// The checker's print of `node`, cut where its own abbreviation model
+    /// runs out.
+    fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String;
     /// Whether the global `Object` type every object reads declares `name`,
     /// or does not settle.
     fn global_object_declares(&self, name: &str, canonical: &str) -> bool;
@@ -11804,6 +11807,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
         self.print_diagnostic_type(node)
+    }
+    fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String {
+        self.print_diagnostic_type_clipped(node)
     }
     fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
         ProjectSemanticDispatch::global_object_declares(self, name, canonical)
@@ -12722,6 +12728,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
         self.driver.print_checker_type(node)
+    }
+    fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String {
+        self.driver.print_checker_type_clipped(node)
     }
     fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
         self.driver.global_object_declares(name, canonical)
@@ -25012,7 +25021,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                         crate::semantic_query::SurfaceKeyProjection::AbsentProven
-                            if surface.closed().has_index_signature() =>
+                            if surface.closed().has_index_signature()
+                                || surface.withholds_key(key) =>
                         {
                             any_unknown = true;
                         }

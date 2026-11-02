@@ -49,11 +49,12 @@ flow result. With no `ThisType` declared at all, a project whose `noLib`
 program declares every name reads the reference as the checker's TS2304 error
 type: `G & <error>` is the error type wherever it is reached, an argument
 relates to it, inference deposits nothing into its other arms, and the call
-completes with those parameters uninferred. Two parts are not modelled yet. A
-member the resulting store proves absent keeps its unread access rather than
-TS2339's `any` when the store is an intersection of aliases, and the store
-literal's `this` still reads the literal rather than `any`, so its flow result
-records TS2339 and TS7023 occurrences the checker does not report.
+completes with those parameters uninferred. A member the resulting store proves
+absent is a written access's TS2339 and `any`, and the store literal's `this`
+reads the error type, so what its functions reported on their own is forgotten:
+see `checker-diagnostics.md`. A contextual `this` holding the type the literal
+infers (`ThisType<A & M>`) is not the error type: a member it lacks is TS2339,
+and TS7023 at the method whose return reads it.
 Structural readers still instantiate the empty interface normally.
 
 Top-level contextual literals and calls containing context-sensitive object

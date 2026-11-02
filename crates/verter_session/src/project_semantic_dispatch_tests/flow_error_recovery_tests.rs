@@ -6,11 +6,12 @@
 //! rest of the program answering on its own. Whatever the checker's answer
 //! is not known for keeps its typed refusal.
 //!
-//! Oracle comparison: TypeScript 7.0.2.
-//! Every row was read through that version's native API over these sources
-//! under `noLib`: `getTypeAtPosition` on the probe alias, `typeToString` with
-//! `NoTruncation | InTypeAlias`, and `getSemanticDiagnostics` for each code,
-//! start and end.
+//! Oracle comparison: TypeScript 7.0.2, whose `tsc` differs from later releases
+//! on what a marked `this` reports.
+//! Every row was read through that version over these sources under `noLib`,
+//! by its native API (`getTypeAtPosition` on the probe alias, `typeToString`
+//! with `NoTruncation | InTypeAlias`, `getSemanticDiagnostics` for each code,
+//! start and end) or by `tsc`, assigning each probe to a type it does not fit.
 
 use std::sync::Arc;
 
@@ -190,6 +191,19 @@ fn an_absent_member_is_the_checkers_error_type() {
         &declaration("f"),
         &[ts2339("nothing", ".nothing")],
     );
+    for (source, within) in [
+        ("export function f() { const s = 'x'; return s.zz; }", ".zz"),
+        ("export function f(t: 'x' | 'y') { return t.zz; }", ".zz"),
+        ("export function f(t: true) { return t.zz; }", ".zz"),
+        ("export function f(t: 1) { return t.zz; }", ".zz"),
+    ] {
+        assert_row(
+            source,
+            &[("ReturnType<typeof f>", "any")],
+            &declaration("f"),
+            &[ts2339("zz", within)],
+        );
+    }
     assert_row(
         "export function f(o: { a: 1 } | { a: 2 }) { return o.bb; }",
         &[("ReturnType<typeof f>", "any")],
@@ -445,6 +459,10 @@ fn a_written_access_the_object_proves_absent_is_the_error_type() {
         ("[{ a: 1 }['b'], { a: 1 }['a']]", "[any, 1]"),
         ("ReturnType<{ a: 1 }['b']>", "any"),
         ("{ a: 1 }['b'] extends string ? 1 : 2", "any"),
+        ("{ a: 1 }['a' | 'b']", "any"),
+        ("{ a: 1 }['b']['c']", "any"),
+        ("Named['b']['c']", "any"),
+        // Both are the error type, which the checker prints as the name.
         ("Undeclared['b']", "any"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -457,23 +475,91 @@ fn a_written_access_the_object_proves_absent_is_the_error_type() {
     }
 }
 
+/// The checker answers a generic access where it instantiates, and with no
+/// access to report on: an absent key is `unknown`, with TS2536 at the generic
+/// declaration and no TS2339. An access over no generic object is settled where
+/// it is written, so its instantiation holds that access's error type.
+#[test]
+fn an_instantiated_access_of_an_absent_key_is_unknown() {
+    let project = Project::module(
+        "type Named = { a: 1 };\n\
+         type Open<T> = (T & { a: 1 })['b'];\n\
+         type Bounded<T extends { a: 1 }> = T['b'];\n\
+         type Branch<T> = T extends { a: 1 } ? T['b'] : never;\n\
+         type ByKey<K extends string> = { a: 1 }[K];\n\
+         type KeyUnion<K extends 'a' | 'b'> = { a: 1 }[K];\n\
+         type Mapped<K extends string> = { [P in K]: { a: 1 }[P] };\n\
+         type Two<T, U> = (T & U)['b'];\n\
+         type OverConditional<T> = (T extends { a: 1 } ? { c: 1 } : { d: 1 })['nope'];\n\
+         type Bare<T> = T['b'];\n\
+         type Member<T> = { x: T['b'] };\n\
+         type Own<T> = { own: T }['nope'];\n",
+    );
+    let unknown = [
+        "Open<{ c: 2 }>",
+        "Bounded<{ a: 1 }>",
+        "Branch<{ a: 1 }>",
+        "ByKey<'b'>",
+        "KeyUnion<'a' | 'b'>",
+        "Mapped<'b'>['b']",
+        "Two<{ a: 1 }, { c: 1 }>",
+        "OverConditional<{ a: 1 }>",
+        "Bare<Named>",
+        "Member<Named>['x']",
+    ];
+    let mut rows: Vec<(&str, &str)> = unknown.iter().map(|probe| (*probe, "unknown")).collect();
+    rows.extend([
+        ("Open<{ b: 2 }>", "2"),
+        ("ByKey<'a'>", "1"),
+        ("Own<1>", "any"),
+        // A written access of the instantiation's `unknown` is its own TS2339.
+        ("Bare<Named>['z']", "any"),
+    ]);
+    let failures = project.mismatches(&rows);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let host = project.host(ALL[0].options, &unknown);
+    for probe in 0..unknown.len() {
+        assert_eq!(
+            named_answer(&host, probe).checker_recovery_code(),
+            None,
+            "{}",
+            unknown[probe]
+        );
+    }
+    let host = project.host(ALL[0].options, &["Own<1>"]);
+    assert_eq!(named_answer(&host, 0).checker_recovery_code(), Some(2339));
+}
+
 /// An access absence is not proven for keeps its answer or its cause: an index
-/// signature or a present member reads its value, an open type parameter is
-/// decided once it is bound, and an unresolved import proves nothing.
+/// signature or a present member reads its value, an unresolved import proves
+/// nothing, and neither does an application whose genericness depends on what
+/// it names.
 #[test]
 fn an_access_absence_is_not_proven_for_is_no_recovery() {
     let project = Project::module(
         "import { Missing } from './nowhere';\n\
-         type Open<T> = (T & { a: 1 })['b'];\n\
+         type Foo<T> = { own: T };\n\
+         type Id<T> = T;\n\
+         type ThroughFoo<T> = Foo<T>['nope'];\n\
+         type ThroughId<T> = Id<T>['nope'];\n\
          export type Unresolved = Missing['b'];\n\
          export type Heritage = Missing & { a: 1 };\n",
     );
-    let failures = project.mismatches(&[
-        ("Record<string, 1>['b']", "1"),
-        ("Open<{ b: 2 }>", "2"),
-        ("Open<{ c: 2 }>", "any"),
-    ]);
+    let failures = project.mismatches(&[("Record<string, 1>['b']", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let host = project.host(ALL[0].options, &["ThroughFoo<1>", "ThroughId<{ a: 1 }>"]);
+    for probe in 0..2 {
+        let node = named_answer(&host, probe);
+        assert_eq!(node.checker_recovery_code(), None);
+        assert_ne!(
+            wire_answer(&host, &node),
+            TypeExpr::Primitive(PrimitiveName::Any)
+        );
+        assert_ne!(
+            wire_answer(&host, &node),
+            TypeExpr::Primitive(PrimitiveName::Unknown)
+        );
+    }
     let host = project.host(ALL[0].options, &["Unresolved", "Heritage['b']"]);
     for probe in 0..2 {
         let node = named_answer(&host, probe);
@@ -486,8 +572,10 @@ fn an_access_absence_is_not_proven_for_is_no_recovery() {
 }
 
 /// What a literal's functions report on their own is no report once the call
-/// gives the literal a `this`: a valid marked store reports nothing, and a read
-/// the marked `this` still lacks stays reported.
+/// gives the literal a `this`: a valid marked store reports nothing. A read the
+/// marked `this` still lacks stays reported, and a return it decides is circular
+/// under `noImplicitAny` when that `this` holds the type the literal infers,
+/// which the message prints.
 #[test]
 fn a_contextual_this_takes_the_literals_own_reports() {
     let marked = "declare function m<A>(o: { a?: A & ThisType<A & { n: 1 }> }): A;\n";
@@ -501,17 +589,44 @@ fn a_contextual_this_takes_the_literals_own_reports() {
         "{:?}",
         result.checker_diagnostics()
     );
-    let absent = Project::module(&format!(
-        "{marked}export const v = m({{ a: {{ r() {{ return this.nope; }} }} }});"
-    ));
-    let host = absent.host(ALL[0].options, &["typeof v"]);
-    let result = result_of(&host, &initializer("v")).expect("the store has a value");
-    let codes: Vec<u32> = result
-        .checker_diagnostics()
-        .iter()
-        .map(|diagnostic| diagnostic.code().code())
-        .collect();
-    assert_eq!(codes, [2339]);
+    assert_row(
+        &format!("{marked}export const v = m({{ a: {{ r() {{ return this.nope; }} }} }});"),
+        &[("typeof v", "{ r(): any }")],
+        &initializer("v"),
+        &[ts7023("r", "r() {"), ts2339("nope", "this.nope")],
+    );
+    assert_row(
+        "declare function m<A>(o: { a?: A & ThisType<{ n: 1 }> }): A;\n\
+         export const v = m({ a: { r() { return this.nope; } } });",
+        &[("typeof v", "{ r(): any }")],
+        &initializer("v"),
+        &[ts2339("nope", "this.nope")],
+    );
+}
+
+/// A namespace member the export table excludes is no absent member: reading it
+/// from a function keeps its typed cause, while a name the module does not
+/// export is the checker's TS2339.
+#[test]
+fn an_excluded_namespace_member_is_not_proven_absent() {
+    let files = [
+        ("a.ts", "export const x = 1;"),
+        ("b.ts", "export const x = 's';"),
+        ("index.ts", "export * from './a'; export * from './b';"),
+    ];
+    let project = Project::module_beside(
+        "import * as ns from './index';\n\
+         export function excluded() { return ns.x; }\n\
+         export function absent() { return ns.zz; }",
+        &files,
+    );
+    let host = project.host(ALL[0].options, &[]);
+    let result = result_of(&host, &declaration("excluded")).expect("the value degrades");
+    assert!(result.degradation().is_some());
+    assert!(result.checker_diagnostics().is_empty());
+    let result = result_of(&host, &declaration("absent")).expect("the read recovers");
+    assert_eq!(result.degradation(), None);
+    assert_eq!(result.checker_diagnostics().len(), 1);
 }
 
 /// A cancelled request answers no recovery, and the retry computes it.

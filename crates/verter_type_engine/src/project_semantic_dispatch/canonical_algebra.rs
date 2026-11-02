@@ -4226,10 +4226,12 @@ fn compare_shallow(
             D::IndexedAccess {
                 object: oa,
                 index: ia,
+                ..
             },
             D::IndexedAccess {
                 object: ob,
                 index: ib,
+                ..
             },
         ) => {
             match (

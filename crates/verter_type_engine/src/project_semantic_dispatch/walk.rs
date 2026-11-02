@@ -1240,6 +1240,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "Boolean",
             Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => "BigInt",
             Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => "Symbol",
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                verter_type_expr::LiteralValue::String(_) => "String",
+                verter_type_expr::LiteralValue::Number(_) => "Number",
+                verter_type_expr::LiteralValue::Boolean(_) => "Boolean",
+                verter_type_expr::LiteralValue::BigInt(_) => "BigInt",
+            },
             _ => return false,
         };
         matches!(
@@ -2040,8 +2046,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                 },
             };
-            self.graph()
-                .intern_preserving_scope(base, SemanticNodeData::IndexedAccess { object, index })
+            self.graph().intern_preserving_scope(
+                base,
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index,
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
+                },
+            )
         })
     }
 
@@ -2357,6 +2369,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .any(|member| member.key.as_known().is_none())
             && absent(name)
             && name.element_access_equivalent().as_ref().is_none_or(absent)
+            && !matches!(name, PropertyKey::String(text) if view.withholds_key(text.as_ref()))
     }
 
     /// Record the step an indexed access takes through an index signature
@@ -3429,6 +3442,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             SemanticNodeData::IndexedAccess {
                 object,
                 index: IndexKey::Computed(index),
+                origin: crate::semantic_query::IndexedAccessOrigin::Composed,
             },
         );
         let mut output = QueryBuildOutput::from((QueryResult::Value(carrier), self.fence.clone()))
@@ -4581,7 +4595,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     current = resolved;
                 }
-                SemanticNodeData::IndexedAccess { object, index: ix } => {
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index: ix,
+                    origin,
+                } => {
+                    let origin = *origin;
                     // Path-precision rule (mirrors the `InstantiationRef`
                     // intermediate-hop demotion above and `evaluate.rs`):
                     // this arm only runs inside `while index < path.len()`,
@@ -4614,10 +4633,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let resolved =
                         match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
                             base: object,
-                            index: ix,
+                            index: ix.clone(),
                             mode: ProjectionMode::Navigate,
                         }) {
-                            QueryResult::Value(id) => id,
+                            QueryResult::Value(id) => self
+                                .dispatch
+                                .absent_read_answer(origin, id, object, &ix, self.context)
+                                .unwrap_or(id),
                             _ => {
                                 results.push(self.opaque_miss());
                                 return;
@@ -8837,7 +8859,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // arm) — and the RESOLVED value contributes its surface. An
             // access the query cannot close contributes nothing (the honest
             // unresolvable fallback).
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let object = *object;
                 let index = index.clone();
                 drop(data);
@@ -9318,6 +9340,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
                         object: source,
                         index: IndexKey::Computed(key_arg),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }),
                 }
             } else {
@@ -9807,6 +9830,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
                             object: source,
                             index: IndexKey::from_known(key.key.clone()),
+                            origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                         }),
                     }
                 } else if value_expr_is_k_independent {
@@ -11617,6 +11641,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         return false;
                     }
                 }
+                // `unknown` has no property at all.
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => {}
                 _ => match self
                     .normalize_node_for_structural_fact_demand(concrete, context)
                     .into_complete_node()

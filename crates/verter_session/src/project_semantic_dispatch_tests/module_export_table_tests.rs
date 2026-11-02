@@ -758,18 +758,19 @@ fn star_exports_exclude_ambiguous_names_and_default() {
             },
         )
     };
-    for probe in ["typeof ns.x", "typeof ns.default"] {
+    for probe in ["typeof ns.x", "(typeof ns)['x']", "typeof ns.default"] {
         assert_eq!(
             measure(probe),
             "Opaque(Miss)",
             "excluded namespace member: {probe}"
         );
     }
-    // A written access reads the closed surface the table publishes.
-    let written = measure("(typeof ns)['x']");
+    // The table only leaves the excluded name out. A name it does not know of
+    // is absent, and reading that as written is the checker's TS2339.
+    let absent = measure("(typeof ns)['zz']");
     assert!(
-        written.contains("CheckerRecovery"),
-        "excluded namespace member, written: {written}"
+        absent.contains("CheckerRecovery"),
+        "absent member: {absent}"
     );
 }
 

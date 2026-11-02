@@ -2888,7 +2888,7 @@ impl MapperKind {
                 value_id = *inner;
             }
             let (object, index) = match graph.node_data(value_id).as_deref() {
-                Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+                Some(SemanticNodeData::IndexedAccess { object, index, .. }) => (*object, index.clone()),
                 _ => return MapperKind::Computed,
             };
             if object != source {
@@ -4619,6 +4619,9 @@ pub struct SurfaceView {
     pub(crate) index_signatures: Arc<[IndexSignature]>,
     pub(crate) keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
+    /// Names this surface leaves out although the declarations behind it may
+    /// well answer them: a missing member proves nothing about these.
+    withheld_keys: Arc<[verter_type_expr::OwnedStr]>,
 }
 
 impl SurfaceView {
@@ -4644,6 +4647,7 @@ impl SurfaceView {
             index_signatures: self.index_signatures.clone(),
             keyspace: self.keyspace.clone(),
             has_index_signature: self.has_index_signature.clone(),
+            withheld_keys: self.withheld_keys.clone(),
         }
     }
 }
@@ -5219,6 +5223,7 @@ impl SurfaceView {
             index_signatures,
             keyspace,
             has_index_signature,
+            withheld_keys: Arc::from([]),
         }
     }
 
@@ -5251,7 +5256,27 @@ impl SurfaceView {
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace,
             has_index_signature,
+            withheld_keys: Arc::from([]),
         }
+    }
+
+    /// This surface, leaving out the names `withheld`.
+    #[must_use]
+    pub(crate) fn withholding_keys(mut self, withheld: Vec<verter_type_expr::OwnedStr>) -> Self {
+        self.withheld_keys = Arc::from(withheld.into_boxed_slice());
+        self
+    }
+
+    /// Hand each name this surface withholds to `encode`, in order.
+    pub(crate) fn encode_withheld_keys(&self, mut encode: impl FnMut(&str)) {
+        for key in self.withheld_keys.iter() {
+            encode(key.as_ref());
+        }
+    }
+
+    /// Whether this surface leaves `name` out without proving it absent.
+    pub(crate) fn withholds_key(&self, name: &str) -> bool {
+        self.withheld_keys.iter().any(|key| key.as_ref() == name)
     }
 
     pub fn from_init(init: SurfaceViewInit) -> Self {
@@ -5555,6 +5580,7 @@ impl std::hash::Hash for SurfaceView {
         self.entries.hash(state);
         self.keyspace.hash(state);
         self.has_index_signature.hash(state);
+        self.withheld_keys.hash(state);
     }
 }
 
@@ -11131,6 +11157,21 @@ impl ObjectSpreadProgram {
     }
 }
 
+/// Which access a deferred `T[K]` shell stands for, as far as an absent key
+/// goes: the checker's `getIndexedAccessType` answers by whether it holds an
+/// access node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexedAccessOrigin {
+    /// An access the engine composed for its own reading; an absent key stays
+    /// the typed miss.
+    Composed,
+    /// An access written in a type position: an absent key is the checker's
+    /// TS2339, read as its error type.
+    Written,
+    /// The instantiation of a written access over a generic object or index:
+    /// an absent key is `unknown`, and nothing is reported.
+    Instantiated,
+}
 #[derive(Debug)]
 pub enum SemanticNodeData {
     /// A compiler-native intrinsic operation applied to its operands, kept
@@ -11225,6 +11266,9 @@ pub enum SemanticNodeData {
     IndexedAccess {
         object: SemanticNodeId,
         index: IndexKey,
+        /// Which access this shell stands for, which decides what an absent
+        /// key answers.
+        origin: IndexedAccessOrigin,
     },
     /// Deferred mapped-type shell used when the solver/bridge needs to
     /// preserve `{ [K in Source]: Value }` structure across the dispatch
@@ -11621,9 +11665,14 @@ impl SemanticNodeData {
                 expressions: expressions.share(),
             },
             Self::KeyOf { base } => Self::KeyOf { base: base.clone() },
-            Self::IndexedAccess { object, index } => Self::IndexedAccess {
+            Self::IndexedAccess {
+                object,
+                index,
+                origin,
+            } => Self::IndexedAccess {
                 object: object.clone(),
                 index: index.clone(),
+                origin: *origin,
             },
             Self::Mapped { source, mapper } => Self::Mapped {
                 source: source.clone(),
@@ -11905,12 +11954,14 @@ impl PartialEq for SemanticNodeData {
                 Self::IndexedAccess {
                     object: ao,
                     index: ai,
+                    origin: aorigin,
                 },
                 Self::IndexedAccess {
                     object: bo,
                     index: bi,
+                    origin: borigin,
                 },
-            ) => ao == bo && ai == bi,
+            ) => ao == bo && ai == bi && aorigin == borigin,
             (
                 Self::Mapped {
                     source: asrc,
@@ -12123,9 +12174,14 @@ impl std::hash::Hash for SemanticNodeData {
             Self::KeyOf { base } => {
                 base.hash(state);
             }
-            Self::IndexedAccess { object, index } => {
+            Self::IndexedAccess {
+                object,
+                index,
+                origin,
+            } => {
                 object.hash(state);
                 index.hash(state);
+                origin.hash(state);
             }
             Self::Mapped { source, mapper } => {
                 source.hash(state);

@@ -401,7 +401,7 @@ Acceptance: `a_const_tuple_element_read_is_the_element_the_checker_reads`, `a_ne
   | `return n > 0 && f(n - 1);` | `any` + **TS7023** |
   | `return { a: n > 0 ? f(n - 1) : 0 };` | `any` + **TS7023** |
 
-  Publishing the concrete arm alone would be `number` where the checker answers `any`, a divergence in the direction this substrate must never move. Acceptance: `flow_return_ternary_self_recursion_refuses_where_the_checker_refuses`.
+  Publishing the concrete arm alone would be `number` where the checker answers `any`, a divergence in the direction this substrate must never move. Acceptance: `a_composed_or_variable_self_call_is_circular`.
 - **Flow-return recorded debt (deferred, with owners).** Each row is a measured, PRE-EXISTING divergence outside this substrate's own boundary; none is introduced or worsened by the flow rail, and each is fixed by its named owner rather than opportunistically here — opportunistic fixes on the shared PathWalker are exactly what turned a pre-existing wrong overload answer into an `any` leak on component-meta's hottest path. Rows FR-D1 / FR-D2 / FR-D3 / FR-D4 are captured as `#[ignore]`d tests with REAL bodies asserting the CHECKER's answer plus the verbatim un-ignored failure, in `project_semantic_dispatch_tests/flow_return_lexical_tests.rs` (`heritage_redeclared_method_answers_the_derived_declaration`, `accessor_pair_read_publishes_the_getters_return`, `undefined_identifier_publishes_the_undefined_primitive`, `call_in_a_logical_operand_publishes_the_operand_union`) — the owning block inherits an executable repro, not a paragraph. The remaining rows are shape/perf notes with no single asserting point.
 
   | row | measured behaviour | checker | owner | resolution gate |

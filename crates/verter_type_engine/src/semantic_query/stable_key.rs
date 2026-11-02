@@ -1316,10 +1316,19 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.header(category::SYNTHETIC, subtag::KEYOF);
             enc.child(*base);
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess {
+            object,
+            index,
+            origin,
+        } => {
             enc.header(category::SYNTHETIC, subtag::INDEXED_ACCESS);
             enc.child(*object);
             encode_property_key(&mut enc, index);
+            enc.u8(match origin {
+                crate::semantic_query::IndexedAccessOrigin::Composed => 0,
+                crate::semantic_query::IndexedAccessOrigin::Written => 1,
+                crate::semantic_query::IndexedAccessOrigin::Instantiated => 2,
+            });
         }
         SemanticNodeData::Mapped { source, mapper } => {
             enc.header(category::SYNTHETIC, subtag::MAPPED);
@@ -1584,6 +1593,11 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 encode_surface_entry(&mut enc, entry);
             }
             enc.bool(surface.has_known_index_signature());
+            surface.encode_withheld_keys(|name| {
+                enc.u8(1);
+                enc.bytes(name.as_bytes());
+            });
+            enc.u8(0);
             match surface.keyspace {
                 None => enc.u8(0),
                 Some(ks) => {

@@ -2888,7 +2888,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // A shell the lane keeps where it is written (`Rec["a"]`,
                 // `keyof O`) is generic only over a generic operand; the
                 // checker resolved it.
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     pending.push((*object, infer_operand));
                     if let crate::semantic_query::IndexKey::Computed(index) = index {
                         pending.push((*index, infer_operand));

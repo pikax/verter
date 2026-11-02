@@ -294,7 +294,7 @@ impl PayloadHeap for SemanticNodeData {
                 expressions.visit_payload_heap(visitor);
             }
             Self::KeyOf { base } => base.visit_payload_heap(visitor),
-            Self::IndexedAccess { object, index } => {
+            Self::IndexedAccess { object, index, .. } => {
                 object.visit_payload_heap(visitor);
                 index.visit_payload_heap(visitor);
             }
@@ -446,6 +446,7 @@ impl PayloadHeap for SurfaceView {
             index_signatures,
             keyspace,
             has_index_signature,
+            withheld_keys,
         } = self;
         // The lists are private to the surface and borrowed as slices.
         visit_arc_slice(entries, visitor);
@@ -455,6 +456,7 @@ impl PayloadHeap for SurfaceView {
         visit_arc_slice(index_signatures, visitor);
         keyspace.visit_payload_heap(visitor);
         has_index_signature.visit_payload_heap(visitor);
+        visit_arc_slice(withheld_keys, visitor);
     }
 }
 

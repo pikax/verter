@@ -961,6 +961,7 @@ fn reverse_homomorphic_reduces_more_than_eight_root_conditionals() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let mut template = projection;
     for index in (0..12).rev() {
@@ -2095,6 +2096,7 @@ fn reverse_projection_rejects_nested_materialized_opaque_candidates() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -2172,6 +2174,7 @@ fn mutable_container_nested_projection_subtrees_use_only_the_binding_direction()
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let nested_projection = intern_object_with_members(
         &graph,
@@ -2546,6 +2549,7 @@ fn reverse_homomorphic_nonterminal_tuple_rest_uses_the_broad_number_key() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let fixed_zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "0".to_string(),
@@ -2658,6 +2662,7 @@ fn conditional_applications_reuse_demanded_arguments_and_keep_origins() {
         let argument = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: source,
             index: IndexKey::String(verter_type_expr::OwnedStr::from(key)),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         let application = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: identity.clone(),
@@ -2775,6 +2780,7 @@ fn demanded_imported_arguments_share_their_defining_scope() {
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: outer,
                 index: IndexKey::String(verter_type_expr::OwnedStr::from("child")),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             })
         } else {
             source
@@ -2782,6 +2788,7 @@ fn demanded_imported_arguments_share_their_defining_scope() {
         let argument = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: source,
             index: IndexKey::String(verter_type_expr::OwnedStr::from("value")),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         let application = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
@@ -2957,6 +2964,7 @@ fn conditional_branch_keeps_an_argument_cached_by_a_closed_demand() {
     let argument = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("value")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let (_, completeness, suppressed) =
@@ -5763,6 +5771,7 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
     let shell = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: root,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: shell,
@@ -5897,7 +5906,7 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
     // caller's mode; the `object` Mid carrier resolves and `['b']`
     // projects `number`.
     let (shell_object, shell_index) = match graph.node_data(mixed_body).as_deref() {
-        Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+        Some(SemanticNodeData::IndexedAccess { object, index, .. }) => (*object, index.clone()),
         other => panic!("expected IndexedAccess shell, got {other:?}"),
     };
     let mixed_terminal = match dispatch.execute_type_node(SemanticQueryKey::IndexedAccess {
@@ -15102,6 +15111,7 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -15146,6 +15156,7 @@ fn reverse_homomorphic_nested_bare_ref_projection_candidate_stays_deferred() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -15214,6 +15225,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -15268,6 +15280,7 @@ fn reverse_homomorphic_nested_type_param_bound_poison_stays_deferred() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -15324,6 +15337,7 @@ fn reverse_homomorphic_synthetic_binding_descends_value_node_without_over_refusa
     let known_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: known_infer,
         index: IndexKey::Computed(known_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let known_target = reverse_test_target(
         &graph,
@@ -15356,6 +15370,7 @@ fn reverse_homomorphic_synthetic_binding_descends_value_node_without_over_refusa
     let unresolved_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: unresolved_infer,
         index: IndexKey::Computed(unresolved_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let unresolved_target = reverse_test_target(
         &graph,
@@ -15403,6 +15418,7 @@ fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -15480,6 +15496,7 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let template = intern_object_with_members(
         &graph,
@@ -15607,6 +15624,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer_t,
         index: IndexKey::Computed(mapper_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let template = intern_object_with_members(
         &graph,
@@ -16086,6 +16104,7 @@ fn reverse_homomorphic_reduces_key_sensitive_conditionals_nested_in_template_mem
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "a".to_string(),
@@ -16178,6 +16197,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
         let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: infer,
             index: IndexKey::Computed(parameter),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         let conditional = graph.intern_node(SemanticNodeData::Conditional {
             check: parameter,
@@ -16272,6 +16292,7 @@ fn reverse_homomorphic_array_and_tuple_containers_preserve_source_readonly_acros
             let array_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: array_infer,
                 index: IndexKey::Computed(array_parameter),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             });
             let array_target = reverse_test_target(
                 &graph,
@@ -16305,6 +16326,7 @@ fn reverse_homomorphic_array_and_tuple_containers_preserve_source_readonly_acros
             let tuple_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: tuple_infer,
                 index: IndexKey::Computed(tuple_parameter),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             });
             let tuple_target = reverse_test_target(
                 &graph,
@@ -16423,6 +16445,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
     let array_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: array_infer,
         index: IndexKey::Computed(array_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let array_target = reverse_test_target(
         &graph,
@@ -16450,6 +16473,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
     let tuple_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tuple_infer,
         index: IndexKey::Computed(tuple_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let tuple_target = reverse_test_target(
         &graph,
@@ -16498,6 +16522,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
     let object_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: object_infer,
         index: IndexKey::Computed(object_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let object_target = reverse_test_target(
         &graph,
@@ -16694,6 +16719,7 @@ fn reverse_projection_control_and_degraded_candidates_fail_closed() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -16765,6 +16791,7 @@ fn reverse_homomorphic_normalizes_a_transparent_closed_source_alias() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -16823,6 +16850,7 @@ fn reverse_homomorphic_normalizes_declref_and_instantiationref_sources() {
         let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: infer,
             index: IndexKey::Computed(parameter),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         let target = reverse_test_target(
             &graph,
@@ -16853,6 +16881,7 @@ fn reverse_homomorphic_normalizes_declref_and_instantiationref_sources() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -16929,6 +16958,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
         let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: infer,
             index: IndexKey::Computed(parameter),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         let target =
             reverse_test_target(&graph, infer, parameter, projection, optionality, readonly);
@@ -17163,6 +17193,7 @@ fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let fixed_key = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "0".to_string(),
@@ -17298,6 +17329,7 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: infer,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -17333,6 +17365,7 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
     let union_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: union_infer,
         index: IndexKey::Computed(union_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let losing_target = intern_object_with_members(
         &graph,
@@ -17385,6 +17418,7 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
     let intersection_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: intersection_infer,
         index: IndexKey::Computed(intersection_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let intersection_template = intern_object_with_members(
         &graph,
@@ -17499,6 +17533,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
         let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: infer,
             index: IndexKey::Computed(parameter),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         let wrap = |value| match label {
             "object" => intern_object_with_members(
@@ -17614,6 +17649,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: scoped_reference,
         index: IndexKey::Computed(parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let target = reverse_test_target(
         &graph,
@@ -17640,6 +17676,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     let bare_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: unrelated_bare,
         index: IndexKey::Computed(bare_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let bare_target = reverse_test_target(
         &graph,
@@ -17666,6 +17703,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     let shadow_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: shadow_reference,
         index: IndexKey::Computed(shadow_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let shadow_template = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
@@ -17752,6 +17790,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     let wrong_parameter_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: identity_infer,
         index: IndexKey::Computed(same_name_other_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let identity_target = reverse_test_target(
         &graph,
@@ -17776,6 +17815,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     let remap_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: remap_infer,
         index: IndexKey::Computed(remap_parameter),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let remapped_target = graph.intern_node(SemanticNodeData::Mapped {
         source: remap_infer,
@@ -18554,6 +18594,7 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
     let check = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
         index: IndexKey::Computed(k_param),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let value_expr = graph.intern_node(SemanticNodeData::Conditional {
         check,
@@ -20554,6 +20595,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: wrap_of_t,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21088,6 +21130,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     let node_nested = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![nested_obj]),
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21102,6 +21145,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     let node_inline = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inline_obj,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21136,6 +21180,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     let node_fn_open = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![fn_open]),
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21167,6 +21212,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     let node_fn_closed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![fn_closed]),
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21686,6 +21732,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
             verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(0)
                 .expect("canonical"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -22277,6 +22324,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     let open_value_access = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: mapped_open_value,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -22300,6 +22348,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     let fixed_keys_access = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: mapped_fixed_keys,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -26814,7 +26863,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
     // `IndexedAccess { object: source, index: 'p' }` carrier —
     // re-dispatchable by consumers, distinguishable from absence.
     match graph.node_data(member.value).as_deref() {
-        Some(SemanticNodeData::IndexedAccess { object, index }) => {
+        Some(SemanticNodeData::IndexedAccess { object, index, .. }) => {
             assert_eq!(*object, source, "carrier indexes the mapped SOURCE");
             match index {
                 IndexKey::String(spelling) => {
@@ -30631,12 +30680,14 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("a"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let outer = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: mid,
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("k"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
@@ -33315,6 +33366,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
         let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: src,
             index: IndexKey::Computed(k_param),
+            origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
         });
         MapperKey {
             over_type_variable: false,
@@ -33457,6 +33509,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: props_ref,
         index: IndexKey::Computed(k_param),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let mapper = MapperKey {
         over_type_variable: false,

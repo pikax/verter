@@ -268,11 +268,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         memo: &ViewMemo,
         deferred_position: bool,
     ) -> ProjectionFinish {
-        let SemanticNodeData::IndexedAccess { object, index } = data else {
+        let SemanticNodeData::IndexedAccess {
+            object,
+            index,
+            origin,
+        } = data
+        else {
             unreachable!("indexed projection carries an indexed access")
         };
         let object_context = self.indexed_access_operand_context(*object, context);
         let object_id = projected(memo, *object, object_context);
+        let authored_index = index;
         let index = match index {
             IndexKey::String(value) => IndexKey::String(value.clone()),
             IndexKey::Number(value) => IndexKey::Number(*value),
@@ -291,6 +297,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }),
         };
         let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
+        let origin = if object_id == *object && index == *authored_index {
+            *origin
+        } else {
+            self.instantiated_access_origin(*origin, *object, authored_index)
+        };
         let should_defer = !proven_empty
             && (!may_reduce_operator(context)
                 || context.mode == ProjectionMode::Skeleton
@@ -305,14 +316,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::IndexedAccess {
                     object: object_id,
                     index,
+                    origin,
                 },
             ))
         } else {
+            let answer = |value: SemanticNodeId| {
+                self.absent_read_answer(origin, value, object_id, &index, context)
+            };
             match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                 base: object_id,
-                index,
+                index: index.clone(),
                 mode: ProjectionMode::Navigate,
             }) {
+                QueryResult::Value(SemanticQueryOutput { value, .. })
+                    if answer(value).is_some() =>
+                {
+                    ProjectionFinish::Node(answer(value).expect("checked by the guard"))
+                }
                 QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => {
                     if context.mode == ProjectionMode::Expanded {
                         let generic_interface = |base: &crate::semantic_query::DeclIdentity| {

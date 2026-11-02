@@ -485,6 +485,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         index: crate::semantic_query::IndexKey::String(
                             verter_type_expr::OwnedStr::from(key.as_string()?),
                         ),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     });
                     Some(crate::semantic_query::SurfaceEntry::Member(member))
                 }

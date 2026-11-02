@@ -111,6 +111,14 @@ impl<'a> Project<'a> {
         }
     }
 
+    /// A module of `source` beside the modules `declarations`.
+    pub(super) fn module_beside(source: &str, declarations: &'a [(&'a str, &'a str)]) -> Self {
+        Self {
+            declarations,
+            scenario: format!("{source}\nexport {{}};\n"),
+        }
+    }
+
     /// Each probe resolved by name under `options` — the alias `__P{i}`
     /// beside the scenario in one project — as its wire answer.
     fn answers(&self, options: &str, probes: &[&str]) -> Vec<TypeExpr> {

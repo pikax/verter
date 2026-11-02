@@ -6516,6 +6516,12 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
         "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); return { v: x } }",
         verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
+    // An absent member beside the unmodelled effect recovers nothing: the
+    // answer it would read as is not the function's, and nothing is admitted.
+    expect_refused_flow_as(
+        "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); const o = { a: 1 }; return { v: x, w: o.bb } }",
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
 
     // Negative control: a directly invoked write remains effectful and
     // fails closed.

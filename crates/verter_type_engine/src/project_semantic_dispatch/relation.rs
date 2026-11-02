@@ -5302,7 +5302,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stack.extend(expressions.iter().copied());
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let IndexKey::Computed(index) = index {
                         stack.push(*index);
@@ -6451,6 +6451,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
             object: spec.base_infer,
             index: IndexKey::Computed(spec.mapper_parameter),
+            origin: crate::semantic_query::IndexedAccessOrigin::Composed,
         });
         let projection_probe =
             self.substitute_semantic_type_param(projection_probe, spec.mapper_parameter, key);
@@ -6602,7 +6603,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             match data.as_ref() {
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     if !shadowed
                         && index == expected_index
                         && self.reverse_projection_object_matches(
@@ -16244,7 +16245,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     /// operand, and for a computed index of a constrained parameter, whose
     /// constraint reads the index's own first.
     fn rigid_indexed_access_constraint(&self, data: &SemanticNodeData) -> Option<SemanticNodeId> {
-        let SemanticNodeData::IndexedAccess { object, index } = data else {
+        let SemanticNodeData::IndexedAccess { object, index, .. } = data else {
             return None;
         };
         let graph = self.graph();
@@ -16267,6 +16268,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             (Some(constraint), index) => graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: constraint,
                 index: index.clone(),
+                origin: crate::semantic_query::IndexedAccessOrigin::Composed,
             }),
         })
     }

@@ -350,7 +350,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     ) -> SemanticNodeId {
         let part = |id: SemanticNodeId| read.get(&id).copied().unwrap_or(id);
         match data {
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 return self.declared_indexed_read(node, *object, index.clone());
             }
             SemanticNodeData::Union(members) => {

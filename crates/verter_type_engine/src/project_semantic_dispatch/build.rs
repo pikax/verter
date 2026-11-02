@@ -14054,7 +14054,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         stack.extend(expressions.iter().copied());
                     }
                     SemanticNodeData::KeyOf { base } => stack.push(*base),
-                    SemanticNodeData::IndexedAccess { object, index } => {
+                    SemanticNodeData::IndexedAccess { object, index, .. } => {
                         stack.push(*object);
                         if let IndexKey::Computed(idx_node) = index {
                             stack.push(*idx_node);
@@ -14446,6 +14446,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     SemanticNodeData::IndexedAccess {
                         object: base,
                         index: index.clone(),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     },
                 );
                 let mut out = super::walk::QueryBuildOutput::from((
@@ -14580,7 +14581,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.finite_index_keys(index)
     }
 
-    fn finite_index_keys(
+    pub(super) fn finite_index_keys(
         &self,
         index: SemanticNodeId,
     ) -> Option<Vec<crate::semantic_query::IndexKey>> {
@@ -14824,23 +14825,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut walker = PathWalker::new(self, context, &fence);
         walker.record_prefix_receipts(start_base, &walker_path);
         let result = walker.walk(start_base, walker_path.as_ref());
-        // A written indexed access its object proves absent is the checker's
-        // TS2339. A walk that stopped early proves nothing, and a walk that
-        // found a value or kept a carrier reads no further declaration here.
-        let result = match path.as_ref() {
-            [PathSegment::Index(index)]
-                if matches!(
-                    walker.completeness,
-                    crate::semantic_query::ResultCompleteness::Complete
-                ) && matches!(
-                    self.graph().node_data(result).as_deref(),
-                    Some(SemanticNodeData::Opaque(QueryError::Miss))
-                ) && self.indexed_access_proves_absence(base, index, context) =>
-            {
-                self.absent_index_recovery()
-            }
-            _ => result,
-        };
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
         // A member read through a reference binds the member's polymorphic
@@ -16652,6 +16636,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.graph().intern_node(SemanticNodeData::IndexedAccess {
                     object: container,
                     index: self.normalized_index_key_node(key),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                 })
             }
             crate::semantic_query::MapperKind::Computed => {
@@ -17434,6 +17419,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => graph.intern_node(SemanticNodeData::IndexedAccess {
                         object: source,
                         index: IndexKey::from_known(key.key.clone()),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }),
                 }
             } else if value_expr_is_k_independent {
@@ -17570,6 +17556,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (None, true) => graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: source,
                     index: IndexKey::Computed(index_key.key_type),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                 }),
                 (_, false) if value_expr_is_k_independent => {
                     if shared_value.is_none() {
@@ -17835,6 +17822,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             if matches!(data.as_ref(), SemanticNodeData::IndexedAccess {
                 object, index: crate::semantic_query::IndexKey::Computed(index),
+                ..
             } if (*object == source || *object == resolved_source) && *index == mapper.parameter_node)
             {
                 reads.push(node);
@@ -18580,7 +18568,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);

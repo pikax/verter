@@ -211,6 +211,25 @@ read) and TS7024 (an anonymous function) are not reported. A cycle through anoth
 initializer stays a typed `Unresolved` failure. TS7006 is reported only where the error type is the
 literal's contextual type, and TS2304 only for a name such a literal's contextual type reads. A literal
 whose contextual type is an authored `any` still reads its own `this`, where the checker reads `any`.
+A read a contextual `this` lacks outside a return is not reported, because that `this`'s members can
+be bodies of their own. A written access's TS2339 carries its code on the answer and no location: the
+shell it comes from has none to give. A receiver whose print the abbreviation model does not reproduce
+keeps its report with a clipped message.
+
+An indexed access's fate follows `getIndexedAccessType`, by the `IndexedAccessOrigin` of its shell:
+
+| Origin | Absent key answers | Set by |
+| --- | --- | --- |
+| `Written` | TS2339 and the error type | the authored lowering of a type-position access |
+| `Instantiated` | `unknown`, nothing reported | instantiating a written access over a generic object or index (`isGenericObjectType`, `isGenericIndexType`) |
+| `Composed` | the typed miss | anything the engine builds for its own reading, and a written access whose genericness depends on what an application over a free parameter names (`Foo<T>['k']`) |
+
+A written access over a non-generic object stays `Written` through instantiation (`{ own: T }['k']`
+is settled where it is written). A key that names no value proves nothing through a surface that
+withholds it: a module object leaves out the names its export table excludes (`SurfaceView::withholds_key`),
+so `(typeof ns)['x']` on an ambiguous star export stays the typed miss while `(typeof ns)['zz']` recovers.
+Recovery sits on the shell's consumers (`absent_read_answer`), never on the shared `IndexedAccess`
+and `ProjectPath` queries, which keep answering the typed miss to every path a consumer demands.
 
 ## Formatted node and walker diagnostics
 
