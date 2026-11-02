@@ -33,9 +33,11 @@ Reproduce with the read-only driver. It exits non-zero if any record is unreadab
 ```sh
 node scripts/ci-concurrency-observe.mjs --repo pikax/verter --annotations \
   --run 40324254479 --run 40327765458 --run 40328263341 \
-  --run 41349220820 --run 41286541386@1 --run 41286541386@2 --run 41286541386@3 \
+  --run 41349220820@1 --run 41286541386@1 --run 41286541386@2 --run 41286541386@3 \
   --run 40276061212 --run 40277406274
 ```
+
+The command was run end to end on 2026-11-02 against the unauthenticated API: 22 requests with the default budget, no unreadable record, no verdict violation, and every table row below matches. Without `@attempt` the driver reads the latest attempt, so a run that was re-run since (41349220820, now at attempt 2) needs its attempt named. `--annotations` reads only the first cancelled job's cause; `--annotations-all` reads every cancelled job and needs a larger `--max-requests` or a token.
 
 "Cancelled, ran" means the job held a runner when it was cancelled. "Cancelled, no runner" means it never reached one. Peak is the most jobs running at once in that attempt.
 
