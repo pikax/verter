@@ -76,215 +76,321 @@
       "path": ["CLI0", "CLI1", "TSB7"],
       "targets": ["packages/verter/src/commands/build"],
       "acceptance": "TSB7-AC1"
+    },
+    {
+      "id": "TSB8",
+      "path": ["CLI0", "CLI1", "CLITS0", "TSB7C", "TSB8"],
+      "targets": ["crates/verter_tsc/src"],
+      "acceptance": "TSB8-AC2"
     }
   ],
   "inventory": [
     {
       "id": "ApplicationServices",
       "owner": "CLI1",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
     },
     {
       "id": "SelectionPlan",
       "owner": "CLI1",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
     },
     {
       "id": "Reporter",
       "owner": "CLI1",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
     },
     {
       "id": "WriteTransaction",
       "owner": "CLI1",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
     },
     {
       "id": "CommandCapability",
       "owner": "CLI1",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "separate package launchers and command-local project logic"
     },
     {
       "id": "typecheck",
       "owner": "CLI2",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "tsc",
       "owner": "CLITS0",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "compile",
       "owner": "CLIC0",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "type-info",
       "owner": "CLI4",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "lsp",
       "owner": "CLI4",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "mcp",
       "owner": "CLI4",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "format",
       "owner": "CLIF0",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "lint",
       "owner": "CLIL0",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "check",
       "owner": "CLI3",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "fix",
       "owner": "CLI3",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "build",
       "owner": "TSB7",
-      "kind": "outcome"
+      "kind": "outcome",
+      "source": "no unified verter command"
     },
     {
       "id": "package-and-bin",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "package.json (private verter root)"
     },
     {
       "id": "shell-invocation",
       "owner": "CLI1",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/binary-launcher/cli.js"
     },
     {
       "id": "terminal-users",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/verter-tsc/bin/run.js"
     },
     {
       "id": "editor-hosts",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/verter-lsp/index.js"
     },
     {
       "id": "agent-hosts",
       "owner": "CLI4",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "crates/verter_mcp_server/src/main.rs"
     },
     {
       "id": "tsc-wrapper",
       "owner": "CLI6",
       "kind": "route",
+      "source": "packages/verter-tsc/bin/run.js",
       "converter": "CLI5"
     },
     {
       "id": "lsp-wrapper",
       "owner": "CLI6",
       "kind": "route",
+      "source": "packages/verter-lsp/bin/run.js",
       "converter": "CLI5"
     },
     {
       "id": "mcp-wrapper",
       "owner": "CLI6",
       "kind": "route",
+      "source": "packages/verter-mcp/bin/run.js",
       "converter": "CLI5"
     },
     {
       "id": "native-mcp-alias",
       "owner": "CLI6",
       "kind": "route",
+      "source": "crates/verter_mcp_server/src/main.rs",
       "converter": "CLI5"
     },
     {
-      "kind": "route",
       "id": "native-mcp-shipped",
       "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_mcp/src/main.rs",
       "converter": "CLI5"
     },
     {
-      "kind": "route",
       "id": "native-tsc-shipped",
       "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_tsc/src/main.rs",
       "converter": "CLI5"
     },
     {
-      "kind": "route",
       "id": "native-lsp-shipped",
       "owner": "CLI6",
+      "kind": "route",
+      "source": "crates/verter_lsp/src/main.rs",
       "converter": "CLI5"
     },
     {
-      "kind": "route",
       "id": "native-tsc-checker",
-      "owner": "CLI5"
+      "owner": "TSB8",
+      "kind": "retained",
+      "source": "crates/verter_tsc/src/checker.rs and crates/verter_tsc/src/api_check.rs"
     },
     {
-      "kind": "retained",
       "id": "native-relay-shim",
-      "owner": "CLI5"
+      "owner": "CLI5",
+      "kind": "retained",
+      "source": "crates/verter_relay_shim/src/main.rs"
     },
     {
       "id": "command-local-semantic-engine",
       "owner": "CLI1",
-      "kind": "route"
+      "kind": "route",
+      "source": "no application-level analysis exists; reject new command-local analysis"
     },
     {
       "id": "non-atomic-multi-file-writes",
       "owner": "CLI1",
-      "kind": "route"
+      "kind": "route",
+      "source": "no application transaction exists; reject direct multi-file command writes"
     },
     {
       "id": "ambiguous-offset-encoding",
       "owner": "CLI1",
-      "kind": "route"
+      "kind": "route",
+      "source": "new CLI selector ingress; reject untagged offsets"
     },
     {
       "id": "watch-and-wrapper-conversion",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/verter-lsp and packages/verter-tsc public bin names"
     },
     {
       "id": "vscode-lsp-client",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/vue-vscode/src/extension.ts"
     },
     {
       "id": "vscode-mcp-client",
       "owner": "CLI4",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/vue-vscode/src/mcpServer.ts"
     },
     {
       "id": "lapce-native-client",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "extensions/lapce/src/lib.rs"
     },
     {
       "id": "zed-native-client",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "extensions/zed/src/lib.rs"
     },
     {
       "id": "benchmark-native-client",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/benchmark/src/perf/lsp-driver.ts"
     },
     {
       "id": "programmatic-resolvers",
       "owner": "CLI5",
-      "kind": "consumer"
+      "kind": "consumer",
+      "source": "packages/verter-lsp/index.js and packages/verter-mcp/index.js"
+    },
+    {
+      "id": "helix-config-client",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "editors/helix/languages.toml"
+    },
+    {
+      "id": "neovim-config-client",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "editors/nvim/lua/verter/init.lua"
+    },
+    {
+      "id": "mcp-config-template",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "mcp/verter.mcp.json"
+    },
+    {
+      "id": "reference-command-manifest",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "examples/reference/cli/commands.json and examples/reference/manifest.json"
+    },
+    {
+      "id": "editor-launch-contract",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "crates/verter-editor-client/src/args.rs and crates/verter-editor-client/src/discovery.rs"
+    },
+    {
+      "id": "vscode-bundled-binaries",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "packages/vue-vscode/stage-bin.mjs"
+    },
+    {
+      "id": "release-publish-selection",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "scripts/lib/publish-set.mjs and scripts/lib/release-publish.mjs"
+    },
+    {
+      "id": "legacy-platform-packages",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "packages/verter-lsp/npm, packages/verter-mcp/npm and packages/verter-tsc/npm"
+    },
+    {
+      "id": "repo-harness-launchers",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "packages/dx-harness/src/corpus-gate/spawn.ts, scripts/dx/dx-lsp-smoke.mjs, scripts/integration-test/run.mjs and scripts/perf-breakdown.mjs"
+    },
+    {
+      "id": "published-install-guidance",
+      "owner": "CLI6",
+      "kind": "consumer",
+      "source": "docs/editor/other-editors.md, docs/editor/mcp-server.md, editors/helix/README.md, editors/nvim/README.md and mcp/README.md"
     }
   ],
   "commands": [

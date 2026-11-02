@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 const schema = JSON.parse(
   readFileSync(new URL("../../docs/arch/cli/ownership-schema.v1.json", import.meta.url)),
 );
@@ -13,8 +13,10 @@ export const releaseWorkflowText = () =>
 // The schema pins rows it already knows; only the workflows reveal a newly shipped binary.
 function releaseBuiltEntries(workflowText) {
   const entries = new Set();
-  for (const [line] of workflowText.matchAll(/^.*cargo (?:zig)?build\b.*$/gm)) {
-    for (const [, pkg] of line.matchAll(/(?:--package|-p) (\S+)/g)) {
+  const logicalLines = workflowText.replace(/\\\r?\n\s*/g, " ");
+  const buildLine = /^(?!\s*#).*\b(?:cargo (?:zig)?build|cross build)\b.*$/gm;
+  for (const [line] of logicalLines.matchAll(buildLine)) {
+    for (const [, pkg] of line.matchAll(/\s(?:--package[= ]|-p[ =]?)(\S+)/g)) {
       entries.add(`crates/${pkg}/src/main.rs`);
     }
   }
@@ -23,7 +25,7 @@ function releaseBuiltEntries(workflowText) {
 }
 
 const byId = (rows) => [...rows].sort((a, b) => a.id.localeCompare(b.id));
-export function validate(contract, workflowText = releaseWorkflowText()) {
+export function validate(contract, workflowText = releaseWorkflowText(), pins = schema) {
   assert.equal(contract.schemaVersion, 1);
   assert.equal(contract.package, "@verter/cli");
   assert.equal(contract.binary, "verter");
@@ -35,21 +37,25 @@ export function validate(contract, workflowText = releaseWorkflowText()) {
       `${id}: a wrapper cannot be retired by the node that creates it`,
     );
   }
-  assert.deepEqual(byId(contract.owners), byId(schema.owners), "unknown or pathless owner");
+  assert.deepEqual(byId(contract.owners), byId(pins.owners), "unknown or pathless owner");
   assert.deepEqual(
     byId(
-      contract.inventory.map(({ id, owner, kind, converter }) => ({
+      contract.inventory.map(({ id, owner, kind, source, converter }) => ({
         id,
         owner,
         kind,
+        source,
         ...(converter && { converter }),
       })),
     ),
-    byId(schema.inventory),
+    byId(pins.inventory),
     "incomplete or conflicting inventory",
   );
   for (const row of contract.inventory) {
-    assert.ok(typeof row.source === "string" && row.source.length > 0);
+    assert.ok(
+      !row.converter || existsSync(new URL(`../../${row.source}`, import.meta.url)),
+      `${row.id}: retirement target does not exist: ${row.source}`,
+    );
     const owner = contract.owners.find((o) => o.id === row.owner);
     assert.ok(
       owner.targets.some((t) => row.successor === t || row.successor.startsWith(`${t}/`)),
@@ -58,7 +64,7 @@ export function validate(contract, workflowText = releaseWorkflowText()) {
   }
   for (const entry of releaseBuiltEntries(workflowText)) {
     assert.ok(
-      contract.inventory.some((row) => row.source === entry),
+      contract.inventory.some((row) => row.kind !== "consumer" && row.source === entry),
       `release-built native entry has no inventory row: ${entry}`,
     );
   }
@@ -69,7 +75,7 @@ export function validate(contract, workflowText = releaseWorkflowText()) {
       effect,
       compilerDisposition,
     })),
-    schema.commands,
+    pins.commands,
     "command semantics/order",
   );
   for (const command of contract.commands) {

@@ -116,19 +116,29 @@ receiving packaging owner provides parity.
 
 CLI1 rejects command-local semantic engines, non-atomic multi-file writes and
 untagged offset inputs at the application boundary. This does not claim today's
-launchers contain analyzers or transactions. The one shipped command-local
-checker is native `verter-tsc` (`crates/verter_tsc/src/checker.rs` and
-`api_check.rs`): row `native-tsc-checker` binds it to CLI5-AC1, because
-converting that entry to a thin wrapper removes the checker from the route.
-CLITS0 supplies the certified `tsc` adapter and CLI4 the `lsp` and `mcp`
-adapters with protocol parity. These assignments partition physical routes; the
-shared application owner remains singular.
+launchers contain analyzers or transactions. CLITS0 supplies the `tsc` adapter
+and CLI4 the `lsp` and `mcp` adapters with protocol parity. These assignments
+partition physical routes; the shared application owner remains singular.
 
-Every release-built native entry has a row. Release workflow builds are
-discovered by the validator, so a new shipped binary without a row fails.
+The checker in native `verter-tsc` (`crates/verter_tsc/src/checker.rs` and
+`api_check.rs`) is not a displaced route. It is the tsgo-backed service the `tsc`
+adapter keeps calling until the compiler train replaces it, so row
+`native-tsc-checker` is `retained` and CLI5's wrapper conversion removes nothing
+from it. Its one deletion split is TSB8-AC2, which removes `run_declaration_stage`
+and the duplicate `tsconfig.rs` loader. CLI6 retires the `main.rs` entry without
+erasing this service. NCK8's deletion manifest, not this row, classifies any
+provider diagnostic route that remains in those files.
+
+Every release-built native entry has a route or retained row. The validator
+discovers `cargo build`, `cargo zigbuild` and `cross build` lines in the release
+workflows that name a package (`--package x`, `--package=x`, `-p x`, including
+backslash continuations), so such a build without a row fails. A build selected
+only by `--bin` or hidden behind another script is not discovered and stays a
+review obligation.
 `verter-tsc`, `verter-lsp` and `verter-mcp` are public distributed executables,
 distinct from their npm wrappers and from the `verter-mcp-server` development
-entry. Lapce and Zed launch native `verter-lsp` directly. The crates behind them
+entry. Lapce, Zed, Helix and Neovim launch native `verter-lsp` directly, and the
+`mcp/verter.mcp.json` template launches `verter-mcp` by name. The crates behind them
 stay as internal service code, not independently distributed application
 authorities after retirement. `verter-relay-shim`, built beside `verter-lsp`,
 is classified `retained`: a non-public relay the VS Code launch path stages as
@@ -158,8 +168,9 @@ classified as non-public service entries, not a second application authority.
 
 ## Verification and rationale
 
-CLI0-AC1 uses the inventory schema, its omission/conflict/unknown/pathless
-negative cases, and release-workflow discovery of native entries. CLI0-AC2 uses existing binary-launcher CLI tests for argument,
+CLI0-AC1 uses the inventory schema, which pins each row's owner, kind and source,
+its omission/conflict/unknown/pathless/swapped-source negative cases, a live-path
+check on retirement targets, and release-workflow discovery of native entries. CLI0-AC2 uses existing binary-launcher CLI tests for argument,
 exit, stdout, stderr, self-spawn and inherited-protocol behavior. Future service
 adapters must prove shared-envelope preservation rather than treating this
 contract as evidence they already do. CLI0-AC3 is not applicable: no incremental,
@@ -182,12 +193,21 @@ writes, mislocated edits and false-complete results; existing launchers cannot
 check those planned application boundaries. They are receiving obligations of
 the named owners, not additional CLI0 runtime mechanisms.
 
-Consumer coverage includes the VS Code LSP launcher and MCP lifecycle manager,
-Lapce and Zed's direct native launch contracts, benchmark LSP spawning and
-programmatic resolution APIs. Their inventory owners own compatibility evidence
-at the package boundary, not edits to those consumers outside their charter.
-JetBrains discovers via its existing companion/health integration rather than
-an npm launcher import; no CLI route replaces that integration in this lock.
+Consumer coverage includes the VS Code LSP launcher, bundled binaries and MCP
+lifecycle manager, Lapce and Zed's direct native launch contracts and their shared
+`verter-editor-client` plan, the Helix and Neovim configurations packaged into IDE
+release archives, the `mcp/verter.mcp.json` template, the reference command
+manifest, benchmark LSP spawning, the repository's LSP and `verter-tsc` harnesses,
+release publish selection, the old platform packages, published install guidance
+and programmatic resolution APIs. Rows owned by CLI4 or CLI5 are clients those
+tasks prove on the compatibility release, at the package boundary, not edits to
+those consumers outside their charter. Rows owned by CLI6 keep working unchanged
+through that release, because the old names still resolve, and first change at
+retirement. CLI6's zero-consumer proof reconciles every consumer row, whichever
+task owns it. JetBrains names `verter-lsp` only in comments and plugin text: it
+discovers via its existing companion/health integration rather than a launch or
+an npm launcher import, so it has no row and no CLI route replaces that
+integration in this lock.
 
 Selector grammar for `type-info` is `--file <path> --position <integer>
 --encoding utf8|utf16`; offsets are zero-based code units in the selected source
@@ -207,4 +227,5 @@ reinterpret protocol configuration as file targets.
 | Root selection, argv forwarding, self-spawn rejection and protocol-only stdout | security | Untrusted target shell interpretation, recursive spawning or corrupted protocol frames | Existing guards cover launcher spawning; new application adapters must preserve them |
 | One-release wrapper retirement | process | Aliases becoming permanent competing application entry points | Current release wiring validates today's packages, not the future removal release |
 | Release-built native entries discovered from the release workflows | correctness | A shipped binary with no disposition, which this inventory missed for three native entries | The schema population only detects rows removed from it, not an entry never added |
+| Pinned row sources and a live path for retirement targets | correctness | A route silently repointed or swapped, so CLI6 retires the wrong entry | Ownership checks read owner and kind, not the production path a row names |
 | Startup/no-work and watch work-count evidence | performance | Duplicate semantic work or retained watch candidates after adapter introduction | No unified shell/watch implementation exists to measure in this docs-only lock |

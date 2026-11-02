@@ -79,6 +79,12 @@
       "path": ["CLI0", "CLI1", "TSB7"],
       "targets": ["packages/verter/src/commands/build"],
       "acceptance": "TSB7-AC1"
+    },
+    {
+      "id": "TSB8",
+      "path": ["CLI0", "CLI1", "CLITS0", "TSB7C", "TSB8"],
+      "targets": ["crates/verter_tsc/src"],
+      "acceptance": "TSB8-AC2"
     }
   ],
   "inventory": [
@@ -286,11 +292,11 @@
       "successor": "packages/verter/bin"
     },
     {
-      "kind": "route",
+      "kind": "retained",
       "id": "native-tsc-checker",
-      "owner": "CLI5",
+      "owner": "TSB8",
       "source": "crates/verter_tsc/src/checker.rs and crates/verter_tsc/src/api_check.rs",
-      "successor": "packages/verter/bin"
+      "successor": "crates/verter_tsc/src"
     },
     {
       "kind": "retained",
@@ -367,6 +373,76 @@
       "id": "programmatic-resolvers",
       "owner": "CLI5",
       "source": "packages/verter-lsp/index.js and packages/verter-mcp/index.js",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "helix-config-client",
+      "owner": "CLI6",
+      "source": "editors/helix/languages.toml",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "neovim-config-client",
+      "owner": "CLI6",
+      "source": "editors/nvim/lua/verter/init.lua",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "mcp-config-template",
+      "owner": "CLI6",
+      "source": "mcp/verter.mcp.json",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "reference-command-manifest",
+      "owner": "CLI6",
+      "source": "examples/reference/cli/commands.json and examples/reference/manifest.json",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "editor-launch-contract",
+      "owner": "CLI6",
+      "source": "crates/verter-editor-client/src/args.rs and crates/verter-editor-client/src/discovery.rs",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "vscode-bundled-binaries",
+      "owner": "CLI6",
+      "source": "packages/vue-vscode/stage-bin.mjs",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "release-publish-selection",
+      "owner": "CLI6",
+      "source": "scripts/lib/publish-set.mjs and scripts/lib/release-publish.mjs",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "legacy-platform-packages",
+      "owner": "CLI6",
+      "source": "packages/verter-lsp/npm, packages/verter-mcp/npm and packages/verter-tsc/npm",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "repo-harness-launchers",
+      "owner": "CLI6",
+      "source": "packages/dx-harness/src/corpus-gate/spawn.ts, scripts/dx/dx-lsp-smoke.mjs, scripts/integration-test/run.mjs and scripts/perf-breakdown.mjs",
+      "successor": "packages/verter/bin"
+    },
+    {
+      "kind": "consumer",
+      "id": "published-install-guidance",
+      "owner": "CLI6",
+      "source": "docs/editor/other-editors.md, docs/editor/mcp-server.md, editors/helix/README.md, editors/nvim/README.md and mcp/README.md",
       "successor": "packages/verter/bin"
     }
   ],
