@@ -222,10 +222,39 @@ const CONTROLS = [
   },
   {
     name: "optional default hot bookkeeping",
-    mutate: ({ report }) => (report.inventories.observe.files[0].rows[1].gate = "always"),
-    applied: ({ report }) =>
-      report.inventories.observe.files[0].rows[1].classification === "OPTIONAL",
+    mutate: ({ plan, report }) => {
+      plan.closure.observeOwners[0].items[1].gate = "always";
+      report.inventories.observe.files[0].rows[1].gate = "always";
+    },
+    applied: ({ plan, report }) =>
+      plan.closure.observeOwners[0].items[1].classification === "OPTIONAL" &&
+      report.inventories.observe.files[0].rows[1].item ===
+        plan.closure.observeOwners[0].items[1].item,
     expect: ["optional-default-hot-bookkeeping"],
+  },
+  {
+    name: "the default-hot optional observe row dropped from the report",
+    mutate: ({ plan, report }) => {
+      plan.closure.observeOwners[0].items[1].gate = "always";
+      report.inventories.observe.files[0].rows.pop();
+    },
+    applied: ({ plan, report }) =>
+      plan.closure.observeOwners[0].items[1].classification === "OPTIONAL" &&
+      report.inventories.observe.files[0].rows.length === 1,
+    expect: ["observe-inventory-incomplete", "optional-default-hot-bookkeeping"],
+  },
+  {
+    name: "a discovered test dropped with both counts lowered",
+    mutate: ({ report }) => {
+      const mapping = report.inventories.engine.testMapping;
+      mapping.rows.pop();
+      mapping.discoveredBefore = 1;
+      mapping.discoveredAfter = 1;
+    },
+    applied: ({ plan, report }) =>
+      plan.closure.engineTestsBefore.length === 2 &&
+      report.inventories.engine.testMapping.rows.length === 1,
+    expect: ["engine-inventory-incomplete"],
   },
   {
     name: "an absent WSP6 count",

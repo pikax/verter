@@ -87,11 +87,14 @@ function expectedClassification(ctx, slug) {
 
 /**
  * Each required outcome has exactly one claimant, and that claimant is an
- * implemented owner with a path to the target (or the target itself). An
- * optional, pending or detached row can never carry a required outcome.
+ * implemented owner with a path to the target. The target is judged before it
+ * is implemented, so it may carry only the terminal outcomes the export
+ * declares as its own (`closure.targetOutcomes`). An optional, pending or
+ * detached row can never carry a required outcome.
  */
 function checkOutcomePopulation(ctx, inPopulation) {
   const { graph, policy, target } = ctx;
+  const targetOwned = new Set(graph.closure.targetOutcomes);
   for (const id of graph.closure.requiredOutcomes) {
     const claimants = ctx.report.owners.filter((row) => row.outcomeIds?.includes(id));
     if (claimants.length === 0) {
@@ -101,8 +104,15 @@ function checkOutcomePopulation(ctx, inPopulation) {
       ctx.add("outcome-multiple-owners", id, `claimed by ${names}; an outcome has one owner`);
     }
     for (const { slug } of claimants) {
-      if (slug === target) continue;
-      if (!inPopulation(slug)) {
+      if (slug === target) {
+        if (!targetOwned.has(id)) {
+          ctx.add(
+            "outcome-owner-ineligible",
+            id,
+            `${target} may own only its declared terminal outcomes`,
+          );
+        }
+      } else if (!inPopulation(slug)) {
         ctx.add("outcome-owner-ineligible", id, `${slug} has no dependency path to ${target}`);
       } else if (graph.status(slug) !== policy.implementedStatus) {
         ctx.add("outcome-owner-ineligible", id, `${slug} is not implemented`);

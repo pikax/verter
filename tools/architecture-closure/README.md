@@ -39,29 +39,33 @@ semantic cells stay optional there so an omission is rejected for its own code.
 
 **Plan export:** the fields below (an assembled evidence package for real runs).
 A population that is absent, empty or has a malformed element is
-`plan-field-missing`, and one listing the same entry twice is
-`plan-duplicate-entry`; the validator never infers a population from prose.
+`plan-field-missing` (only `closure.targetOutcomes` may be empty: it restricts
+what the target may claim, so emptiness forbids rather than waives), and one
+listing the same entry twice is `plan-duplicate-entry`; the validator never
+infers a population from prose.
 Every report section the export declares a population for is compared against
 it: a declared entry with no report row, a row the export does not declare, or
 two report rows with one identity each reject, so a report can neither drop the
 row that would fail nor let a later duplicate shadow it.
 
-| Field                                                                         | Meaning                                                                                                               |
-| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `tasks[].slug`, `train`, `predecessors`, `labels`, `semanticRole`, `optional` | The dependency graph and its classifications                                                                          |
-| `tasks[].selected`                                                            | Boolean on every optional task: whether it was selected                                                               |
-| `ledger[]`                                                                    | `{ slug, status }`, the trusted implementation status; an absent row is never implemented                             |
-| `closure.structuralOwners[]`                                                  | The structural owners the lock names; each must have a path to the lock target (owner-lock)                           |
-| `closure.namedOwners[]`                                                       | Owners required by contracts and amendments; each must have a path to the target (closure)                            |
-| `closure.requiredOutcomes[]`                                                  | Outcome ids, each owned by exactly one implemented report row with a path to the target (closure)                     |
-| `closure.capabilitySurfaces[]`                                                | `{ surface, class, cases: [{ case, kind }] }`, the declared surfaces and their partial or unsupported cases (closure) |
-| `closure.metricCells[]`                                                       | `{ row, evidenceRun, modes, evidenceKind }`, the predeclared controlling cells of the benchmark runs (closure)        |
-| `closure.wsp6Counts[]`                                                        | Names of the required production counts (both modes)                                                                  |
-| `closure.engineRelocations[]`                                                 | `{ from, to }`, the engine relocation inventory (both modes)                                                          |
-| `closure.engineGuardFamilies[]`                                               | `{ family, kind }`, the moved enforcement families (both modes)                                                       |
-| `closure.futureCharterSurfaces[]`                                             | `{ surface, owner }`, the affected future charter surfaces (both modes)                                               |
-| `closure.observeOwners[]`                                                     | `{ owner, path }`, the per-owner semantic-observe inventory files (both modes)                                        |
-| `closure.reuseAdmissions[]`                                                   | `{ id, class }`, the typed-reuse admission rows (closure)                                                             |
+| Field                                                                         | Meaning                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tasks[].slug`, `train`, `predecessors`, `labels`, `semanticRole`, `optional` | The dependency graph and its classifications                                                                                                                                              |
+| `tasks[].selected`                                                            | Boolean on every optional task: whether it was selected                                                                                                                                   |
+| `ledger[]`                                                                    | `{ slug, status }`, the trusted implementation status; an absent row is never implemented                                                                                                 |
+| `closure.structuralOwners[]`                                                  | The structural owners the lock names; each must have a path to the lock target (owner-lock)                                                                                               |
+| `closure.namedOwners[]`                                                       | Owners required by contracts and amendments; each must have a path to the target (closure)                                                                                                |
+| `closure.requiredOutcomes[]`                                                  | Outcome ids, each owned by exactly one implemented report row with a path to the target (closure)                                                                                         |
+| `closure.targetOutcomes[]`                                                    | The terminal outcome ids the target itself may own; any other outcome on the target's row is ineligible (closure)                                                                         |
+| `closure.capabilitySurfaces[]`                                                | `{ surface, class, cases: [{ case, kind }] }`, the declared surfaces and their partial or unsupported cases (closure)                                                                     |
+| `closure.metricCells[]`                                                       | `{ row, evidenceRun, modes, evidenceKind }`, the predeclared controlling cells of the benchmark runs (closure)                                                                            |
+| `closure.wsp6Counts[]`                                                        | Names of the required production counts (both modes)                                                                                                                                      |
+| `closure.engineRelocations[]`                                                 | `{ from, to }`, the engine relocation inventory (both modes)                                                                                                                              |
+| `closure.engineTestsBefore[]`, `engineTestsAfter[]`                           | The tests discovered before and after the moves; the report's mapping must be a bijection between them (both modes)                                                                       |
+| `closure.engineGuardFamilies[]`                                               | `{ family, kind }`, the moved enforcement families (both modes)                                                                                                                           |
+| `closure.futureCharterSurfaces[]`                                             | `{ surface, owner }`, the affected future charter surfaces (both modes)                                                                                                                   |
+| `closure.observeOwners[]`                                                     | `{ owner, path, items: [{ item, classification, gate }] }`, the per-owner semantic-observe files and their rows (both modes); default-hot optional state is judged on these declared rows |
+| `closure.reuseAdmissions[]`                                                   | `{ id, class }`, the typed-reuse admission rows (closure)                                                                                                                                 |
 
 [`closure-policy.json`](closure-policy.json) holds the named constants the rules
 apply: targets, the conditional owner, named evidence rows, benchmark runs and

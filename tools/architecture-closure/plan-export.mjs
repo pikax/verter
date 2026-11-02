@@ -30,16 +30,27 @@ const text = (element) => (isText(element) ? [] : [""]);
 const caseList = (cases) =>
   Array.isArray(cases) &&
   cases.every((entry) => record({ case: isText, kind: oneOf(CASE_KINDS) })(entry).length === 0);
+/** The rows of one per-owner observe file: non-empty, each item named once. */
+const observeItems = (items) =>
+  Array.isArray(items) &&
+  items.length > 0 &&
+  items.every(
+    (entry) => record({ item: isText, classification: isText, gate: isText })(entry).length === 0,
+  ) &&
+  new Set(items.map((entry) => entry.item)).size === items.length;
 
 /**
  * Every population the rules need, with its element shape and the key that
  * makes an element unique. Each must be present, non-empty and well formed:
- * an empty or partial population would let its rule pass vacuously.
+ * an empty or partial population would let its rule pass vacuously. Only a
+ * population that restricts what a report may claim (`allowEmpty`) may be
+ * empty, because emptiness there forbids rather than waives.
  */
 const POPULATIONS = {
   structuralOwners: { element: text, key: (v) => v },
   namedOwners: { element: text, key: (v) => v },
   requiredOutcomes: { element: text, key: (v) => v },
+  targetOutcomes: { element: text, key: (v) => v, allowEmpty: true },
   capabilitySurfaces: {
     element: record({ surface: isText, class: oneOf(STABILITY_CLASSES), cases: caseList }),
     key: (v) => v.surface,
@@ -66,7 +77,12 @@ const POPULATIONS = {
     element: record({ surface: isText, owner: isText }),
     key: (v) => v.surface,
   },
-  observeOwners: { element: record({ owner: isText, path: isText }), key: (v) => v.owner },
+  engineTestsBefore: { element: text, key: (v) => v },
+  engineTestsAfter: { element: text, key: (v) => v },
+  observeOwners: {
+    element: record({ owner: isText, path: isText, items: observeItems }),
+    key: (v) => v.owner,
+  },
   reuseAdmissions: {
     element: record({ id: isText, class: oneOf(ADMISSION_CLASSES) }),
     key: (v) => v.id,
@@ -76,6 +92,8 @@ const POPULATIONS = {
 const STRUCTURAL_INVENTORIES = [
   "wsp6Counts",
   "engineRelocations",
+  "engineTestsBefore",
+  "engineTestsAfter",
   "engineGuardFamilies",
   "futureCharterSurfaces",
   "observeOwners",
@@ -85,6 +103,7 @@ const POPULATION_FIELDS = {
   closure: [
     "namedOwners",
     "requiredOutcomes",
+    "targetOutcomes",
     "capabilitySurfaces",
     "metricCells",
     "reuseAdmissions",
@@ -97,8 +116,10 @@ function populationProblems(closure, field) {
   const list = closure[field];
   const missing = "plan-field-missing";
   if (!Array.isArray(list)) return [[missing, at, `the export has no ${at} population`]];
-  if (list.length === 0) return [[missing, at, `the export's ${at} population is empty`]];
-  const { element, key } = POPULATIONS[field];
+  const { element, key, allowEmpty = false } = POPULATIONS[field];
+  if (list.length === 0 && !allowEmpty) {
+    return [[missing, at, `the export's ${at} population is empty`]];
+  }
   const out = [];
   const seen = new Set();
   list.forEach((entry, index) => {

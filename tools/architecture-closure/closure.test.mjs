@@ -20,6 +20,10 @@ const reviewRow = ({ report }, train) => findRow(report.trainReviews, (r) => r.t
 const admission = ({ report }, id) =>
   findRow(report.inventories.reuse.admissions, (a) => a.id === id);
 const countOf = (list, predicate) => list.filter(predicate).length;
+const declaredObserveItem = ({ plan }, item) =>
+  findRow(plan.closure.observeOwners[0].items, (r) => r.item === item);
+const observeRow = ({ report }, item) =>
+  findRow(report.inventories.observe.files[0].rows, (r) => r.item === item);
 
 test("the complete fixture is accepted with its target implemented", () => {
   assert.equal(ledgerStatus(base, "L4"), "implemented");
@@ -454,15 +458,98 @@ const CONTROLS = [
   },
   {
     name: "optional default hot bookkeeping",
-    mutate: ({ report }) =>
-      (findRow(
-        report.inventories.observe.files[0].rows,
-        (r) => r.classification === "OPTIONAL",
-      ).gate = "always"),
-    applied: ({ report }) =>
-      findRow(report.inventories.observe.files[0].rows, (r) => r.classification === "OPTIONAL")
-        .gate === "always",
+    mutate: (i) => {
+      declaredObserveItem(i, "per-site timers").gate = "always";
+      observeRow(i, "per-site timers").gate = "always";
+    },
+    applied: (i) =>
+      declaredObserveItem(i, "per-site timers").classification === "OPTIONAL" &&
+      observeRow(i, "per-site timers").gate === "always",
     expect: ["optional-default-hot-bookkeeping"],
+  },
+  {
+    name: "the default-hot optional observe row dropped from the report",
+    mutate: (i) => {
+      declaredObserveItem(i, "per-site timers").gate = "always";
+      dropRow(i.report.inventories.observe.files[0].rows, (r) => r.item === "per-site timers");
+    },
+    applied: (i) =>
+      declaredObserveItem(i, "per-site timers").gate === "always" &&
+      !i.report.inventories.observe.files[0].rows.some((r) => r.item === "per-site timers"),
+    expect: ["observe-inventory-incomplete", "optional-default-hot-bookkeeping"],
+  },
+  {
+    name: "a declared observe row omitted",
+    mutate: ({ report }) =>
+      dropRow(report.inventories.observe.files[0].rows, (r) => r.item === "per-site timers"),
+    applied: ({ report }) =>
+      !report.inventories.observe.files[0].rows.some((r) => r.item === "per-site timers"),
+    expect: ["observe-inventory-incomplete"],
+  },
+  {
+    name: "an observe row whose gate disagrees with the export",
+    mutate: (i) => (observeRow(i, "retained entries accessor").gate = "cfg(test)"),
+    applied: (i) => declaredObserveItem(i, "retained entries accessor").gate === "always",
+    expect: ["observe-inventory-incomplete"],
+  },
+  {
+    name: "an observe row reclassified away from optional",
+    mutate: (i) => (observeRow(i, "per-site timers").classification = "REQUIRED"),
+    applied: (i) => declaredObserveItem(i, "per-site timers").classification === "OPTIONAL",
+    expect: ["observe-inventory-incomplete"],
+  },
+  {
+    name: "a discovered test dropped with both counts lowered",
+    mutate: ({ report }) => {
+      const mapping = report.inventories.engine.testMapping;
+      mapping.rows.pop();
+      mapping.discoveredBefore = 1;
+      mapping.discoveredAfter = 1;
+    },
+    applied: ({ plan, report }) =>
+      plan.closure.engineTestsBefore.length === 2 &&
+      report.inventories.engine.testMapping.rows.length === 1,
+    expect: ["engine-inventory-incomplete"],
+  },
+  {
+    name: "a test mapped onto a destination the export did not discover",
+    mutate: ({ report }) => (report.inventories.engine.testMapping.rows[1].new = "invented::test"),
+    applied: ({ plan }) => !plan.closure.engineTestsAfter.includes("invented::test"),
+    expect: ["engine-inventory-incomplete"],
+  },
+  {
+    name: "a failing negative-cache test beside a passing one",
+    mutate: ({ report }) =>
+      report.inventories.reuse.negativeCacheTests.push({
+        dimension: "edit",
+        test: "negative_cache_edit_stale",
+        executedTests: 1,
+        passed: false,
+      }),
+    applied: ({ report }) =>
+      countOf(report.inventories.reuse.negativeCacheTests, (r) => r.dimension === "edit") === 2,
+    expect: ["negative-cache-test-missing"],
+  },
+  {
+    name: "a format inventory reported both updated and not updated",
+    mutate: ({ report }) =>
+      report.inventories.engine.formatInventories.unshift({ id: "ARH0", updated: false }),
+    applied: ({ report }) =>
+      countOf(report.inventories.engine.formatInventories, (r) => r.id === "ARH0") === 2,
+    expect: ["engine-inventory-incomplete"],
+  },
+  {
+    name: "a required outcome moved onto the pending target",
+    mutate: (i) => {
+      for (const row of i.report.owners) delete row.outcomeIds;
+      ownerRow(i, "L4").outcomeIds = [...i.plan.closure.requiredOutcomes];
+      findRow(i.plan.ledger, owner("L4")).status = "pending";
+    },
+    applied: (i) =>
+      ledgerStatus(i, "L4") === "pending" &&
+      i.plan.closure.targetOutcomes.length === 0 &&
+      ownerRow(i, "L4").outcomeIds.length === 3,
+    expect: ["outcome-owner-ineligible"],
   },
   {
     name: "an absent WSP6 count",
@@ -711,6 +798,7 @@ const CONTROLS = [
       plan.closure.observeOwners.push({
         owner: "S-ENG",
         path: "crates/engine/observe-inventory/S-ENG.md",
+        items: [{ item: "engine accessor", classification: "REQUIRED", gate: "always" }],
       }),
     applied: ({ report }) => !report.inventories.observe.files.some((f) => f.owner === "S-ENG"),
     expect: ["observe-inventory-incomplete"],
@@ -765,6 +853,10 @@ const EXPORT_FIELDS = [
   ["closure", ({ plan }) => delete plan.closure],
   ["closure.namedOwners", ({ plan }) => delete plan.closure.namedOwners],
   ["closure.requiredOutcomes", ({ plan }) => delete plan.closure.requiredOutcomes],
+  ["closure.targetOutcomes", ({ plan }) => delete plan.closure.targetOutcomes],
+  ["closure.engineTestsBefore", ({ plan }) => delete plan.closure.engineTestsBefore],
+  ["closure.engineTestsAfter", ({ plan }) => delete plan.closure.engineTestsAfter],
+  ["closure.observeOwners[0].items", ({ plan }) => delete plan.closure.observeOwners[0].items],
   ["closure.capabilitySurfaces", ({ plan }) => delete plan.closure.capabilitySurfaces],
   ["closure.metricCells", ({ plan }) => delete plan.closure.metricCells],
   ["closure.wsp6Counts", ({ plan }) => delete plan.closure.wsp6Counts],
@@ -786,7 +878,14 @@ const EXPORT_FIELDS = [
   ["closure.capabilitySurfaces[0]", ({ plan }) => (plan.closure.capabilitySurfaces[0] = null)],
 ];
 
-const EMPTY_POPULATIONS = ["requiredOutcomes", "namedOwners", "capabilitySurfaces", "wsp6Counts"];
+const EMPTY_POPULATIONS = [
+  "requiredOutcomes",
+  "namedOwners",
+  "capabilitySurfaces",
+  "wsp6Counts",
+  "engineTestsBefore",
+  "engineTestsAfter",
+];
 
 for (const field of EMPTY_POPULATIONS) {
   test(`an export whose closure.${field} is empty fails closed`, () => {
@@ -894,6 +993,19 @@ test("a selected conditional owner with a real path joins the required populatio
   });
   inputs.report.evidence.push({ ...evidenceRow(inputs, "ev-wasm"), id: "ev-storage", owner: "V9" });
   assert.deepEqual(validateClosure({ mode: "closure", ...inputs }).errors, []);
+});
+
+test("the target may carry an outcome the export declares as its own", () => {
+  const inputs = structuredClone(base);
+  inputs.plan.closure.targetOutcomes.push("direction-no-computation-cap");
+  const previous = findRow(inputs.report.owners, (row) =>
+    row.outcomeIds?.includes("direction-no-computation-cap"),
+  );
+  assert.notEqual(previous.slug, "L4");
+  delete previous.outcomeIds;
+  ownerRow(inputs, "L4").outcomeIds = ["direction-no-computation-cap"];
+  const decision = validateClosure({ mode: "closure", ...inputs });
+  assert.deepEqual(decision.errors, []);
 });
 
 test("an unrelated pending task and an unselected conditional owner never block closure", () => {

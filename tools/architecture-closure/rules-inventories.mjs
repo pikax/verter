@@ -10,14 +10,15 @@ const REFUSALS = new Set(["OperationRefusal", "IsolatedRootLedgerRefusal"]);
 /**
  * Matches report rows to the export-declared population: each declared entry
  * needs exactly one row, and a row the export does not declare is rejected.
+ * `declaredKeyOf` names a declared entry when its shape differs from a row's.
  * Returns the matched pairs `[declared, row]`.
  */
-function matchDeclared(ctx, { declared, rows, keyOf, code, label }) {
+function matchDeclared(ctx, { declared, rows, keyOf, declaredKeyOf = keyOf, code, label }) {
   const indexed = ctx.index(rows, keyOf, code);
   const out = [];
   const known = new Set();
   for (const entry of declared) {
-    const key = keyOf(entry);
+    const key = declaredKeyOf(entry);
     known.add(key);
     const row = indexed.get(key);
     if (row) out.push([entry, row]);
@@ -29,25 +30,39 @@ function matchDeclared(ctx, { declared, rows, keyOf, code, label }) {
   return out;
 }
 
+/**
+ * The old-to-new mapping must be a bijection between the export's discovered
+ * test populations: every test discovered before the moves maps to exactly one
+ * test discovered after them, and every discovered destination is reached once.
+ * The report's counts are claims and must agree with those populations.
+ */
 function checkTestMapping(ctx, mapping) {
   const incomplete = (subject, message) => ctx.add("engine-inventory-incomplete", subject, message);
-  if (!mapping?.rows?.length) {
+  const { engineTestsBefore: before, engineTestsAfter: after } = ctx.graph.closure;
+  if (mapping === undefined) {
     incomplete("testMapping", "no old-to-new discovered-test mapping");
     return;
   }
-  const olds = new Set(mapping.rows.map((row) => row.old));
-  if (olds.size !== mapping.rows.length) incomplete("testMapping", "a test is mapped twice");
-  const news = new Set(mapping.rows.map((row) => row.new));
-  if (news.size !== mapping.rows.length) {
-    incomplete("testMapping", "two tests map to one destination, so one was dropped");
+  matchDeclared(ctx, {
+    declared: before,
+    rows: mapping.rows,
+    keyOf: (row) => `testMapping/old/${row.old}`,
+    declaredKeyOf: (id) => `testMapping/old/${id}`,
+    code: "engine-inventory-incomplete",
+    label: "test discovered before the moves",
+  });
+  matchDeclared(ctx, {
+    declared: after,
+    rows: mapping.rows,
+    keyOf: (row) => `testMapping/new/${row.new}`,
+    declaredKeyOf: (id) => `testMapping/new/${id}`,
+    code: "engine-inventory-incomplete",
+    label: "test discovered after the moves",
+  });
+  if (mapping.discoveredBefore !== before.length || mapping.discoveredAfter !== after.length) {
+    incomplete("testMapping", "the discovered counts disagree with the export's populations");
   }
-  if (mapping.discoveredBefore !== mapping.rows.length) {
-    incomplete("testMapping", "the mapping does not cover every discovered test");
-  }
-  if (
-    mapping.discoveredAfter !== mapping.discoveredBefore ||
-    mapping.normalizedIdentical !== true
-  ) {
+  if (before.length !== after.length || mapping.normalizedIdentical !== true) {
     incomplete("testMapping", "the normalised test population changed");
   }
 }
@@ -101,11 +116,15 @@ function checkEngineInventory(ctx, engine) {
   });
   checkTestMapping(ctx, engine?.testMapping);
   checkGuards(ctx, engine?.guards);
-  const updated = new Set(
-    engine?.formatInventories?.filter((row) => row.updated).map((row) => row.id),
+  const formats = ctx.index(
+    engine?.formatInventories,
+    (row) => `formatInventories/${row.id}`,
+    "engine-inventory-incomplete",
   );
   for (const id of ctx.policy.engineFormatInventories) {
-    if (!updated.has(id)) incomplete(`formatInventories/${id}`, "not updated with the moves");
+    if (formats.get(`formatInventories/${id}`)?.updated !== true) {
+      incomplete(`formatInventories/${id}`, "not updated with the moves");
+    }
   }
   const surfaces = matchDeclared(ctx, {
     declared: closure.futureCharterSurfaces,
@@ -121,29 +140,57 @@ function checkEngineInventory(ctx, engine) {
   }
 }
 
-function checkObserveFile(ctx, file) {
+/**
+ * A per-owner file's rows must be exactly the items the export declares for
+ * it, with the declared classification and gate, so a report can neither drop
+ * the row that would fail nor reclassify or regate it.
+ */
+function checkObserveFile(ctx, declared, file) {
   const incomplete = (subject, message) =>
     ctx.add("observe-inventory-incomplete", subject, message);
   if (OBSERVE_FILE.exec(file.path)?.[1] !== file.owner) {
     incomplete(file.path, `not the per-owner inventory file of ${file.owner}`);
   }
-  if (!file.rows?.length) incomplete(file.path, "no inventory rows");
-  for (const row of file.rows ?? []) {
+  const rows = matchDeclared(ctx, {
+    declared: declared.items,
+    rows: file.rows,
+    keyOf: (row) => `${file.owner}/${row.item}`,
+    code: "observe-inventory-incomplete",
+    label: `item of ${file.owner}`,
+  });
+  for (const [item, row] of rows) {
     const subject = `${file.owner}/${row.item}`;
     for (const field of OBSERVE_FIELDS) {
       if (row[field] === undefined) incomplete(subject, `no ${field}`);
     }
-    if (row.classification === "OPTIONAL" && /^`?always\b/.test(row.gate ?? "")) {
-      ctx.add(
-        "optional-default-hot-bookkeeping",
-        subject,
-        "optional state is on in default builds",
-      );
+    for (const field of ["classification", "gate"]) {
+      if (row[field] !== undefined && row[field] !== item[field]) {
+        incomplete(subject, `declared ${field} ${item[field]}, got ${row[field]}`);
+      }
+    }
+  }
+}
+
+/**
+ * Optional state that is on in default builds, judged on the export's declared
+ * items so the verdict never depends on what the report transcribes.
+ */
+function checkDefaultHotBookkeeping(ctx) {
+  for (const { owner, items } of ctx.graph.closure.observeOwners) {
+    for (const item of items) {
+      if (item.classification === "OPTIONAL" && /^`?always\b/.test(item.gate)) {
+        ctx.add(
+          "optional-default-hot-bookkeeping",
+          `${owner}/${item.item}`,
+          "optional state is on in default builds",
+        );
+      }
     }
   }
 }
 
 function checkObserveInventory(ctx, observe) {
+  checkDefaultHotBookkeeping(ctx);
   const files = matchDeclared(ctx, {
     declared: ctx.graph.closure.observeOwners,
     rows: observe?.files,
@@ -155,7 +202,7 @@ function checkObserveInventory(ctx, observe) {
     if (file.path !== declared.path) {
       ctx.add("observe-inventory-incomplete", file.path, `the declared file is ${declared.path}`);
     }
-    checkObserveFile(ctx, file);
+    checkObserveFile(ctx, declared, file);
   }
   const counts = ctx.index(observe?.counts, (row) => row.name, "wsp6-count-duplicate");
   for (const name of ctx.graph.closure.wsp6Counts) {
@@ -246,7 +293,9 @@ export function checkClosureInventories(ctx) {
   for (const [declared, admission] of admissions) checkAdmission(ctx, declared, admission);
   for (const dimension of ctx.policy.negativeCacheDimensions) {
     const proofs = reuse.negativeCacheTests?.filter((row) => row.dimension === dimension) ?? [];
-    if (!proofs.some((row) => row.executedTests > 0 && row.passed === true)) {
+    // Every row of a dimension must pass: a failing proof beside a passing one still fails.
+    const proven = (row) => row.executedTests > 0 && row.passed === true;
+    if (proofs.length === 0 || !proofs.every(proven)) {
       ctx.add("negative-cache-test-missing", dimension, "no executed passing negative-cache test");
     }
   }

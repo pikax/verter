@@ -170,6 +170,7 @@
     "structuralOwners": ["S-ENG", "S-OBS", "CP-STRUCT"],
     "namedOwners": ["K-8", "B-BRIDGE"],
     "requiredOutcomes": ["proposal-01", "proposal-02", "direction-no-computation-cap"],
+    "targetOutcomes": [],
     "capabilitySurfaces": [
       {
         "surface": "vue-compile",
@@ -242,6 +243,8 @@
         "to": "crates/new_owner/src/store.rs"
       }
     ],
+    "engineTestsBefore": ["old_owner::store::keeps_entries", "old_owner::store::evicts_entries"],
+    "engineTestsAfter": ["new_owner::store::keeps_entries", "new_owner::store::evicts_entries"],
     "engineGuardFamilies": [
       {
         "family": "dependency-family",
@@ -265,7 +268,19 @@
     "observeOwners": [
       {
         "owner": "S-OBS",
-        "path": "crates/observed/observe-inventory/S-OBS.md"
+        "path": "crates/observed/observe-inventory/S-OBS.md",
+        "items": [
+          {
+            "item": "retained entries accessor",
+            "classification": "REQUIRED-lifetime",
+            "gate": "always"
+          },
+          {
+            "item": "per-site timers",
+            "classification": "OPTIONAL",
+            "gate": "cfg(feature = \"semantic-observe\")"
+          }
+        ]
       }
     ],
     "reuseAdmissions": [
