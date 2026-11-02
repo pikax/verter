@@ -221,6 +221,69 @@ export function fresh() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+const NESTED_ONLY_SOURCE: &str = r##"
+declare function box<T>(value: T): { value: T };
+export function nestedOnly(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return box({ value: value });
+}
+export function nestedOnlyShorthand(flag: boolean) {
+    const value = flag ? "fresh" : 1 as const;
+    return box({ value });
+}
+export function shadowed(flag: boolean) {
+    const value = flag ? "outer" : 1 as const;
+    {
+        const value = flag ? "inner" : 2 as const;
+        return box({ value });
+    }
+}
+export function beside(flag: boolean) {
+    const unrelated = notDeclared();
+    const value = flag ? "fresh" : 1 as const;
+    return box({ value });
+}
+"##;
+
+/// A local read only inside a call's object argument selects its own
+/// reaching value, cold and warm: the call needs no separate whole-binding
+/// read, and the property keeps the local's fresh and pinned membership.
+#[test]
+fn nested_only_local_call_argument_demands_reaching_value() {
+    let matrix = Matrix::new(NESTED_ONLY_SOURCE).settings(&ALL);
+    let answer = "{ value: { value: string | 1; }; }";
+    let rows = [
+        (Read::Return("nestedOnly"), vec![answer; 4]),
+        (Read::Return("nestedOnlyShorthand"), vec![answer; 4]),
+    ];
+    let host = matrix.host(&rows);
+    for temperature in ["cold", "warm"] {
+        let verdicts = matrix.verdicts_on(&host, &rows);
+        for ((read, _), row) in rows.iter().zip(&verdicts) {
+            for verdict in row {
+                assert!(
+                    verdict.matched,
+                    "{temperature} `{}`: {}",
+                    read.text(),
+                    verdict.lane
+                );
+            }
+        }
+    }
+}
+
+/// The argument's read follows lexical identity, not its name, and leaves
+/// every other local alone: the inner `value` supplies its own membership
+/// and a sibling whose initializer fails degrades nothing.
+#[test]
+fn object_argument_local_read_is_binding_exact() {
+    let failures = Matrix::new(NESTED_ONLY_SOURCE).settings(&ALL).returns(&[
+        ("shadowed", "{ value: { value: string | 2; }; }"),
+        ("beside", "{ value: { value: string | 1; }; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Partial reads keep regular composite arms and enum member identity.
 #[test]
 fn partial_call_reads_preserve_composites_and_enums() {

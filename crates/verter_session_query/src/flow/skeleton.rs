@@ -567,6 +567,10 @@ pub struct SkeletonExprSite {
     pub closures: OwnedSlice<SkeletonClosure>,
     /// Call / construct footprints attributed to this site.
     pub calls: OwnedSlice<SkeletonCall>,
+    /// Child object-literal sites this site's computation consumes whole
+    /// (`box({ value })`): each one's entries carry their own reads, which
+    /// are this computation's inputs exactly as a bare `box(value)` read is.
+    pub input_sites: OwnedSlice<SkeletonExprSiteId>,
 }
 
 /// The root target of one write.
