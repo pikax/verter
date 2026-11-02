@@ -218,6 +218,7 @@ impl UpsertBatchTxn {
         );
         let mut outcomes =
             Self::map_states(host, prepared, states, false, UpsertResultDemand::Full);
+        host.materialize_pending_declarations();
         host.materialize_upsert_carrier_routes(&mut outcomes);
         outcomes
     }

@@ -191,6 +191,86 @@ fn injected_unimported_ambient_is_ingested_without_upserting_it() {
     );
 }
 
+/// A load of a contributor publishes under admission. Ingestion therefore
+/// releases admission before it waits for that load: a producer that reached
+/// the publication seam first must be able to finish, for both the standalone
+/// and the upsert route into ingestion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn contributor_ingestion_waits_for_its_index_producer_outside_admission() {
+    use crossbeam_channel::bounded;
+    #[derive(Clone, Copy, Debug)]
+    enum Route {
+        Standalone,
+        Upsert,
+    }
+    for route in [Route::Standalone, Route::Upsert] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), workspace.clone()));
+        workspace.inject_file(
+            "/producer.d.ts".into(),
+            Arc::from("declare const producer: number;"),
+        );
+
+        // The producer stops at the seam directly before it takes admission.
+        let (at_seam_tx, at_seam_rx) = bounded::<()>(1);
+        let (resume_tx, resume_rx) = bounded::<()>(1);
+        *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || {
+            at_seam_tx.send(()).expect("the test waits for the seam");
+            resume_rx.recv().expect("the test resumes the producer");
+        }));
+        let producer = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || {
+                let _ = host.ensure_indexed_ready_serve("/producer.d.ts");
+            })
+        };
+        at_seam_rx.recv().expect("the producer reached the seam");
+
+        // Ingestion owns admission when this fires, so the resumed producer
+        // queues behind it; the producer's flight is still in progress.
+        *host.test_force.ambient_ingestion_cursor_hook.0.lock() = Some(Arc::new(move || {
+            resume_tx.send(()).expect("the producer is at the seam");
+        }));
+        let (done_tx, done_rx) = bounded::<()>(1);
+        let ingestion = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || {
+                match route {
+                    Route::Standalone => host.ingest_injected_ambient_roots(None),
+                    Route::Upsert => {
+                        let _ = host
+                            .upsert(UpsertRequest {
+                                canonical_id: Some("/consumer.ts".to_owned()),
+                                input_id: "/consumer.ts".to_owned(),
+                                source: Arc::from("export const consumer = 1;\n"),
+                                file_language: FileLanguage::script_ts(),
+                                aliases: Vec::new(),
+                            })
+                            .expect("consumer upsert");
+                    }
+                }
+                let _ = done_tx.send(());
+            })
+        };
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "{route:?} ingestion must not hold admission across the producer it joined"
+        );
+        ingestion.join().expect("ingestion finished");
+        producer.join().expect("the producer finished");
+        assert!(
+            host.project_type_store()
+                .indexed()
+                .get_any("/producer.d.ts")
+                .is_some(),
+            "{route:?} ingestion returns only once its contributor is IndexedReady"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn contributor_ingestion_takes_admission_before_its_cursor() {

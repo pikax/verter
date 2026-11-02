@@ -3459,17 +3459,15 @@ mod tests {
         );
     }
 
-    /// CacheNode dispatch releases the parked CPU permit. `next_ready` reserves
-    /// a CPU permit for the cache-node candidate at dispatch; after
+    /// CacheNode dispatch releases the parked producer permit. `next_ready` reserves
+    /// a producer permit for the cache-node candidate at dispatch; after
     /// `execute_cache_node` runs, the single dispatch entry marks the identity
     /// complete, releasing the reservation through its by-value consume.
     ///
-    /// DISCRIMINATOR: without the release the {cpu:1} class stays drained and
-    /// the follow-on Analysis below never dispatches —
-    /// `in_flight_cpu_permits()` would read 1 and `h.try_get()` would not be
-    /// ready.
+    /// DISCRIMINATOR: without the release the one producer slot stays drained
+    /// and `in_flight_producer_permits()` would read 1.
     #[test]
-    fn cache_node_dispatch_releases_cpu_permit() {
+    fn cache_node_dispatch_releases_producer_permit() {
         use crate::cache_id::SchedulerCacheId;
         use crate::dag::{PinId, WorkKind};
         let loader = Arc::new(MemorySourceLoader::new());
@@ -3517,10 +3515,10 @@ mod tests {
         // counter would be 1 (parked reservation on the dispatched CacheNode
         // entry); with it the count is 0.
         assert_eq!(
-            sched.dag.lock().in_flight_cpu_permits(),
+            sched.dag.lock().in_flight_producer_permits(),
             0,
-            "CacheNode dispatch must release the parked CPU permit \
-             — without it the {{cpu:1}} class would stay drained",
+            "CacheNode dispatch must release the parked producer permit \
+             — without it the one producer slot would stay drained",
         );
 
         // Submit a real CPU job and verify it dispatches — the follow-on side
@@ -3636,7 +3634,7 @@ mod tests {
     /// swallow-and-`complete()` router the failing node is recorded
     /// `completed == 1, cancelled == 0` and this test FAILS; with the fix the
     /// failure routes to `cancel`, recording `completed == 0, cancelled == 1`.
-    /// `in_flight_cpu_permits() == 0` proves the parked reservation still
+    /// `in_flight_producer_permits() == 0` proves the parked reservation still
     /// releases on the failure arm (both terminals release exactly once).
     #[test]
     fn cache_node_failure_is_not_completed_as_success() {
@@ -3661,9 +3659,9 @@ mod tests {
              cancel (recorded cancelled == 1)",
         );
         assert_eq!(
-            sched.dag.lock().in_flight_cpu_permits(),
+            sched.dag.lock().in_flight_producer_permits(),
             0,
-            "the cache-node failure arm must still release the parked CPU permit \
+            "the cache-node failure arm must still release the parked producer permit \
              exactly once (cancel's by-value reservation consume)",
         );
     }
@@ -3702,9 +3700,9 @@ mod tests {
              (recorded cancelled == 1)",
         );
         assert_eq!(
-            sched.dag.lock().in_flight_cpu_permits(),
+            sched.dag.lock().in_flight_producer_permits(),
             0,
-            "the cache-node panic arm must still release the parked CPU permit \
+            "the cache-node panic arm must still release the parked producer permit \
              exactly once (cancel's by-value reservation consume)",
         );
     }

@@ -30,6 +30,65 @@ fn request() -> ScopedCacheNodeRequest {
     }
 }
 
+/// A producer may block on anything its computation needs, including a lock
+/// whose holder is waiting for a file stage. Producers filling every CPU worker
+/// and every CPU permit therefore leave file stages runnable.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_file_stage_completes_while_a_producer_blocks_at_full_cpu_capacity() {
+    use std::time::Duration;
+    let scheduler = Scheduler::test_new(
+        SchedulerConfig {
+            cpu_threads: 1,
+            ..SchedulerConfig::default()
+        },
+        Arc::new(MemorySourceLoader::new()),
+    );
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+    let blocked = {
+        let scheduler = Arc::clone(&scheduler);
+        std::thread::spawn(move || {
+            scheduler
+                .execute_scoped_cache_node(request(), move |_| {
+                    entered_tx
+                        .send(())
+                        .expect("the test waits for the producer");
+                    release_rx.recv().expect("the test releases the producer");
+                })
+                .expect("the producer answers");
+        })
+    };
+    entered_rx.recv().expect("the producer started");
+
+    let handle = scheduler.submit_request(Request {
+        file_id: "/stage.ts".into(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const n = 1;")),
+        file_language: None,
+        request_context: None,
+    });
+    let (finished_tx, finished_rx) = crossbeam_channel::bounded::<()>(1);
+    let waiter = std::thread::spawn(move || {
+        let state = handle.wait();
+        let _ = finished_tx.send(());
+        state
+    });
+
+    let finished = finished_rx.recv_timeout(Duration::from_secs(10));
+    release_tx.send(()).expect("the producer is waiting");
+    blocked.join().expect("the producer finished");
+    assert!(
+        finished.is_ok(),
+        "a file stage must not wait for a blocked producer"
+    );
+    assert!(matches!(
+        waiter.join().expect("the waiter finished"),
+        crate::job::CompletionState::Ready(_)
+    ));
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn completed_file_stage_releases_its_task_before_worker_context_cleanup() {
@@ -1142,7 +1201,7 @@ fn settling_a_scoped_producer_notifies_capacity_blocked_dispatch() {
             "drop" => drop(producer),
             _ => unreachable!(),
         }
-        assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 0);
+        assert_eq!(scheduler.dag.lock().in_flight_producer_permits(), 0);
         assert!(
             matches!(scheduler.inbox.receiver.try_recv(), Ok(Submission::Wake)),
             "{terminal}: released capacity must explicitly notify the idle driver"
@@ -1186,7 +1245,7 @@ fn a_pending_scoped_dependency_borrows_its_active_workers_capacity() {
         else {
             panic!("a saturated worker must loan capacity using its active path");
         };
-        assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 2);
+        assert_eq!(scheduler.dag.lock().in_flight_producer_permits(), 2);
         producer.run(|_| 42);
         let Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) = child.poll(Waker::noop()) else {
             panic!("nested producer completes");
@@ -1196,7 +1255,7 @@ fn a_pending_scoped_dependency_borrows_its_active_workers_capacity() {
     assert!(
         matches!(root.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 42)
     );
-    assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 0);
+    assert_eq!(scheduler.dag.lock().in_flight_producer_permits(), 0);
 }
 
 #[test]
