@@ -3703,6 +3703,7 @@ version = "0.0.1-beta.7"
 dependencies = [
  "blake3",
  "serde_json",
+ "verter_identity",
  "verter_retention",
 ]
 
