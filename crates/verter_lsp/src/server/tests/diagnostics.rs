@@ -237,6 +237,108 @@ async fn publish_carrier_pin_is_captured_before_the_compile_not_after() {
     );
 }
 
+/// End-to-end convergence witness for the "type a character, undo" race: a
+/// publish pass pins revision B, the buffer returns to A's exact bytes while
+/// that pass is parked after its compile, and the pass resumes. Its fenced IDE
+/// record is refused (the pin no longer matches the live document), so the
+/// recorded surface still describes A, and the gateway must publish none of
+/// B's companions. The oracle is the plugin-read IDE carrier hash: it holds
+/// only while a refused record publishes nothing. Delivering the companions
+/// despite the refusal leaves the store on B while every LSP-side record says
+/// A, and interactive repair then trusts that record and never republishes.
+/// The two companion-producer regressions beside
+/// [`crate::provider_surface_store::record_and_version_carrier_companions`]
+/// cover the refusal paths this witness does not reach: an open carrier
+/// compiled without a pin, and an unavailable carrier source.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_superseded_publish_whose_edit_returns_to_published_bytes_converges() {
+    let workspace_root = unique_server_ws_root("publish_return_to_content");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(provider);
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a '\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+    let ide_hash = || {
+        carrier_manifest_strict(&workspace_root)
+            .expect("a publish must have written a manifest")
+            .projects
+            .get(&tsconfig)
+            .and_then(|project| {
+                project.ready_files.iter().find_map(|(provider, ready)| {
+                    provider
+                        .ends_with(".vue.tsx")
+                        .then(|| ready.content_hash.clone())
+                })
+            })
+            .expect("the publish must materialize the IDE carrier")
+    };
+
+    let uri = open_test_vue(server, &canonical_id, SOURCE_A);
+    server.needs_ide_sync.insert(canonical_id.clone());
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .provider_sync_state_for_source(&canonical_id)
+            .is_some(),
+        "interactive repair must commit the initial published revision"
+    );
+    let published_a = ide_hash();
+
+    assert!(server.documents.did_change(&uri, 2, SOURCE_B).changed);
+    let (arrived, release) = server.pause_next_publish_carrier_after_compile(&canonical_id);
+    let publish_b = server.publish_carrier_to_external_ts(&canonical_id);
+    let return_to_a = async {
+        arrived.notified().await;
+        let changed = server.documents.did_change(&uri, 3, SOURCE_A).changed;
+        release.notify_one();
+        changed
+    };
+    let (_, changed) = futures_util::future::join(publish_b, return_to_a).await;
+    assert!(
+        changed,
+        "the live buffer must return to the published bytes"
+    );
+    let requeued = server
+        .pending_snapshot_provider_sync
+        .contains(&canonical_id);
+    let after_superseded_pass = ide_hash();
+
+    // Interactive repair can see the old A record as current after the undo.
+    // It must never leave the plugin reading B through A's recorded map.
+    server.needs_ide_sync.insert(canonical_id.clone());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        ide_hash(),
+        published_a,
+        "interactive repair must leave the store on the live revision's bytes"
+    );
+    assert_eq!(
+        server.documents.get(&uri).unwrap().source.as_ref(),
+        SOURCE_A
+    );
+
+    assert_eq!(
+        after_superseded_pass, published_a,
+        "the refused pass must not deliver unrecorded intermediate bytes"
+    );
+    assert!(
+        requeued,
+        "the superseded pass must leave the live revision queued"
+    );
+
+    // A later ordinary publish must still deliver a genuinely changed revision.
+    assert!(server.documents.did_change(&uri, 4, SOURCE_B).changed);
+    assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
+    assert_ne!(ide_hash(), published_a, "a live edit must still publish");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn edited_carrier_republishes_its_own_contract_after_an_isolated_edit() {
     // A document with no import roots keeps its delivered import receipt
