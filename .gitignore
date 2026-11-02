@@ -142,6 +142,8 @@ packages/native/npm/*/*.node
 
 # Local nextest CI-replication archives (not committed)
 artifacts/
+!/crates/verter_wasm/src/artifacts/
+!/crates/verter_wasm/src/artifacts/**
 
 # Local release state: downloaded release-run artifacts and packed tarballs
 # (scripts/release-publish.mjs local)
