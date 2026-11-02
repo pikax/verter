@@ -659,7 +659,7 @@ pub(crate) fn record_carrier_ide_surface_fenced(
 
     if let Some(documents) = documents {
         if documents.canonical_id_to_uri(canonical_id).is_some() {
-            tracing::debug!(
+            tracing::info!(
                 "provider_surface_store: discarding IDE surface for {provider_path} — the \
                  carrier is open but no revision was pinned for this compile"
             );
@@ -838,7 +838,7 @@ fn record_carrier_companion_surface_fenced(
     }
     if let Some(documents) = documents {
         if documents.canonical_id_to_uri(canonical_id).is_some() {
-            tracing::debug!(
+            tracing::info!(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  carrier is open but no revision was pinned for this compile"
             );
