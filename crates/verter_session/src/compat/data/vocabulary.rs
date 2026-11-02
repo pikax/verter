@@ -4,6 +4,13 @@
 //! every form below is admitted or carries the reason it is not. A form needing
 //! a statistic, a list or a clock the snapshot does not carry answers that
 //! reason; it never fetches, guesses or narrows to a subset it can answer.
+//!
+//! A form that names its family is answerable target by target. A form that
+//! ranges over every Browserslist family is answerable only together with the
+//! families the snapshot does not carry: [`all_family_coverage`] names them, and
+//! each one must stand in the expansion as an unknown entry rather than vanish.
+
+use super::snapshot::CompatSnapshot;
 
 /// Every Browserslist query form, closed so a new one must state its admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +77,17 @@ pub(in crate::compat) enum UnsupportedQueryReason {
 /// A form's standing against the pinned snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::compat) enum QueryAdmission {
+    /// The form names its family, so each target it yields lies in that family.
+    /// A named family the snapshot does not carry answers unknown on its own.
+    /// For composition the combinator is admitted and each operand keeps its own
+    /// standing.
     Admitted,
+    /// The form ranges over every Browserslist family, so the release data
+    /// answers only the families it carries. An expansion must hold one unknown
+    /// entry for each family [`all_family_coverage`] lists as uncarried, and
+    /// leaves out the dataset families it lists as excluded; it never stands as
+    /// a complete answer over the carried subset.
+    AllFamilies,
     Unsupported(UnsupportedQueryReason),
 }
 
@@ -81,15 +98,15 @@ impl BrowserslistQueryForm {
             Self::ExactVersion
             | Self::VersionRange
             | Self::VersionComparison
-            | Self::LastVersions
             | Self::LastBrowserVersions
-            | Self::LastMajorVersions
             | Self::LastBrowserMajorVersions
             | Self::FirefoxEsr
-            | Self::UnreleasedVersions
             | Self::UnreleasedBrowserVersions
-            | Self::SinceDate
             | Self::Composition => return QueryAdmission::Admitted,
+            Self::LastVersions
+            | Self::LastMajorVersions
+            | Self::UnreleasedVersions
+            | Self::SinceDate => return QueryAdmission::AllFamilies,
             Self::Defaults | Self::GlobalUsage | Self::Coverage => Reason::UsageStatisticNotCarried,
             Self::RegionalUsage => Reason::RegionalStatisticNotCarried,
             Self::Dead => Reason::DeadListNotCarried,
@@ -100,6 +117,78 @@ impl BrowserslistQueryForm {
             Self::Extends => Reason::ResolvedByProjectModel,
         };
         QueryAdmission::Unsupported(reason)
+    }
+}
+
+/// The families an all-family form ranges over: Browserslist's canonical
+/// family names, the caniuse agents, in ascending order.
+pub(in crate::compat) const BROWSERSLIST_FAMILIES: [&str; 19] = [
+    "and_chr", "and_ff", "and_qq", "and_uc", "android", "baidu", "bb", "chrome", "edge", "firefox",
+    "ie", "ie_mob", "ios_saf", "kaios", "op_mini", "op_mob", "opera", "safari", "samsung",
+];
+
+/// Why a Browserslist family has no release data in the snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::compat) enum UncarriedFamilyReason {
+    /// The dataset has no family this name denotes.
+    NoDatasetFamily,
+    /// The name denotes a dataset family this snapshot carries no record of.
+    ReleaseDataAbsent,
+}
+
+/// A Browserslist family an all-family expansion must hold as an unknown entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::compat) struct UncarriedFamily {
+    pub(in crate::compat) family: &'static str,
+    pub(in crate::compat) reason: UncarriedFamilyReason,
+}
+
+/// What an all-family form ranges over in one snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::compat) struct AllFamilyCoverage {
+    /// Browserslist family and the dataset family whose releases answer it.
+    pub(in crate::compat) carried: Vec<(&'static str, &'static str)>,
+    /// Families the expansion holds as unknown entries, never drops.
+    pub(in crate::compat) uncarried: Vec<UncarriedFamily>,
+    /// Dataset families no Browserslist name denotes (`nodejs`, `deno`, ...).
+    /// Browserslist never ranges over them, so an all-family form excludes them.
+    pub(in crate::compat) excluded: Vec<String>,
+}
+
+/// Partition the Browserslist families, and the snapshot's own families, for an
+/// all-family form.
+pub(in crate::compat) fn all_family_coverage(snapshot: &CompatSnapshot) -> AllFamilyCoverage {
+    let mut carried = Vec::new();
+    let mut uncarried = Vec::new();
+    for family in BROWSERSLIST_FAMILIES {
+        match browserslist_family(family) {
+            Some(dataset) if snapshot.browser(dataset).is_some() => {
+                carried.push((family, dataset));
+            }
+            Some(_) => uncarried.push(UncarriedFamily {
+                family,
+                reason: UncarriedFamilyReason::ReleaseDataAbsent,
+            }),
+            None => uncarried.push(UncarriedFamily {
+                family,
+                reason: UncarriedFamilyReason::NoDatasetFamily,
+            }),
+        }
+    }
+    let excluded = snapshot
+        .browsers()
+        .map(|(dataset, _)| dataset)
+        .filter(|dataset| {
+            !BROWSERSLIST_FAMILIES
+                .iter()
+                .any(|family| browserslist_family(family) == Some(*dataset))
+        })
+        .map(str::to_owned)
+        .collect();
+    AllFamilyCoverage {
+        carried,
+        uncarried,
+        excluded,
     }
 }
 
