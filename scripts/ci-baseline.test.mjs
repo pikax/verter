@@ -1007,8 +1007,9 @@ test("spend with no amount and an empty allocation are gaps, never zeros", async
   await withTempDir(async (dir) => {
     const report = await reportAfter(dir, ({ rewrite }) => {
       rewrite("billing.json", { usageItems: [{ product: "Actions" }] });
-      rewrite("allocation.json", []);
+      rewrite("allocation.json", {});
     });
+    assert.equal(report.hostedAllocation.status, "unavailable");
     assert.equal(report.paidSpend.status, "unavailable");
     assert.match(report.paidSpend.reason, /no net amount/);
     assert.ok(report.baseline.gaps.some((gap) => /^hosted allocation unavailable/.test(gap)));
@@ -1058,7 +1059,9 @@ test("required contexts can come from an owner export or from branch protection"
 
 test("a rerun's copied jobs add no runner time, and a head's push time is its own branch's", () => {
   const original = job("build", 0, 10, { id: 7, attempt: 1 });
-  const rerun = [original, { ...original, attempt: 2 }, job("test", 12, 14, { id: 8, attempt: 2 })];
+  // The live shape: the copy carries a new id and a later created_at, but the same name and interval.
+  const copy = { ...original, id: 9, attempt: 2, created_at: at(60) };
+  const rerun = [original, copy, job("test", 12, 14, { id: 8, attempt: 2 })];
   const { intervals, copied } = runnerIntervals(rerun);
   assert.equal(copied, 1);
   assert.equal(

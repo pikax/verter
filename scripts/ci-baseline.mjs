@@ -499,21 +499,25 @@ const metric = (status, samples, reason, context = {}) =>
 
 /**
  * Runner intervals for jobs: skipped jobs hold no runner, unknown orders are counted, not
- * zeroed. A rerun lists the jobs it copied from an earlier attempt again, under the same id
- * (or with the same name and timestamps); a copy held no runner, so it adds nothing.
+ * zeroed. A rerun lists the jobs it copied from an earlier attempt again, under a NEW id with
+ * the same name, started_at and completed_at (the live shape) or under the same id; a copy held
+ * no runner, so it adds nothing. Within one attempt, equal keys are distinct jobs.
  */
 export function runnerIntervals(jobs) {
   const intervals = [];
   const tally = { skipped: 0, invalid: 0, outstanding: 0, neverAssigned: 0, copied: 0 };
   const firstAttempt = new Map();
   for (const job of jobs) {
-    const identity = job.id ?? `${job.name}|${job.started_at}|${job.completed_at}`;
+    const identities = [`interval|${job.name}|${job.started_at}|${job.completed_at}`];
+    if (job.id !== undefined && job.id !== null) identities.push(`id|${job.id}`);
     if (job.status === "completed" && job.conclusion !== "skipped") {
-      if (firstAttempt.has(identity) && firstAttempt.get(identity) !== job.attempt) {
+      if (
+        identities.some((key) => firstAttempt.has(key) && firstAttempt.get(key) !== job.attempt)
+      ) {
         tally.copied += 1;
         continue;
       }
-      firstAttempt.set(identity, job.attempt);
+      for (const key of identities) if (!firstAttempt.has(key)) firstAttempt.set(key, job.attempt);
     }
     if (job.conclusion === "skipped") tally.skipped += 1;
     else if (job.status !== "completed" || !job.completed_at) tally.outstanding += 1;
@@ -1206,7 +1210,11 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
               ? `${unpriced} Actions usage item(s) carry no net amount`
               : "no Actions usage item in the billing record"),
         };
-  const allocationRecords = pagesOf("allocation");
+  // A record with no content (`{}`, `null`) records nothing.
+  const allocationRecords = pagesOf("allocation").filter(
+    (record) =>
+      record !== null && !(typeof record === "object" && Object.keys(record).length === 0),
+  );
   const allocation =
     allocationRecords.length > 0
       ? { status: "measured", records: allocationRecords }

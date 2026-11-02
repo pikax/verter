@@ -98,7 +98,7 @@ All of these are `observational`. Only runs bound to a corpus sample report as `
 
 ## Limitations
 
-- **Observed, not specified.** The eligibility reading of `created_at` and the walk back through it come from sampled records. A chain broken by a gap over two seconds attributes the rest to pre-admission, and a rerun's copied jobs can do the same. Runner-minutes and peak runners count a job repeated by a later attempt, under the same id or with the same name and timestamps, once.
+- **Observed, not specified.** The eligibility reading of `created_at` and the walk back through it come from sampled records. A chain broken by a gap over two seconds attributes the rest to pre-admission, and a rerun's copied jobs can do the same. Runner-minutes and peak runners count a job repeated by a later attempt, with the same name, start and completion (a rerun gives the copy a new id) or under the same id, once.
 - **Bounded reads.** The runs API returns at most 1,000 results per query, so a busy window needs narrower windows. Activity retention is finite. The report states when a window was read in part.
 - **Shared streams.** A branch reused by two pull requests reads as one stream.
 - **Partial pools.** With job records for only some runs, peak runners are lower bounds and peak share is a share of the jobs that were read, not of the runs that held runners. The report names how many runs were read.
