@@ -3694,6 +3694,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_formatter"
+version = "0.0.1-beta.7"
+
+[[package]]
 name = "verter_identity"
 version = "0.0.1-beta.7"
 dependencies = [
