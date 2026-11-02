@@ -11,6 +11,7 @@ import test from "node:test";
 
 import {
   cancelCauseGroup,
+  classifyCancelCause,
   findOlderTreeDisplacements,
   findVerdictViolations,
   observe,
@@ -19,6 +20,7 @@ import {
 } from "./ci-concurrency-observe.mjs";
 
 const REPO = "owner/trial";
+const checkRunUrl = (id) => `https://api.github.com/repos/${REPO}/check-runs/${id}`;
 
 function job(name, conclusion, overrides = {}) {
   return {
@@ -124,6 +126,12 @@ test("an aggregate reading as passing beside unsatisfied work is a violation", (
     },
     { label: "no aggregate", jobs: [job("a", "success")], expected: ["aggregate-missing"] },
     {
+      label: "no aggregate yet in an unfinished run",
+      runOverrides: { status: "in_progress", conclusion: null },
+      jobs: [],
+      expected: [],
+    },
+    {
       label: "accepted skip",
       jobs: [job("a", "skipped"), job("CI Required", "success")],
       expected: [],
@@ -175,7 +183,6 @@ test("peak running jobs counts overlap and ignores work that never reached a run
   // Jobs still in progress count until the observation time.
   const live = summarizeAttempt({
     run: run({ status: "in_progress", conclusion: null }),
-    observedAt: Date.parse(at(8)),
     jobs: [
       job("a", null, { status: "in_progress", started_at: at(0), completed_at: null }),
       job("b", null, { status: "in_progress", started_at: at(2), completed_at: null }),
@@ -189,6 +196,13 @@ test("peak running jobs counts overlap and ignores work that never reached a run
     ],
   });
   assert.equal(live.peakRunningJobs, 3);
+
+  // A runner that started after the records were requested still counts.
+  const late = summarizeAttempt({
+    run: run({ status: "in_progress", conclusion: null }),
+    jobs: [job("late", null, { status: "in_progress", started_at: at(59), completed_at: null })],
+  });
+  assert.equal(late.peakRunningJobs, 1);
 });
 
 test("a re-run of an older run that displaces the newest push is reported", () => {
@@ -217,6 +231,7 @@ test("a re-run of an older run that displaces the newest push is reported", () =
   assert.deepEqual(findOlderTreeDisplacements([older, newest]), [
     {
       displacedRunId: 20,
+      groupEvidence: "pull-request",
       displacedAggregate: "failure",
       rerunRunId: 10,
       rerunAttempt: 3,
@@ -236,6 +251,35 @@ test("a re-run of an older run that displaces the newest push is reported", () =
   for (const candidate of [firstAttempt, newerRun, outsideWindow, otherRef, otherPull, sameTree]) {
     assert.deepEqual(findOlderTreeDisplacements([candidate, newest]), []);
   }
+
+  // The API's pull request list can be empty. Two pull request runs on equal
+  // branch names whose recorded cancel groups differ cannot share a group, and
+  // runs with no ownership evidence at all are kept as unknown, not as shared.
+  const unowned = (record, cancelledByGroup) => ({
+    ...record,
+    pullRequests: [],
+    cancelledByGroup,
+  });
+  assert.deepEqual(
+    findOlderTreeDisplacements([
+      unowned(older, "ci-refs/pull/1/merge"),
+      unowned(newest, "ci-refs/pull/2/merge"),
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    findOlderTreeDisplacements([
+      unowned(older, "ci-refs/pull/1/merge"),
+      unowned(newest, "ci-refs/pull/1/merge"),
+    ]).map((found) => found.groupEvidence),
+    ["cancel-group"],
+  );
+  assert.deepEqual(
+    findOlderTreeDisplacements([unowned(older, null), unowned(newest, null)]).map(
+      (found) => found.groupEvidence,
+    ),
+    ["unknown"],
+  );
 });
 
 test("the cancel cause yields its concurrency group and nothing else matches", () => {
@@ -250,6 +294,14 @@ test("the cancel cause yields its concurrency group and nothing else matches", (
     "ci-refs/pull/7/merge",
   );
   assert.equal(cancelCauseGroup([{ message: "The operation was canceled." }]), null);
+
+  // A message this driver does not know stays visible instead of reading as no cause.
+  assert.deepEqual(classifyCancelCause([{ message: "The operation was canceled." }]), {
+    kind: "unrecognised",
+    group: null,
+    messages: ["The operation was canceled."],
+  });
+  assert.deepEqual(classifyCancelCause([]), { kind: "none", group: null, messages: [] });
 });
 
 test("observe reads one attempt's jobs across pages without mixing attempts", async () => {
@@ -282,7 +334,10 @@ test("observe uses the latest attempt and records the cancel group on request", 
     "/actions/runs/1": respond(200, run({ run_attempt: 4, conclusion: "cancelled" })),
     "/actions/runs/1/attempts/4/jobs?per_page=100&page=1": respond(200, {
       total_count: 2,
-      jobs: [job("a", "cancelled", { id: 55 }), job("CI Required", "failure")],
+      jobs: [
+        job("a", "cancelled", { id: 55, check_run_url: checkRunUrl(55) }),
+        job("CI Required", "failure"),
+      ],
     }),
     "/check-runs/55/annotations": respond(200, [
       { message: "Canceling since a higher priority waiting request for slot-1 exists" },
@@ -299,14 +354,13 @@ test("observe uses the latest attempt and records the cancel group on request", 
 });
 
 test("cancel causes follow each job's check_run_url and can cover every cancelled job", async () => {
-  const url = (id) => `https://api.github.com/repos/${REPO}/check-runs/${id}`;
   const { impl, calls } = fakeFetch({
     "/actions/runs/1": respond(200, run({ conclusion: "cancelled" })),
     "/actions/runs/1/attempts/1/jobs?per_page=100&page=1": respond(200, {
       total_count: 3,
       jobs: [
-        job("first", "cancelled", { id: 11, check_run_url: url(900) }),
-        job("second", "cancelled", { id: 12, check_run_url: url(901) }),
+        job("first", "cancelled", { id: 11, check_run_url: checkRunUrl(900) }),
+        job("second", "cancelled", { id: 12, check_run_url: checkRunUrl(901) }),
         job("CI Required", "failure"),
       ],
     }),
@@ -321,7 +375,20 @@ test("cancel causes follow each job's check_run_url and can cover every cancelle
     fetchImpl: impl,
     allCancelCauses: true,
   });
-  assert.deepEqual(result.summaries[0].cancelCauses, { first: null, second: "slot-1" });
+  assert.deepEqual(result.summaries[0].cancelCauses, {
+    11: {
+      name: "first",
+      kind: "unrecognised",
+      group: null,
+      messages: ["The operation was canceled."],
+    },
+    12: {
+      name: "second",
+      kind: "group",
+      group: "slot-1",
+      messages: ["Canceling since a higher priority waiting request for slot-1 exists"],
+    },
+  });
   assert.equal(result.summaries[0].cancelledByGroup, "slot-1");
   assert.ok(calls.includes("/check-runs/900/annotations"));
   assert.ok(!calls.some((path) => path.includes("/check-runs/11/")));
@@ -332,7 +399,10 @@ test("an unreadable cancel cause keeps the run's states and reports the gap", as
     "/actions/runs/1": respond(200, run({ conclusion: "cancelled" })),
     "/actions/runs/1/attempts/1/jobs?per_page=100&page=1": respond(200, {
       total_count: 2,
-      jobs: [job("a", "cancelled", { id: 55 }), job("CI Required", "failure")],
+      jobs: [
+        job("a", "cancelled", { id: 55, check_run_url: checkRunUrl(55) }),
+        job("CI Required", "failure"),
+      ],
     }),
     "/check-runs/55/annotations": respond(404, {}),
   });
@@ -348,6 +418,65 @@ test("an unreadable cancel cause keeps the run's states and reports the gap", as
   assert.deepEqual(result.missing, [
     { runId: "1", attempt: null, reason: "/check-runs/55/annotations: HTTP 404" },
   ]);
+});
+
+test("a cancelled job without a check_run_url is unreadable, never read by its job id", async () => {
+  const { impl, calls } = fakeFetch({
+    "/actions/runs/1": respond(200, run({ conclusion: "cancelled" })),
+    "/actions/runs/1/attempts/1/jobs?per_page=100&page=1": respond(200, {
+      total_count: 2,
+      jobs: [job("a", "cancelled", { id: 55 }), job("CI Required", "failure")],
+    }),
+  });
+  const result = await observe({
+    repo: REPO,
+    requests: [{ runId: "1" }],
+    fetchImpl: impl,
+    annotations: true,
+  });
+  assert.deepEqual(calls, [
+    "/actions/runs/1",
+    "/actions/runs/1/attempts/1/jobs?per_page=100&page=1",
+  ]);
+  assert.deepEqual(result.summaries[0].cancelCauses, {});
+  assert.deepEqual(result.missing, [
+    { runId: "1", attempt: null, reason: "job 55 (a): record has no check_run_url" },
+  ]);
+});
+
+test("jobs sharing a display name keep separate cancel causes in either order", async () => {
+  const evicted = "Canceling since a higher priority waiting request for slot-1 exists";
+  for (const order of [
+    [101, 102],
+    [102, 101],
+  ]) {
+    const byId = {
+      101: { id: 101, check_run_url: checkRunUrl(901) },
+      102: { id: 102, check_run_url: checkRunUrl(902) },
+    };
+    const { impl } = fakeFetch({
+      "/actions/runs/1": respond(200, run({ conclusion: "cancelled" })),
+      "/actions/runs/1/attempts/1/jobs?per_page=100&page=1": respond(200, {
+        total_count: 3,
+        jobs: [
+          ...order.map((id) => job("heavy", "cancelled", byId[id])),
+          job("CI Required", "failure"),
+        ],
+      }),
+      "/check-runs/901/annotations": respond(200, [{ message: evicted }]),
+      "/check-runs/902/annotations": respond(200, [{ message: "The operation was canceled." }]),
+    });
+    const result = await observe({
+      repo: REPO,
+      requests: [{ runId: "1" }],
+      fetchImpl: impl,
+      allCancelCauses: true,
+    });
+    const { cancelCauses, cancelledByGroup } = result.summaries[0];
+    assert.equal(cancelCauses[101].group, "slot-1");
+    assert.equal(cancelCauses[102].kind, "unrecognised");
+    assert.equal(cancelledByGroup, "slot-1");
+  }
 });
 
 test("an unreadable record stays missing and never becomes a summary", async () => {

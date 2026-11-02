@@ -34,10 +34,10 @@ Reproduce with the read-only driver. It exits non-zero if any record is unreadab
 node scripts/ci-concurrency-observe.mjs --repo pikax/verter --annotations \
   --run 40324254479 --run 40327765458 --run 40328263341 \
   --run 41349220820@1 --run 41286541386@1 --run 41286541386@2 --run 41286541386@3 \
-  --run 40276061212 --run 40277406274
+  --run 40276061212 --run 40277406274 --run 40098863892 --run 41362800277
 ```
 
-The command was run end to end on 2026-11-02 against the unauthenticated API: 22 requests with the default budget, no unreadable record, no verdict violation, and every table row below matches. Without `@attempt` the driver reads the latest attempt, so a run that was re-run since (41349220820, now at attempt 2) needs its attempt named. `--annotations` reads only the first cancelled job's cause; `--annotations-all` reads every cancelled job and needs a larger `--max-requests` or a token.
+The command spends 29 requests with the default budget of 60: a run record and a job page for each of the eleven runs, plus one annotation read for each of the seven runs with a cancelled job. The final re-run on 2026-11-02 used the unauthenticated API (60 requests an hour) and exhausted it, so 41362800277's job page answered HTTP 403 and the driver reported it as `missing` with exit status 2; the other ten records were read, matched every table row below and had no verdict violation. 41362800277's cancel cause and failing `CI Required` below come from the earlier read of that run, and are the one claim here not reproduced by the last run. Without `@attempt` the driver reads the latest attempt, so a run that was re-run since (41349220820, now at attempt 2) needs its attempt named. `--annotations` reads only the first cancelled job's cause; `--annotations-all` reads every cancelled job and needs a larger `--max-requests` or a token.
 
 "Cancelled, ran" means the job held a runner when it was cancelled. "Cancelled, no runner" means it never reached one. Peak is the most jobs running at once in that attempt.
 
@@ -52,8 +52,9 @@ The command was run end to end on 2026-11-02 against the unauthenticated API: 22
 | 41286541386 #2  | 1080         | failure        | failure       | 0              | 0                    | 17   | none                      |
 | 41286541386 #3  | 1080         | success        | success       | 0              | 0                    | 17   | none                      |
 | 41349220820 #1  | 1080         | cancelled      | failure       | 0              | 34                   | 1    | `ci-refs/pull/1080/merge` |
+| 40098863892 #1  | 1013         | cancelled      | failure       | 1              | 0                    | 20   | `ci-refs/pull/1013/merge` |
 
-The driver found no verdict violations in these attempts. Two other cancelled runs agree: 40098863892, a pull request run, and 41362800277, a push to `main` cancelled by `ci-refs/heads/main`, both ended with a failing `CI Required`. This is a sample of the 333 cancelled pull request runs on record, not all of them, and none of it involves a job-level queue.
+The driver found no verdict violations in these attempts. One other cancelled run agrees: 41362800277, a push to `main` cancelled by `ci-refs/heads/main`, ended with a failing `CI Required`. This is a hand-picked sample of cancelled runs, not the population, and none of it involves a job-level queue.
 
 ### Superseded pushes on one ref
 
@@ -96,7 +97,7 @@ Pull request 1080 shows supersession running backwards, on 2026-11-01:
 | 20:54:28   | The newest run's `CI Required` fails                                                                                                     |
 | 21:00:03   | The older head's `CI Required` succeeds                                                                                                  |
 
-The API does not name the request that displaced a run. Attributing this one to attempt 3 is an inference from its timing and from it being the only other CI run active on that ref. The driver reports it as a candidate.
+The API does not name the request that displaced a run. Attributing this one to attempt 3 is an inference from its timing and from it being the only other CI run active on that ref. The driver reports it as a candidate, with `groupEvidence` saying how the two runs were shown to share a group: `pull-request` (both records list a common pull request), `cancel-group` (the recorded cancel groups are equal), `ref` (a push event on one ref) or `unknown` (a pull request event with neither, which is not claimed as shared). Records whose pull requests or cancel groups differ are never candidates.
 
 The check on the current head correctly reads failure, and the pull request was still open when observed, so nothing wrong landed. The hazard is in how results get read:
 
@@ -156,7 +157,7 @@ Coordinate jobs with an explicit release signal. Deadlines may only guard agains
 2. **Contention across refs.** Have three refs contend for one slot under each queue setting, with no supersession, and record whether any job is displaced and what its aggregate reads. Keep a distinct-ref control.
 3. **Older-tree re-run.** Re-run a superseded head's attempt while the newest run waits, and check which verdict each key reads.
 4. **Idle capacity.** Compare contended static slots with an available-slot control under the same workload. Retain occupancy, runnable waiting demand and unused capacity together. A job waiting alone does not prove capacity is idle.
-5. **Evidence.** Capture every attempt with `node scripts/ci-concurrency-observe.mjs --repo <trial> --token-env <NAME> --annotations-all --obligation <job> --run ...`, polling while transitions are live. In-progress jobs count toward peak running until observed complete. A record that cannot be read stays missing and never counts as success.
+5. **Evidence.** Capture every attempt with `node scripts/ci-concurrency-observe.mjs --repo <trial> --token-env <NAME> --annotations-all --obligation <job> --run ...`, polling while transitions are live. In-progress jobs count toward peak running until observed complete. A record that cannot be read stays missing and never counts as success. Cancel causes are kept per Actions job id, because display names repeat; each is a `group`, an `unrecognised` message kept verbatim (GitHub does not document the annotation wording, so the driver only knows the text read from the runs above), or `none`. A job record without a `check_run_url` is reported missing rather than read by job id.
 
 Outcome decision, fixed by the ruling: `supersession-only` if a cross-ref eviction of an unsuperseded run's pending slot job occurs, if a slot idles beside a queued unsuperseded job, or if any cancelled or pending slot job reads as passing; `slot-groups-safe` only when none occurs across scenarios 1 to 4. The record names the deciding scenario.
 
