@@ -55,9 +55,11 @@ in `compat/data/snapshot.rs`; the suites fail until both agree.
 ## Schema validation
 
 Records validate against the upstream schemas with a closed draft-07 subset that
-throws on any keyword it does not implement. Failures are quarantined at the
-narrowest level that keeps the rest truthful: one browser's statements, otherwise
-the whole record. The quarantine names the instance path and keyword and is
+throws on any keyword it does not implement. `format` is asserted, as upstream's
+own schema validator asserts it: `date` is a calendar-valid `YYYY-MM-DD`, `uri`
+is a scheme with no whitespace, and any other format throws. Failures are
+quarantined at the narrowest level that keeps the rest truthful: one browser's
+statements, otherwise the whole record. The quarantine names the instance path and keyword and is
 counted in the header. Structural failures in browser release data stop
 generation, because every answer depends on that data.
 

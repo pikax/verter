@@ -21,8 +21,10 @@ the canonical Rust gate. Generator tests are in
 
 Browser-schema admission is covered by `rejects browser release data it cannot
 trust rather than omitting it`: a valid multi-browser input is the control;
-missing `engine_version` and malformed discarded `release_notes` reject before
-projection. `enforces property dependencies and preserves schema dependencies`
+missing `engine_version`, malformed discarded `release_notes` and a malformed
+`release_date` reject before projection. `asserts the date and uri formats and
+fails closed on any other` pins the format semantics.
+`enforces property dependencies and preserves schema dependencies`
 distinguishes both dependency forms. The integrity and recipe tests bind the
 verbatim browser schema and both BCD schema digests to the snapshot identity.
 

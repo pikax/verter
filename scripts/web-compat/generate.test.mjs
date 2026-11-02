@@ -221,6 +221,14 @@ describe("compatibility snapshot generation", () => {
     assert.throws(() => buildFixture({ bcd: invalidDroppedField }), {
       code: "browser-record",
     });
+    for (const releaseDate of ["not-a-date", "2011-13-45", "2023-02-29", "2011-1-05"]) {
+      const malformedDate = readJson("fixtures", "upstream-browser-compat-data.json");
+      malformedDate.browsers.chrome.releases["9"].release_date = releaseDate;
+      assert.throws(() => buildFixture({ bcd: malformedDate }), {
+        code: "browser-record",
+        message: /release_date \(format\)/,
+      });
+    }
     const bcd = readJson("fixtures", "upstream-browser-compat-data.json");
     bcd.browsers.chrome.releases.latest = { status: "current" };
     assert.throws(() => buildFixture({ bcd }), { code: "browser-record" });
@@ -287,6 +295,48 @@ describe("compatibility snapshot generation", () => {
     assert.throws(() => validator.validate({ $ref: "#/definitions/absent" }, 1), /dangling/);
     assert.equal(validator.validate({ type: "boolean", nullable: true }, null), null);
     assert.equal(validator.validate({ type: "boolean" }, null).keyword, "type");
+  });
+
+  it("asserts the date and uri formats and fails closed on any other", () => {
+    const validator = schemaValidator({});
+    const date = { format: "date" };
+    for (const valid of ["2011-02-08", "2024-02-29", "2000-02-29", "1999-12-31"]) {
+      assert.equal(validator.validate(date, valid), null, valid);
+    }
+    for (const invalid of [
+      "",
+      "not-a-date",
+      "2011-13-45",
+      "2011-00-10",
+      "2011-01-00",
+      "2011-04-31",
+      "2023-02-29",
+      "1900-02-29",
+      "2011-2-8",
+      " 2011-02-08",
+      "2011-02-08T00:00:00Z",
+    ]) {
+      assert.deepEqual(
+        validator.validate(date, invalid, "/release_date"),
+        { instance_path: "/release_date", keyword: "format" },
+        invalid,
+      );
+    }
+    const uri = { format: "uri" };
+    for (const valid of ["https://example.test/a?b#c", "mailto:a@example.test"]) {
+      assert.equal(validator.validate(uri, valid), null, valid);
+    }
+    for (const invalid of ["", "example.test/a", "/relative", "https://example.test/a b", "1a:b"]) {
+      assert.equal(validator.validate(uri, invalid).keyword, "format", invalid);
+    }
+    // A format constrains strings only; the type keyword owns every other value.
+    assert.equal(validator.validate(date, 20110208), null);
+    assert.equal(validator.validate(uri, null), null);
+    assert.throws(
+      () => validator.validate({ format: "email" }, "a@example.test"),
+      /unsupported format/,
+    );
+    assert.throws(() => validator.validate({ format: "email" }, 1), /unsupported format/);
   });
 
   it("enforces property dependencies and preserves schema dependencies", () => {

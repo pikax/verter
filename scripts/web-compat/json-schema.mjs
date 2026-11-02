@@ -1,5 +1,5 @@
 // A closed draft-07 subset validator for the pinned compatibility schemas.
-// An unrecognised keyword throws rather than passing silently, so a schema
+// An unrecognised keyword or format throws rather than passing silently, so a schema
 // upgrade that introduces new validation semantics stops generation instead of
 // weakening it.
 
@@ -12,7 +12,25 @@ const ANNOTATION_KEYWORDS = new Set([
   "definitions",
   "tsType",
   "errorMessage",
-  "format",
+]);
+
+const CALENDAR_DATE = /^(\d{4})-(\d{2})-(\d{2})$/u;
+// The shape upstream's own schema validator asserts for `uri`: a scheme, then no whitespace.
+const URI = /^[a-z][a-z0-9+\-.]*:\S*$/iu;
+
+/** RFC 3339 `full-date`: the `YYYY-MM-DD` shape naming a day the calendar actually has. */
+function isCalendarDate(value) {
+  const match = CALENDAR_DATE.exec(value);
+  if (match === null) return false;
+  const [year, month, day] = match.slice(1).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
+}
+
+const FORMATS = new Map([
+  ["date", isCalendarDate],
+  ["uri", (value) => URI.test(value)],
 ]);
 
 function typeMatches(type, value, nullable) {
@@ -95,6 +113,13 @@ export function schemaValidator(root) {
         return typeof value !== "string" || regex(argument).test(value)
           ? null
           : fail(path, "pattern");
+      case "format": {
+        const matches = FORMATS.get(argument);
+        if (matches === undefined) {
+          throw new Error(`json-schema: unsupported format ${JSON.stringify(argument)}`);
+        }
+        return typeof value !== "string" || matches(value) ? null : fail(path, "format");
+      }
       case "minItems":
         return !Array.isArray(value) || value.length >= argument ? null : fail(path, "minItems");
       case "items": {
