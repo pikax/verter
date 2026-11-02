@@ -867,11 +867,12 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     //
     // A refused record means no current carrier source describes these
     // companions: the open document moved after this compile's pin, the compile
-    // carries no pin, or the source is unavailable. Publish nothing. The store is the provider's view, while the LSP-side records
-    // still describe the live revision; writing the stale content would leave
-    // the two disagreeing, and an edit that returns the document to the
-    // already-committed text (insert then undo) would find nothing to
-    // republish. The live revision is requeued and publishes on its own pass.
+    // carries no pin, or the source is unavailable. Publish nothing. The store is
+    // the provider's view, while the LSP-side records still describe the live
+    // revision; writing the stale content would leave the two disagreeing, and an
+    // edit that returns the document to the already-committed text (insert then
+    // undo) would find nothing to republish. The live revision is requeued and
+    // publishes on its own pass.
     if crate::provider_surface_store::record_and_version_carrier_companions(
         req.provider_surfaces,
         req.documents,

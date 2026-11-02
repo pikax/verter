@@ -630,7 +630,7 @@ pub(crate) fn record_carrier_ide_surface_fenced(
 ) -> bool {
     if let Some((open_uri, revision)) = open_pin {
         let Some(documents) = documents else {
-            tracing::debug!(
+            tracing::info!(
                 "provider_surface_store: discarding IDE surface for {provider_path} — a \
                  revision was pinned but no document registry was supplied to fence against"
             );
@@ -814,6 +814,10 @@ fn record_carrier_companion_surface_fenced(
 ) -> Result<Option<u64>, CompanionRecordSuperseded> {
     if let Some((open_uri, revision)) = open_pin {
         let Some(documents) = documents else {
+            tracing::info!(
+                "provider_surface_store: discarding IDE companion for {provider_path} — a \
+                 revision was pinned but no document registry was supplied to fence against"
+            );
             return Err(CompanionRecordSuperseded);
         };
         let Some(generation) =
