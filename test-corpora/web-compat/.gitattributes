@@ -1,0 +1,7 @@
+# The snapshot loader verifies a SHA-256 over these exact bytes; a line-ending
+# conversion on checkout would reject every answer.
+*.jsonl -text
+# Upstream license and schema bytes are digest-pinned verbatim.
+pinned/LICENSE.* -text -whitespace
+pinned/NOTICE.md -text -whitespace
+schemas/*.json -text -whitespace
