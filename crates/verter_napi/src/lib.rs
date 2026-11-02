@@ -1564,7 +1564,7 @@ impl From<FfiTscResponse> for NapiTscResponse {
 
 impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
     fn from(value: FfiPublicApiProjectionError) -> Self {
-        let subject = match value.subject {
+        let subject = match value.subject.exact() {
             PublicApiProjectionSubject::Macro { syntax_index } => {
                 Either3::A(NapiTscMacroFailureSubject {
                     kind: "macro".to_string(),
@@ -1935,16 +1935,16 @@ fn napi_module_reference_analyzability_from_str(
     }
 }
 
-fn napi_module_reference_to_analysis(
+fn napi_module_reference_to_resolvable(
     input: NapiModuleReference,
-) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference> {
+) -> Result<verter_resolution::ResolvableModuleReference> {
     // Read-back of a reference this binding published: its spans are in the
     // declared wire encoding of the originating source, which is not part of
-    // this call. The consumers (specifier collection and known-file
-    // resolution) are span-independent, so the read-back refuses an unknown
-    // tag or an inverted range and carries UTF-8 spans verbatim; a UTF-16
-    // span is not a byte position and is not relabelled as one.
-    let span_encoding = SpanEncodingTag::from_wire(&input.spanEncoding).ok_or_else(|| {
+    // this call. Specifier collection and known-file resolution read no
+    // position, so the read-back validates the wire contract (known tag,
+    // well-formed range) and carries only the span-free facts: a span is
+    // never converted without its source and never fabricated.
+    SpanEncodingTag::from_wire(&input.spanEncoding).ok_or_else(|| {
         Error::new(
             Status::InvalidArg,
             format!(
@@ -1959,27 +1959,13 @@ fn napi_module_reference_to_analysis(
             "module reference span is inverted",
         ));
     }
-    let (span, expr_span) = match span_encoding {
-        SpanEncodingTag::Utf8 => (
-            verter_span::Span::new(input.spanStart, input.spanEnd),
-            verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
-        ),
-        SpanEncodingTag::Utf16 => (verter_span::Span::default(), verter_span::Span::default()),
-    };
-    Ok(
-        verter_session_query::analysis::types::AnalyzedModuleReference {
-            syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
-            semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
-            is_type_only: input.isTypeOnly,
-            span,
-            expr_span,
-            raw_text: input.rawText,
-            literal_specifier: input.literalSpecifier,
-            finite_specifiers: input.finiteSpecifiers,
-            static_prefix: input.staticPrefix,
-            analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
-        },
-    )
+    napi_module_reference_syntax_from_str(&input.syntax)?;
+    napi_module_reference_semantics_from_str(&input.semantics)?;
+    Ok(verter_resolution::ResolvableModuleReference {
+        analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
+        literal_specifier: input.literalSpecifier,
+        finite_specifiers: input.finiteSpecifiers,
+    })
 }
 
 fn host_module_reference_to_napi(
@@ -3336,7 +3322,7 @@ impl NapiVerterHost {
     ) -> Result<Vec<String>> {
         let module_references = module_references
             .into_iter()
-            .map(napi_module_reference_to_analysis)
+            .map(napi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>>>()?;
         Ok(verter_resolution::collect_resolvable_module_reference_specifiers(&module_references))
     }
@@ -3353,7 +3339,7 @@ impl NapiVerterHost {
     ) -> Result<Vec<String>> {
         let module_references = module_references
             .into_iter()
-            .map(napi_module_reference_to_analysis)
+            .map(napi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>>>()?;
         let extensions = extensions.unwrap_or_else(|| self.inner.known_dependency_extensions());
         Ok(
@@ -3797,10 +3783,11 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         // Each entry's diagnostics are converted against the exact source
         // snapshot the batch supplied for that input (shared `Arc`, no copy).
-        let input_sources: std::collections::HashMap<String, std::sync::Arc<str>> = inputs
-            .iter()
-            .map(|input| (input.canonical_id.clone(), input.source.clone()))
-            .collect();
+        // Entries come back one per input in the caller's order, so the
+        // snapshots pair with them by position: the host canonicalizes every
+        // input id, so a caller-spelled id is never a valid lookup key.
+        let input_sources: Vec<std::sync::Arc<str>> =
+            inputs.iter().map(|input| input.source.clone()).collect();
         let default_mode = opts
             .defaultMode
             .map(|m| ffi_compile_cache_mode_to_host(&m))
@@ -3885,9 +3872,17 @@ impl NapiVerterHost {
                 target,
             )
         }))?;
+        if entries.len() != input_sources.len() {
+            return Err(ffi_err(format!(
+                "compileMany returned {} entries for {} inputs",
+                entries.len(),
+                input_sources.len()
+            )));
+        }
         Ok(entries
             .into_iter()
-            .map(|e| {
+            .zip(input_sources)
+            .map(|(e, input_source)| {
                 // Flatten the typed outcome ARM BY ARM, exhaustively (no
                 // wildcard — a new variant is a compile error here, not a
                 // silently mis-serialized entry). The JS-visible shape is
@@ -3905,9 +3900,8 @@ impl NapiVerterHost {
                         lang,
                         Vec::new(),
                         {
-                            let spans = verter_ffi::convert::SpanConverter::new(
-                                input_sources.get(&e.canonical_id).map(|s| &**s),
-                            );
+                            let spans =
+                                verter_ffi::convert::SpanConverter::new(Some(&*input_source));
                             diagnostics
                                 .iter()
                                 .map(|d| {

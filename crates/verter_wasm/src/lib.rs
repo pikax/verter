@@ -335,42 +335,26 @@ fn ffi_module_reference_analyzability_from_str(
     }
 }
 
-fn ffi_module_reference_to_analysis(
+fn ffi_module_reference_to_resolvable(
     input: FfiModuleReference,
-) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference, JsValue> {
+) -> Result<verter_resolution::ResolvableModuleReference, JsValue> {
     // Read-back of a reference this binding published: its spans are in the
     // declared wire encoding (`span_encoding`, required by the schema) of the
-    // originating source, which is not part of this call. The consumers
-    // (specifier collection and known-file resolution) are span-independent,
-    // so the read-back refuses an inverted range and carries UTF-8 spans
-    // verbatim; a UTF-16 span is not a byte position and is not relabelled
-    // as one.
+    // originating source, which is not part of this call. Specifier
+    // collection and known-file resolution read no position, so the read-back
+    // validates the wire contract (well-formed range) and carries only the
+    // span-free facts: a span is never converted without its source and never
+    // fabricated.
     if input.span_start > input.span_end || input.expr_span_start > input.expr_span_end {
         return Err(ffi_err("module reference span is inverted"));
     }
-    let (span, expr_span) = match input.span_encoding {
-        verter_protocol::types::SpanEncodingTag::Utf8 => (
-            verter_span::Span::new(input.span_start, input.span_end),
-            verter_span::Span::new(input.expr_span_start, input.expr_span_end),
-        ),
-        verter_protocol::types::SpanEncodingTag::Utf16 => {
-            (verter_span::Span::default(), verter_span::Span::default())
-        }
-    };
-    Ok(
-        verter_session_query::analysis::types::AnalyzedModuleReference {
-            syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
-            semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
-            is_type_only: input.is_type_only,
-            span,
-            expr_span,
-            raw_text: input.raw_text,
-            literal_specifier: input.literal_specifier,
-            finite_specifiers: input.finite_specifiers,
-            static_prefix: input.static_prefix,
-            analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
-        },
-    )
+    ffi_module_reference_syntax_from_str(&input.syntax)?;
+    ffi_module_reference_semantics_from_str(&input.semantics)?;
+    Ok(verter_resolution::ResolvableModuleReference {
+        analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
+        literal_specifier: input.literal_specifier,
+        finite_specifiers: input.finite_specifiers,
+    })
 }
 
 // =============================================================================
@@ -887,7 +871,7 @@ impl WasmVerterHost {
     ) -> Result<JsValue, JsValue> {
         let module_references = parse_wasm_input::<Vec<FfiModuleReference>>(module_references)?
             .into_iter()
-            .map(ffi_module_reference_to_analysis)
+            .map(ffi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
             verter_resolution::collect_resolvable_module_reference_specifiers(&module_references);
@@ -906,7 +890,7 @@ impl WasmVerterHost {
     ) -> Result<JsValue, JsValue> {
         let module_references = parse_wasm_input::<Vec<FfiModuleReference>>(module_references)?
             .into_iter()
-            .map(ffi_module_reference_to_analysis)
+            .map(ffi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>, _>>()?;
         let known_ids: Vec<String> = parse_wasm_input(known_ids)?;
         let extensions = if extensions.is_undefined() || extensions.is_null() {

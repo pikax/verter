@@ -8,7 +8,7 @@ import type {
   AnalysisStyleBlock,
   OrderedSfcStructure,
 } from "../core/types";
-import { utf8ToUtf16Offset } from "./offsets";
+import { utf8ToUtf16Offset, utf8ToUtf16RangeExact } from "./offsets";
 
 /** Decoration descriptor for a binding in the script block. */
 export interface BindingDecoration {
@@ -72,10 +72,12 @@ function getBindingStyle(binding: AnalysisBinding): { className: string; label: 
  * Compute binding reactivity decorations from analysis data.
  * Returns decorations for each binding declaration AND template binding occurrences.
  *
- * Uses SFC-absolute spans from the analysis for precise positioning.
+ * Uses SFC-absolute spans from the analysis for precise positioning. The
+ * analysis spans are `utf8.v1` byte offsets; they are converted to UTF-16
+ * against `source`, and a span that cannot be converted exactly is skipped.
  */
 export function computeBindingDecorations(
-  _source: string,
+  source: string,
   analysis: FileAnalysis,
 ): BindingDecoration[] {
   const decorations: BindingDecoration[] = [];
@@ -92,10 +94,14 @@ export function computeBindingDecorations(
     bindingStyles.set(binding.name, style);
 
     // Use SFC-absolute span from analysis
-    if (binding.spanStart > 0 || binding.spanEnd > 0) {
+    const range =
+      binding.spanStart > 0 || binding.spanEnd > 0
+        ? utf8ToUtf16RangeExact(source, binding.spanStart, binding.spanEnd)
+        : null;
+    if (range) {
       decorations.push({
-        start: binding.spanStart,
-        end: binding.spanEnd,
+        start: range.start,
+        end: range.end,
         className: style.className,
         hoverMessage: `**${style.label}** binding`,
       });
@@ -108,9 +114,11 @@ export function computeBindingDecorations(
       const style = bindingStyles.get(occ.name);
       if (!style) continue;
 
+      const range = utf8ToUtf16RangeExact(source, occ.spanStart, occ.spanEnd);
+      if (!range) continue;
       decorations.push({
-        start: occ.spanStart,
-        end: occ.spanEnd,
+        start: range.start,
+        end: range.end,
         className: style.className,
         hoverMessage: `**${style.label}** binding (${occ.usageKind})`,
       });
@@ -124,7 +132,10 @@ export function computeBindingDecorations(
  * Compute CSS class usage decorations.
  * Marks classes defined in <style> blocks as used/unused based on template analysis.
  */
-export function computeCssClassDecorations(analysis: FileAnalysis): CssClassDecoration[] {
+export function computeCssClassDecorations(
+  source: string,
+  analysis: FileAnalysis,
+): CssClassDecoration[] {
   const decorations: CssClassDecoration[] = [];
 
   // Collect all template class names (from static classes on elements)
@@ -138,9 +149,11 @@ export function computeCssClassDecorations(analysis: FileAnalysis): CssClassDeco
       // Track unique class names
       allDefinedClasses.add(cls.name);
 
+      const range = utf8ToUtf16RangeExact(source, cls.start, cls.end);
+      if (!range) continue;
       decorations.push({
-        start: cls.start,
-        end: cls.end,
+        start: range.start,
+        end: range.end,
         used: true, // Default to true since we don't have template usage data yet
         className: "verter-css-used",
       });

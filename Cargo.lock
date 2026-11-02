@@ -3800,6 +3800,7 @@ dependencies = [
  "verter_compiler",
  "verter_css_syntax",
  "verter_diagnostics",
+ "verter_ffi",
  "verter_macro_dto",
  "verter_protocol",
  "verter_semantic",

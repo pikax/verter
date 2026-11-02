@@ -268,7 +268,7 @@ function updateDecorations() {
   }
 
   // CSS class usage decorations
-  const cssDecs = computeCssClassDecorations(analysis);
+  const cssDecs = computeCssClassDecorations(file.code, analysis);
   for (const dec of cssDecs) {
     const startPos = model.getPositionAt(dec.start);
     const endPos = model.getPositionAt(dec.end);

@@ -35,6 +35,7 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_protocol = { path = "../verter_protocol" }
+verter_ffi = { path = "../verter_ffi" }
 rmcp = { version = "3.7.0", features = [
   "server",
   "macros",

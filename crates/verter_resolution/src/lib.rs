@@ -29,6 +29,7 @@ pub use attempt_output::AttemptOutput;
 pub use input_resolution_budgets::InputResolutionRetention;
 pub use module_reference_resolution::{
     collect_resolvable_module_reference_specifiers, resolve_known_module_reference_dependencies,
+    ResolvableModuleReference,
 };
 pub use module_resolver_core::ModuleResolverCore;
 pub use node_modules_resolution::{ancestor_dirs, ancestor_dirs_from_dir};

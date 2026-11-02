@@ -21,7 +21,7 @@ pub fn host_public_api_projection_error_to_ffi(
     FfiPublicApiProjectionError {
         code: error.code().to_string(),
         detail_code: error.detail_code().to_string(),
-        subject: error.subject(),
+        subject: error.subject().exact(),
         declaration_shape_reason: error
             .declaration_shape_reason()
             .map(|reason| reason.code().to_string()),

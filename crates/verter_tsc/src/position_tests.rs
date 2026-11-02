@@ -217,11 +217,35 @@ fn rendered_diagnostics_carry_the_selected_unit_or_no_position() {
         PositionRenderer::new(Utf8).render(&missing),
         format!("{path}.missing: error TS2322: m")
     );
-    // Column 1 is the line start in every encoding, whatever the content.
-    let start = diagnostic(&format!("{path}.missing"), 7, 1);
+    // Validation runs in every encoding and for column 1: an unreadable file
+    // or a line the file does not have is reported without a position, never
+    // as a guessed `(line,1)`.
+    for encoding in [Utf8, Utf16, Utf32] {
+        let renderer = PositionRenderer::new(encoding);
+        for (file, line, col) in [
+            (format!("{path}.missing"), 7, 1),
+            (format!("{path}.missing"), 1, 4),
+            (path.clone(), 7, 1),
+            (path.clone(), 0, 1),
+            (path.clone(), 1, 0),
+            (path.clone(), 1, 99),
+        ] {
+            assert_eq!(
+                renderer.render(&diagnostic(&file, line, col)),
+                format!("{file}: error TS2322: m"),
+                "{encoding:?} {file}({line},{col})"
+            );
+        }
+        // Column 1 of a line the file has stays valid.
+        assert_eq!(
+            renderer.render(&diagnostic(&path, 1, 1)),
+            format!("{path}(1,1): error TS2322: m")
+        );
+    }
+    // Under UTF-16 a column inside a surrogate pair is refused as well.
     assert_eq!(
-        PositionRenderer::new(Utf8).render(&start),
-        format!("{path}.missing(7,1): error TS2322: m")
+        PositionRenderer::new(Utf16).render(&inside),
+        format!("{path}: error TS2322: m")
     );
 
     // Selection: a selector in the selected unit matches by file + position.

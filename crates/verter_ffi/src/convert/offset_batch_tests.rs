@@ -350,7 +350,7 @@ fn every_surface_names_the_same_authored_text_after_declared_conversion() {
     );
 
     // MCP lint wire: UTF-8 bytes under `utf8.v1`.
-    let mcp = lint_diagnostics_to_wire_utf8(vec![lint(start, end)]);
+    let mcp = lint_diagnostics_to_wire_utf8(vec![lint(start, end)], Some(source));
     let span = &mcp[0].span;
     assert_eq!(span.encoding, SpanEncodingTag::Utf8);
     assert_eq!(

@@ -489,7 +489,8 @@ fn line_text(content: &str, line: u32) -> Option<&str> {
 /// Validate a preprocessor-reported 1-based `line` and 1-based UTF-16
 /// `column` against the exact `content` the tool consumed. Exact or refused:
 /// a zero base, a line past the last, a column past the end of its line, or a
-/// column without a line is [`CoordError::InvalidBoundary`]; a column inside
+/// column without a line, or a line without a column (a position is the
+/// complete `(line, column)` pair) is [`CoordError::InvalidBoundary`]; a column inside
 /// a surrogate pair is [`CoordError::NotCharBoundary`]. `None`/`None` is an
 /// absent position and always valid.
 pub(crate) fn check_preprocessor_position(
@@ -500,16 +501,13 @@ pub(crate) fn check_preprocessor_position(
     use verter_span::CoordError;
     let (line, column) = match (line, column) {
         (None, None) => return Ok(()),
-        (None, Some(_)) => return Err(CoordError::InvalidBoundary),
-        (Some(line), column) => (line, column),
+        (None, Some(_)) | (Some(_), None) => return Err(CoordError::InvalidBoundary),
+        (Some(line), Some(column)) => (line, column),
     };
     if line == 0 {
         return Err(CoordError::InvalidBoundary);
     }
     let text = line_text(content, line).ok_or(CoordError::InvalidBoundary)?;
-    let Some(column) = column else {
-        return Ok(());
-    };
     let target = u64::from(column.checked_sub(1).ok_or(CoordError::InvalidBoundary)?);
     let mut units = 0u64;
     for ch in text.chars() {
@@ -2107,7 +2105,11 @@ mod tests {
         let input = "a\u{1F600}b\r\n\rx\n";
         let check = super::check_preprocessor_position;
         assert_eq!(check(input, None, None), Ok(()));
-        assert_eq!(check(input, Some(1), None), Ok(()));
+        assert_eq!(
+            check(input, Some(1), None),
+            Err(CoordError::InvalidBoundary),
+            "a line without a column is a half-specified position"
+        );
         assert_eq!(check(input, Some(1), Some(1)), Ok(()));
         assert_eq!(check(input, Some(1), Some(2)), Ok(()), "before the emoji");
         assert_eq!(

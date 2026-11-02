@@ -1701,6 +1701,52 @@ fn lint_diagnostics_to_wire_utf16_tags_a_separate_span() {
     assert_eq!(json["spanError"], "SourceUnavailable");
 }
 
+#[test]
+fn lint_diagnostics_to_wire_utf8_refuses_unexact_spans_and_converts_evidence() {
+    let source = "a😀b";
+    let lint = |start, end, evidence| verter_diagnostics::LintDiagnostic {
+        rule: "r".to_string(),
+        category: "c".to_string(),
+        severity: verter_diagnostics::Severity::Error,
+        message: "m".to_string(),
+        span: verter_span::Span::new(start, end),
+        tags: vec![],
+        span_kind: verter_diagnostics::DiagnosticSpanKind::ElementOpenTag,
+        certainty: verter_diagnostics::Certainty::Definite,
+        evidence,
+        related_files: Vec::new(),
+    };
+    let code = |start, end| {
+        lint_diagnostics_to_wire_utf8(vec![lint(start, end, Vec::new())], Some(source))[0]
+            .span
+            .error
+    };
+    assert_eq!(code(1, 5), None);
+    assert_eq!(code(2, 5), Some("NotCharBoundary"), "inside the emoji");
+    assert_eq!(code(1, 99), Some("InvalidBoundary"), "past the end");
+    assert_eq!(code(5, 1), Some("InvalidBoundary"), "inverted");
+    let sourceless = lint_diagnostics_to_wire_utf8(vec![lint(5, 1, Vec::new())], None);
+    assert_eq!(sourceless[0].span.error, Some("InvalidBoundary"));
+
+    // Evidence highlights follow the enclosing wire encoding: bytes under
+    // utf8.v1, code units under utf16.v1; an off-boundary highlight is
+    // omitted rather than passed through untagged.
+    let snippet = |start, end| verter_diagnostics::EvidenceSnippet {
+        context: source.to_string(),
+        highlight_start: start,
+        highlight_end: end,
+    };
+    let evidence = vec![snippet(1, 5), snippet(2, 5)];
+    let utf8 = lint_diagnostics_to_wire_utf8(vec![lint(1, 5, evidence.clone())], Some(source));
+    let json = serde_json::to_value(&utf8[0]).expect("wire lint serializes");
+    assert_eq!(json["evidence"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["evidence"][0]["highlightEnd"], 5);
+    let utf16 = lint_diagnostics_to_wire_utf16(vec![lint(1, 5, evidence)], Some(source));
+    let json = serde_json::to_value(&utf16[0]).expect("wire lint serializes");
+    assert_eq!(json["evidence"][0]["highlightStart"], 1);
+    assert_eq!(json["evidence"][0]["highlightEnd"], 3);
+}
+
 // ── Output direction: host_update_to_ffi ─────────────────────────
 
 #[test]

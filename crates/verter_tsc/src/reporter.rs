@@ -194,11 +194,10 @@ impl PositionRenderer {
     #[must_use]
     pub fn position(&self, diagnostic: &Diagnostic) -> Option<(u32, u32)> {
         use crate::position::{ColumnEncoding, LineTable};
-        if self.encoding == ColumnEncoding::Utf16 || diagnostic.col == 1 {
-            // UTF-16 is the engine's own unit; column 1 is the line start in
-            // every encoding, whatever the content.
-            return Some((diagnostic.line, diagnostic.col));
-        }
+        // Every position is validated against the file's exact content, in
+        // every encoding (UTF-16 included): an unreadable file, a line the file
+        // does not have, a column past the line end or inside a surrogate pair
+        // is reported without a position.
         let text = self.text(&diagnostic.file)?;
         let column = LineTable::new(&text)
             .convert_column(

@@ -287,7 +287,11 @@ fn populate_evidence(diags: &mut [verter_diagnostics::LintDiagnostic], source: O
         None => return,
     };
     for d in diags.iter_mut() {
-        if d.span.start >= d.span.end || d.span.end as usize > src.len() {
+        if d.span.start >= d.span.end
+            || d.span.end as usize > src.len()
+            || !src.is_char_boundary(d.span.start as usize)
+            || !src.is_char_boundary(d.span.end as usize)
+        {
             continue;
         }
         // Find 1 line before and 1 line after the span for context
@@ -337,7 +341,7 @@ fn public_api_projection_mcp_error(
     error: verter_session::PublicApiProjectionError,
 ) -> ErrorData {
     let unavailable_outcome = error.unavailable_outcome();
-    let subject = match error.subject() {
+    let subject = match error.subject().exact() {
         verter_session::PublicApiProjectionSubject::Macro { syntax_index } => {
             serde_json::json!({ "kind": "macro", "syntaxIndex": syntax_index })
         }
@@ -552,8 +556,10 @@ impl VerterMcpServer {
                     let analysis = host
                         .get_analysis(&canonical)
                         .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
-                    let json = serde_json::to_string_pretty(&analysis)
-                        .map_err(|e| mcp_err(e.to_string()))?;
+                    let json = serde_json::to_string_pretty(
+                        &verter_protocol::types::Utf8SpanPayload::new(&analysis),
+                    )
+                    .map_err(|e| mcp_err(e.to_string()))?;
                     Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                 })();
                 mcp_tool_success(result)
@@ -647,8 +653,10 @@ impl VerterMcpServer {
                         }
                     }
 
-                    let json =
-                        serde_json::to_string_pretty(&api).map_err(|e| mcp_err(e.to_string()))?;
+                    let json = serde_json::to_string_pretty(
+                        &verter_protocol::types::Utf8SpanPayload::new(&api),
+                    )
+                    .map_err(|e| mcp_err(e.to_string()))?;
                     Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                 })();
                 mcp_tool_success(result)
@@ -715,8 +723,10 @@ impl VerterMcpServer {
             .host
             .get_analysis(&canonical)
             .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
-        let json =
-            serde_json::to_string_pretty(&analysis.imports).map_err(|e| mcp_err(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&verter_protocol::types::Utf8SpanPayload::new(
+            serde_json::json!({ "imports": &analysis.imports }),
+        ))
+        .map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
@@ -733,8 +743,10 @@ impl VerterMcpServer {
             .host
             .get_analysis(&canonical)
             .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
-        let json =
-            serde_json::to_string_pretty(&analysis.bindings).map_err(|e| mcp_err(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&verter_protocol::types::Utf8SpanPayload::new(
+            serde_json::json!({ "bindings": &analysis.bindings }),
+        ))
+        .map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
@@ -754,7 +766,9 @@ impl VerterMcpServer {
         let tpl = analysis
             .template
             .ok_or_else(|| mcp_err("No template analysis available"))?;
-        let json = serde_json::to_string_pretty(&tpl).map_err(|e| mcp_err(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&verter_protocol::types::Utf8SpanPayload::new(&tpl))
+                .map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
@@ -775,8 +789,10 @@ impl VerterMcpServer {
             .host
             .get_analysis(&canonical)
             .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
-        let json =
-            serde_json::to_string_pretty(&analysis.styles).map_err(|e| mcp_err(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&verter_protocol::types::Utf8SpanPayload::new(
+            serde_json::json!({ "styles": &analysis.styles }),
+        ))
+        .map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
@@ -986,10 +1002,9 @@ impl VerterMcpServer {
         }
 
         // Each diagnostic names its span encoding beside `spanStart`/`spanEnd`.
-        let tagged: Vec<_> = diag_vec
-            .iter()
-            .map(verter_protocol::types::Utf8SpanPayload::new)
-            .collect();
+        // Each span is validated against the source snapshot; an inexact span
+        // is reported with a typed refusal and no offsets.
+        let tagged = verter_ffi::convert::lint_diagnostics_to_wire_utf8(diag_vec, source_str);
         let json = serde_json::to_string_pretty(&tagged).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
@@ -1075,11 +1090,13 @@ impl VerterMcpServer {
                 }
             }
 
-            let filtered: Vec<_> = diag_vec
-                .iter()
-                .filter(|d| !errors_only || d.severity == Severity::Error)
-                .map(verter_protocol::types::Utf8SpanPayload::new)
-                .collect();
+            let filtered = verter_ffi::convert::lint_diagnostics_to_wire_utf8(
+                diag_vec
+                    .into_iter()
+                    .filter(|d| !errors_only || d.severity == Severity::Error)
+                    .collect(),
+                source_str,
+            );
 
             if !filtered.is_empty() {
                 by_file.insert(
@@ -1144,8 +1161,22 @@ impl VerterMcpServer {
 
         check_mcp_byte_offset(&source, params.offset)?;
         let actions = self.action_engine.actions_at(params.offset, &ctx);
+        // An action with an edit whose range is not a valid range of the
+        // source (inverted, past the end, inside a UTF-8 sequence) is withheld:
+        // an inexact edit is never published.
+        let exact_range = |start: u32, end: u32| {
+            start <= end
+                && end as usize <= source.len()
+                && source.is_char_boundary(start as usize)
+                && source.is_char_boundary(end as usize)
+        };
         let actions_json: Vec<serde_json::Value> = actions
             .into_iter()
+            .filter(|a| {
+                a.edits
+                    .iter()
+                    .all(|e| exact_range(e.span.start, e.span.end))
+            })
             .map(|a| {
                 serde_json::json!({
                     "title": a.title,
@@ -4242,6 +4273,25 @@ const count = ref(0)
             diags[0].evidence.is_empty(),
             "should skip out-of-range spans"
         );
+    }
+
+    #[test]
+    fn populate_evidence_skips_spans_inside_a_multibyte_character() {
+        let mut diags = vec![verter_diagnostics::LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: verter_diagnostics::Severity::Warning,
+            message: "test".to_string(),
+            // Byte 2 is inside the 4-byte emoji at bytes 1..5.
+            span: verter_span::Span::new(2, 6),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        }];
+        populate_evidence(&mut diags, Some("a\u{1F600}bcd"));
+        assert!(diags[0].evidence.is_empty());
     }
 
     // ── Route analysis: build_route_snapshot extracts template components ──

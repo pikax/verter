@@ -930,6 +930,21 @@ pub enum PublicApiProjectionSubject {
     Source,
 }
 
+impl PublicApiProjectionSubject {
+    /// The subject with a range that is not a valid half-open range
+    /// (`start > end`) reported as the whole source: an inexact range is never
+    /// published, swapped or emptied.
+    #[must_use]
+    pub fn exact(self) -> Self {
+        match self {
+            Self::ScriptSetupAttrs { source_range } if source_range.start > source_range.end => {
+                Self::Source
+            }
+            other => other,
+        }
+    }
+}
+
 impl std::fmt::Display for PublicApiProjectionSubject {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -970,6 +985,18 @@ mod public_api_projection_subject_tests {
             serde_json::to_value(PublicApiProjectionSubject::Source).unwrap(),
             serde_json::json!({ "kind": "source" })
         );
+        // An inverted range is reported as the whole source, never emitted.
+        assert_eq!(
+            PublicApiProjectionSubject::ScriptSetupAttrs {
+                source_range: verter_span::Span::new(37, 31),
+            }
+            .exact(),
+            PublicApiProjectionSubject::Source
+        );
+        let valid = PublicApiProjectionSubject::ScriptSetupAttrs {
+            source_range: verter_span::Span::new(31, 37),
+        };
+        assert_eq!(valid.clone().exact(), valid);
     }
 }
 
