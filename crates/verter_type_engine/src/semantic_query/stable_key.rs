@@ -1317,11 +1317,23 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.child(*base);
         }
         // Which access a shell stands for decides what an absent key answers,
-        // never where the shell sorts: an order may not move with it.
-        SemanticNodeData::IndexedAccess { object, index, .. } => {
+        // so two origins are two keys: equal keys license a collapse. A
+        // written access, the authored form, adds nothing, so it keeps the
+        // order it sorts in; the others add one trailing byte, which the
+        // length-prefixed child keys keep unambiguous.
+        SemanticNodeData::IndexedAccess {
+            object,
+            index,
+            origin,
+        } => {
             enc.header(category::SYNTHETIC, subtag::INDEXED_ACCESS);
             enc.child(*object);
             encode_property_key(&mut enc, index);
+            match origin {
+                crate::semantic_query::IndexedAccessOrigin::Written => {}
+                crate::semantic_query::IndexedAccessOrigin::Composed => enc.u8(1),
+                crate::semantic_query::IndexedAccessOrigin::Instantiated => enc.u8(2),
+            }
         }
         SemanticNodeData::Mapped { source, mapper } => {
             enc.header(category::SYNTHETIC, subtag::MAPPED);

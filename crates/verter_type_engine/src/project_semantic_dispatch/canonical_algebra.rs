@@ -4226,14 +4226,19 @@ fn compare_shallow(
             D::IndexedAccess {
                 object: oa,
                 index: ia,
-                ..
+                origin: ra,
             },
             D::IndexedAccess {
                 object: ob,
                 index: ib,
-                ..
+                origin: rb,
             },
         ) => {
+            // Accesses of different origins answer an absent key differently,
+            // so they are never one member.
+            if ra != rb {
+                return false;
+            }
             match (
                 authored_property_key_child(ia),
                 authored_property_key_child(ib),

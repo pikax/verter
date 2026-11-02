@@ -2395,3 +2395,61 @@ fn member_comparisons_keep_their_stream_stacks_inline_as_the_union_widens() {
         "the deep pair stays two members"
     );
 }
+
+/// An access's origin decides what its absent key answers (the checker's
+/// error type when written, `unknown` when instantiated, the typed miss when
+/// composed), so shells over one object and key that differ only in origin
+/// are distinct members: the canonical union keeps both in either input
+/// order, alone or beside other arms, and never lets the first stand for
+/// the other.
+#[test]
+fn union_reducer_keeps_accesses_of_different_origins_apart() {
+    use crate::semantic_query::{AuthoredPropertyKey, IndexedAccessOrigin};
+    let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
+    let object = bound_free_binder(&graph);
+    let access = |origin| {
+        graph.intern_node(SemanticNodeData::IndexedAccess {
+            object,
+            index: AuthoredPropertyKey::string("missing"),
+            origin,
+        })
+    };
+    let written = access(IndexedAccessOrigin::Written);
+    let instantiated = access(IndexedAccessOrigin::Instantiated);
+    let composed = access(IndexedAccessOrigin::Composed);
+    let bystanders: Vec<SemanticNodeId> = (0..7)
+        .map(|index| lit_str(&graph, &format!("bystander-{index}")))
+        .collect();
+    for (a, b) in [
+        (written, instantiated),
+        (written, composed),
+        (instantiated, composed),
+    ] {
+        assert_eq!(
+            structural_identity(&graph, a, b),
+            StructuralIdentity::Distinct,
+            "the comparator tells the two origins apart"
+        );
+        assert_ne!(
+            stable_key_for_node(&graph, a),
+            stable_key_for_node(&graph, b),
+            "the two origins key apart"
+        );
+        for extra in [&[][..], &bystanders[..]] {
+            let mut orders = Vec::new();
+            for pair in [[a, b], [b, a]] {
+                let mut members = pair.to_vec();
+                members.extend_from_slice(extra);
+                let arms = union_arms(&graph, keyed_union(&graph, &members));
+                assert!(
+                    arms.contains(&a) && arms.contains(&b),
+                    "both origins survive beside {} other arms",
+                    extra.len()
+                );
+                orders.push(arms);
+            }
+            assert_eq!(orders[0], orders[1], "one order whatever the input order");
+        }
+    }
+}
