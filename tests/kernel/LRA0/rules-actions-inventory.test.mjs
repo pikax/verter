@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const load = () =>
@@ -13,27 +14,144 @@ const load = () =>
     fs.readFileSync(new URL("./products/rules-actions-inventory.v1.json", import.meta.url), "utf8"),
   );
 
-// What handle_code_action_attempt calls today, with the kind each answers.
+// What handle_code_action_attempt calls today. A direct producer builds its own
+// transport action, so it binds one model row and one edit row; a bridged
+// producer reaches the shared engine. These values are written out here rather
+// than derived from the inventory, because the inventory is what is under test.
 const HANDLER_PRODUCERS = new Map([
-  ["organize_imports_actions", "source.organizeImports"],
-  ["extract_component_action", "refactor.extract"],
-  ["macro_code_actions", "quickfix"],
-  ["component_code_actions", "quickfix"],
-  ["suggest_matching_props", "quickfix"],
-  ["event_type_hint_actions", "quickfix"],
-  ["merge_code_actions", "quickfix"],
-  ["action_engine_fixes", "quickfix"],
-  ["action_engine_refactorings", "refactor"],
+  [
+    "organize_imports_actions",
+    {
+      requestKind: "source.organizeImports",
+      reach: "direct",
+      consumer: "LRA-C14",
+      routes: ["LRA-D12", "LRA-D13"],
+    },
+  ],
+  [
+    "extract_component_action",
+    {
+      requestKind: "refactor.extract",
+      reach: "direct",
+      consumer: "LRA-C15",
+      routes: ["LRA-D14", "LRA-D15"],
+    },
+  ],
+  [
+    "macro_code_actions",
+    {
+      requestKind: "quickfix",
+      reach: "direct",
+      consumer: "LRA-C11",
+      routes: ["LRA-D10", "LRA-D11"],
+    },
+  ],
+  [
+    "component_code_actions",
+    {
+      requestKind: "quickfix",
+      reach: "direct",
+      consumer: "LRA-C12",
+      routes: ["LRA-D10", "LRA-D11"],
+    },
+  ],
+  [
+    "suggest_matching_props",
+    {
+      requestKind: "quickfix",
+      reach: "direct",
+      consumer: "LRA-C12",
+      routes: ["LRA-D10", "LRA-D11"],
+    },
+  ],
+  [
+    "event_type_hint_actions",
+    {
+      requestKind: "quickfix",
+      reach: "direct",
+      consumer: "LRA-C13",
+      routes: ["LRA-D10", "LRA-D11"],
+    },
+  ],
+  [
+    "merge_code_actions",
+    {
+      requestKind: "quickfix",
+      reach: "direct",
+      consumer: "LRA-C16",
+      routes: ["LRA-D16", "LRA-D17"],
+    },
+  ],
+  [
+    "action_engine_fixes",
+    {
+      requestKind: "quickfix",
+      reach: "bridged",
+      consumer: "LRA-C06",
+      routes: ["LRA-D04", "LRA-D05"],
+    },
+  ],
+  [
+    "action_engine_refactorings",
+    {
+      requestKind: "refactor",
+      reach: "bridged",
+      consumer: "LRA-C06",
+      routes: ["LRA-D04", "LRA-D05"],
+    },
+  ],
 ]);
 
-function rowErrors(row, owner, contractNode) {
+const FEATURES = "crates/verter_lsp/src/features";
+const PROVIDER_MERGE = "crates/verter_lsp/src/type_provider/merge/feature_merges.rs";
+// The model owner runs after the edit owner it consumes.
+const MODEL_OWNER = { owner: "ACT1", path: ["LRA0", "LSO8", "ACT1"], acceptance: "ACT1-AC1" };
+const EDIT_OWNER = { owner: "LSO8", path: ["LRA0", "LSO8"], acceptance: "LSO8-AC1" };
+
+// Every consumer and displaced route the audit above binds, with its receiving
+// owner, the path that reaches that owner, its acceptance and its source.
+const BOUND_ROWS = new Map([
+  [
+    "LRA-C06",
+    {
+      owner: "LNT3",
+      path: ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      acceptance: "LNT3-AC2",
+      source: `${FEATURES}/diagnostics_bridge.rs`,
+    },
+  ],
+  ["LRA-C11", { ...MODEL_OWNER, source: `${FEATURES}/macro_actions.rs` }],
+  ["LRA-C12", { ...MODEL_OWNER, source: `${FEATURES}/component_actions.rs` }],
+  ["LRA-C13", { ...MODEL_OWNER, source: `${FEATURES}/event_type_hints.rs` }],
+  ["LRA-C14", { ...MODEL_OWNER, source: `${FEATURES}/organize_imports.rs` }],
+  ["LRA-C15", { ...MODEL_OWNER, source: `${FEATURES}/extract_component.rs` }],
+  ["LRA-C16", { ...MODEL_OWNER, source: PROVIDER_MERGE }],
+  ["LRA-D04", { ...MODEL_OWNER, source: "crates/verter_actions/src/engine.rs" }],
+  [
+    "LRA-D05",
+    { ...MODEL_OWNER, acceptance: "ACT1-AC2", source: "crates/verter_actions/src/types.rs" },
+  ],
+  ["LRA-D10", { ...MODEL_OWNER, source: "crates/verter_lsp/src/server/aux_features.rs" }],
+  ["LRA-D11", { ...EDIT_OWNER, source: `${FEATURES}/action_utils.rs` }],
+  ["LRA-D12", { ...MODEL_OWNER, source: `${FEATURES}/organize_imports.rs` }],
+  ["LRA-D13", { ...EDIT_OWNER, source: `${FEATURES}/organize_imports.rs` }],
+  ["LRA-D14", { ...MODEL_OWNER, source: `${FEATURES}/extract_component.rs` }],
+  ["LRA-D15", { ...EDIT_OWNER, source: `${FEATURES}/extract_component.rs` }],
+  ["LRA-D16", { ...MODEL_OWNER, source: PROVIDER_MERGE }],
+  ["LRA-D17", { ...EDIT_OWNER, source: PROVIDER_MERGE }],
+]);
+
+function rowErrors(row, owner, expected) {
   const errors = [];
-  const path = row.successorPath ?? [];
-  if (path[0] !== contractNode || path.at(-1) !== owner) {
-    errors.push(`${row.id}: successor path does not run from ${contractNode} to ${owner}`);
+  if (owner !== expected.owner) errors.push(`${row.id}: owned by ${owner}, not ${expected.owner}`);
+  if (JSON.stringify(row.successorPath) !== JSON.stringify(expected.path)) {
+    errors.push(`${row.id}: successor path is not ${expected.path.join(" -> ")}`);
   }
-  if (!row.receivingAcceptance?.startsWith(`${owner}-`)) {
-    errors.push(`${row.id}: acceptance ${row.receivingAcceptance} is not ${owner}'s`);
+  if (row.receivingAcceptance !== expected.acceptance) {
+    errors.push(`${row.id}: acceptance ${row.receivingAcceptance} is not ${expected.acceptance}`);
+  }
+  if (row.source !== expected.source) {
+    errors.push(`${row.id}: source ${row.source} is not ${expected.source}`);
   }
   if (!row.source || !fs.existsSync(ROOT + row.source)) {
     errors.push(`${row.id}: source ${row.source} is not in the tree`);
@@ -44,42 +162,55 @@ function rowErrors(row, owner, contractNode) {
 function auditErrors(inventory) {
   const audit = inventory.codeActionRouteAudit;
   if (!audit) return ["no code-action route audit"];
-  const consumers = new Map(inventory.consumers.map((row) => [row.id, row]));
-  const routes = new Map(inventory.displacedRoutes.map((row) => [row.id, row]));
   const errors = [];
-  const listed = new Map(audit.producers.map((entry) => [entry.producer, entry]));
-  for (const [producer, kind] of HANDLER_PRODUCERS) {
+  const indexRows = (table, label) => {
+    const index = new Map();
+    for (const row of table) {
+      if (index.has(row.id)) errors.push(`${row.id}: more than one ${label} row`);
+      index.set(row.id, row);
+    }
+    return index;
+  };
+  const consumers = indexRows(inventory.consumers, "consumer");
+  const routes = indexRows(inventory.displacedRoutes, "displaced route");
+  const listed = new Map();
+  for (const entry of audit.producers) {
+    if (listed.has(entry.producer)) errors.push(`${entry.producer}: audited more than once`);
+    listed.set(entry.producer, entry);
+  }
+  for (const [producer, expected] of HANDLER_PRODUCERS) {
     const entry = listed.get(producer);
     if (!entry) {
       errors.push(`${producer}: not audited`);
       continue;
     }
-    if (entry.requestKind !== kind) errors.push(`${producer}: answers ${kind}`);
-    const consumer = consumers.get(entry.consumer);
-    if (consumer) {
-      errors.push(...rowErrors(consumer, consumer.implementationOwner, inventory.contractNode));
-    } else {
-      errors.push(`${producer}: no consumer row ${entry.consumer}`);
+    if (entry.requestKind !== expected.requestKind) {
+      errors.push(`${producer}: answers ${expected.requestKind}, not ${entry.requestKind}`);
     }
-    const bound = entry.routes.map((id) => routes.get(id));
-    for (const [index, row] of bound.entries()) {
-      if (row) errors.push(...rowErrors(row, row.deletionOwner, inventory.contractNode));
-      else errors.push(`${producer}: no displaced route ${entry.routes[index]}`);
+    if (entry.reach !== expected.reach) {
+      errors.push(`${producer}: reach is ${entry.reach}, not ${expected.reach}`);
     }
-    if (entry.reach === "direct") {
-      const owners = bound
-        .map((row) => row?.deletionOwner)
-        .sort()
-        .join();
-      if (owners !== "ACT1,LSO8") {
-        errors.push(`${producer}: direct route needs one ACT1 and one LSO8 row, has ${owners}`);
-      }
-    } else if (entry.reach !== "bridged") {
-      errors.push(`${producer}: unknown reach ${entry.reach}`);
+    if (entry.consumer !== expected.consumer) {
+      errors.push(`${producer}: consumer is ${entry.consumer}, not ${expected.consumer}`);
+    }
+    if (JSON.stringify(entry.routes) !== JSON.stringify(expected.routes)) {
+      errors.push(`${producer}: routes are ${entry.routes}, not ${expected.routes}`);
+    }
+    if (!consumers.has(expected.consumer)) {
+      errors.push(`${producer}: no consumer row ${expected.consumer}`);
+    }
+    for (const id of expected.routes) {
+      if (!routes.has(id)) errors.push(`${producer}: no displaced route ${id}`);
     }
   }
   for (const producer of listed.keys()) {
     if (!HANDLER_PRODUCERS.has(producer)) errors.push(`${producer}: not a handler producer`);
+  }
+  for (const [id, expected] of BOUND_ROWS) {
+    const consumer = consumers.get(id);
+    const route = routes.get(id);
+    if (consumer) errors.push(...rowErrors(consumer, consumer.implementationOwner, expected));
+    if (route) errors.push(...rowErrors(route, route.deletionOwner, expected));
   }
   return errors;
 }
@@ -98,20 +229,23 @@ test("every producer the code-action handler calls is bound to its owners", () =
   assert.deepEqual(auditErrors(load()), []);
 });
 
-test("extract-to-component binds the action model to ACT1 and its edits to LSO8", () => {
-  const inventory = load();
-  const entry = inventory.codeActionRouteAudit.producers.find(
-    (candidate) => candidate.producer === "extract_component_action",
-  );
-  const owners = Object.fromEntries(
-    entry.routes.map((id) => {
-      const row = inventory.displacedRoutes.find((candidate) => candidate.id === id);
-      assert.equal(row.source, "crates/verter_lsp/src/features/extract_component.rs");
-      return [row.deletionOwner, row.receivingAcceptance];
-    }),
-  );
-  assert.deepEqual(owners, { ACT1: "ACT1-AC1", LSO8: "LSO8-AC1" });
+test("a change to a bound row's source reaches this test in the script lane", () => {
+  for (const { source } of BOUND_ROWS.values()) {
+    assert.equal(matchPathFilters([source]).hits.scripts, true, source);
+  }
 });
+
+const editProducer = (producer, patch) => (inventory) => {
+  Object.assign(
+    inventory.codeActionRouteAudit.producers.find((entry) => entry.producer === producer),
+    patch,
+  );
+};
+const applyAll =
+  (...mutations) =>
+  (inventory) => {
+    for (const mutate of mutations) mutate(inventory);
+  };
 
 for (const [name, mutate, expected] of [
   [
@@ -148,22 +282,143 @@ for (const [name, mutate, expected] of [
       successorPath: ["LRA0", "LSO8", "ACT1"],
       receivingAcceptance: "ACT1-AC1",
     }),
-    /extract_component_action: direct route needs one ACT1 and one LSO8 row/,
+    /LRA-D15: owned by ACT1, not LSO8/,
   ],
   [
     "an owner whose path does not reach it",
     editRow("displacedRoutes", "LRA-D15", { successorPath: ["LRA0", "ACT1"] }),
-    /LRA-D15: successor path does not run from LRA0 to LSO8/,
+    /LRA-D15: successor path is not LRA0 -> LSO8/,
+  ],
+  [
+    "a model route that skips the edit owner it consumes",
+    editRow("displacedRoutes", "LRA-D14", { successorPath: ["LRA0", "ACT1"] }),
+    /LRA-D14: successor path is not LRA0 -> LSO8 -> ACT1/,
   ],
   [
     "an acceptance another owner holds",
     editRow("displacedRoutes", "LRA-D14", { receivingAcceptance: "LSO8-AC1" }),
-    /LRA-D14: acceptance LSO8-AC1 is not ACT1's/,
+    /LRA-D14: acceptance LSO8-AC1 is not ACT1-AC1/,
+  ],
+  [
+    "a nonexistent acceptance of the right owner",
+    editRow("displacedRoutes", "LRA-D17", { receivingAcceptance: "LSO8-AC9" }),
+    /LRA-D17: acceptance LSO8-AC9 is not LSO8-AC1/,
+  ],
+  [
+    "a different acceptance of the provider model owner",
+    editRow("displacedRoutes", "LRA-D16", { receivingAcceptance: "ACT1-AC2" }),
+    /LRA-D16: acceptance ACT1-AC2 is not ACT1-AC1/,
+  ],
+  [
+    "a different acceptance on an already bound edit route",
+    editRow("displacedRoutes", "LRA-D11", { receivingAcceptance: "LSO8-AC2" }),
+    /LRA-D11: acceptance LSO8-AC2 is not LSO8-AC1/,
+  ],
+  [
+    "the extract consumer moved to the edit owner",
+    editRow("consumers", "LRA-C15", {
+      implementationOwner: "LSO8",
+      successorPath: ["LRA0", "LSO8"],
+      receivingAcceptance: "LSO8-AC1",
+    }),
+    /LRA-C15: owned by LSO8, not ACT1/,
+  ],
+  [
+    "the provider owners swapped with consistent paths",
+    applyAll(
+      editRow("displacedRoutes", "LRA-D16", {
+        deletionOwner: "LSO8",
+        successorPath: ["LRA0", "LSO8"],
+        receivingAcceptance: "LSO8-AC1",
+      }),
+      editRow("displacedRoutes", "LRA-D17", {
+        deletionOwner: "ACT1",
+        successorPath: ["LRA0", "LSO8", "ACT1"],
+        receivingAcceptance: "ACT1-AC1",
+      }),
+    ),
+    /LRA-D16: owned by LSO8, not ACT1/,
   ],
   [
     "a source path outside the tree",
     editRow("consumers", "LRA-C15", { source: "crates/verter_lsp/src/features/absent.rs" }),
     /LRA-C15: source .* is not in the tree/,
+  ],
+  [
+    "a route pointed at an unrelated file that exists",
+    editRow("displacedRoutes", "LRA-D17", { source: "crates/verter_lsp/src/lib.rs" }),
+    /LRA-D17: source crates\/verter_lsp\/src\/lib\.rs is not /,
+  ],
+  [
+    "the provider producer relabelled as bridged with its rows removed",
+    applyAll(
+      editProducer("merge_code_actions", {
+        reach: "bridged",
+        consumer: "LRA-C06",
+        routes: ["LRA-D04", "LRA-D05"],
+      }),
+      removeRow("consumers", "LRA-C16"),
+      removeRow("displacedRoutes", "LRA-D16"),
+      removeRow("displacedRoutes", "LRA-D17"),
+    ),
+    /merge_code_actions: reach is bridged, not direct/,
+  ],
+  [
+    "the provider producer bound to another producer's routes",
+    editProducer("merge_code_actions", { routes: ["LRA-D14", "LRA-D15"] }),
+    /merge_code_actions: routes are LRA-D14,LRA-D15, not LRA-D16,LRA-D17/,
+  ],
+  [
+    "the provider producer bound to another producer's consumer",
+    applyAll(
+      editProducer("merge_code_actions", { consumer: "LRA-C15" }),
+      removeRow("consumers", "LRA-C16"),
+    ),
+    /merge_code_actions: consumer is LRA-C15, not LRA-C16/,
+  ],
+  [
+    "a direct producer relabelled as bridged",
+    editProducer("organize_imports_actions", { reach: "bridged" }),
+    /organize_imports_actions: reach is bridged, not direct/,
+  ],
+  [
+    "a bridged producer relabelled as direct",
+    editProducer("action_engine_fixes", { reach: "direct" }),
+    /action_engine_fixes: reach is direct, not bridged/,
+  ],
+  [
+    "a bridge with no routes",
+    editProducer("action_engine_fixes", { routes: [] }),
+    /action_engine_fixes: routes are , not LRA-D04,LRA-D05/,
+  ],
+  [
+    "a producer answering another request kind",
+    editProducer("extract_component_action", { requestKind: "quickfix" }),
+    /extract_component_action: answers refactor\.extract, not quickfix/,
+  ],
+  [
+    "a producer the handler does not call",
+    (inventory) => {
+      inventory.codeActionRouteAudit.producers.push({ producer: "unknown_action", routes: [] });
+    },
+    /unknown_action: not a handler producer/,
+  ],
+  [
+    "a producer audited twice, the later copy correct",
+    (inventory) => {
+      const { producers } = inventory.codeActionRouteAudit;
+      const entry = producers.find((row) => row.producer === "merge_code_actions");
+      producers.unshift({ ...entry, reach: "bridged" });
+    },
+    /merge_code_actions: audited more than once/,
+  ],
+  [
+    "a route row shadowed by a later correct copy",
+    (inventory) => {
+      const row = inventory.displacedRoutes.find((candidate) => candidate.id === "LRA-D15");
+      inventory.displacedRoutes.unshift({ ...row, deletionOwner: "ACT1" });
+    },
+    /LRA-D15: more than one displaced route row/,
   ],
 ]) {
   test(`the route audit rejects ${name}`, () => {

@@ -11,8 +11,9 @@ contracts (#879)`, 2026-10-13. The title and date are descriptive context.
 It follows the [docs-only rule](README.md): reviewed contract data with no
 production change, executable schema, validator or CI lane. One data test,
 `tests/kernel/LRA0/rules-actions-inventory.test.mjs`, runs in the existing
-repository-script tests and pins the code-action route audit below; general
-ownership validation stays with UAP0.
+repository-script tests, is also selected by changes to the sources its rows
+name, and pins the code-action route audit below; general ownership validation
+stays with UAP0.
 
 ## Imported authority and reviewed products
 
