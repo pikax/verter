@@ -112,9 +112,16 @@ candidate/unknown corpus, missing/duplicate cells and route owners, corrupt hash
 omitted numeric modes/calibration, and missing/noncontiguous churn actions.
 Routes are bound by path and symbol: `inventory.json` and the reviewed
 `formatter-inventory.v1.json` must name the same live file, disposition and owner
-for each route. A capability provider counts as registered only through an
-assignment statement on the capability set or a struct-literal field in that file;
-a comment, a comparison or a `None` value does not.
+for each route; a reviewed route that names no owner fails unless it is retained
+outside the formatter, which defaults to `markup-auto-close`. The route-source
+check is a textual presence check over the file's code: comments (line and nested
+block) and string, raw-string and char literal bodies are blanked first. A
+capability provider then counts as registered only through an assignment
+statement on the capability set or a struct-literal field; a comparison or a
+direct `None` value does not. It does not evaluate `cfg` attributes, later
+reassignments or the advertised value; the LSP wire test
+`advertised_capabilities_match_the_wire_contract_exactly`
+(`crates/verter_lsp/src/capabilities_tests.rs`) owns what is actually advertised.
 Fixture paths are repository-confined, including realpath checks against symlink
 escapes. The restricted TOML reader rejects unknown syntax and duplicate keys.
 

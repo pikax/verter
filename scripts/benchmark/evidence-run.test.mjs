@@ -210,8 +210,13 @@ describe("formatter contract", () => {
       const absent = [
         ["removed", ""],
         ["commented out", `// caps.${symbol} = ${value}`],
+        ["block commented", `/*\n    caps.${symbol} = ${value}\n    */`],
+        ["nested block commented", `/* outer /* inner */\n    caps.${symbol} = ${value}\n    */`],
+        ["inside a raw string", `let _ = r#"\ncaps.${symbol} = ${value}\n"#;`],
         ["compared", `caps.${symbol} == ${value}`],
         ["assigned None", `caps.${symbol} = None;`],
+        ["assigned a commented None", `caps.${symbol} = /* off */ None;`],
+        ["assigned None after a line comment", `caps.${symbol} = // off\n        None;`],
         ["renamed", `caps.${symbol}_other = ${value}`],
       ];
       for (const [name, replacement] of absent) {
@@ -226,6 +231,11 @@ describe("formatter contract", () => {
       const present = [
         ["multi-line assignment", `caps.${symbol} =\n        ${value}`],
         ["struct-literal field", `${symbol}: ${value}`],
+        ["after a closed block comment", `/* note */ caps.${symbol} = ${value}`],
+        [
+          "after literals holding comment and quote markers",
+          `let _: &'static str = "/* // \\"'"; let _ = '"';\n    caps.${symbol} = ${value}`,
+        ],
       ];
       for (const [name, replacement] of present) {
         const copy = routeLockCopy(lock);
@@ -298,6 +308,22 @@ describe("formatter contract", () => {
       [
         "wrong reviewed owner",
         (l) => (row(l.sourceInventory.currentRoutes, formatting).integrationOwner = "wrong-owner"),
+        /route ownership document_formatting_provider/,
+      ],
+      [
+        "formatter route without a reviewed owner, lock defaulted to markup-auto-close",
+        (l) => {
+          delete row(l.sourceInventory.currentRoutes, formatting).integrationOwner;
+          row(l.inventory.routes, formatting).owner = "markup-auto-close";
+        },
+        /route ownership document_formatting_provider/,
+      ],
+      [
+        "formatter route without an owner in either inventory",
+        (l) => {
+          delete row(l.sourceInventory.currentRoutes, formatting).integrationOwner;
+          delete row(l.inventory.routes, formatting).owner;
+        },
         /route ownership document_formatting_provider/,
       ],
       [
