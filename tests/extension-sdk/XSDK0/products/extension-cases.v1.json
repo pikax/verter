@@ -39,8 +39,8 @@
       "id": "N05",
       "producer": "XSDK1",
       "control": "exact known tuple with resolved exact dependency; core mints provenance and digest; granted required capability participates",
-      "counterexample": "range/floating version or dependency, missing dependency, unknown schema/kind/target/capability id, manifest claiming official-static provenance or a digest that does not match the admitted bytes; or a known required capability, grant or host cell that is denied or unavailable",
-      "required": "unknown, ranged or forged inputs reject without execution; a denied or unavailable required capability, grant or host cell leaves the row registered and non-participating with a typed disabled reason and zero execution; optional denial reported disabled; grant changes leave snapshot identity unchanged",
+      "counterexample": "range/floating version or dependency, missing dependency, unknown schema/kind/target/capability id, manifest claiming official-static provenance or carrying its own digest, a detached digest expectation that does not match the digest core computes over the exact admitted bytes or names another algorithm; or a known required capability, grant or host cell that is denied or unavailable",
+      "required": "unknown, ranged or forged inputs, including a self-digest field, reject without execution and without stripping a field to form the preimage; a denied or unavailable required capability, grant or host cell leaves the row registered and non-participating with a typed disabled reason and zero execution; optional denial reported disabled; grant changes leave snapshot identity unchanged",
       "conditions": ["E01", "E02", "E03"]
     },
     {
