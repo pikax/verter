@@ -649,3 +649,7 @@ native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 | `RELEASE_TAG_SSH_KEY` | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.
+
+## Representative change comparisons
+
+Before/after CI comparisons read the versioned [CI change corpus](ci-change-corpus.v1.md): its passing and failing change inputs, platform and cache cells, and concurrent supersession streams. The [collection protocol](ci-change-corpus-collection.v1.md) defines the replay commands, paired repetitions and the queue, execution, resource and landing metrics. Consumers keep their results outside the repository. The corpus claims no measured savings and replaces no exact-tree required check.
