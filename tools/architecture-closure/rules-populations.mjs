@@ -69,6 +69,10 @@ function checkCapabilityCases(ctx, surface, row) {
       ctx.add("capability-limitation-missing", subject, "the cell states no limitation");
     }
   }
+  const known = new Set(surface.cases.map((declared) => `${surface.surface}/${declared.case}`));
+  for (const subject of cases.keys()) {
+    if (!known.has(subject)) ctx.add("capability-cell-mismatch", subject, "not a declared case");
+  }
 }
 
 /** One row per surface the catalog declares, each truthful about its class. */
@@ -190,6 +194,11 @@ function checkMetricRow(ctx, cell, row) {
       ctx.add("metric-result-missing", subject, "an unavailable cell states no reason");
     } else {
       ctx.advisories.push({ code: "metric-unavailable", subject, message: row.unavailableReason });
+    }
+  }
+  for (const mode of Object.keys(row.outcomes ?? {})) {
+    if (!cell.modes.includes(mode)) {
+      ctx.add("metric-undeclared", `${subject}/${mode}`, `${mode} is not a declared mode`);
     }
   }
   const measured = values.some((value) => MEASURED.has(value));

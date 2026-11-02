@@ -539,6 +539,29 @@ const CONTROLS = [
     expect: ["engine-inventory-incomplete"],
   },
   {
+    name: "a failing outcome on a mode the cell does not declare",
+    mutate: (i) => (metricRow(i, "wall/vue-compile").outcomes.pressure = "fail"),
+    applied: (i) =>
+      !findRow(i.plan.closure.metricCells, (c) => c.row === "wall/vue-compile").modes.includes(
+        "pressure",
+      ) && metricRow(i, "wall/vue-compile").outcomes.pressure === "fail",
+    expect: ["metric-undeclared"],
+  },
+  {
+    name: "a capability case the export does not declare",
+    mutate: ({ report }) =>
+      findRow(report.capabilities, (r) => r.surface === "svelte-compile").cases.push({
+        case: "invented-case",
+        typedResult: "unsupported",
+        limitation: "invented",
+      }),
+    applied: ({ plan }) =>
+      !findRow(plan.closure.capabilitySurfaces, (c) => c.surface === "svelte-compile").cases.some(
+        (c) => c.case === "invented-case",
+      ),
+    expect: ["capability-cell-mismatch"],
+  },
+  {
     name: "a required outcome moved onto the pending target",
     mutate: (i) => {
       for (const row of i.report.owners) delete row.outcomeIds;
