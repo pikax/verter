@@ -36,7 +36,8 @@ verbatim browser schema and both BCD schema digests to the snapshot identity.
 | Removal boundary | `removal_is_an_exclusive_upper_bound`; `alternative_statements_are_evaluated_separately_and_all_retained` |
 | Flag provenance | `flags_and_partial_limits_survive_as_distinct_facts` |
 | Admitted source inventory | `verifies integrity before ingestion and rejects changed bytes`; `keeps the committed outputs bound to this recipe and the pinned inputs`; `web_feature_groupings_keep_baseline_apart_from_support` |
-| Offline determinism | `is independent of input key order`; `reproduces the committed fixture snapshot byte for byte`; `the_snapshot_input_state_is_never_an_empty_success`; `the_query_vocabulary_refuses_what_the_snapshot_cannot_answer` |
+| Offline determinism | `is independent of input key order`; `reproduces the committed fixture snapshot byte for byte`; `the_snapshot_input_state_is_never_an_empty_success`; `the_query_vocabulary_refuses_what_the_snapshot_cannot_answer` (all-family forms are `AllFamilies`, never plainly admitted, and the uncarried and excluded families are pinned for the fixture and, in `the_admitted_snapshot_answers_from_the_pinned_upstream_records`, the admitted snapshot) |
+| Header provenance binding | `every_provenance_field_and_count_is_bound_by_the_snapshot_identity` (each dataset's package, artifact URL, license, license file and attribution, and each rejected count); `moving_a_field_boundary_changes_the_snapshot_identity`; `the_header_is_read_only_in_its_canonical_spelling`; the generator side in `orders records so a reader can binary-search them, and binds identity to content` |
 | Upgrade equality (data level) | `identity_follows_content_so_an_edit_and_its_revert_are_exact` |
 
 Reproducing the real artifacts needs the network, so `generate.mjs --check` is an
@@ -51,7 +52,7 @@ generator and the pinned inputs, and the Rust suite reads every record of it.
 | Deterministic ordering under perturbation | Applicable. Reversing every input object's key order yields identical bytes. Records are sorted, and out-of-order or duplicate records are rejected |
 | Edit and revert | Applicable. Snapshot identity derives from content, so an edit changes it and a revert restores it exactly. Answers follow the identity |
 | Fresh versus warm equivalence | Applicable at this level. An answer after earlier reads equals one from a fresh load. There is no cache to diverge: each answer parses its record |
-| Stale or partial rejection | Applicable. Flipped bytes, truncation, CRLF conversion, forged identity, other data, a future format, extra header fields, dropped or duplicated records and a bad browser record are each rejected |
+| Stale or partial rejection | Applicable. Flipped payload bytes, truncation, CRLF conversion, forged identity, other data, a future format, extra header fields, an edit to any header provenance field or count, a moved field boundary, a non-canonical header spelling, dropped or duplicated records and a bad browser record are each rejected. The identity covers the whole canonical header minus `snapshot_id`, so no header byte escapes it |
 | Cancellation | Not applicable. Admission and reads are synchronous, hold no lock, spawn nothing and publish nothing |
 | Scheduling and query-graph invalidation | Not applicable. This adds no query, cache or scheduled work. `SnapshotState` is `Send + Sync`; the effective-target query key and its invalidation belong to target calculation |
 

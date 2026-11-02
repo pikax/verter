@@ -959,13 +959,21 @@ impl Scheduler {
     /// wakes the computation.
     pub fn dispatch_for_pending_dependency(self: &Arc<Self>) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        let progress = self
-            .pump_ready_with_path(
-                PumpReason::WaitOrDrive,
-                caller_kind::CallerKind::current(),
-                &caller_kind::snapshot_active_path(),
-            )
-            .made_progress();
+        let progress = match caller_kind::CallerKind::current() {
+            // A producer worker leaves stages to the stage workers while a
+            // driver delivers their completions; without one it is the only
+            // thread that can run them.
+            caller_kind::CallerKind::ProducerWorker if !self.has_driver_thread() => {
+                self.drive_one()
+            }
+            caller => self
+                .pump_ready_with_path(
+                    PumpReason::WaitOrDrive,
+                    caller,
+                    &caller_kind::snapshot_active_path(),
+                )
+                .made_progress(),
+        };
         #[cfg(target_arch = "wasm32")]
         let progress = self.drive_one();
         progress
@@ -2493,9 +2501,10 @@ impl Scheduler {
     ///
     /// Behaviour by caller kind:
     ///
-    /// - **`Driver` / `External`** with a live driver thread: park
-    ///   on the condvar. The driver pumps; the waiter has no work
-    ///   to share.
+    /// - **`Driver` / `External` / `ProducerWorker`** with a live
+    ///   driver thread: park on the condvar. The driver pumps; the
+    ///   waiter has no work to share, and a producer worker never
+    ///   runs a file stage.
     /// - **`CpuWorker` / `IoWorker`**: enter the cooperative pump.
     ///   Each iteration runs `pump_ready_with_path` (so the DAG
     ///   never returns an identity the calling worker is itself
@@ -2574,8 +2583,14 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let has_driver = self.driver_handle.lock().is_some();
-            if has_driver && matches!(caller_kind, CallerKind::Driver | CallerKind::External) {
-                // No work to share — park on the condvar.
+            if has_driver
+                && matches!(
+                    caller_kind,
+                    CallerKind::Driver | CallerKind::External | CallerKind::ProducerWorker
+                )
+            {
+                // No work to share — park on the condvar. A producer worker
+                // parks too: the driver hands the stage to a stage worker.
                 return handle.wait();
             }
             if has_driver && matches!(caller_kind, CallerKind::CpuWorker | CallerKind::IoWorker) {
@@ -3459,17 +3474,15 @@ mod tests {
         );
     }
 
-    /// CacheNode dispatch releases the parked CPU permit. `next_ready` reserves
-    /// a CPU permit for the cache-node candidate at dispatch; after
+    /// CacheNode dispatch releases the parked producer permit. `next_ready` reserves
+    /// a producer permit for the cache-node candidate at dispatch; after
     /// `execute_cache_node` runs, the single dispatch entry marks the identity
     /// complete, releasing the reservation through its by-value consume.
     ///
-    /// DISCRIMINATOR: without the release the {cpu:1} class stays drained and
-    /// the follow-on Analysis below never dispatches —
-    /// `in_flight_cpu_permits()` would read 1 and `h.try_get()` would not be
-    /// ready.
+    /// DISCRIMINATOR: without the release the one producer slot stays drained
+    /// and `in_flight_producer_permits()` would read 1.
     #[test]
-    fn cache_node_dispatch_releases_cpu_permit() {
+    fn cache_node_dispatch_releases_producer_permit() {
         use crate::cache_id::SchedulerCacheId;
         use crate::dag::{PinId, WorkKind};
         let loader = Arc::new(MemorySourceLoader::new());
@@ -3517,10 +3530,10 @@ mod tests {
         // counter would be 1 (parked reservation on the dispatched CacheNode
         // entry); with it the count is 0.
         assert_eq!(
-            sched.dag.lock().in_flight_cpu_permits(),
+            sched.dag.lock().in_flight_producer_permits(),
             0,
-            "CacheNode dispatch must release the parked CPU permit \
-             — without it the {{cpu:1}} class would stay drained",
+            "CacheNode dispatch must release the parked producer permit \
+             — without it the one producer slot would stay drained",
         );
 
         // Submit a real CPU job and verify it dispatches — the follow-on side
@@ -3636,7 +3649,7 @@ mod tests {
     /// swallow-and-`complete()` router the failing node is recorded
     /// `completed == 1, cancelled == 0` and this test FAILS; with the fix the
     /// failure routes to `cancel`, recording `completed == 0, cancelled == 1`.
-    /// `in_flight_cpu_permits() == 0` proves the parked reservation still
+    /// `in_flight_producer_permits() == 0` proves the parked reservation still
     /// releases on the failure arm (both terminals release exactly once).
     #[test]
     fn cache_node_failure_is_not_completed_as_success() {
@@ -3661,9 +3674,9 @@ mod tests {
              cancel (recorded cancelled == 1)",
         );
         assert_eq!(
-            sched.dag.lock().in_flight_cpu_permits(),
+            sched.dag.lock().in_flight_producer_permits(),
             0,
-            "the cache-node failure arm must still release the parked CPU permit \
+            "the cache-node failure arm must still release the parked producer permit \
              exactly once (cancel's by-value reservation consume)",
         );
     }
@@ -3702,9 +3715,9 @@ mod tests {
              (recorded cancelled == 1)",
         );
         assert_eq!(
-            sched.dag.lock().in_flight_cpu_permits(),
+            sched.dag.lock().in_flight_producer_permits(),
             0,
-            "the cache-node panic arm must still release the parked CPU permit \
+            "the cache-node panic arm must still release the parked producer permit \
              exactly once (cancel's by-value reservation consume)",
         );
     }
@@ -16246,6 +16259,7 @@ mod tests {
                     crate::caller_kind::CallerKind::CpuWorker => 3,
                     crate::caller_kind::CallerKind::IoWorker => 4,
                     crate::caller_kind::CallerKind::Inline => 5,
+                    crate::caller_kind::CallerKind::ProducerWorker => 6,
                 }
             }
             impl crate::execution::executor::StageExecutor for CallerKindProbe {
@@ -16372,6 +16386,120 @@ mod tests {
                 analysis_cpu_token.load(AtomOrd::SeqCst),
                 sched.cpu_pool.pool_id(),
                 "Analysis worker must carry THIS scheduler CPU pool's identity token"
+            );
+
+            // A producer worker waiting on a stage leaves it to a stage
+            // worker: the stage never runs on the producer (code 6).
+            analysis_kind.store(0, AtomOrd::SeqCst);
+            let handle = sched.submit_request(Request {
+                file_id: "/y.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("<template>y</template>")),
+                file_language: None,
+                request_context: None,
+            });
+            let state = sched.cpu_pool.install(|| sched.wait_or_drive(&handle));
+            assert!(
+                matches!(state, CompletionState::Ready(_)),
+                "request must complete: {state:?}"
+            );
+            assert_eq!(
+                analysis_kind.load(AtomOrd::SeqCst),
+                3,
+                "a stage a producer worker waits on must run on a stage worker"
+            );
+        }
+
+        /// Without a driver thread nothing else delivers stage completions, so
+        /// a producer worker waiting on a dependency runs the ready stages on
+        /// its own thread and leaves the request settled when dispatch stops
+        /// progressing.
+        #[test]
+        fn a_producer_worker_runs_stages_itself_without_a_driver_thread() {
+            use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
+
+            #[derive(Default)]
+            struct StageThreads(parking_lot::Mutex<Vec<std::thread::ThreadId>>);
+            impl StageThreads {
+                fn record(&self) {
+                    self.0.lock().push(std::thread::current().id());
+                }
+            }
+            impl crate::execution::executor::StageExecutor for StageThreads {
+                fn as_any(&self) -> &dyn std::any::Any {
+                    self
+                }
+                fn execute_source(
+                    &self,
+                    _c: &str,
+                    _k: FileLanguage,
+                    content: Arc<str>,
+                    generation: u64,
+                    _incarnation: u64,
+                ) -> Result<SourceSnapshot, crate::execution::executor::StageError>
+                {
+                    self.record();
+                    Ok(SourceSnapshot::new_empty(content, generation))
+                }
+                fn execute_analysis(
+                    &self,
+                    _c: &str,
+                    _s: &SourceSnapshot,
+                    generation: u64,
+                ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError>
+                {
+                    self.record();
+                    Ok(AnalysisSnapshot::new_empty(generation))
+                }
+                fn execute_artifact(
+                    &self,
+                    _c: &str,
+                    _s: &SourceSnapshot,
+                    _a: &AnalysisSnapshot,
+                    profile_hash: u64,
+                    generation: u64,
+                ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError>
+                {
+                    self.record();
+                    Ok(ArtifactSnapshot {
+                        generation,
+                        profile_hash,
+                        data: Arc::new(crate::node::EmptyData),
+                    })
+                }
+            }
+
+            let threads = Arc::new(StageThreads::default());
+            let sched = Scheduler::test_new_sync_with_executor(
+                SchedulerConfig::default(),
+                Arc::new(MemorySourceLoader::new()) as Arc<dyn crate::source_loader::SourceLoader>,
+                Arc::clone(&threads) as Arc<dyn crate::execution::executor::StageExecutor>,
+            );
+            let handle = sched.submit_request(Request {
+                file_id: "/x.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("<template>x</template>")),
+                file_language: None,
+                request_context: None,
+            });
+
+            let _producer = crate::caller_kind::CallerKindGuard::install(
+                crate::caller_kind::CallerKind::ProducerWorker,
+            );
+            while sched.dispatch_for_pending_dependency() {}
+
+            assert!(
+                matches!(handle.try_get(), Some(CompletionState::Ready(_))),
+                "the request must be settled once dispatch stops progressing"
+            );
+            let current = std::thread::current().id();
+            let ran = threads.0.lock();
+            assert_eq!(ran.len(), 2, "source and analysis both ran: {ran:?}");
+            assert!(
+                ran.iter().all(|thread| *thread == current),
+                "stages must run on the producer worker's own thread: {ran:?}"
             );
         }
 

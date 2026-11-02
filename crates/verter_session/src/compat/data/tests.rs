@@ -14,7 +14,8 @@ use super::support::{
     VersionAdded,
 };
 use super::vocabulary::{
-    browserslist_family, BrowserslistQueryForm, QueryAdmission, UnsupportedQueryReason,
+    all_family_coverage, browserslist_family, BrowserslistQueryForm, QueryAdmission,
+    UncarriedFamily, UncarriedFamilyReason, UnsupportedQueryReason,
 };
 
 fn corpus(relative: &str) -> Vec<u8> {
@@ -47,30 +48,51 @@ fn split_header(bytes: &[u8]) -> (serde_json::Value, &[u8]) {
     )
 }
 
-/// The identity law, restated independently of the loader so a change to either
-/// side is caught.
-fn reseal(mut header: serde_json::Value, payload: &[u8]) -> Vec<u8> {
-    header["payload_digest"] = sha256_label(payload).into();
-    let text = |value: &serde_json::Value| value.as_str().expect("string field").to_owned();
-    let mut parts = vec![
-        "verter-compat-snapshot-id".to_owned(),
-        header["format_version"].to_string(),
-    ];
-    for dataset in header["datasets"].as_array().expect("datasets") {
-        for field in [
-            "name",
-            "release",
-            "integrity",
-            "schema_digest",
-            "license_digest",
-        ] {
-            parts.push(text(&dataset[field]));
+/// The one spelling a header takes: object keys sorted, no whitespace.
+fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
+    fn write(value: &serde_json::Value, out: &mut Vec<u8>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push(b'{');
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        out.push(b',');
+                    }
+                    out.extend(serde_json::to_vec(key).expect("key"));
+                    out.push(b':');
+                    write(&map[key], out);
+                }
+                out.push(b'}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push(b'[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push(b',');
+                    }
+                    write(item, out);
+                }
+                out.push(b']');
+            }
+            scalar => out.extend(serde_json::to_vec(scalar).expect("scalar")),
         }
     }
-    parts.push(text(&header["recipe_digest"]));
-    parts.push(text(&header["payload_digest"]));
-    header["snapshot_id"] = sha256_label(parts.join("\0").as_bytes()).into();
-    let mut sealed = serde_json::to_vec(&header).expect("header bytes");
+    let mut out = Vec::new();
+    write(value, &mut out);
+    out
+}
+
+/// The identity law, restated independently of the loader so a change to either
+/// side is caught: the digest of the canonical header without `snapshot_id`.
+fn reseal(mut header: serde_json::Value, payload: &[u8]) -> Vec<u8> {
+    header["payload_digest"] = sha256_label(payload).into();
+    let fields = header.as_object_mut().expect("header object");
+    fields.remove("snapshot_id");
+    let snapshot_id = sha256_label(&canonical_json(&header));
+    header["snapshot_id"] = snapshot_id.into();
+    let mut sealed = canonical_json(&header);
     sealed.push(b'\n');
     sealed.extend_from_slice(payload);
     sealed
@@ -664,6 +686,131 @@ fn changed_bytes_and_unadmitted_identities_are_rejected() {
     ));
 }
 
+/// Re-emit a header with an unchanged declared identity, so a test shows the
+/// loader binding the field rather than the pin catching a re-minted id.
+fn with_declared_identity(header: &serde_json::Value, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = canonical_json(header);
+    bytes.push(b'\n');
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+#[test]
+fn every_provenance_field_and_count_is_bound_by_the_snapshot_identity() {
+    let bytes = fixture_bytes();
+    let pin = pin_of(&bytes);
+    let (header, payload) = split_header(&bytes);
+
+    let mut edits: Vec<(String, serde_json::Value)> = Vec::new();
+    for index in 0..header["datasets"].as_array().expect("datasets").len() {
+        for field in [
+            "package",
+            "artifact_url",
+            "license",
+            "license_file",
+            "attribution",
+        ] {
+            let mut edited = header.clone();
+            let value = edited["datasets"][index][field]
+                .as_str()
+                .expect("string field")
+                .to_owned();
+            edited["datasets"][index][field] = format!("{value}-edited").into();
+            edits.push((format!("datasets[{index}].{field}"), edited));
+        }
+    }
+    for count in [
+        "bcd_rejected_features",
+        "bcd_rejected_families",
+        "web_features_rejected",
+    ] {
+        let mut edited = header.clone();
+        let value = edited["counts"][count].as_u64().expect("count");
+        edited["counts"][count] = (value + 1).into();
+        edits.push((format!("counts.{count}"), edited));
+    }
+
+    for (field, edited) in edits {
+        // The edit under the old declared identity no longer derives it.
+        assert!(
+            matches!(
+                rejection_of(with_declared_identity(&edited, payload), &pin),
+                SnapshotRejection::IdentityMismatch { .. }
+            ),
+            "{field} must be bound by snapshot_id"
+        );
+        // Re-minted, it is other data and not the pinned snapshot.
+        let resealed = reseal(edited, payload);
+        assert_ne!(pin_of(&resealed), pin, "{field}");
+        assert!(
+            matches!(
+                rejection_of(resealed, &pin),
+                SnapshotRejection::UnpinnedSnapshot { .. }
+            ),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn moving_a_field_boundary_changes_the_snapshot_identity() {
+    let bytes = fixture_bytes();
+    let (header, payload) = split_header(&bytes);
+    // Two headers that differ only in where one field ends and the next begins
+    // are different headers, so one cannot keep the identity the other declares.
+    let mut sealed = header.clone();
+    let recipe = sealed["recipe_digest"].as_str().expect("recipe").to_owned();
+    sealed["recipe_digest"] = format!("shift\0{recipe}").into();
+    let sealed_bytes = reseal(sealed.clone(), payload);
+    let sealed_pin = pin_of(&sealed_bytes);
+    assert!(matches!(
+        state_of(sealed_bytes.clone()),
+        SnapshotState::Ready(_)
+    ));
+    let (sealed_header, _) = split_header(&sealed_bytes);
+    let mut shifted = sealed_header.clone();
+    let last = shifted["datasets"].as_array().expect("datasets").len() - 1;
+    let license = shifted["datasets"][last]["license_digest"]
+        .as_str()
+        .expect("license digest")
+        .to_owned();
+    shifted["datasets"][last]["license_digest"] = format!("{license}\0shift").into();
+    shifted["recipe_digest"] = recipe.into();
+    assert!(matches!(
+        rejection_of(with_declared_identity(&shifted, payload), &sealed_pin),
+        SnapshotRejection::IdentityMismatch { .. }
+    ));
+}
+
+#[test]
+fn the_header_is_read_only_in_its_canonical_spelling() {
+    let bytes = fixture_bytes();
+    let pin = pin_of(&bytes);
+    let (header, payload) = split_header(&bytes);
+    let header_end = bytes.len() - payload.len() - 1;
+    let canonical = std::str::from_utf8(&bytes[..header_end]).expect("utf-8 header");
+    assert_eq!(canonical.as_bytes(), canonical_json(&header));
+
+    // The same header values, spelled with whitespace or an escaped letter.
+    let mut pretty = serde_json::to_vec_pretty(&header).expect("header");
+    pretty.retain(|byte| *byte != b'\n');
+    let escaped = canonical.replacen(
+        "\"name\":\"web-features\"",
+        "\"name\":\"\\u0077eb-features\"",
+        1,
+    );
+    assert_ne!(escaped, canonical);
+    for spelling in [pretty, escaped.into_bytes()] {
+        let mut respelled = spelling;
+        respelled.push(b'\n');
+        respelled.extend_from_slice(payload);
+        assert!(matches!(
+            rejection_of(respelled, &pin),
+            SnapshotRejection::HeaderMismatch { .. }
+        ));
+    }
+}
+
 #[test]
 fn a_structurally_invalid_payload_is_rejected_whole() {
     let bytes = fixture_bytes();
@@ -900,11 +1047,20 @@ fn the_query_vocabulary_refuses_what_the_snapshot_cannot_answer() {
     use UnsupportedQueryReason as Reason;
     for form in [
         Form::ExactVersion,
-        Form::LastVersions,
+        Form::LastBrowserVersions,
         Form::FirefoxEsr,
-        Form::SinceDate,
+        Form::UnreleasedBrowserVersions,
     ] {
         assert_eq!(form.admission(), QueryAdmission::Admitted, "{form:?}");
+    }
+    for form in [
+        Form::LastVersions,
+        Form::LastMajorVersions,
+        Form::UnreleasedVersions,
+        Form::SinceDate,
+    ] {
+        // Browserslist expands these over families the snapshot does not carry.
+        assert_eq!(form.admission(), QueryAdmission::AllFamilies, "{form:?}");
     }
     for (form, reason) in [
         (Form::Defaults, Reason::UsageStatisticNotCarried),
@@ -928,6 +1084,29 @@ fn the_query_vocabulary_refuses_what_the_snapshot_cannot_answer() {
     assert_eq!(browserslist_family("iOS"), Some("safari_ios"));
     assert_eq!(browserslist_family("and_chr"), Some("chrome_android"));
     assert_eq!(browserslist_family("op_mini"), None);
+
+    // The fixture carries chrome, firefox, oculus and safari. A mapped family
+    // without release data and an unmapped one both stay as unknown entries;
+    // oculus has no Browserslist name and is excluded.
+    let coverage = all_family_coverage(&fixture());
+    assert_eq!(
+        coverage.carried,
+        [
+            ("chrome", "chrome"),
+            ("firefox", "firefox"),
+            ("safari", "safari")
+        ]
+    );
+    assert_eq!(coverage.uncarried.len(), 16);
+    assert!(coverage.uncarried.contains(&UncarriedFamily {
+        family: "edge",
+        reason: UncarriedFamilyReason::ReleaseDataAbsent,
+    }));
+    assert!(coverage.uncarried.contains(&UncarriedFamily {
+        family: "op_mini",
+        reason: UncarriedFamilyReason::NoDatasetFamily,
+    }));
+    assert_eq!(coverage.excluded, ["oculus"]);
 }
 
 #[test]
@@ -998,6 +1177,33 @@ fn the_admitted_snapshot_answers_from_the_pinned_upstream_records() {
             web_features: count("web_features"),
             format_mismatches: 0,
         }
+    );
+
+    // An all-family form over the admitted data: these Browserslist families
+    // have no dataset family and stay unknown, and these dataset families have
+    // no Browserslist name and are excluded.
+    let coverage = all_family_coverage(&snapshot);
+    let uncarried: Vec<(&str, UncarriedFamilyReason)> = coverage
+        .uncarried
+        .iter()
+        .map(|entry| (entry.family, entry.reason))
+        .collect();
+    assert_eq!(
+        uncarried,
+        ["and_qq", "and_uc", "baidu", "bb", "ie_mob", "kaios", "op_mini"]
+            .map(|family| (family, UncarriedFamilyReason::NoDatasetFamily))
+    );
+    let carried: Vec<&str> = coverage.carried.iter().map(|(family, _)| *family).collect();
+    assert_eq!(
+        carried,
+        [
+            "and_chr", "and_ff", "android", "chrome", "edge", "firefox", "ie", "ios_saf", "op_mob",
+            "opera", "safari", "samsung"
+        ]
+    );
+    assert_eq!(
+        coverage.excluded,
+        ["deno", "nodejs", "oculus", "webview_ios"]
     );
 
     // The dataset never releases a version past its pin.
