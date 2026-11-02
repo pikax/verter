@@ -2818,13 +2818,15 @@ impl VerterHost {
     /// the index's canonical order.
     ///
     /// Processed block content never mutates the carrier's authored analysis, so
-    /// every profile reads the same raw facts. This answers the whole population:
-    /// [`Self::css_var_candidates`] takes finite budgets and reports coverage.
+    /// every profile reads the same raw facts. This walks the whole population.
+    /// The answer's `page.status` says how much of it the flow covers: read an
+    /// empty flow as absence only when that status is `Complete`.
+    /// [`Self::css_var_candidates`] takes finite budgets.
     pub fn css_var_flow(
         &self,
         var_name: &str,
         profile: Option<&CompileProfile>,
-    ) -> verter_semantic::analysis::CssVarFlow {
+    ) -> crate::workspace_index::CssVarCandidates {
         let _ = profile;
         self.css_var_candidates(
             var_name,
@@ -2832,9 +2834,9 @@ impl VerterHost {
                 postings: u32::MAX,
                 records: u32::MAX,
             },
+            None,
             &|| false,
         )
-        .flow
     }
 
     pub(crate) fn load_export_graph_analysis(

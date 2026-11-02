@@ -476,7 +476,7 @@ mod sfc_projection_observations;
 mod sfc_projection_observations_tests;
 mod structural_search;
 mod testing;
-mod workspace_index;
+pub mod workspace_index;
 mod workspace_intel;
 
 // Reserved homes for planned session product modules in the lint, CSS,

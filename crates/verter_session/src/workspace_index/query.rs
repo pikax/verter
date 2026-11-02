@@ -2,18 +2,23 @@
 //!
 //! A query names its lookups, its finite budgets and optionally the population
 //! it wants certified. Work spent on filtered or stale rows counts against the
-//! budget, and `Complete` is only reported when the walk proved exhaustion and
-//! a current coverage record certifies the declared population.
+//! budget. `Complete` is only reported when the walk proved exhaustion, every
+//! looked-up key reads a partition inside the declared population, and a current
+//! coverage record certifies those partitions.
 
+use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
 use imbl::OrdSet;
+use verter_identity::encoding::{CanonicalDigest, CanonicalEncoder};
 
 use super::delta::{ObservationOracle, PartialCause};
-use super::identity::{ContributionId, ScopeId, TableKind};
-use super::records::{IndexRecord, KeyFamily, PostingKey};
-use super::snapshot::{Contribution, IndexSnapshot, PostingRef};
+use super::identity::{ContributionId, PartitionFamily, PartitionId, ScopeId};
+use super::records::{
+    lexical_fold, IndexRecord, KeyFamily, PostingKey, LEXICAL_PROJECTION_VERSION,
+};
+use super::snapshot::{Contribution, CoverageRecord, IndexSnapshot, PostingRef, SnapshotIdentity};
 
 /// Finite budgets of one query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,15 +34,87 @@ pub struct QueryBudgets {
 pub enum Lookup {
     /// Exact keys, in the caller's order.
     Keys(Vec<PostingKey>),
-    /// An ordered walk of one table's key family from a text prefix. The empty
-    /// prefix is a broad walk: it consumes the budget and reports `Partial`
-    /// unless it proves exhaustion.
+    /// An ordered walk of one partition's key family from a text prefix, in the
+    /// projection that family posts under: a lexical prefix is folded the way
+    /// its postings are. The empty prefix is a broad walk: it consumes the
+    /// budget and reports `Partial` unless it proves exhaustion.
     Prefix {
-        table: TableKind,
+        partition: PartitionFamily,
         family: KeyFamily,
         version: u32,
         prefix: Arc<str>,
     },
+}
+
+impl Lookup {
+    /// Whether this lookup reads `family`.
+    pub(super) fn reads(&self, family: PartitionFamily) -> bool {
+        match self {
+            Self::Keys(keys) => keys.iter().any(|key| key.partition() == family),
+            Self::Prefix { partition, .. } => *partition == family,
+        }
+    }
+
+    fn encode(&self, encoder: &mut CanonicalEncoder) {
+        let mut key_fields =
+            |partition: PartitionFamily, family: KeyFamily, version, text: &str| {
+                encoder.field_enum_discriminant(3, partition.encoding());
+                encoder.field_enum_discriminant(4, key_family_encoding(family));
+                encoder.field_u32(5, version);
+                encoder.field_str(6, text);
+            };
+        match self {
+            Self::Keys(keys) => {
+                for key in keys {
+                    key_fields(key.partition(), key.family(), key.version(), key.text());
+                }
+            }
+            Self::Prefix {
+                partition,
+                family,
+                version,
+                prefix,
+            } => {
+                key_fields(*partition, *family, *version, prefix);
+                encoder.field_bool(7, true);
+            }
+        }
+    }
+}
+
+fn key_family_encoding(family: KeyFamily) -> u32 {
+    match family {
+        KeyFamily::Exact => 1,
+        KeyFamily::Lexical => 2,
+        KeyFamily::Forward => 3,
+        KeyFamily::Reverse => 4,
+    }
+}
+
+/// One declared population: its identity and the partitions it reads. Rows of
+/// any other partition are outside the answer and are never returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredScope {
+    id: ScopeId,
+    partitions: BTreeSet<PartitionId>,
+}
+
+impl DeclaredScope {
+    pub(crate) fn new(id: ScopeId, partitions: BTreeSet<PartitionId>) -> Self {
+        Self { id, partitions }
+    }
+
+    /// The population's identity.
+    #[must_use]
+    pub fn id(&self) -> &ScopeId {
+        &self.id
+    }
+
+    fn reads_family(&self, family: PartitionFamily) -> bool {
+        self.partitions
+            .iter()
+            .any(|partition| partition.family() == family)
+    }
 }
 
 /// One bounded query.
@@ -47,15 +124,20 @@ pub struct IndexQuery {
     pub budgets: QueryBudgets,
     /// The declared population to certify. Without one the walk cannot be
     /// `Complete`: nothing proves it saw everything.
-    pub scope: Option<ScopeId>,
-    /// Resume point from an earlier page of the same snapshot.
+    pub scope: Option<DeclaredScope>,
+    /// Resume point from an earlier page of the same query on the same snapshot.
     pub continuation: Option<IndexContinuation>,
 }
 
-/// Exact-snapshot-qualified resume point.
+/// Resume point of one query on one exact snapshot. Any other snapshot, lookup
+/// or declared population refuses it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexContinuation {
-    generation: u64,
+    snapshot: SnapshotIdentity,
+    binding: CanonicalDigest,
+    /// Which requested key to resume at. A lookup may repeat a key, so the key
+    /// alone does not say where the walk stopped.
+    position: u32,
     key: PostingKey,
     next: Box<PostingRef>,
 }
@@ -65,6 +147,9 @@ pub struct IndexContinuation {
 pub struct CoveredScope {
     pub keys_exhausted: u32,
     pub postings_visited: u32,
+    /// Locators of the units this answer could not read. Empty unless an
+    /// unavailable input is the reason the answer is partial.
+    pub unavailable_units: Vec<Arc<str>>,
 }
 
 /// How much of the declared population an answer enumerated. Independent of
@@ -72,8 +157,9 @@ pub struct CoveredScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnumerationStatus {
     /// Every requested key was exhausted and a current coverage record
-    /// certifies the population. An empty page then means no candidates in
-    /// that population: never semantic absence, and never outside it.
+    /// certifies the partitions it reads. An empty page then means no
+    /// candidates in that population: never semantic absence, and never
+    /// outside it.
     Complete,
     /// Positive candidates only, for this request.
     Partial {
@@ -142,10 +228,14 @@ struct Walk<'a> {
     budgets: QueryBudgets,
     oracle: Option<&'a dyn ObservationOracle>,
     is_cancelled: &'a dyn Fn() -> bool,
+    scope: Option<&'a DeclaredScope>,
     candidates: Vec<Candidate>,
     work: QueryWork,
     keys_exhausted: u32,
     saw_stale: bool,
+    saw_outside: bool,
+    /// The requested key being walked.
+    position: u32,
 }
 
 enum Stop {
@@ -158,6 +248,14 @@ enum Stop {
 }
 
 impl Walk<'_> {
+    /// `false` for a key that reads outside the declared population. Without a
+    /// declared population nothing is outside, and nothing is certified either.
+    fn admits_key(&mut self, partition: PartitionFamily) -> bool {
+        let admitted = self.scope.is_none_or(|scope| scope.reads_family(partition));
+        self.saw_outside |= !admitted;
+        admitted
+    }
+
     /// Visit one key's postings from `resume` on.
     fn visit_key(
         &mut self,
@@ -182,6 +280,9 @@ impl Walk<'_> {
             let Some(contribution) = self.snapshot.contribution(&posting.contribution) else {
                 continue;
             };
+            if !self.admits_contribution(contribution) {
+                continue;
+            }
             if self.is_stale(contribution) {
                 self.saw_stale = true;
                 continue;
@@ -196,6 +297,12 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// Another producer's slot of the same family is outside this population.
+    fn admits_contribution(&self, contribution: &Contribution) -> bool {
+        self.scope
+            .is_none_or(|scope| scope.partitions.contains(&contribution.key.partition_id()))
+    }
+
     fn is_stale(&self, contribution: &Contribution) -> bool {
         self.oracle.is_some_and(|oracle| {
             contribution
@@ -205,13 +312,33 @@ impl Walk<'_> {
                 .any(|witness| oracle.current(&witness.key) != Some(witness.fingerprint))
         })
     }
+
+    fn covered(&self) -> CoveredScope {
+        CoveredScope {
+            keys_exhausted: self.keys_exhausted,
+            postings_visited: self.work.posting_visits,
+            unavailable_units: Vec::new(),
+        }
+    }
+}
+
+/// What a continuation is bound to besides its snapshot.
+fn query_binding(query: &IndexQuery) -> CanonicalDigest {
+    let mut encoder = CanonicalEncoder::new("verter.session.workspace_index.continuation.v1");
+    match &query.scope {
+        Some(scope) => encoder.field_bytes(1, scope.id.digest().as_bytes()),
+        None => encoder.field_bool(2, false),
+    };
+    query.lookup.encode(&mut encoder);
+    encoder.digest()
 }
 
 /// Answer `query` from one captured snapshot.
 ///
 /// `oracle` revalidates each visited contribution's read set against its
 /// owners; pass `None` only for a request explicitly tied to this snapshot's
-/// basis. A stale row is never returned and leaves the answer `Partial`.
+/// basis. A stale row is never returned and leaves the answer `Partial`, and so
+/// does a continuation issued for any other snapshot, lookup or population.
 #[must_use]
 pub fn query_candidates(
     snapshot: &IndexSnapshot,
@@ -220,27 +347,28 @@ pub fn query_candidates(
     is_cancelled: &dyn Fn() -> bool,
 ) -> CandidatePage {
     let generation = snapshot.generation();
-    let covered = |walk: &Walk<'_>| CoveredScope {
-        keys_exhausted: walk.keys_exhausted,
-        postings_visited: walk.work.posting_visits,
-    };
     let mut walk = Walk {
         snapshot,
         budgets: query.budgets,
         oracle,
         is_cancelled,
+        scope: query.scope.as_ref(),
         candidates: Vec::new(),
         work: QueryWork::default(),
         keys_exhausted: 0,
         saw_stale: false,
+        saw_outside: false,
+        position: 0,
     };
     if let Some(continuation) = &query.continuation {
-        if continuation.generation != generation {
+        if continuation.snapshot != snapshot.identity()
+            || continuation.binding != query_binding(query)
+        {
             return CandidatePage {
                 candidates: Vec::new(),
                 status: EnumerationStatus::Partial {
                     cause: PartialCause::Stale,
-                    covered: covered(&walk),
+                    covered: walk.covered(),
                     continuation: None,
                 },
                 work: walk.work,
@@ -255,13 +383,13 @@ pub fn query_candidates(
     let outcome = match &query.lookup {
         Lookup::Keys(keys) => walk_keys(&mut walk, keys, query.continuation.as_ref()),
         Lookup::Prefix {
-            table,
+            partition,
             family,
             version,
             prefix,
         } => walk_prefix(
             &mut walk,
-            *table,
+            *partition,
             *family,
             *version,
             prefix,
@@ -274,9 +402,11 @@ pub fn query_candidates(
         Err(Stop::Budget { key, next }) => {
             let status = EnumerationStatus::Partial {
                 cause: PartialCause::BudgetExhausted,
-                covered: covered(&walk),
+                covered: walk.covered(),
                 continuation: Some(IndexContinuation {
-                    generation,
+                    snapshot: snapshot.identity(),
+                    binding: query_binding(query),
+                    position: walk.position,
                     key,
                     next,
                 }),
@@ -284,7 +414,7 @@ pub fn query_candidates(
             finish(walk, status, generation)
         }
         Ok(()) => {
-            let status = exhausted_status(&walk, query.scope.as_ref(), covered(&walk));
+            let status = exhausted_status(&walk, &query.lookup);
             finish(walk, status, generation)
         }
     }
@@ -299,26 +429,37 @@ fn finish(walk: Walk<'_>, status: EnumerationStatus, generation: u64) -> Candida
     }
 }
 
+/// `true` when `record` certifies every partition `lookup` reads.
+fn certifies_lookup(record: &CoverageRecord, scope: &DeclaredScope, lookup: &Lookup) -> bool {
+    scope
+        .partitions
+        .iter()
+        .filter(|partition| lookup.reads(partition.family()))
+        .all(|partition| record.partitions.contains(partition))
+}
+
 /// The walk ran out of keys. That alone does not certify a population.
-fn exhausted_status(
-    walk: &Walk<'_>,
-    scope: Option<&ScopeId>,
-    covered: CoveredScope,
-) -> EnumerationStatus {
+fn exhausted_status(walk: &Walk<'_>, lookup: &Lookup) -> EnumerationStatus {
     let partial = |cause| EnumerationStatus::Partial {
         cause,
-        covered: covered.clone(),
+        covered: walk.covered(),
         continuation: None,
     };
     if walk.saw_stale {
         return partial(PartialCause::Stale);
     }
-    if walk.snapshot.is_return_only() {
-        return partial(PartialCause::UnavailableInput);
+    if walk.saw_outside {
+        return partial(PartialCause::OutsideDemand);
     }
-    let Some(record) = scope.and_then(|scope| walk.snapshot.coverage(scope)) else {
+    let Some(scope) = walk.scope else {
         return partial(PartialCause::OpenDiscovery);
     };
+    let Some(record) = walk.snapshot.coverage(&scope.id) else {
+        return partial(PartialCause::OpenDiscovery);
+    };
+    if !certifies_lookup(record, scope, lookup) {
+        return partial(PartialCause::OpenDiscovery);
+    }
     let witness_current = walk.oracle.is_none_or(|oracle| {
         oracle.current(&record.witness.key) == Some(record.witness.fingerprint)
     });
@@ -335,12 +476,14 @@ fn walk_keys(
     continuation: Option<&IndexContinuation>,
 ) -> Result<(), Stop> {
     let start = continuation.map_or(0, |resume| {
-        keys.iter()
-            .position(|key| *key == resume.key)
-            .unwrap_or(keys.len())
+        usize::try_from(resume.position).unwrap_or(usize::MAX)
     });
     let snapshot = walk.snapshot;
     for (position, key) in keys.iter().enumerate().skip(start) {
+        walk.position = u32::try_from(position).unwrap_or(u32::MAX);
+        if !walk.admits_key(key.partition()) {
+            continue;
+        }
         walk.work.key_lookups += 1;
         let resume = continuation
             .filter(|_| position == start)
@@ -356,25 +499,31 @@ fn walk_keys(
 
 fn walk_prefix(
     walk: &mut Walk<'_>,
-    table: TableKind,
+    partition: PartitionFamily,
     family: KeyFamily,
     version: u32,
     prefix: &Arc<str>,
     continuation: Option<&IndexContinuation>,
 ) -> Result<(), Stop> {
+    if !walk.admits_key(partition) {
+        return Ok(());
+    }
+    let folded;
+    let prefix: &str = if family == KeyFamily::Lexical && version == LEXICAL_PROJECTION_VERSION {
+        folded = lexical_fold(prefix);
+        &folded
+    } else {
+        prefix
+    };
     let start = continuation.map_or_else(
-        || PostingKey {
-            table,
-            family,
-            version,
-            text: Arc::clone(prefix),
-        },
+        || PostingKey::projected(partition, family, version, prefix),
         |resume| resume.key.clone(),
     );
     let snapshot = walk.snapshot;
     for (key, postings) in snapshot.postings.range(start..) {
-        let in_family = key.table == table && key.family == family && key.version == version;
-        if !in_family || !key.text.starts_with(prefix.as_ref()) {
+        let in_family =
+            key.partition() == partition && key.family() == family && key.version() == version;
+        if !in_family || !key.text().starts_with(prefix) {
             break;
         }
         walk.work.key_lookups += 1;

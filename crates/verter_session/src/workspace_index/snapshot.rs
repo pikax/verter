@@ -6,6 +6,7 @@
 //! charge is released when the last snapshot holding it is dropped.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -15,8 +16,8 @@ use rustc_hash::FxHashMap;
 use verter_session_query::retention::{RetentionCharge, StoreAccount};
 
 use super::delta::{
-    CompletePartition, ContributionDelta, ExpectedPrior, ObservationOracle, PublishOutcome,
-    PublishRefusal, SlotChange,
+    CompletePartition, ContributionDelta, ExpectedPrior, ObservationOracle, PartitionDraft,
+    PublishOutcome, PublishRefusal, SlotChange,
 };
 use super::identity::{
     ContributionId, ContributionKey, ObservationKey, PartitionId, ReadSet, ReadWitness, ScopeId,
@@ -43,6 +44,19 @@ impl Contribution {
         self.charge.bytes()
     }
 
+    /// The request-local form of an unpublished draft.
+    pub(super) fn return_only(draft: PartitionDraft, charge: RetentionCharge) -> Self {
+        Self {
+            id: draft.key.id(),
+            key: draft.key,
+            basis: draft.basis,
+            provenance: draft.provenance,
+            read_set: draft.read_set,
+            records: draft.records,
+            charge,
+        }
+    }
+
     fn same_value(&self, partition: &CompletePartition) -> bool {
         let draft = &partition.draft;
         self.basis == draft.basis
@@ -56,12 +70,13 @@ impl Contribution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageRecord {
     pub scope: ScopeId,
-    /// The declared fact families this population covers.
+    /// The fact families this record certifies. A lookup reading any other
+    /// family is not certified by it, even under the same scope.
     pub partitions: BTreeSet<PartitionId>,
     /// The owner's enumeration witness. A list of previously seen files would
     /// miss additions; this changes when the population does.
     pub witness: ReadWitness,
-    /// Every slot the population holds.
+    /// Every slot the certified partitions hold.
     pub contributions: BTreeSet<ContributionId>,
 }
 
@@ -76,10 +91,26 @@ pub(super) struct PostingRef {
     pub record_index: u32,
 }
 
-/// One immutable view of the index.
-#[derive(Debug, Clone, Default)]
-pub struct IndexSnapshot {
+/// Identifies one exact snapshot across every store in the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SnapshotIdentity {
+    /// Generations count per store, so they compare only within one.
+    store: u64,
     generation: u64,
+    /// Set on a request-local snapshot, which shares its generation with the
+    /// snapshot it was derived from and is not that snapshot.
+    private_instance: Option<u64>,
+}
+
+static NEXT_STORE: AtomicU64 = AtomicU64::new(1);
+static NEXT_PRIVATE_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+/// One immutable view of the index.
+#[derive(Debug, Clone)]
+pub struct IndexSnapshot {
+    store: u64,
+    generation: u64,
+    private_instance: Option<u64>,
     contributions: OrdMap<ContributionId, Arc<Contribution>>,
     pub(super) postings: OrdMap<PostingKey, OrdSet<PostingRef>>,
     lineages: OrdMap<ContributionKey, ContributionId>,
@@ -96,9 +127,34 @@ pub struct IndexSnapshot {
 }
 
 impl IndexSnapshot {
+    fn empty(store: u64, generation: u64) -> Self {
+        Self {
+            store,
+            generation,
+            private_instance: None,
+            contributions: OrdMap::default(),
+            postings: OrdMap::default(),
+            lineages: OrdMap::default(),
+            by_partition: OrdMap::default(),
+            dependents: OrdMap::default(),
+            coverage: OrdMap::default(),
+            coverage_by_contribution: OrdMap::default(),
+            coverage_by_witness: OrdMap::default(),
+            return_only: false,
+        }
+    }
+
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(super) fn identity(&self) -> SnapshotIdentity {
+        SnapshotIdentity {
+            store: self.store,
+            generation: self.generation,
+            private_instance: self.private_instance,
+        }
     }
 
     #[must_use]
@@ -150,6 +206,10 @@ impl IndexSnapshot {
 
     /// A private snapshot with request-local rows added and slots the walk
     /// proved gone removed. It answers one request and cannot be published.
+    ///
+    /// A coverage record holding a changed slot does not survive it. Records of
+    /// untouched slots do, so a partial answer keeps what is still certified;
+    /// [`Self::without_coverage`] is for a walk that certified nothing.
     pub(super) fn with_return_only(
         &self,
         contributions: impl IntoIterator<Item = Contribution>,
@@ -157,14 +217,25 @@ impl IndexSnapshot {
     ) -> Self {
         let mut next = self.clone();
         for id in gone {
+            next.retire_coverage_holding(id);
             next.remove_contribution(id);
         }
         for contribution in contributions {
+            next.retire_coverage_holding(&contribution.id);
             next.remove_contribution(&contribution.id);
             next.insert_contribution(Arc::new(contribution));
         }
         next.return_only = true;
+        next.private_instance = Some(NEXT_PRIVATE_INSTANCE.fetch_add(1, Ordering::Relaxed));
         next
+    }
+
+    /// This snapshot with no population certified.
+    pub(super) fn without_coverage(mut self) -> Self {
+        self.coverage = OrdMap::default();
+        self.coverage_by_contribution = OrdMap::default();
+        self.coverage_by_witness = OrdMap::default();
+        self
     }
 
     fn insert_contribution(&mut self, contribution: Arc<Contribution>) {
@@ -192,7 +263,7 @@ impl IndexSnapshot {
         self.lineages
             .insert(contribution.key.lineage(), contribution.id.clone());
         self.by_partition
-            .entry(contribution.key.partition.clone())
+            .entry(contribution.key.partition_id())
             .or_default()
             .insert(contribution.id.clone());
         self.contributions
@@ -219,7 +290,7 @@ impl IndexSnapshot {
             }
         }
         self.lineages.remove(&removed.key.lineage());
-        remove_from_set(&mut self.by_partition, &removed.key.partition, id);
+        remove_from_set(&mut self.by_partition, &removed.key.partition_id(), id);
         Some(removed)
     }
 
@@ -303,9 +374,10 @@ impl std::fmt::Debug for WorkspaceIndex {
 impl WorkspaceIndex {
     /// An empty store charging `account`.
     #[must_use]
-    pub fn new(account: StoreAccount) -> Self {
+    pub(crate) fn new(account: StoreAccount) -> Self {
+        let store = NEXT_STORE.fetch_add(1, Ordering::Relaxed);
         Self {
-            current: ArcSwap::from_pointee(IndexSnapshot::default()),
+            current: ArcSwap::from_pointee(IndexSnapshot::empty(store, 0)),
             writer: Mutex::new(()),
             account,
             population_stamps: Mutex::default(),
@@ -314,7 +386,7 @@ impl WorkspaceIndex {
 
     /// The account this store charges.
     #[must_use]
-    pub fn account(&self) -> &StoreAccount {
+    pub(crate) fn account(&self) -> &StoreAccount {
         &self.account
     }
 
@@ -327,13 +399,12 @@ impl WorkspaceIndex {
     }
 
     /// Drop every slot and population. Readers keep what they captured.
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         let _writer = self.writer.lock();
-        let generation = self.current.load().generation + 1;
-        self.current.store(Arc::new(IndexSnapshot {
-            generation,
-            ..IndexSnapshot::default()
-        }));
+        let current = self.current.load();
+        let (store, generation) = (current.store, current.generation + 1);
+        self.current
+            .store(Arc::new(IndexSnapshot::empty(store, generation)));
         self.population_stamps.lock().clear();
     }
 
@@ -349,7 +420,7 @@ impl WorkspaceIndex {
     /// every consumed observation, retention, cancellation. A failure at any
     /// step leaves the current snapshot untouched, including for sibling
     /// changes in the same delta.
-    pub fn publish(
+    pub(crate) fn publish(
         &self,
         delta: ContributionDelta,
         oracle: &dyn ObservationOracle,
@@ -369,9 +440,7 @@ impl WorkspaceIndex {
             Err(refusal) => return PublishOutcome::Refused(refusal),
         };
         if plan.is_noop() {
-            return PublishOutcome::AlreadyCurrent {
-                generation: current.generation,
-            };
+            return PublishOutcome::AlreadyCurrent;
         }
         let next = match plan.apply(&current) {
             Ok(next) => next,
@@ -381,15 +450,21 @@ impl WorkspaceIndex {
         if is_cancelled() {
             return PublishOutcome::Refused(PublishRefusal::Cancelled);
         }
-        let generation = next.generation;
         self.current.store(Arc::new(next));
-        PublishOutcome::Published { generation }
+        PublishOutcome::Published
     }
 
     /// Make every slot and population that consumed `observations` ineligible
     /// immediately. Requests cannot serve them as current while a rebuild is
     /// pending; unrelated partitions stay.
-    pub fn invalidate(&self, observations: &[ObservationKey]) -> InvalidationWork {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the host retires through its walk; owner feeds are not wired"
+        )
+    )]
+    pub(crate) fn invalidate(&self, observations: &[ObservationKey]) -> InvalidationWork {
         let _writer = self.writer.lock();
         let current = self.current.load_full();
         let mut next = (*current).clone();
@@ -442,6 +517,7 @@ struct PublicationPlan {
     upserts: Vec<CompletePartition>,
     retirements: Vec<ContributionId>,
     coverage: Vec<CoverageRecord>,
+    decertified: Vec<ScopeId>,
 }
 
 impl PublicationPlan {
@@ -454,6 +530,11 @@ impl PublicationPlan {
             upserts: Vec::with_capacity(delta.changes.len()),
             retirements: Vec::new(),
             coverage: Vec::new(),
+            decertified: delta
+                .decertified
+                .into_iter()
+                .filter(|scope| current.coverage.contains_key(scope))
+                .collect(),
         };
         let retiring: BTreeSet<ContributionId> = delta
             .changes
@@ -572,11 +653,17 @@ impl PublicationPlan {
     }
 
     fn is_noop(&self) -> bool {
-        self.upserts.is_empty() && self.retirements.is_empty() && self.coverage.is_empty()
+        self.upserts.is_empty()
+            && self.retirements.is_empty()
+            && self.coverage.is_empty()
+            && self.decertified.is_empty()
     }
 
     fn apply(self, current: &IndexSnapshot) -> Result<IndexSnapshot, PublishRefusal> {
         let mut next = current.clone();
+        for scope in &self.decertified {
+            next.remove_coverage(scope);
+        }
         for id in &self.retirements {
             next.retire_coverage_holding(id);
             next.remove_contribution(id);
@@ -604,19 +691,5 @@ impl PublicationPlan {
         }
         next.generation = current.generation + 1;
         Ok(next)
-    }
-}
-
-/// Build the request-local form of a partial walk's rows.
-pub(super) fn return_only_contribution(partial: super::delta::PartialEnumeration) -> Contribution {
-    let super::delta::PartialEnumeration { draft, charge, .. } = partial;
-    Contribution {
-        id: draft.key.id(),
-        key: draft.key,
-        basis: draft.basis,
-        provenance: draft.provenance,
-        read_set: draft.read_set,
-        records: draft.records,
-        charge,
     }
 }

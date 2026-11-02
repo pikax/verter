@@ -8,12 +8,12 @@
 //! contract is the atomic semantic contributions decision in
 //! `docs/arch/kernel/`.
 //!
-//! The module has one write path. A producer seals a complete enumeration
-//! into a [`CompletePartition`] (a partial or cancelled walk has no such
-//! constructor), composes partitions into a [`ContributionDelta`], and
-//! [`WorkspaceIndex::publish`] revalidates the delta's fence and swaps one
-//! immutable [`IndexSnapshot`]. Readers hold whichever whole snapshot they
-//! captured.
+//! The read side and the host entry points are public. The one write path is
+//! private to this crate: a producer seals a complete enumeration into a
+//! `CompletePartition` (a partial or cancelled walk has no such constructor),
+//! composes partitions into a `ContributionDelta`, and `WorkspaceIndex::publish`
+//! revalidates the delta's fence and swaps one immutable [`IndexSnapshot`].
+//! Readers hold whichever whole snapshot they captured.
 
 mod delta;
 mod host_projection;
@@ -23,27 +23,27 @@ mod query;
 mod records;
 mod snapshot;
 
-pub use delta::{
-    CompletePartition, ContributionDelta, ExpectedPrior, IngressRejection, ObservationOracle,
-    PartialCause, PartialEnumeration, PartitionDraft, PublishOutcome, PublishRefusal,
-    RetirementEvidence, SchemaAdmission, SlotChange,
-};
+#[cfg(test)]
+mod store_tests;
+
+pub use delta::{ObservationOracle, PartialCause};
 pub use host_projection::{
-    CssVarCandidates, IndexDemand, IndexDemandPartition, IndexReconcileWork, ReconcileStatus,
+    CssVarCandidates, IndexDemand, IndexDemandPartition, IndexReconcileWork, PartitionShortfall,
+    ReconcileStatus,
 };
 pub use identity::{
     CatalogRevisionId, ContributionId, ContributionKey, DemandEpoch, ExtensionId,
     InferredProjectId, ObservationKey, ObservationOwner, ObservationRef, ObservedFact,
-    OwnerSnapshotId, PartitionId, PmProjectId, ProducerDescriptorId, ProfileClaim, ReadSet,
-    ReadWitness, ScopeId, SelectionEpoch, SourceBasis, TableKind, TableSchema,
+    OwnerSnapshotId, PartitionFamily, PartitionId, PmProjectId, ProducerDescriptorId, ProfileClaim,
+    ReadSet, ReadWitness, ScopeId, SelectionEpoch, SourceBasis, TableKind, TableSchema,
 };
 pub use membership::{
-    project_units, publishable_membership, unit_members, MembershipDecline, MembershipObservation,
-    MembershipPage, MembershipStatus, PreferredOwner, ProjectMember, ProjectUnitsPage,
+    project_units, unit_members, MembershipPage, MembershipStatus, PreferredOwner, ProjectMember,
+    ProjectUnitsPage,
 };
 pub use query::{
-    query_candidates, Candidate, CandidatePage, CoveredScope, EnumerationStatus, IndexContinuation,
-    IndexQuery, Lookup, QueryBudgets, QueryWork,
+    query_candidates, Candidate, CandidatePage, CoveredScope, DeclaredScope, EnumerationStatus,
+    IndexContinuation, IndexQuery, Lookup, QueryBudgets, QueryWork,
 };
 pub use records::{
     ComponentRow, ConfigEnvKind, ConfigEnvRow, Endpoint, ExtensionField, ExtensionFieldValue,

@@ -8,17 +8,28 @@
 //! rather than fed by mutation hooks. All facts come through the same shared
 //! cached accessors every other consumer uses: nothing here parses a file or
 //! branches on a framework.
+//!
+//! Each partition is certified on its own. One the host's analysis scope does
+//! not compute, or one with a unit whose facts cannot be read, answers `Partial`
+//! naming why; the others stay certified.
+//!
+//! This producer has no catalog, selection or demand-plan owner to read, so its
+//! bases record those as absent. Its table layouts are its own declaration, and
+//! a project-generation change reaches the fence through each slot's activation
+//! witness and the population witness.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
+use verter_identity::canonical::Canonical;
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{
-    ContentId, QueryIdentity, ResultContractId, SourceId, SourceRevision, SourceUnitId,
+    ContentId, ResultContractId, SourceId, SourceRevision, SourceUnitId,
 };
 use verter_identity::successor::{CarrierProfileId, ProfileSchemaEpoch};
-use verter_language::FileLanguage;
+use verter_language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
+use verter_semantic::analysis::AnalysisScope;
 use verter_span::{SourceByteOffset, SourceByteRange, Span};
 
 use super::delta::{
@@ -27,13 +38,13 @@ use super::delta::{
     SlotChange,
 };
 use super::identity::{
-    CatalogRevisionId, ContributionId, ContributionKey, DemandEpoch, ObservationKey,
-    ObservationOwner, ObservedFact, OwnerSnapshotId, PartitionId, ProducerDescriptorId,
-    ProfileClaim, ReadSet, ReadWitness, ScopeId, SelectionEpoch, SourceBasis, TableKind,
-    TableSchema,
+    ContributionId, ContributionKey, DemandEpoch, ObservationKey, ObservationOwner,
+    OwnerSnapshotId, PartitionFamily, PartitionId, ProducerDescriptorId, ProfileClaim, ReadSet,
+    ReadWitness, ScopeId, SelectionEpoch, SourceBasis, TableSchema,
 };
 use super::query::{
-    query_candidates, CandidatePage, EnumerationStatus, IndexQuery, Lookup, QueryBudgets,
+    query_candidates, CandidatePage, DeclaredScope, EnumerationStatus, IndexContinuation,
+    IndexQuery, Lookup, QueryBudgets,
 };
 use super::records::{
     ComponentRow, Endpoint, FactCause, FactQuality, IndexRecord, IndexRow, LinkRelation, LinkRole,
@@ -67,23 +78,38 @@ pub enum IndexDemandPartition {
 }
 
 impl IndexDemandPartition {
-    fn table(self) -> TableKind {
+    /// The fact family this demand reads.
+    #[must_use]
+    pub fn family(self) -> PartitionFamily {
         match self {
-            Self::CssVariables | Self::StyleSelectors => TableKind::StylesheetSymbols,
-            Self::Bindings => TableKind::Names,
-            Self::Components => TableKind::Components,
-            Self::Imports => TableKind::Links,
+            Self::CssVariables => PartitionFamily::CssVariables,
+            Self::StyleSelectors => PartitionFamily::StyleSelectors,
+            Self::Bindings => PartitionFamily::Bindings,
+            Self::Components => PartitionFamily::Components,
+            Self::Imports => PartitionFamily::Imports,
         }
     }
 
-    fn id(self) -> PartitionId {
-        PartitionId(Arc::from(match self {
-            Self::CssVariables => "css-variables",
-            Self::StyleSelectors => "style-selectors",
-            Self::Bindings => "bindings",
-            Self::Components => "components",
-            Self::Imports => "imports",
-        }))
+    /// The host's partition of this family.
+    #[must_use]
+    pub fn id(self) -> PartitionId {
+        PartitionId::new(producer().clone(), self.family())
+    }
+
+    /// Whether `scope` computes every owner fact this partition's rows read.
+    /// Empty owner facts under any other scope say nothing about the source.
+    fn computed_under(self, scope: AnalysisScope) -> bool {
+        match self {
+            Self::CssVariables => {
+                scope.needs_style_analysis()
+                    && scope.needs_template_analysis()
+                    && scope.needs_script_analysis()
+            }
+            Self::StyleSelectors => scope.needs_style_analysis(),
+            Self::Bindings => scope.contains(AnalysisScope::BINDINGS | AnalysisScope::IMPORTS),
+            Self::Components => scope.contains(AnalysisScope::TPL_COMPONENTS),
+            Self::Imports => scope.contains(AnalysisScope::IMPORTS),
+        }
     }
 
     /// A component view exists only for a component carrier. Other files have
@@ -110,7 +136,21 @@ impl IndexDemand {
     /// The population a complete walk of this demand certifies.
     #[must_use]
     pub fn scope(&self) -> ScopeId {
-        ScopeId::from_canonical(self)
+        ScopeId::of_population(self)
+    }
+
+    /// The declared population a query of this demand reads. A key of any
+    /// other partition is outside it.
+    #[must_use]
+    pub fn declared_scope(&self) -> DeclaredScope {
+        DeclaredScope::new(self.scope(), self.partition_ids())
+    }
+
+    fn partition_ids(&self) -> BTreeSet<PartitionId> {
+        self.partitions
+            .iter()
+            .map(|partition| partition.id())
+            .collect()
     }
 }
 
@@ -120,7 +160,7 @@ impl CanonicalEncode for IndexDemand {
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_u32(1, SCHEMA_VERSION);
         for partition in &self.partitions {
-            encoder.field_str(2, &partition.id().0);
+            encoder.field_enum_discriminant(2, partition.family().encoding());
         }
     }
 }
@@ -141,13 +181,23 @@ pub struct IndexReconcileWork {
     pub publish_attempts: u32,
 }
 
-/// How far the current snapshot answers a demand.
+/// Why one demanded partition is not certified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionShortfall {
+    pub partition: IndexDemandPartition,
+    pub cause: PartialCause,
+    /// Locators of the units this partition could not read.
+    pub unavailable_units: Vec<Arc<str>>,
+}
+
+/// How far the returned snapshot answers a demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileStatus {
-    /// Coverage for the demanded population is published and current.
+    /// Coverage for every demanded partition is published and current.
     Current,
-    /// The request is answered from private rows. They warm nothing.
-    ReturnOnly(PartialCause),
+    /// These partitions are not certified. Any other demanded partition is,
+    /// and rows only private to this request warm nothing.
+    Uncertified(Vec<PartitionShortfall>),
     /// Nothing is answered or kept.
     Cancelled,
 }
@@ -162,7 +212,7 @@ pub struct CssVarCandidates {
 
 fn producer() -> &'static ProducerDescriptorId {
     static PRODUCER: OnceLock<ProducerDescriptorId> = OnceLock::new();
-    PRODUCER.get_or_init(|| ProducerDescriptorId::from_canonical(&Named("host-file-facts")))
+    PRODUCER.get_or_init(|| ProducerDescriptorId::of_descriptor(&Named("host-file-facts")))
 }
 
 fn result_contract() -> &'static ResultContractId {
@@ -170,24 +220,22 @@ fn result_contract() -> &'static ResultContractId {
     CONTRACT.get_or_init(|| ResultContractId::from_canonical(&Named("host-file-facts-rows")))
 }
 
-fn catalog() -> &'static CatalogRevisionId {
-    static CATALOG: OnceLock<CatalogRevisionId> = OnceLock::new();
-    CATALOG.get_or_init(|| CatalogRevisionId::from_canonical(&Named("host-file-facts-catalog")))
-}
-
-/// Registered rows of the tables the host writes.
+/// This producer's own table layouts. No catalog owner covers them, which the
+/// admission and every basis under it record as absent.
 fn admission() -> &'static SchemaAdmission {
     static ADMISSION: OnceLock<SchemaAdmission> = OnceLock::new();
     ADMISSION.get_or_init(|| SchemaAdmission {
+        catalog: None,
         table_schemas: [
-            TableKind::StylesheetSymbols,
-            TableKind::Names,
-            TableKind::Components,
-            TableKind::Links,
+            IndexDemandPartition::CssVariables,
+            IndexDemandPartition::StyleSelectors,
+            IndexDemandPartition::Bindings,
+            IndexDemandPartition::Components,
+            IndexDemandPartition::Imports,
         ]
         .into_iter()
-        .map(|table| TableSchema {
-            table,
+        .map(|partition| TableSchema {
+            table: partition.family().table(),
             version: SCHEMA_VERSION,
         })
         .collect(),
@@ -217,7 +265,7 @@ impl CanonicalEncode for SourceDescriptor<'_> {
 
 struct RevisionDescriptor {
     whole_hash: [u8; 16],
-    project_generation: u64,
+    generation: u64,
 }
 
 impl CanonicalEncode for RevisionDescriptor {
@@ -225,7 +273,7 @@ impl CanonicalEncode for RevisionDescriptor {
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_bytes(1, &self.whole_hash);
-        encoder.field_u64(2, self.project_generation);
+        encoder.field_u64(2, self.generation);
     }
 }
 
@@ -266,13 +314,64 @@ fn population_key(scope: &ScopeId) -> ObservationKey {
     }
 }
 
+/// The typed fields of a language row that change how its bytes parse. An
+/// owner path never enters a carrier's identity.
+struct CarrierFamily<'a>(&'a FileLanguage);
+
+const fn js_module_encoding(kind: JsModuleKind) -> u32 {
+    match kind {
+        JsModuleKind::Unambiguous => 1,
+        JsModuleKind::Module => 2,
+        JsModuleKind::CommonJs => 3,
+        JsModuleKind::Script => 4,
+    }
+}
+
+impl CanonicalEncode for CarrierFamily<'_> {
+    const DOMAIN_TAG: &'static str = "verter.session.workspace_index.carrier_family.v1";
+
+    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
+        match self.0 {
+            FileLanguage::Script {
+                source_type,
+                flavor,
+            } => {
+                encoder.field_enum_discriminant(1, 1);
+                let (dialect, module) = match source_type {
+                    ScriptSourceType::Ts => (1, 0),
+                    ScriptSourceType::Tsx => (2, 0),
+                    ScriptSourceType::Js(kind) => (3, js_module_encoding(*kind)),
+                    ScriptSourceType::Jsx(kind) => (4, js_module_encoding(*kind)),
+                    ScriptSourceType::Dts => (5, 0),
+                };
+                encoder.field_enum_discriminant(2, dialect);
+                encoder.field_u32(3, module);
+                if let ScriptFlavor::AdapterModule { language_id, .. } = flavor {
+                    encoder.field_str(4, language_id.as_str());
+                }
+            }
+            FileLanguage::Framework { language_id, .. } => {
+                encoder.field_enum_discriminant(1, 2);
+                encoder.field_str(4, language_id.as_str());
+            }
+            FileLanguage::FrameworkTemplate { adapter_id, .. } => {
+                encoder.field_enum_discriminant(1, 3);
+                encoder.field_str(5, adapter_id.as_str());
+            }
+        }
+    }
+}
+
 /// Carrier profile of a file. Facts here come from the carrier and its shared
 /// analysis, so this claims the carrier and never fabricates a framework.
-fn carrier_claim(language: &FileLanguage) -> ProfileClaim {
-    // The whole language row: a script dialect, adapter module or template
-    // language parses differently under the same bytes.
-    let family = format!("{language:?}");
-    let schema = ProfileSchemaEpoch::for_schema_family("host-carrier", SCHEMA_VERSION);
+pub(super) fn carrier_claim(language: &FileLanguage) -> ProfileClaim {
+    let family = Canonical::from_encodable(&CarrierFamily(language))
+        .digest()
+        .to_hex();
+    let schema = ProfileSchemaEpoch::for_schema_family(
+        "verter.session.workspace_index.carrier_family",
+        SCHEMA_VERSION,
+    );
     ProfileClaim::Carrier(CarrierProfileId::from_carrier(&family, &schema))
 }
 
@@ -297,26 +396,36 @@ struct HostObservations<'host> {
 
 impl HostObservations<'_> {
     fn live_population(&self) -> CanonicalDigest {
-        let mut files = tracked_ids(self.host);
+        let mut files: Vec<(String, [u8; 16])> = tracked_ids(self.host)
+            .into_iter()
+            .filter_map(|canonical| {
+                let whole_hash = self.host.scheduler.try_get_source(&canonical)?.whole_hash;
+                Some((canonical, whole_hash))
+            })
+            .collect();
         files.sort();
-        population_fingerprint(files.iter().map(|canonical| {
-            let source = self.host.scheduler.try_get_source(canonical);
-            (canonical.as_str(), source.map(|source| source.whole_hash))
-        }))
+        population_fingerprint(
+            self.host.project_type_store().project_generation(),
+            files
+                .iter()
+                .map(|(canonical, hash)| (canonical.as_str(), hash)),
+        )
     }
 }
 
-/// The population witness: every tracked file and its content, in canonical
-/// order. Adding, removing or editing any file changes it.
+/// The population witness: the project generation, then every file with a
+/// source and its content, in canonical order. Adding, removing or editing any
+/// file changes it. A scheduler node with no source, such as a failed load, is
+/// not a file of the workspace.
 fn population_fingerprint<'a>(
-    files: impl Iterator<Item = (&'a str, Option<[u8; 16]>)>,
+    project_generation: u64,
+    files: impl Iterator<Item = (&'a str, &'a [u8; 16])>,
 ) -> CanonicalDigest {
     let mut encoder = CanonicalEncoder::new("verter.session.workspace_index.population.v1");
+    encoder.field_u64(3, project_generation);
     for (canonical, whole_hash) in files {
         encoder.field_str(1, canonical);
-        if let Some(whole_hash) = whole_hash {
-            encoder.field_bytes(2, &whole_hash);
-        }
+        encoder.field_bytes(2, whole_hash);
     }
     encoder.digest()
 }
@@ -348,11 +457,8 @@ impl ObservationOracle for HostObservations<'_> {
         }
     }
 
-    fn current_epochs(&self) -> (SelectionEpoch, DemandEpoch) {
-        // A direct host request is one fixed demand with no plan epoch, so
-        // selection supersession is the project generation alone.
-        let live = self.host.project_type_store().project_generation();
-        (SelectionEpoch(live), DemandEpoch(0))
+    fn current_epochs(&self) -> (Option<SelectionEpoch>, Option<DemandEpoch>) {
+        (None, None)
     }
 }
 
@@ -419,7 +525,10 @@ impl RowBuilder<'_> {
         scope: StyleScope,
         origin: RecordOrigin,
     ) {
-        let table = TableKind::StylesheetSymbols;
+        let partition = match kind {
+            StyleSymbolKind::CustomProperty => PartitionFamily::CssVariables,
+            StyleSymbolKind::Class | StyleSymbolKind::Id => PartitionFamily::StyleSelectors,
+        };
         let name: Arc<str> = Arc::from(name);
         self.push(
             SlotKind::Occurrence,
@@ -428,8 +537,8 @@ impl RowBuilder<'_> {
                 name: Arc::clone(&name),
             },
             vec![
-                PostingKey::exact(table, &name),
-                PostingKey::lexical(table, &name),
+                PostingKey::exact(partition, &name),
+                PostingKey::lexical(partition, &name),
             ],
             IndexRow::Stylesheet(StylesheetRow {
                 kind,
@@ -444,8 +553,14 @@ impl RowBuilder<'_> {
     }
 }
 
-/// Facts the owner could not supply for a walk.
-struct MissingFacts;
+/// Whether a projection read every owner surface its partition needs. Rows of
+/// the surfaces it could read still answer the request, privately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Projection {
+    Complete,
+    /// An owner surface this file should have was not available.
+    MissingFacts,
+}
 
 impl VerterHost {
     /// Read `partition`'s owner facts for one file.
@@ -456,7 +571,7 @@ impl VerterHost {
         &self,
         partition: IndexDemandPartition,
         rows: &mut RowBuilder<'_>,
-    ) -> Result<(), MissingFacts> {
+    ) -> Projection {
         match partition {
             IndexDemandPartition::CssVariables => self.project_css_variables(rows),
             IndexDemandPartition::StyleSelectors => self.project_style_selectors(rows),
@@ -466,12 +581,40 @@ impl VerterHost {
         }
     }
 
-    fn project_css_variables(&self, rows: &mut RowBuilder<'_>) -> Result<(), MissingFacts> {
+    /// A file's template facts, and whether any it should have are missing.
+    fn template_facts(
+        &self,
+        canonical: &str,
+    ) -> (
+        Option<
+            verter_session_query::retention::heap_size::OwnedValue<
+                verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+            >,
+        >,
+        Projection,
+    ) {
+        let template = self.raw_template_analysis_for_file(canonical);
+        let expected = self
+            .effective_file_state(canonical, None)
+            .is_none_or(|state| state.meta.has_template);
+        let projection = if template.is_none() && expected {
+            Projection::MissingFacts
+        } else {
+            Projection::Complete
+        };
+        (template, projection)
+    }
+
+    /// Each surface is read on its own, so one that is not available does not
+    /// hide what the others report.
+    fn project_css_variables(&self, rows: &mut RowBuilder<'_>) -> Projection {
         let canonical = rows.file.canonical.clone();
-        let styles = self
-            .effective_style_analyses(&canonical, None)
-            .ok_or(MissingFacts)?;
-        for (block, style) in styles.iter().enumerate() {
+        let mut projection = Projection::Complete;
+        let styles = self.effective_style_analyses(&canonical, None);
+        if styles.is_none() {
+            projection = Projection::MissingFacts;
+        }
+        for (block, style) in styles.iter().flatten().enumerate() {
             let Some(css) = style.css.as_ref() else {
                 continue;
             };
@@ -502,7 +645,11 @@ impl VerterHost {
                 );
             }
         }
-        if let Some(template) = self.raw_template_analysis_for_file(&canonical) {
+        let (template, template_projection) = self.template_facts(&canonical);
+        if template_projection == Projection::MissingFacts {
+            projection = Projection::MissingFacts;
+        }
+        if let Some(template) = template {
             for name in &template.css_var_names {
                 rows.push_style(
                     StyleSymbolKind::CustomProperty,
@@ -514,9 +661,9 @@ impl VerterHost {
                 );
             }
         }
-        let state = self
-            .effective_file_state(&canonical, None)
-            .ok_or(MissingFacts)?;
+        let Some(state) = self.effective_file_state(&canonical, None) else {
+            return Projection::MissingFacts;
+        };
         for manipulation in state.script_analysis.css_var_manipulations.iter() {
             let origin = rows.origin(manipulation.span);
             rows.push_style(
@@ -528,13 +675,13 @@ impl VerterHost {
                 origin,
             );
         }
-        Ok(())
+        projection
     }
 
-    fn project_style_selectors(&self, rows: &mut RowBuilder<'_>) -> Result<(), MissingFacts> {
-        let styles = self
-            .effective_style_analyses(&rows.file.canonical, None)
-            .ok_or(MissingFacts)?;
+    fn project_style_selectors(&self, rows: &mut RowBuilder<'_>) -> Projection {
+        let Some(styles) = self.effective_style_analyses(&rows.file.canonical, None) else {
+            return Projection::MissingFacts;
+        };
         for (block, style) in styles.iter().enumerate() {
             let Some(css) = style.css.as_ref() else {
                 continue;
@@ -566,15 +713,15 @@ impl VerterHost {
                 );
             }
         }
-        Ok(())
+        Projection::Complete
     }
 
-    fn project_bindings(&self, rows: &mut RowBuilder<'_>) -> Result<(), MissingFacts> {
-        let analysis = self
-            .get_analysis(&rows.file.canonical)
-            .ok_or(MissingFacts)?;
+    fn project_bindings(&self, rows: &mut RowBuilder<'_>) -> Projection {
+        let Some(analysis) = self.get_analysis(&rows.file.canonical) else {
+            return Projection::MissingFacts;
+        };
         let unit = rows.file.unit.clone();
-        let table = TableKind::Names;
+        let partition = PartitionFamily::Bindings;
         let push_name = |rows: &mut RowBuilder<'_>, name: &str, role, kind, span| {
             let spelling: Arc<str> = Arc::from(name);
             let origin = rows.origin(span);
@@ -585,8 +732,8 @@ impl VerterHost {
                     spelling: Arc::clone(&spelling),
                 },
                 vec![
-                    PostingKey::exact(table, name),
-                    PostingKey::lexical(table, name),
+                    PostingKey::exact(partition, name),
+                    PostingKey::lexical(partition, name),
                 ],
                 IndexRow::Name(NameRow {
                     spelling,
@@ -598,12 +745,11 @@ impl VerterHost {
             );
         };
         for binding in &analysis.bindings {
-            let kind = Some(Arc::from(format!("{:?}", binding.kind)));
             push_name(
                 rows,
                 &binding.name,
                 NameRole::Declaration,
-                kind,
+                Some(binding.kind),
                 binding.span,
             );
         }
@@ -612,46 +758,36 @@ impl VerterHost {
                 push_name(rows, &binding.name, NameRole::Import, None, binding.span);
             }
         }
-        Ok(())
+        Projection::Complete
     }
 
-    fn project_components(&self, rows: &mut RowBuilder<'_>) -> Result<(), MissingFacts> {
+    fn project_components(&self, rows: &mut RowBuilder<'_>) -> Projection {
         let canonical = rows.file.canonical.clone();
-        let analysis = self.get_analysis(&canonical).ok_or(MissingFacts)?;
+        let Some(analysis) = self.get_analysis(&canonical) else {
+            return Projection::MissingFacts;
+        };
         let unit = rows.file.unit.clone();
-        let table = TableKind::Components;
+        let partition = PartitionFamily::Components;
 
-        // The basename is a candidate key and a display label, never identity.
-        let filename = canonical.rsplit('/').next().unwrap_or(&canonical);
-        let stem = verter_session_query::resolution::strip_carrier_extension(filename);
-        let observed = [claim_digest(&rows.file.claim)];
+        // The view of a component belongs to its TypeInfo owner, which this
+        // host does not run, and no name identifies a subject. This row says
+        // so where the unit is looked up, and no name finds it.
         rows.push(
             SlotKind::Declaration,
             TypedSubject::Component {
                 unit: unit.clone(),
-                export: Arc::from("default"),
+                export: None,
             },
-            vec![
-                PostingKey::exact(table, stem),
-                PostingKey::lexical(table, stem),
-            ],
-            IndexRow::Component(ComponentRow::View {
-                query: QueryIdentity::<ObservedFact>::compose(
-                    "verter.typeinfo.component_facets.v1",
-                    unit.digest(),
-                    &observed,
-                    result_contract(),
-                ),
-                native_basis: None,
-                composed_children: Vec::new(),
-                display: Arc::from(stem),
+            vec![PostingKey::forward(partition, &unit.digest().to_hex())],
+            IndexRow::Component(ComponentRow::ViewUnavailable {
+                cause: FactCause::OwnerUnavailable,
             }),
             RecordOrigin::Unavailable(OriginUnavailable::OwnerRecordsNoSpan),
-            FactQuality::Exact,
+            FactQuality::Unresolved,
         );
 
         let Some(template) = analysis.template.as_ref() else {
-            return Ok(());
+            return self.template_facts(&canonical).1;
         };
         for usage in &template.components {
             let tag: Arc<str> = Arc::from(usage.name.as_str());
@@ -674,23 +810,23 @@ impl VerterHost {
                     target: Arc::clone(&tag),
                 },
                 vec![
-                    PostingKey::exact(table, &usage.name),
-                    PostingKey::lexical(table, &usage.name),
+                    PostingKey::exact(partition, &usage.name),
+                    PostingKey::lexical(partition, &usage.name),
                 ],
                 IndexRow::Component(ComponentRow::Usage { tag, target }),
                 origin,
                 FactQuality::Unresolved,
             );
         }
-        Ok(())
+        Projection::Complete
     }
 
-    fn project_imports(&self, rows: &mut RowBuilder<'_>) -> Result<(), MissingFacts> {
-        let analysis = self
-            .get_analysis(&rows.file.canonical)
-            .ok_or(MissingFacts)?;
+    fn project_imports(&self, rows: &mut RowBuilder<'_>) -> Projection {
+        let Some(analysis) = self.get_analysis(&rows.file.canonical) else {
+            return Projection::MissingFacts;
+        };
         let unit = rows.file.unit.clone();
-        let table = TableKind::Links;
+        let partition = PartitionFamily::Imports;
         for import in &analysis.imports {
             let specifier: Arc<str> = Arc::from(import.source.as_str());
             let origin = rows.origin(import.span);
@@ -702,8 +838,8 @@ impl VerterHost {
                     target: Arc::clone(&specifier),
                 },
                 vec![
-                    PostingKey::forward(table, &unit.digest().to_hex()),
-                    PostingKey::reverse(table, &specifier),
+                    PostingKey::forward(partition, &unit.digest().to_hex()),
+                    PostingKey::reverse(partition, &specifier),
                 ],
                 // Resolving the specifier is the project model's proof to give;
                 // the edge stays explicit about not having it.
@@ -721,11 +857,15 @@ impl VerterHost {
                 FactQuality::Unresolved,
             );
         }
-        Ok(())
+        Projection::Complete
     }
 
-    /// One read of every tracked file's identity and content hash.
-    fn capture_tracked(&self, project_generation: u64) -> (Vec<TrackedFile>, Vec<Arc<str>>) {
+    /// One read of every tracked file's identity and content hash. A file with
+    /// a source the host cannot read comes back separately, with its hash.
+    fn capture_tracked(
+        &self,
+        project_generation: u64,
+    ) -> (Vec<TrackedFile>, Vec<(Arc<str>, [u8; 16])>) {
         use crate::host_executor::HostSourceData;
 
         let mut ids = tracked_ids(self);
@@ -735,11 +875,10 @@ impl VerterHost {
         for id in ids {
             let canonical: Arc<str> = Arc::from(id.as_str());
             let Some(snapshot) = self.scheduler.try_get_source(&id) else {
-                unavailable.push(canonical);
                 continue;
             };
             let Some(data) = snapshot.downcast_data::<HostSourceData>() else {
-                unavailable.push(canonical);
+                unavailable.push((canonical, snapshot.whole_hash));
                 continue;
             };
             let language = data.file_language.clone();
@@ -752,7 +891,7 @@ impl VerterHost {
                 source: Arc::clone(&snapshot.source),
                 revision: SourceRevision::from_canonical(&RevisionDescriptor {
                     whole_hash: snapshot.whole_hash,
-                    project_generation,
+                    generation: project_generation,
                 }),
                 canonical,
             });
@@ -764,44 +903,46 @@ impl VerterHost {
         ContributionKey {
             producer: producer().clone(),
             schema: TableSchema {
-                table: partition.table(),
+                table: partition.family().table(),
                 version: SCHEMA_VERSION,
             },
             unit: file.unit.clone(),
             claim: file.claim.clone(),
             project: None,
-            partition: partition.id(),
+            partition: partition.family(),
         }
     }
 
+    /// Project one slot. An incomplete projection still carries the rows of the
+    /// surfaces it could read.
     fn draft_slot(
         &self,
         file: &TrackedFile,
         partition: IndexDemandPartition,
         project_generation: u64,
-    ) -> Result<PartitionDraft, MissingFacts> {
+    ) -> (PartitionDraft, Projection) {
         let mut rows = RowBuilder {
             file,
             content: ContentId::from_content_bytes(file.source.as_bytes()),
             records: Vec::new(),
         };
-        self.project_partition(partition, &mut rows)?;
+        let projection = self.project_partition(partition, &mut rows);
         let RowBuilder {
             content, records, ..
         } = rows;
-        Ok(PartitionDraft {
+        let draft = PartitionDraft {
             key: Self::slot_key(file, partition),
             basis: SourceBasis {
                 unit: file.unit.clone(),
                 locator: Arc::clone(&file.canonical),
                 revision: file.revision.clone(),
                 content,
-                catalog: catalog().clone(),
-                selection_epoch: SelectionEpoch(project_generation),
-                demand_epoch: DemandEpoch(0),
-                owner_snapshot: OwnerSnapshotId::from_canonical(&RevisionDescriptor {
+                catalog: None,
+                selection_epoch: None,
+                demand_epoch: None,
+                owner_snapshot: OwnerSnapshotId::of_owner_snapshot(&RevisionDescriptor {
                     whole_hash: file.whole_hash,
-                    project_generation: file.generation,
+                    generation: file.generation,
                 }),
             },
             provenance: Provenance {
@@ -821,7 +962,21 @@ impl VerterHost {
                 },
             ]),
             records,
-        })
+        };
+        (draft, projection)
+    }
+
+    /// The demanded partitions this host's analysis scope computes. Every other
+    /// one answers unsupported without visiting a file.
+    fn computed_demand(&self, demand: &IndexDemand) -> IndexDemand {
+        let scope = self.config.effective_scope();
+        IndexDemand::of(
+            demand
+                .partitions
+                .iter()
+                .copied()
+                .filter(|partition| partition.computed_under(scope)),
+        )
     }
 
     /// Bring the index up to date for `demand` and return the snapshot that
@@ -836,59 +991,88 @@ impl VerterHost {
         is_cancelled: &dyn Fn() -> bool,
     ) -> (Arc<IndexSnapshot>, ReconcileStatus, IndexReconcileWork) {
         let index = self.project_type_store().workspace_index();
-        let scope = demand.scope();
+        let computed = self.computed_demand(demand);
         let mut work = IndexReconcileWork::default();
+        let mut shortfalls: Vec<PartitionShortfall> = demand
+            .partitions
+            .difference(&computed.partitions)
+            .map(|&partition| PartitionShortfall {
+                partition,
+                cause: PartialCause::UnsupportedCoverage,
+                unavailable_units: Vec::new(),
+            })
+            .collect();
+        let finished = |snapshot, mut shortfalls: Vec<PartitionShortfall>, work| {
+            shortfalls.sort_by_key(|shortfall| shortfall.partition);
+            let status = if shortfalls.is_empty() {
+                ReconcileStatus::Current
+            } else {
+                ReconcileStatus::Uncertified(shortfalls)
+            };
+            (snapshot, status, work)
+        };
+        if computed.partitions.is_empty() {
+            return finished(index.snapshot(), shortfalls, work);
+        }
 
         // The epochs are bumped after a mutation commits, so reading them
         // first can only make a later request re-check, never miss a change.
+        let scope = computed.scope();
         let stamp = (
             self.current_store_view_epoch(),
             self.current_load_generation(),
         );
         if index.population_stamp(&scope) == Some(stamp) {
             let snapshot = index.snapshot();
-            if snapshot.coverage(&scope).is_some() {
-                return (snapshot, ReconcileStatus::Current, work);
+            let certified = snapshot
+                .coverage(&scope)
+                .is_some_and(|record| record.partitions == computed.partition_ids());
+            if certified {
+                return finished(snapshot, shortfalls, work);
             }
         }
 
-        let mut return_only_cause = None;
+        let mut refusal_cause = PartialCause::Stale;
         for _ in 0..MAX_PUBLISH_ATTEMPTS {
-            match self.reconcile_once(demand, &scope, is_cancelled, &mut work, true) {
+            match self.reconcile_once(&computed, &scope, is_cancelled, &mut work, true) {
                 Attempt::Published(snapshot) => {
                     index.record_population_stamp(scope, stamp);
-                    return (snapshot, ReconcileStatus::Current, work);
+                    return finished(snapshot, shortfalls, work);
                 }
-                Attempt::ReturnOnly(snapshot, cause) => {
-                    return (snapshot, ReconcileStatus::ReturnOnly(cause), work);
+                Attempt::Uncertified(snapshot, blocked) => {
+                    shortfalls.extend(blocked);
+                    return finished(snapshot, shortfalls, work);
                 }
-                Attempt::Cancelled => {
+                Attempt::Cancelled | Attempt::Refused(PublishRefusal::Cancelled) => {
                     return (index.snapshot(), ReconcileStatus::Cancelled, work);
                 }
                 Attempt::Refused(PublishRefusal::RetentionPressure) => {
-                    return_only_cause = Some(PartialCause::RetentionPressure);
+                    refusal_cause = PartialCause::RetentionPressure;
                     break;
-                }
-                Attempt::Refused(PublishRefusal::Cancelled) => {
-                    return (index.snapshot(), ReconcileStatus::Cancelled, work);
                 }
                 Attempt::Refused(_) => {}
             }
         }
         // Lost every attempt, or the account refused retention: answer from
-        // private rows.
-        let cause = return_only_cause.unwrap_or(PartialCause::Stale);
-        match self.reconcile_once(demand, &scope, is_cancelled, &mut work, false) {
-            Attempt::ReturnOnly(snapshot, partial_cause) => {
-                let cause = if partial_cause == PartialCause::Stale {
-                    cause
-                } else {
-                    partial_cause
-                };
-                (snapshot, ReconcileStatus::ReturnOnly(cause), work)
+        // private rows, certifying nothing.
+        match self.reconcile_once(&computed, &scope, is_cancelled, &mut work, false) {
+            Attempt::Uncertified(snapshot, blocked) => {
+                let has_own_cause = |partition| blocked.iter().any(|b| b.partition == partition);
+                let walk_wide: Vec<PartitionShortfall> = computed
+                    .partitions
+                    .iter()
+                    .filter(|&&partition| !has_own_cause(partition))
+                    .map(|&partition| PartitionShortfall {
+                        partition,
+                        cause: refusal_cause.clone(),
+                        unavailable_units: Vec::new(),
+                    })
+                    .collect();
+                shortfalls.extend(walk_wide);
+                shortfalls.extend(blocked);
+                finished(snapshot, shortfalls, work)
             }
-            Attempt::Published(snapshot) => (snapshot, ReconcileStatus::ReturnOnly(cause), work),
-            Attempt::Cancelled | Attempt::Refused(_) => {
+            Attempt::Published(_) | Attempt::Cancelled | Attempt::Refused(_) => {
                 (index.snapshot(), ReconcileStatus::Cancelled, work)
             }
         }
@@ -909,7 +1093,7 @@ impl VerterHost {
         let captured = index.snapshot();
         let (files, unavailable) = self.capture_tracked(project_generation);
         work.population_checks += count_u32(files.len() + unavailable.len());
-        let captured_population = captured_population(&files, &unavailable);
+        let captured_population = captured_population(project_generation, &files, &unavailable);
 
         let mut canonical_by_unit: BTreeMap<CanonicalDigest, Arc<str>> = files
             .iter()
@@ -918,10 +1102,20 @@ impl VerterHost {
 
         let mut changes = Vec::new();
         let mut private_rows = Vec::new();
-        let mut current_slots = BTreeSet::new();
+        let mut current_slots: BTreeMap<IndexDemandPartition, BTreeSet<ContributionId>> =
+            BTreeMap::new();
         let mut gone = Vec::new();
-        let mut ineligible = Vec::new();
-        let mut partial_cause = (!unavailable.is_empty()).then_some(PartialCause::UnavailableInput);
+        // A unit the host cannot read may hold rows of any partition.
+        let mut blocked: BTreeMap<IndexDemandPartition, BTreeSet<Arc<str>>> = BTreeMap::new();
+        for (canonical, _) in &unavailable {
+            for &partition in &demand.partitions {
+                blocked
+                    .entry(partition)
+                    .or_default()
+                    .insert(Arc::clone(canonical));
+            }
+        }
+        let mut unsupported = BTreeSet::new();
 
         for file in &files {
             for &partition in &demand.partitions {
@@ -936,38 +1130,41 @@ impl VerterHost {
                 let held = captured.contribution(&id);
                 if held.is_some_and(|held| held.basis.revision == file.revision) {
                     work.unchanged += 1;
-                    current_slots.insert(id);
+                    current_slots.entry(partition).or_default().insert(id);
                     continue;
                 }
                 work.projections += 1;
-                let Ok(draft) = self.draft_slot(file, partition, project_generation) else {
+                let (draft, projection) = self.draft_slot(file, partition, project_generation);
+                if projection == Projection::MissingFacts {
                     // An old value does not stay current because its
                     // replacement could not be built.
-                    partial_cause = Some(PartialCause::UnavailableInput);
-                    if held.is_some() {
-                        ineligible.push(source_key(&file.unit));
+                    blocked
+                        .entry(partition)
+                        .or_default()
+                        .insert(Arc::clone(&file.canonical));
+                    if let Some(held) = held {
                         gone.push(id);
+                        changes.push(retire(held, CanonicalDigest::of_bytes(&file.whole_hash)));
+                        work.retired += 1;
                     }
+                    private_rows.push(PartialEnumeration::new(draft, account));
                     continue;
-                };
-                if !self.source_unchanged(file) {
-                    if publish {
-                        return Attempt::Refused(PublishRefusal::Stale);
-                    }
-                    partial_cause = Some(PartialCause::Stale);
+                }
+                if publish && !self.source_unchanged(file) {
+                    return Attempt::Refused(PublishRefusal::Stale);
                 }
                 if !publish {
-                    private_rows.push(PartialEnumeration::new(draft, PartialCause::Stale, account));
+                    private_rows.push(PartialEnumeration::new(draft, account));
                     continue;
                 }
                 let expected = held.map_or(ExpectedPrior::Absent, |held| {
                     ExpectedPrior::Basis(Box::new(held.basis.clone()))
                 });
                 match draft.seal(admission(), account) {
-                    Ok(partition) => {
-                        current_slots.insert(id);
+                    Ok(sealed) => {
+                        current_slots.entry(partition).or_default().insert(id);
                         changes.push(SlotChange::Upsert {
-                            partition: Box::new(partition),
+                            partition: Box::new(sealed),
                             expected,
                         });
                     }
@@ -976,16 +1173,20 @@ impl VerterHost {
                             false,
                             "a host partition failed its own registered schema: {rejection:?}"
                         );
-                        partial_cause = Some(PartialCause::UnsupportedCoverage);
+                        unsupported.insert(partition);
                     }
                 }
             }
         }
 
         // Slots of this demand that no tracked file claims any more.
+        let blocked_slots: BTreeSet<ContributionId> = gone.iter().cloned().collect();
         for &partition in &demand.partitions {
+            let slots = current_slots.get(&partition);
             for held in captured.contributions_in_partition(&partition.id()) {
-                if held.key.producer != *producer() || current_slots.contains(&held.id) {
+                if slots.is_some_and(|slots| slots.contains(&held.id))
+                    || blocked_slots.contains(&held.id)
+                {
                     continue;
                 }
                 let Some(fingerprint_owner) = self.live_slot_owner(&files, &held.basis) else {
@@ -1010,34 +1211,67 @@ impl VerterHost {
             }
         }
 
+        let shortfalls: Vec<PartitionShortfall> = blocked
+            .iter()
+            .map(|(&partition, units)| PartitionShortfall {
+                partition,
+                cause: PartialCause::UnavailableInput,
+                unavailable_units: units.iter().cloned().collect(),
+            })
+            .chain(unsupported.iter().map(|&partition| PartitionShortfall {
+                partition,
+                cause: PartialCause::UnsupportedCoverage,
+                unavailable_units: Vec::new(),
+            }))
+            .collect();
+
+        let private_contributions = private_rows
+            .into_iter()
+            .map(PartialEnumeration::into_return_only);
+
+        if !publish {
+            let private = captured
+                .with_return_only(private_contributions, &gone)
+                .without_coverage();
+            return Attempt::Uncertified(Arc::new(private), shortfalls);
+        }
+
         let observations = HostObservations {
             host: self,
             canonical_by_unit,
             scope: scope.clone(),
         };
 
-        if !publish {
-            let cause = partial_cause.unwrap_or(PartialCause::Stale);
-            let rows = private_rows
-                .into_iter()
-                .map(super::snapshot::return_only_contribution);
-            return Attempt::ReturnOnly(Arc::new(captured.with_return_only(rows, &gone)), cause);
-        }
-
-        if !ineligible.is_empty() {
-            index.invalidate(&ineligible);
-        }
-
-        let coverage = if partial_cause.is_none() {
+        // Each partition is certified on its own: a unit that blocks one says
+        // nothing about the others.
+        let certified: BTreeSet<IndexDemandPartition> = demand
+            .partitions
+            .iter()
+            .copied()
+            .filter(|partition| {
+                !blocked.contains_key(partition) && !unsupported.contains(partition)
+            })
+            .collect();
+        let coverage = if certified.is_empty() {
+            Vec::new()
+        } else {
             vec![CoverageRecord {
                 scope: scope.clone(),
-                partitions: demand.partitions.iter().map(|p| p.id()).collect(),
+                partitions: certified.iter().map(|p| p.id()).collect(),
                 witness: ReadWitness {
                     key: population_key(scope),
                     fingerprint: captured_population,
                 },
-                contributions: current_slots,
+                contributions: certified
+                    .iter()
+                    .filter_map(|partition| current_slots.get(partition))
+                    .flatten()
+                    .cloned()
+                    .collect(),
             }]
+        };
+        let decertified = if certified.is_empty() {
+            vec![scope.clone()]
         } else {
             Vec::new()
         };
@@ -1045,54 +1279,23 @@ impl VerterHost {
         let delta = ContributionDelta {
             changes,
             coverage,
-            selection_epoch: SelectionEpoch(project_generation),
-            demand_epoch: DemandEpoch(0),
+            decertified,
+            selection_epoch: None,
+            demand_epoch: None,
         };
         work.publish_attempts += 1;
         match index.publish(delta, &observations, is_cancelled) {
-            PublishOutcome::Published { .. } | PublishOutcome::AlreadyCurrent { .. } => {
+            PublishOutcome::Published | PublishOutcome::AlreadyCurrent => {
                 let snapshot = index.snapshot();
-                match partial_cause {
-                    None => Attempt::Published(snapshot),
-                    Some(cause) => {
-                        // Complete slots were kept; the rest answers privately.
-                        let rows = self.private_rows_for_incomplete(demand, &files, &snapshot);
-                        let private = snapshot.with_return_only(rows, &[]);
-                        Attempt::ReturnOnly(Arc::new(private), cause)
-                    }
+                if shortfalls.is_empty() {
+                    Attempt::Published(snapshot)
+                } else {
+                    let private = snapshot.with_return_only(private_contributions, &[]);
+                    Attempt::Uncertified(Arc::new(private), shortfalls)
                 }
             }
             PublishOutcome::Refused(refusal) => Attempt::Refused(refusal),
         }
-    }
-
-    /// Current positive rows of the slots a partial walk could not publish.
-    fn private_rows_for_incomplete(
-        &self,
-        demand: &IndexDemand,
-        files: &[TrackedFile],
-        snapshot: &IndexSnapshot,
-    ) -> Vec<super::snapshot::Contribution> {
-        let account = self.project_type_store().workspace_index().account().get();
-        let generation = self.project_type_store().project_generation();
-        let mut rows = Vec::new();
-        for file in files {
-            for &partition in &demand.partitions {
-                if !partition.applies_to(&file.language) {
-                    continue;
-                }
-                let held = snapshot.contribution(&Self::slot_key(file, partition).id());
-                if held.is_some_and(|held| held.basis.revision == file.revision) {
-                    continue;
-                }
-                if let Ok(draft) = self.draft_slot(file, partition, generation) {
-                    let partial =
-                        PartialEnumeration::new(draft, PartialCause::UnavailableInput, account);
-                    rows.push(super::snapshot::return_only_contribution(partial));
-                }
-            }
-        }
-        rows
     }
 
     fn source_unchanged(&self, file: &TrackedFile) -> bool {
@@ -1116,14 +1319,21 @@ impl VerterHost {
 
     /// Enumerate candidates for `demand` under finite budgets.
     ///
-    /// The answer is `Complete` only when the walk exhausted its keys and the
-    /// demand's population is certified. Candidates are candidates: the owning
-    /// operation still validates each one before a semantic answer or edit.
+    /// The answer is `Complete` only when the walk exhausted its keys and every
+    /// partition the lookup reads is certified. A key outside the demand returns
+    /// nothing and answers `Partial`. `continuation` resumes an earlier page of
+    /// the same lookup and demand; once the index has moved on it answers
+    /// `Partial(Stale)`, and a request-local snapshot issues none, because no
+    /// later request can hold it.
+    ///
+    /// Candidates are candidates: the owning operation still validates each one
+    /// before a semantic answer or edit.
     pub fn workspace_index_candidates(
         &self,
         demand: &IndexDemand,
         lookup: Lookup,
         budgets: QueryBudgets,
+        continuation: Option<IndexContinuation>,
         is_cancelled: &dyn Fn() -> bool,
     ) -> (CandidatePage, IndexReconcileWork) {
         let (snapshot, status, work) = self.workspace_index_reconcile(demand, is_cancelled);
@@ -1141,19 +1351,39 @@ impl VerterHost {
             );
             return (page, work);
         }
+        let shortfalls: &[PartitionShortfall] = match &status {
+            ReconcileStatus::Uncertified(shortfalls) => shortfalls,
+            ReconcileStatus::Current | ReconcileStatus::Cancelled => &[],
+        };
+        let relevant: Vec<&PartitionShortfall> = shortfalls
+            .iter()
+            .filter(|shortfall| lookup.reads(shortfall.partition.family()))
+            .collect();
         let query = IndexQuery {
             lookup,
             budgets,
-            scope: Some(demand.scope()),
-            continuation: None,
+            scope: Some(self.computed_demand(demand).declared_scope()),
+            continuation,
         };
         let mut page = query_candidates(&snapshot, &query, None, is_cancelled);
-        if let (
-            ReconcileStatus::ReturnOnly(cause),
-            EnumerationStatus::Partial { cause: slot, .. },
-        ) = (&status, &mut page.status)
+        if let EnumerationStatus::Partial {
+            cause,
+            covered,
+            continuation,
+        } = &mut page.status
         {
-            cause.clone_into(slot);
+            let resumable = continuation.is_some() && !snapshot.is_return_only();
+            if !resumable {
+                *continuation = None;
+            }
+            if let (false, Some(shortfall)) = (resumable, relevant.first()) {
+                shortfall.cause.clone_into(cause);
+            }
+            let units: BTreeSet<&Arc<str>> = relevant
+                .iter()
+                .flat_map(|shortfall| &shortfall.unavailable_units)
+                .collect();
+            covered.unavailable_units = units.into_iter().cloned().collect();
         }
         (page, work)
     }
@@ -1163,14 +1393,16 @@ impl VerterHost {
         &self,
         var_name: &str,
         budgets: QueryBudgets,
+        continuation: Option<IndexContinuation>,
         is_cancelled: &dyn Fn() -> bool,
     ) -> CssVarCandidates {
         let demand = IndexDemand::of([IndexDemandPartition::CssVariables]);
-        let key = PostingKey::exact(TableKind::StylesheetSymbols, var_name);
+        let key = PostingKey::exact(PartitionFamily::CssVariables, var_name);
         let (page, work) = self.workspace_index_candidates(
             &demand,
             Lookup::Keys(vec![key]),
             budgets,
+            continuation,
             is_cancelled,
         );
         CssVarCandidates {
@@ -1183,23 +1415,29 @@ impl VerterHost {
 
 /// The population as this walk saw it. The fence compares it with the live
 /// population, so a file edited after capture cannot be certified.
-fn captured_population(files: &[TrackedFile], unavailable: &[Arc<str>]) -> CanonicalDigest {
-    let mut entries: Vec<(&str, Option<[u8; 16]>)> = files
+fn captured_population(
+    project_generation: u64,
+    files: &[TrackedFile],
+    unavailable: &[(Arc<str>, [u8; 16])],
+) -> CanonicalDigest {
+    let mut entries: Vec<(&str, &[u8; 16])> = files
         .iter()
-        .map(|file| (file.canonical.as_ref(), Some(file.whole_hash)))
+        .map(|file| (file.canonical.as_ref(), &file.whole_hash))
         .chain(
             unavailable
                 .iter()
-                .map(|canonical| (canonical.as_ref(), None)),
+                .map(|(canonical, hash)| (canonical.as_ref(), hash)),
         )
         .collect();
     entries.sort_by_key(|(canonical, _)| *canonical);
-    population_fingerprint(entries.into_iter())
+    population_fingerprint(project_generation, entries.into_iter())
 }
 
 enum Attempt {
+    /// Coverage for every partition of the demand is current.
     Published(Arc<IndexSnapshot>),
-    ReturnOnly(Arc<IndexSnapshot>, PartialCause),
+    /// The snapshot that answers, and the partitions it could not certify.
+    Uncertified(Arc<IndexSnapshot>, Vec<PartitionShortfall>),
     Refused(PublishRefusal),
     Cancelled,
 }
@@ -1224,14 +1462,6 @@ fn block_scope(scoped: bool, is_module: bool) -> StyleScope {
         StyleScope::Scoped
     } else {
         StyleScope::Global
-    }
-}
-
-fn claim_digest(claim: &ProfileClaim) -> CanonicalDigest {
-    match claim {
-        ProfileClaim::Carrier(id) => id.digest(),
-        ProfileClaim::Framework { profile, .. } => profile.digest(),
-        ProfileClaim::Project(id) => id.digest(),
     }
 }
 

@@ -41,12 +41,6 @@ use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 pub use verter_type_engine::semantic_query_memo::SemanticCloseReport;
 
-/// The workspace candidate index's public surface. See
-/// `crate::workspace_index`.
-pub mod workspace_index {
-    pub use crate::workspace_index::*;
-}
-
 /// What document closes have cost: a fixed-size aggregate, no history
 /// (retention observability, read through
 /// [`ProjectTypeStore::close_stats`]).

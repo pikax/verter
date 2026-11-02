@@ -14,8 +14,11 @@ use verter_identity::mapping::MapRevision;
 use verter_identity::successor::ReleaseId;
 use verter_span::{EmbeddedByteRange, GeneratedByteRange, SourceByteRange};
 
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+
 use super::identity::{
-    ExtensionId, ObservationRef, ObservedFact, PmProjectId, ProducerDescriptorId, TableKind,
+    ExtensionId, ObservationRef, ObservedFact, PartitionFamily, PmProjectId, ProducerDescriptorId,
+    TableKind,
 };
 use super::membership::{MembershipStatus, PreferredOwner, ProjectMember};
 
@@ -35,59 +38,94 @@ pub enum KeyFamily {
     Reverse,
 }
 
+/// The lexical search projection. Folding one character at a time keeps it
+/// context-free, so the fold of a prefix is a prefix of the fold of the whole.
+pub(super) fn lexical_fold(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).collect()
+}
+
 /// One candidate lookup key. A spelling here finds possible candidates; it is
-/// never a target identity.
+/// never a target identity. Its partition comes first, so one partition's keys
+/// are contiguous and a walk of them cannot reach a neighbouring family.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PostingKey {
-    pub table: TableKind,
-    pub family: KeyFamily,
+    partition: PartitionFamily,
+    family: KeyFamily,
     /// Version of the key's projection; zero for an unprojected key.
-    pub version: u32,
-    pub text: Arc<str>,
+    version: u32,
+    text: Arc<str>,
 }
 
 impl PostingKey {
     #[must_use]
-    pub fn exact(table: TableKind, spelling: &str) -> Self {
-        Self {
-            table,
-            family: KeyFamily::Exact,
-            version: 0,
-            text: Arc::from(spelling),
-        }
+    pub fn exact(partition: PartitionFamily, spelling: &str) -> Self {
+        Self::projected(partition, KeyFamily::Exact, 0, spelling)
     }
 
     /// The case-folded search key of an authored spelling.
     #[must_use]
-    pub fn lexical(table: TableKind, spelling: &str) -> Self {
-        Self {
-            table,
-            family: KeyFamily::Lexical,
-            version: LEXICAL_PROJECTION_VERSION,
-            text: Arc::from(spelling.to_lowercase()),
-        }
+    pub fn lexical(partition: PartitionFamily, spelling: &str) -> Self {
+        Self::projected(
+            partition,
+            KeyFamily::Lexical,
+            LEXICAL_PROJECTION_VERSION,
+            &lexical_fold(spelling),
+        )
     }
 
     /// Adjacency key out of an endpoint with this canonical text.
     #[must_use]
-    pub fn forward(table: TableKind, endpoint: &str) -> Self {
-        Self {
-            table,
-            family: KeyFamily::Forward,
-            version: 0,
-            text: Arc::from(endpoint),
-        }
+    pub fn forward(partition: PartitionFamily, endpoint: &str) -> Self {
+        Self::projected(partition, KeyFamily::Forward, 0, endpoint)
     }
 
     /// Adjacency key into an endpoint with this canonical text.
     #[must_use]
-    pub fn reverse(table: TableKind, endpoint: &str) -> Self {
+    pub fn reverse(partition: PartitionFamily, endpoint: &str) -> Self {
+        Self::projected(partition, KeyFamily::Reverse, 0, endpoint)
+    }
+
+    /// A key whose text is already in its family's projection.
+    pub(super) fn projected(
+        partition: PartitionFamily,
+        family: KeyFamily,
+        version: u32,
+        text: &str,
+    ) -> Self {
         Self {
-            table,
-            family: KeyFamily::Reverse,
-            version: 0,
-            text: Arc::from(endpoint),
+            partition,
+            family,
+            version,
+            text: Arc::from(text),
         }
+    }
+
+    /// The fact family this key reads.
+    #[must_use]
+    pub fn partition(&self) -> PartitionFamily {
+        self.partition
+    }
+
+    /// The table this key's rows live in.
+    #[must_use]
+    pub fn table(&self) -> TableKind {
+        self.partition.table()
+    }
+
+    pub(super) fn family(&self) -> KeyFamily {
+        self.family
+    }
+
+    pub(super) fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(super) fn estimated_text_bytes(&self) -> usize {
+        self.text.len()
     }
 }
 
@@ -193,10 +231,10 @@ pub enum TypedSubject {
         unit: SourceUnitId,
         spelling: Arc<str>,
     },
-    /// A demanded view of one component subject.
+    /// One component subject. `export` is `None` until the owner names one.
     Component {
         unit: SourceUnitId,
-        export: Arc<str>,
+        export: Option<Arc<str>>,
     },
     /// A relation from one unit, ordered by relation then target spelling.
     Link {
@@ -245,8 +283,8 @@ pub enum NameRole {
 pub struct NameRow {
     pub spelling: Arc<str>,
     pub role: NameRole,
-    /// The owner's declaration-kind label, for presentation.
-    pub declaration_kind: Option<Arc<str>>,
+    /// The owner's declaration kind, when the owner reports one.
+    pub declaration_kind: Option<AnalyzedBindingKind>,
 }
 
 /// View references and usage links, keyed by the owner's query identity.
@@ -262,6 +300,9 @@ pub enum ComponentRow {
         /// Display-only spelling of the subject.
         display: Arc<str>,
     },
+    /// This unit has a component subject whose view no owner produced. It is
+    /// never keyed by a name, and it answers nothing about the view.
+    ViewUnavailable { cause: FactCause },
     /// A component use in markup.
     Usage { tag: Arc<str>, target: Endpoint },
 }
@@ -505,7 +546,7 @@ impl IndexRecord {
         let key_bytes: usize = self
             .keys
             .iter()
-            .map(|key| 3 * std::mem::size_of::<PostingKey>() + key.text.len())
+            .map(|key| 3 * std::mem::size_of::<PostingKey>() + key.estimated_text_bytes())
             .sum();
         std::mem::size_of::<Self>()
             + key_bytes
@@ -517,7 +558,7 @@ impl IndexRecord {
 fn subject_text_len(subject: &TypedSubject) -> usize {
     match subject {
         TypedSubject::Name { spelling, .. } => spelling.len(),
-        TypedSubject::Component { export, .. } => export.len(),
+        TypedSubject::Component { export, .. } => export.as_deref().map_or(0, str::len),
         TypedSubject::Link { target, .. } => target.len(),
         TypedSubject::Registration { key, .. } => match key {
             RegistrationKey::String(text) | RegistrationKey::Symbol(text) => text.len(),

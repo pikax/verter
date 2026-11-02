@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use verter_identity::canonical::Canonical;
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{
     ContentId, InputBasisId, QueryIdentity, SourceRevision, SourceUnitId,
@@ -17,43 +18,101 @@ use verter_identity::successor::{
     RegionId,
 };
 
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// Logical replacement slot of one contribution.
     ContributionId
 );
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// Registered descriptor of the producer that owns a slot.
     ProducerDescriptorId
 );
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// Immutable catalog revision a contribution was produced under.
     CatalogRevisionId
 );
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// Owner snapshot a producer captured its facts from.
     OwnerSnapshotId
 );
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// One declared enumeration population.
     ScopeId
 );
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// Project identity the project model minted for an inferred project.
     /// The index stores it; it never derives one from a path.
     InferredProjectId
 );
-verter_identity::digest_identity!(
+verter_identity::sealed_digest_identity!(
     /// Attributed identity of an extension producer.
     ExtensionId
 );
 
-/// Selection epoch captured with the view a contribution was derived from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SelectionEpoch(pub u64);
+impl ProducerDescriptorId {
+    /// The identity a producer inside this crate registers under.
+    pub(crate) fn of_descriptor<T: CanonicalEncode>(descriptor: &T) -> Self {
+        Self(Canonical::from_encodable(descriptor))
+    }
+}
 
-/// Demand epoch captured with the view a contribution was derived from.
+impl CatalogRevisionId {
+    /// The revision the catalog owner reports. Nothing here invents one: a
+    /// contribution with no catalog owner records that absence in its basis.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no catalog owner reports one"))]
+    pub(crate) fn from_catalog_owner<T: CanonicalEncode>(revision: &T) -> Self {
+        Self(Canonical::from_encodable(revision))
+    }
+}
+
+impl OwnerSnapshotId {
+    /// The snapshot a producer captured from its owner.
+    pub(crate) fn of_owner_snapshot<T: CanonicalEncode>(snapshot: &T) -> Self {
+        Self(Canonical::from_encodable(snapshot))
+    }
+}
+
+impl ScopeId {
+    /// The identity of one population a producer declares.
+    pub(crate) fn of_population<T: CanonicalEncode>(population: &T) -> Self {
+        Self(Canonical::from_encodable(population))
+    }
+}
+
+impl ExtensionId {
+    /// The identity of an attributed extension producer.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no extension producer"))]
+    pub(crate) fn of_extension<T: CanonicalEncode>(extension: &T) -> Self {
+        Self(Canonical::from_encodable(extension))
+    }
+}
+
+/// Selection epoch of the view a contribution was derived from. Only the
+/// selection owner mints one; a host with no selection owner records the
+/// absence, never a counter from another numbering space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DemandEpoch(pub u64);
+pub struct SelectionEpoch(u64);
+
+impl SelectionEpoch {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no selection owner reports one")
+    )]
+    pub(crate) fn from_selection_owner(epoch: u64) -> Self {
+        Self(epoch)
+    }
+}
+
+/// Demand epoch of the view a contribution was derived from. Only a demand
+/// plan mints one; a request with no plan records the absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DemandEpoch(u64);
+
+impl DemandEpoch {
+    #[cfg_attr(not(test), expect(dead_code, reason = "no demand plan reports one"))]
+    pub(crate) fn from_demand_plan(epoch: u64) -> Self {
+        Self(epoch)
+    }
+}
 
 /// The registered tables. Each row variant belongs to exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -76,10 +135,93 @@ pub struct TableSchema {
     pub version: u32,
 }
 
-/// A declared, bounded fact family inside one source unit. Never a thread,
-/// timestamp or execution limit.
+/// A declared, bounded fact family. Never a thread, timestamp or execution
+/// limit. A family belongs to exactly one table, and a lookup key names its
+/// family, so a key can never read a neighbouring family of a shared table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PartitionFamily {
+    /// CSS custom property definitions, references, bindings and manipulations.
+    CssVariables,
+    /// Stylesheet classes and IDs.
+    StyleSelectors,
+    /// Script declarations and imported local names.
+    Bindings,
+    /// Component uses and the availability of component views.
+    Components,
+    /// Authored import relations.
+    Imports,
+    /// Domain registrations.
+    Registrations,
+    /// Configuration keys and environment references.
+    ConfigEnv,
+    /// Test declarations.
+    TestDeclarations,
+    /// Registered extension facts.
+    Extensions,
+    /// A unit's project-membership set.
+    ProjectMembership,
+}
+
+impl PartitionFamily {
+    /// The one table this family's rows are published in.
+    #[must_use]
+    pub fn table(self) -> TableKind {
+        match self {
+            Self::CssVariables | Self::StyleSelectors => TableKind::StylesheetSymbols,
+            Self::Bindings => TableKind::Names,
+            Self::Components => TableKind::Components,
+            Self::Imports => TableKind::Links,
+            Self::Registrations => TableKind::Registrations,
+            Self::ConfigEnv => TableKind::ConfigEnvReferences,
+            Self::TestDeclarations => TableKind::TestDeclarations,
+            Self::Extensions => TableKind::ExtensionFacts,
+            Self::ProjectMembership => TableKind::ProjectMemberships,
+        }
+    }
+
+    /// Stable discriminant in canonical encodings, independent of declaration
+    /// order.
+    pub(super) fn encoding(self) -> u32 {
+        match self {
+            Self::CssVariables => 1,
+            Self::StyleSelectors => 2,
+            Self::Bindings => 3,
+            Self::Components => 4,
+            Self::Imports => 5,
+            Self::Registrations => 6,
+            Self::ConfigEnv => 7,
+            Self::TestDeclarations => 8,
+            Self::Extensions => 9,
+            Self::ProjectMembership => 10,
+        }
+    }
+}
+
+/// One producer's fact family. Two producers declaring the same family hold
+/// distinct partitions.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PartitionId(pub Arc<str>);
+pub struct PartitionId {
+    owner: ProducerDescriptorId,
+    family: PartitionFamily,
+}
+
+impl PartitionId {
+    pub(crate) fn new(owner: ProducerDescriptorId, family: PartitionFamily) -> Self {
+        Self { owner, family }
+    }
+
+    /// The producer that owns this partition.
+    #[must_use]
+    pub fn owner(&self) -> &ProducerDescriptorId {
+        &self.owner
+    }
+
+    /// The fact family.
+    #[must_use]
+    pub fn family(&self) -> PartitionFamily {
+        self.family
+    }
+}
 
 /// The exact profile a contribution claims.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -112,7 +254,7 @@ pub struct ContributionKey {
     pub unit: SourceUnitId,
     pub claim: ProfileClaim,
     pub project: Option<PmProjectId>,
-    pub partition: PartitionId,
+    pub partition: PartitionFamily,
 }
 
 impl CanonicalEncode for ContributionKey {
@@ -137,7 +279,7 @@ impl CanonicalEncode for ContributionKey {
                 encoder.field_bytes(9, id.digest().as_bytes());
             }
         }
-        encoder.field_str(10, &self.partition.0);
+        encoder.field_enum_discriminant(10, self.partition.encoding());
     }
 }
 
@@ -169,8 +311,14 @@ fn encode_claim(encoder: &mut CanonicalEncoder, claim: &ProfileClaim) {
 impl ContributionKey {
     /// The slot this key names.
     #[must_use]
-    pub fn id(&self) -> ContributionId {
-        ContributionId::from_canonical(self)
+    pub(crate) fn id(&self) -> ContributionId {
+        ContributionId(Canonical::from_encodable(self))
+    }
+
+    /// The partition this slot belongs to.
+    #[must_use]
+    pub fn partition_id(&self) -> PartitionId {
+        PartitionId::new(self.producer.clone(), self.partition)
     }
 
     /// The slot with its schema version removed. Two current contributions
@@ -254,8 +402,12 @@ pub struct SourceBasis {
     pub locator: Arc<str>,
     pub revision: SourceRevision,
     pub content: ContentId,
-    pub catalog: CatalogRevisionId,
-    pub selection_epoch: SelectionEpoch,
-    pub demand_epoch: DemandEpoch,
+    /// The catalog revision, or `None` when no catalog owner covers this
+    /// producer's facts.
+    pub catalog: Option<CatalogRevisionId>,
+    /// The selection epoch, or `None` when no selection owner applies.
+    pub selection_epoch: Option<SelectionEpoch>,
+    /// The demand epoch, or `None` for a request with no demand plan.
+    pub demand_epoch: Option<DemandEpoch>,
     pub owner_snapshot: OwnerSnapshotId,
 }

@@ -13,12 +13,12 @@ use super::delta::{
     CompletePartition, IngressRejection, PartialCause, PartitionDraft, SchemaAdmission,
 };
 use super::identity::{
-    ContributionKey, ObservationRef, PmProjectId, ProducerDescriptorId, ProfileClaim, ReadSet,
-    ScopeId, SourceBasis, TableKind, TableSchema,
+    ContributionKey, ObservationRef, PartitionFamily, PmProjectId, ProducerDescriptorId,
+    ProfileClaim, ReadSet, SourceBasis, TableKind, TableSchema,
 };
 use super::query::{
-    query_candidates, CoveredScope, EnumerationStatus, IndexContinuation, IndexQuery, Lookup,
-    QueryBudgets,
+    query_candidates, CoveredScope, DeclaredScope, EnumerationStatus, IndexContinuation,
+    IndexQuery, Lookup, QueryBudgets,
 };
 use super::records::{
     FactQuality, IndexRecord, IndexRow, MembershipRow, OriginUnavailable, PostingKey, Provenance,
@@ -57,7 +57,8 @@ pub struct ProjectMember {
 
 /// One membership observation as the project model reports it.
 #[derive(Debug, Clone)]
-pub struct MembershipObservation {
+#[cfg_attr(not(test), expect(dead_code, reason = "no project model producer"))]
+pub(crate) struct MembershipObservation {
     pub unit: SourceUnitId,
     pub status: MembershipStatus,
     pub members: Vec<ProjectMember>,
@@ -73,7 +74,8 @@ pub struct MembershipObservation {
 /// Why an observation was not stored. Its known members may still answer the
 /// request that asked, but they prove no excluded project.
 #[derive(Debug)]
-pub enum MembershipDecline {
+#[cfg_attr(not(test), expect(dead_code, reason = "no project model producer"))]
+pub(crate) enum MembershipDecline {
     /// Not a complete observation: nothing is published.
     NotComplete {
         status: MembershipStatus,
@@ -83,13 +85,14 @@ pub enum MembershipDecline {
 }
 
 /// The table schema membership contributions are written under.
-pub(super) const MEMBERSHIP_SCHEMA: TableSchema = TableSchema {
+#[cfg_attr(not(test), expect(dead_code, reason = "no project model producer"))]
+const MEMBERSHIP_SCHEMA: TableSchema = TableSchema {
     table: TableKind::ProjectMemberships,
     version: 1,
 };
 
 fn unit_key(unit: &SourceUnitId) -> PostingKey {
-    PostingKey::forward(TableKind::ProjectMemberships, &unit.digest().to_hex())
+    PostingKey::forward(PartitionFamily::ProjectMembership, &unit.digest().to_hex())
 }
 
 fn project_key(project: &PmProjectId) -> PostingKey {
@@ -97,7 +100,7 @@ fn project_key(project: &PmProjectId) -> PostingKey {
         PmProjectId::Configured(id) => id.digest(),
         PmProjectId::Inferred(id) => id.digest(),
     };
-    PostingKey::reverse(TableKind::ProjectMemberships, &digest.to_hex())
+    PostingKey::reverse(PartitionFamily::ProjectMembership, &digest.to_hex())
 }
 
 /// Seal a complete observation as the unit's one membership contribution. A
@@ -107,7 +110,8 @@ fn project_key(project: &PmProjectId) -> PostingKey {
 ///
 /// [`MembershipDecline::NotComplete`] for every status but `Complete`, or the
 /// ingress rejection.
-pub fn publishable_membership(
+#[cfg_attr(not(test), expect(dead_code, reason = "no project model producer"))]
+pub(crate) fn publishable_membership(
     observation: MembershipObservation,
     admission: &SchemaAdmission,
     account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
@@ -174,7 +178,7 @@ pub fn publishable_membership(
             unit,
             claim: observation.claim,
             project: None,
-            partition: super::identity::PartitionId(Arc::from("project-membership")),
+            partition: PartitionFamily::ProjectMembership,
         },
         basis: observation.basis,
         provenance: observation.provenance,
@@ -244,6 +248,7 @@ pub fn unit_members(
         covered: CoveredScope {
             keys_exhausted: 0,
             postings_visited: page.work.posting_visits,
+            unavailable_units: Vec::new(),
         },
         continuation: None,
     };
@@ -279,7 +284,7 @@ pub struct ProjectUnitsPage {
 pub fn project_units(
     snapshot: &IndexSnapshot,
     project: &PmProjectId,
-    scope: Option<ScopeId>,
+    scope: Option<DeclaredScope>,
     max_postings: u32,
 ) -> ProjectUnitsPage {
     let query = IndexQuery {
