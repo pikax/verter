@@ -93,14 +93,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // whole at a naked position as a fresh literal is.
                 let fresh_literals: Vec<SemanticNodeId> =
                     match self.graph().node_data(bound).as_deref() {
-                        Some(SemanticNodeData::Literal(_)) => vec![bound],
+                        Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                            vec![bound]
+                        }
                         Some(SemanticNodeData::Union(members)) => members
                             .iter()
                             .copied()
                             .filter(|member| {
                                 matches!(
                                     self.graph().node_data(*member).as_deref(),
-                                    Some(SemanticNodeData::Literal(_))
+                                    Some(
+                                        SemanticNodeData::Literal(_)
+                                            | SemanticNodeData::EnumLiteral(_)
+                                    )
                                 )
                             })
                             .collect(),
@@ -129,7 +134,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // literal is regular).
                     if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
                         for literal in fresh_literals {
-                            session.note_fresh_literal_deposit(param_node, literal);
+                            if !context_keeps.contains(&literal) {
+                                session.note_fresh_literal_deposit(param_node, literal);
+                            }
                         }
                     }
                 }
