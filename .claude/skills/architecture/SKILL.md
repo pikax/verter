@@ -102,6 +102,18 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 
 **Position encoding for CSS spans**: `CssAnalysis` spans (classes, IDs, selectors) are **SFC-absolute byte offsets**. `CssSource` is constructed with the style content origin, so syntax and projection spans are absolute from creation. Consumers use spans directly without adding any offset. `StyleBlockAnalysis.content_offset` is retained for documentation and slice operations.
 
+## Workspace Candidate Index (`verter_session::workspace_index`)
+
+Typed, snapshot-qualified candidate storage on `ProjectTypeStore::workspace_index`, public at `verter_session::project_type_store::workspace_index`. A posting says where an owner may find a fact: it resolves nothing, and consumers validate candidates through the owner named by the row's provenance. The contract, tables and case list are the atomic semantic contributions decision in `docs/arch/kernel/`.
+
+- **One write path.** `PartitionDraft::seal` validates a complete enumeration into a `CompletePartition`, a `ContributionDelta` composes them, and `WorkspaceIndex::publish` fences expected prior bases, schema layouts, epochs, every read witness, retention and cancellation before swapping one immutable `IndexSnapshot`. A partial or cancelled walk has no route to `CompletePartition`; its rows answer that request only, through a private return-only snapshot.
+- **Bounded reads.** `query_candidates` takes finite budgets and returns `Complete` only when the walk exhausted its keys and a current `CoverageRecord` certifies the population. Work counters (`QueryWork`, `IndexReconcileWork`) are deterministic, so tests assert them exactly.
+- **Host projection.** `VerterHost::workspace_index_reconcile` projects only demanded `IndexDemandPartition`s, reads the shared cached accessors, and re-projects only files whose content or project generation changed. A warm request visits no file; a request after a workspace change compares each tracked file's content hash once, counted as `population_checks`.
+- **Membership** is stored for the project model as one set-valued contribution per unit (`publishable_membership`, `unit_members`, `project_units`). The index derives only the mechanical postings and never picks an owner.
+- **Routes.** `VerterHost::css_var_flow` answers from the index. The LSP and MCP walks and `verter_semantic::analysis::ProjectIndex` are not migrated yet.
+
+New fact families add a producer-local schema row and partition; they do not edit the index.
+
 ## Analysis MCP Server (`verter_mcp`)
 
 `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP for AI agents. `VerterMcpServer` wraps `VerterHost` (with `AnalysisScope::LSP`), `Linter`, and `ActionEngine`. Tools auto-load via `ensure_loaded()`; template analysis triggers `ensure_template_analysis()` transparently. Cross-file tools iterate all loaded files (no `ProjectIndex` exposed from host). Scoring engine computes composite 0-100 quality scores from a11y, lint, template complexity, API surface, CSS health, and reactivity dimensions.

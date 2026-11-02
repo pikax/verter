@@ -686,6 +686,7 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.last_const_prop_overrides).clear();
         write_lock(&self.block_content.state).close_all();
+        self.project_type_store().workspace_index().clear();
 
         // AUTHORITY-RESET cascade: close() is a full teardown, one of
         // the two reserved `bump_project_generation_and_evict` callers
