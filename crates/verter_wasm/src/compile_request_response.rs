@@ -21,7 +21,7 @@ use serde::Serialize;
 use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string, host_node_kind_to_ffi};
 use verter_protocol::types::{
     FfiDestructuredBlockMeta, FfiDiagnosticsSnapshot, FfiIdeResponse, FfiVirtualMeta,
-    FfiVirtualNodeKind,
+    FfiVirtualNodeKind, Utf8SpanPayload,
 };
 use verter_session as host;
 
@@ -72,7 +72,9 @@ pub(crate) enum WasmCompiledProduct {
     },
     IdeCompanion(FfiIdeResponse),
     Analysis {
-        analysis: Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        analysis: Utf8SpanPayload<
+            Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        >,
     },
 }
 
@@ -97,38 +99,50 @@ pub(crate) struct WasmCompileRequestResponse {
 pub(crate) fn ide_response_to_ffi(
     response: &host::IdeResponse,
     sfc_source: Option<&str>,
-) -> FfiIdeResponse {
-    FfiIdeResponse {
+) -> Result<FfiIdeResponse, String> {
+    Ok(FfiIdeResponse {
         code: response.code.to_string(),
         source_map: response.source_map.as_ref().map(ToString::to_string),
         is_jsx: response.is_jsx,
-        destructured_block: destructured_block_to_ffi(response, sfc_source),
-    }
+        destructured_block: destructured_block_to_ffi(response, sfc_source)?,
+    })
 }
 
 fn destructured_block_to_ffi(
     response: &host::IdeResponse,
     sfc_source: Option<&str>,
-) -> Option<FfiDestructuredBlockMeta> {
-    let meta = response.destructured_block.as_ref()?;
-    let sfc = sfc_source.unwrap_or("");
-    let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
+) -> Result<Option<FfiDestructuredBlockMeta>, String> {
+    let Some(meta) = response.destructured_block.as_ref() else {
+        return Ok(None);
+    };
+    let refused = |error: verter_span::CoordError| {
+        format!("destructured block span cannot be converted exactly: {error}")
+    };
+    let bindings = meta
         .bindings
         .iter()
-        .map(|binding| verter_ffi::convert::DestructuredBindingInput {
-            name: &binding.name,
-            source_start: binding.source_span.start,
-            source_end: binding.source_span.end,
+        .map(|binding| {
+            Ok(verter_ffi::convert::DestructuredBindingInput {
+                name: &binding.name,
+                source: verter_ffi::convert::source_range(binding.source_span)?,
+            })
         })
-        .collect();
-    Some(verter_ffi::convert::convert_destructured_block_meta(
-        &bindings,
+        .collect::<Result<Vec<_>, verter_span::CoordError>>()
+        .map_err(refused)?;
+    let block = verter_ffi::convert::generated_range(verter_span::Span::new(
         meta.block_start,
         meta.block_end,
-        sfc,
-        &response.code,
-        verter_ffi::convert::OffsetEncoding::Utf16,
     ))
+    .map_err(refused)?;
+    verter_ffi::convert::convert_destructured_block_meta(
+        &bindings,
+        block,
+        sfc_source,
+        &response.code,
+        verter_protocol::types::SpanEncodingTag::Utf16,
+    )
+    .map(Some)
+    .map_err(|error| format!("destructured block span cannot be converted exactly: {error}"))
 }
 
 /// Project the session's typed envelope for JavaScript.
@@ -194,11 +208,11 @@ fn compiled_product_to_wasm(
             }
         }
         host::CompiledProduct::Ide(response) => {
-            WasmCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source))
+            WasmCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source)?)
         }
-        host::CompiledProduct::Analysis(snapshot) => {
-            WasmCompiledProduct::Analysis { analysis: snapshot }
-        }
+        host::CompiledProduct::Analysis(snapshot) => WasmCompiledProduct::Analysis {
+            analysis: Utf8SpanPayload::new(snapshot),
+        },
     })
 }
 

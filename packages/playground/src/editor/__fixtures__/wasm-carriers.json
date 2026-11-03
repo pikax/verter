@@ -51,11 +51,13 @@
           {
             "name": "msg",
             "sourceStart": 31,
-            "sourceEnd": 34
+            "sourceEnd": 34,
+            "sourceEncoding": "utf16.v1"
           }
         ],
         "blockStart": 1494,
-        "blockEnd": 1598
+        "blockEnd": 1598,
+        "blockEncoding": "utf16.v1"
       }
     },
     "ideUnavailable": null,
@@ -81,11 +83,13 @@
           {
             "name": "count",
             "sourceStart": 31,
-            "sourceEnd": 36
+            "sourceEnd": 36,
+            "sourceEncoding": "utf16.v1"
           }
         ],
         "blockStart": 1528,
-        "blockEnd": 1634
+        "blockEnd": 1634,
+        "blockEncoding": "utf16.v1"
       }
     },
     "ideUnavailable": null,

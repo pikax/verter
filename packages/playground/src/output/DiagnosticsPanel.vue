@@ -33,8 +33,8 @@ function lintToDiagnosticItem(d: LintDiagnostic): DiagnosticItem {
     severity: d.severity,
     message: `[${d.rule}] ${d.message}`,
     code: d.rule,
-    spanStart: d.spanStart,
-    spanEnd: d.spanEnd,
+    spanStart: d.spanStart ?? null,
+    spanEnd: d.spanEnd ?? null,
   };
 }
 

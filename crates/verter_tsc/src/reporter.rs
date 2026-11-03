@@ -126,21 +126,145 @@ impl fmt::Display for Severity {
     }
 }
 
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Diagnostic {
+    /// The rendered line for this diagnostic at `position` (one-based line and
+    /// column in the caller's selected encoding), or without a position when
+    /// `None` — a position that could not be converted exactly is never
+    /// guessed.
+    fn render_at(&self, position: Option<(u32, u32)>) -> String {
+        let location = match position {
+            Some((line, col)) => format!("{}({},{})", self.file, line, col),
+            None => self.file.clone(),
+        };
         match self.verter_code {
-            Some(code) => write!(
-                f,
-                "{}({},{}): {} {}: {}",
-                self.file, self.line, self.col, self.severity, code, self.message
-            ),
-            None => write!(
-                f,
-                "{}({},{}): {} TS{}: {}",
-                self.file, self.line, self.col, self.severity, self.ts_code, self.message
+            Some(code) => format!("{location}: {} {code}: {}", self.severity, self.message),
+            None => format!(
+                "{location}: {} TS{}: {}",
+                self.severity, self.ts_code, self.message
             ),
         }
     }
+}
+
+/// `tsc` convention: one-based line, one-based UTF-16 column.
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render_at(Some((self.line, self.col))))
+    }
+}
+
+/// Renders diagnostics with their column in the user-selected code unit.
+///
+/// A diagnostic's `(line, col)` is the engine's one-based line and one-based
+/// UTF-16 column. For any other encoding the column is re-counted against the
+/// exact file content (read once per file); a file that cannot be read, a line
+/// the file does not have, or a column inside a surrogate pair leaves the
+/// diagnostic reported without a position.
+pub struct PositionRenderer {
+    encoding: crate::position::ColumnEncoding,
+    /// The VFS boundary every file read goes through.
+    fs: verter_workspace::native_fs::NativeFs,
+    /// In-memory files (public-API stubs, ambient shims) that diagnostics are
+    /// positioned in; they are not on disk, so their exact text is supplied.
+    virtual_sources: std::collections::HashMap<String, std::rc::Rc<str>>,
+    files: std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<str>>>>,
+}
+
+impl PositionRenderer {
+    #[must_use]
+    pub fn new(encoding: crate::position::ColumnEncoding) -> Self {
+        Self {
+            encoding,
+            fs: verter_workspace::native_fs::NativeFs::new(),
+            virtual_sources: std::collections::HashMap::new(),
+            files: std::cell::RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Supply the exact text of in-memory files diagnostics may name.
+    #[must_use]
+    pub fn with_virtual_sources(
+        mut self,
+        sources: &std::collections::HashMap<String, std::sync::Arc<str>>,
+    ) -> Self {
+        self.virtual_sources = sources
+            .iter()
+            .map(|(path, text)| (path.clone(), std::rc::Rc::from(&**text)))
+            .collect();
+        self
+    }
+
+    fn text(&self, file: &str) -> Option<std::rc::Rc<str>> {
+        if let Some(text) = self.virtual_sources.get(&file.replace('\\', "/")) {
+            return Some(text.clone());
+        }
+        self.files
+            .borrow_mut()
+            .entry(file.to_string())
+            .or_insert_with(|| {
+                self.fs
+                    .read_file(file)
+                    .map(|text| std::rc::Rc::from(&*text))
+            })
+            .clone()
+    }
+
+    /// The diagnostic's one-based `(line, col)` in the selected encoding, or
+    /// `None` when it cannot be converted exactly.
+    #[must_use]
+    pub fn position(&self, diagnostic: &Diagnostic) -> Option<(u32, u32)> {
+        use crate::position::{ColumnEncoding, LineTable};
+        // Every position is validated against the file's exact content, in
+        // every encoding (UTF-16 included): an unreadable file, a line the file
+        // does not have, a column past the line end or inside a surrogate pair
+        // is reported without a position.
+        let text = self.text(&diagnostic.file)?;
+        let column = LineTable::new(&text)
+            .convert_column(
+                diagnostic.line,
+                diagnostic.col,
+                ColumnEncoding::Utf16,
+                self.encoding,
+            )
+            .ok()?;
+        Some((diagnostic.line, column))
+    }
+
+    /// The rendered diagnostic line.
+    #[must_use]
+    pub fn render(&self, diagnostic: &Diagnostic) -> String {
+        diagnostic.render_at(self.position(diagnostic))
+    }
+
+    /// Resolve a command-line selector to a one-based `(line, column)` in the
+    /// selected encoding, validated against the selected file's content.
+    pub fn resolve_selector(
+        &self,
+        selector: &crate::position::Selector,
+    ) -> Result<(u32, u32), String> {
+        let file = selector.file();
+        let text = self
+            .text(file)
+            .ok_or_else(|| format!("cannot read '{file}' to resolve the selected position"))?;
+        selector
+            .resolve(&crate::position::LineTable::new(&text), self.encoding)
+            .map_err(|error| format!("selected position in '{file}': {error}"))
+    }
+
+    /// Whether `diagnostic` is reported at `file`:`position`.
+    #[must_use]
+    pub fn is_at(&self, diagnostic: &Diagnostic, file: &str, position: (u32, u32)) -> bool {
+        same_file(&diagnostic.file, file) && self.position(diagnostic) == Some(position)
+    }
+}
+
+/// Whether a reported file path names the selected one. Both are normalised
+/// (`\\` to `/`, a leading `./` dropped); a selector written relative to the
+/// reported absolute path matches on a whole path-component suffix.
+fn same_file(reported: &str, selected: &str) -> bool {
+    let normalise = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_string();
+    let (reported, selected) = (normalise(reported), normalise(selected));
+    reported == selected || reported.ends_with(&format!("/{selected}"))
 }
 
 /// Parse the raw output of `tsc` into a list of diagnostics.

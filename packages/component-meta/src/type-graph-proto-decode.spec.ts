@@ -6,6 +6,7 @@ import {
   createTestComponentMetaPayload as factFixture,
   createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
   OriginGraphSchema,
+  PositionEncoding,
   SurfacePartialReason,
   SurfacePartialReasonSchema,
 } from "@verter/proto";
@@ -56,8 +57,23 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 14, found 7/);
+    ).toThrow(/expected 15, found 7/);
   });
+
+  it.each([13, 14])(
+    "refuses a schema %i payload whose flat authored spans are no longer readable",
+    (schemaVersion) => {
+      const current = createTestComponentMetaPayload();
+      expect(() =>
+        decodeTypedComponentMetaPayload(
+          toBinary(
+            ComponentMetaPayloadSchema,
+            create(ComponentMetaPayloadSchema, { ...current, schemaVersion }),
+          ),
+        ),
+      ).toThrow(new RegExp(`expected 15, found ${schemaVersion}`));
+    },
+  );
 
   it("decodes supported contract type references from the shared graph", () => {
     const current = createTestComponentMetaPayload();
@@ -361,6 +377,104 @@ describe("decodeTypedComponentMetaPayload", () => {
   });
 });
 
+describe("resolved declaration and native prop spans", () => {
+  const strings = (base: ReturnType<typeof createTestComponentMetaPayload>) => [
+    ...base.typeGraph!.strings,
+    "defineProps",
+    "Props",
+    "./types",
+    "/types.ts",
+    "interface",
+    "public",
+    "label",
+  ];
+
+  function payloadWith(
+    spans: { declaration?: object; prop?: object },
+    base = createTestComponentMetaPayload(),
+  ) {
+    const table = strings(base);
+    const id = (text: string) => table.indexOf(text) + 1;
+    return create(ComponentMetaPayloadSchema, {
+      ...base,
+      typeGraph: { ...base.typeGraph!, strings: table },
+      body: {
+        ...base.body!,
+        resolution: {
+          modeId: id("public"),
+          macros: [
+            {
+              macroIndex: 0,
+              macroKindId: id("defineProps"),
+              typeNameId: id("Props"),
+              importSourceId: id("./types"),
+              declaration: {
+                requestedNameId: id("Props"),
+                resolvedNameId: id("Props"),
+                canonicalSourceId: id("/types.ts"),
+                kindId: id("interface"),
+                ...spans.declaration,
+              },
+              nativeProps: [
+                {
+                  nameId: id("label"),
+                  visibilityId: id("public"),
+                  ...spans.prop,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  const offsetRange = (encoding: PositionEncoding, start: number, end: number) => ({
+    encoding,
+    representation: { case: "offsetRange" as const, value: { start, end } },
+  });
+
+  const decode = (payload: ReturnType<typeof payloadWith>) =>
+    decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+
+  it("decodes a UTF-8 byte range into a tagged span and keeps an absent range absent", () => {
+    const tagged = decode(
+      payloadWith({
+        declaration: { span: offsetRange(PositionEncoding.UTF8_BYTES, 12, 48) },
+        prop: { span: offsetRange(PositionEncoding.UTF8_BYTES, 30, 45) },
+      }),
+    ) as { resolution?: { macros: Array<Record<string, any>> } };
+    const macro = tagged.resolution!.macros[0]!;
+    expect(macro.declaration.span).toEqual({ start: 12, end: 48, encoding: "utf8.v1" });
+    expect(macro.nativeProps[0].span).toEqual({ start: 30, end: 45, encoding: "utf8.v1" });
+
+    const absent = decode(payloadWith({})) as {
+      resolution?: { macros: Array<Record<string, any>> };
+    };
+    const bare = absent.resolution!.macros[0]!;
+    // Never a zero-filled 0..0 range.
+    expect("span" in bare.declaration).toBe(false);
+    expect("span" in bare.nativeProps[0]).toBe(false);
+  });
+
+  it("rejects an encoding this consumer does not know and an inverted range", () => {
+    expect(() =>
+      decode(
+        payloadWith({
+          declaration: { span: offsetRange(PositionEncoding.UTF32_CODE_POINTS, 1, 2) },
+        }),
+      ),
+    ).toThrow(/does not know/);
+    expect(() =>
+      decode(
+        payloadWith({
+          prop: { span: offsetRange(PositionEncoding.UTF8_BYTES, 9, 4) },
+        }),
+      ),
+    ).toThrow(/inverted/);
+  });
+});
+
 describe("object-literal spread member wire decode", () => {
   it("decodes a spread member (kind 6) instead of throwing", async () => {
     const { buildTestComponentMetaProtoPayload } = await import("./type-graph.test-utils.js");
@@ -559,7 +673,7 @@ describe("typed property keys", () => {
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 14, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 15, found 4/);
   });
 });
 
@@ -667,6 +781,7 @@ describe("surface partial reason taxonomy parity", () => {
       // Those readers accept 12 and 13, then throw on a reason they do not
       // know: the only clean failure for them is the version mismatch.
       expect([12, 13]).not.toContain(GRAPH_FORMAT_VERSION);
+      expect(GRAPH_FORMAT_VERSION).toBeGreaterThan(14);
       expect(
         decodeTypedComponentMetaPayload(payloadAt(GRAPH_FORMAT_VERSION, fanout)).resultCompleteness,
       ).toEqual({ kind: "partial", reasons: ["fanoutLimit"] });
@@ -684,12 +799,14 @@ describe("surface partial reason taxonomy parity", () => {
       );
     });
 
-    it("keeps decoding schema 13 payloads", () => {
-      expect(
-        decodeTypedComponentMetaPayload(payloadAt(13, SurfacePartialReason.BUDGET_EXCEEDED))
-          .resultCompleteness,
-      ).toEqual({ kind: "partial", reasons: ["budgetExceeded"] });
-    });
+    it.each([13, 14])(
+      "refuses a schema %i payload instead of reporting its flat spans as absent",
+      (version) => {
+        expect(() => decodeTypedComponentMetaPayload(payloadAt(version, fanout))).toThrow(
+          new RegExp(`expected ${GRAPH_FORMAT_VERSION}, found ${version}`),
+        );
+      },
+    );
   });
 });
 

@@ -1,6 +1,6 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 14;
+export const GRAPH_FORMAT_VERSION = 15;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;

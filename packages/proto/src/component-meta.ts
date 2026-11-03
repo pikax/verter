@@ -21,6 +21,7 @@ export { ComponentMetaPayloadSchema, LegacyComponentMetaPayloadSchema, OriginGra
 export {
   SurfacePartialReason,
   SurfacePartialReasonSchema,
+  PositionEncoding,
 } from "./gen/verter/v1/component_meta_pb.js";
 
 export type ProtoRecord<TypeName extends string = string> = Message<TypeName> & Record<string, any>;
@@ -270,7 +271,7 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
   } = body;
   const complete = { kind: 1 as const, causes: [] };
   return {
-    schemaVersion: 14,
+    schemaVersion: 15,
     typeGraph: legacy.typeGraph,
     body: {
       ...authored,

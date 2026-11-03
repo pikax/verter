@@ -97,10 +97,12 @@ export interface FrameworkSurfaceMemberDeclaration {
   readonly resolvedName: string;
   /** The declaring file canonical, resolved through the string table. */
   readonly canonicalSource: string;
-  /** Declaration span start (byte offset in `canonicalSource`). */
-  readonly spanStart: number;
-  /** Declaration span end (byte offset in `canonicalSource`). */
-  readonly spanEnd: number;
+  /** The unit of {@link spanStart}/{@link spanEnd}: UTF-8 byte offsets (`utf8.v1`). */
+  readonly spanEncoding: "utf8.v1";
+  /** Declaration span start (byte offset in `canonicalSource`); absent when no exact range is known. */
+  readonly spanStart?: number;
+  /** Declaration span end (byte offset in `canonicalSource`); absent when no exact range is known. */
+  readonly spanEnd?: number;
   /** The declaration kind. */
   readonly kind: FrameworkSurfaceDeclarationKind;
 }
@@ -452,8 +454,10 @@ function decodeMemberOrigin(
           requestedName: resolveString(strings, origin.declaration.requestedNameId),
           resolvedName: resolveString(strings, origin.declaration.resolvedNameId),
           canonicalSource: resolveString(strings, origin.declaration.canonicalSourceId),
-          spanStart: origin.declaration.spanStart,
-          spanEnd: origin.declaration.spanEnd,
+          spanEncoding: "utf8.v1" as const,
+          ...(origin.declaration.hasSpan
+            ? { spanStart: origin.declaration.spanStart, spanEnd: origin.declaration.spanEnd }
+            : {}),
           kind: origin.declaration.kind,
         };
   const chain: FrameworkSurfaceOriginHop[] = origin.chain.map((hop) => ({

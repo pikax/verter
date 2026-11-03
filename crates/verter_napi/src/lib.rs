@@ -76,7 +76,8 @@ pub use compile_request_response::compile_request_failure_to_napi;
 use compile_request_response::{
     binding_failure_entry, binding_failure_to_napi, compile_request_construction_refused,
     compile_request_error, compile_request_failure_status, compile_request_response_to_napi,
-    failure_canonical_id, host_diagnostic_to_napi, host_diagnostics_to_napi, host_ide_to_napi,
+    failure_canonical_id, host_diagnostics_to_napi, host_diagnostics_to_napi_with,
+    host_ide_to_napi,
 };
 #[doc(hidden)]
 pub use js_value_graph::{
@@ -1211,8 +1212,15 @@ pub struct NapiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
-    pub spanStart: u32,
-    pub spanEnd: u32,
+    /// Span start in `spanEncoding` units; absent when the span could not be
+    /// converted exactly (see `spanError`).
+    pub spanStart: Option<u32>,
+    pub spanEnd: Option<u32>,
+    /// Versioned encoding tag of the span (`"utf16.v1"` on this binding).
+    pub spanEncoding: String,
+    /// Typed refusal (`SourceUnavailable`, `NotCharBoundary`,
+    /// `InvalidBoundary`, `Overflow`) when the span could not be produced.
+    pub spanError: Option<String>,
 }
 
 #[napi(object)]
@@ -1265,8 +1273,13 @@ pub struct NapiPreprocessorDiagnostic {
     /// `"error"`, `"warning"`, or `"info"`.
     pub severity: String,
     pub message: String,
+    /// 1-based line within the preprocessor's own input text.
     pub line: Option<u32>,
+    /// 1-based column in UTF-16 code units within `line`.
     pub column: Option<u32>,
+    /// Versioned encoding tag of `column`; required (and must be `"utf16.v1"`)
+    /// whenever `line` or `column` is present.
+    pub positionEncoding: Option<String>,
 }
 
 #[napi(object)]
@@ -1355,6 +1368,8 @@ pub struct NapiModuleReference {
     pub spanEnd: u32,
     pub exprSpanStart: u32,
     pub exprSpanEnd: u32,
+    /// Versioned encoding tag of all four span fields (`"utf16.v1"`).
+    pub spanEncoding: String,
 }
 
 #[napi(object)]
@@ -1398,6 +1413,8 @@ pub struct NapiDestructuredBinding {
     pub name: String,
     pub sourceStart: u32,
     pub sourceEnd: u32,
+    /// Versioned encoding tag of `sourceStart`/`sourceEnd` (domain: the SFC).
+    pub sourceEncoding: String,
 }
 
 /// Metadata for the destructured block region in the generated TSX (UTF-16 for JS).
@@ -1406,6 +1423,8 @@ pub struct NapiDestructuredBlockMeta {
     pub bindings: Vec<NapiDestructuredBinding>,
     pub blockStart: u32,
     pub blockEnd: u32,
+    /// Versioned encoding tag of `blockStart`/`blockEnd` (domain: generated TSX).
+    pub blockEncoding: String,
 }
 
 /// IDE output for type checking (dedicated API, not a virtual file).
@@ -1493,6 +1512,8 @@ pub struct NapiTscMacroFailureSubject {
 pub struct NapiSourceRange {
     pub start: u32,
     pub end: u32,
+    /// Versioned encoding tag of `start`/`end` (`"utf8.v1"`: UTF-8 bytes).
+    pub encoding: String,
 }
 
 #[napi(object)]
@@ -1543,7 +1564,7 @@ impl From<FfiTscResponse> for NapiTscResponse {
 
 impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
     fn from(value: FfiPublicApiProjectionError) -> Self {
-        let subject = match value.subject {
+        let subject = match value.subject.exact() {
             PublicApiProjectionSubject::Macro { syntax_index } => {
                 Either3::A(NapiTscMacroFailureSubject {
                     kind: "macro".to_string(),
@@ -1556,6 +1577,7 @@ impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
                     sourceRange: NapiSourceRange {
                         start: source_range.start,
                         end: source_range.end,
+                        encoding: SpanEncodingTag::Utf8.as_wire().to_string(),
                     },
                 })
             }
@@ -1596,6 +1618,8 @@ pub struct NapiRemoveResult {
 pub struct NapiTextEdit {
     pub spanStart: u32,
     pub spanEnd: u32,
+    /// Versioned encoding tag of `spanStart`/`spanEnd` (`"utf16.v1"`).
+    pub spanEncoding: String,
     pub newText: String,
 }
 
@@ -1619,6 +1643,7 @@ impl From<FfiCodeAction> for NapiCodeAction {
                 .map(|e| NapiTextEdit {
                     spanStart: e.span_start,
                     spanEnd: e.span_end,
+                    spanEncoding: e.span_encoding.as_wire().to_string(),
                     newText: e.new_text,
                 })
                 .collect(),
@@ -1658,6 +1683,8 @@ pub struct NapiDocumentSymbol {
     pub spanEnd: u32,
     pub selectionStart: u32,
     pub selectionEnd: u32,
+    /// Versioned encoding tag of the span and selection offsets.
+    pub spanEncoding: String,
     pub children: Vec<NapiDocumentSymbol>,
 }
 
@@ -1671,6 +1698,7 @@ impl From<FfiDocumentSymbol> for NapiDocumentSymbol {
             spanEnd: f.span_end,
             selectionStart: f.selection_start,
             selectionEnd: f.selection_end,
+            spanEncoding: f.span_encoding.as_wire().to_string(),
             children: f.children.into_iter().map(Into::into).collect(),
         }
     }
@@ -1683,6 +1711,8 @@ pub struct NapiElementMatch {
     pub tag: String,
     pub spanStart: u32,
     pub spanEnd: u32,
+    /// Versioned encoding tag of the element offsets.
+    pub spanEncoding: String,
     pub result: String,
 }
 
@@ -1692,6 +1722,7 @@ impl From<FfiElementMatch> for NapiElementMatch {
             tag: f.tag,
             spanStart: f.span_start,
             spanEnd: f.span_end,
+            spanEncoding: f.span_encoding.as_wire().to_string(),
             result: f.result,
         }
     }
@@ -1702,6 +1733,8 @@ pub struct NapiSelectorMatchResult {
     pub selectorText: String,
     pub selectorStart: u32,
     pub selectorEnd: u32,
+    /// Versioned encoding tag of the selector offsets.
+    pub spanEncoding: String,
     pub matches: Vec<NapiElementMatch>,
 }
 
@@ -1711,6 +1744,7 @@ impl From<FfiSelectorMatchResult> for NapiSelectorMatchResult {
             selectorText: f.selector_text,
             selectorStart: f.selector_start,
             selectorEnd: f.selector_end,
+            spanEncoding: f.span_encoding.as_wire().to_string(),
             matches: f.matches.into_iter().map(Into::into).collect(),
         }
     }
@@ -1724,8 +1758,14 @@ pub struct NapiLintDiagnostic {
     pub category: String,
     pub severity: String,
     pub message: String,
-    pub spanStart: u32,
-    pub spanEnd: u32,
+    /// Span start in `spanEncoding` units; absent when the span could not be
+    /// converted exactly (see `spanError`).
+    pub spanStart: Option<u32>,
+    pub spanEnd: Option<u32>,
+    /// Versioned encoding tag of the span (`"utf16.v1"` on this binding).
+    pub spanEncoding: String,
+    /// Typed refusal when the span could not be produced.
+    pub spanError: Option<String>,
     pub tags: Vec<String>,
     pub spanKind: String,
 }
@@ -1797,13 +1837,6 @@ fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, S
             "invalid hmrStrategy '{s}', expected 'vite', 'webpack', or 'none'"
         ))
     }
-}
-
-/// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
-/// shape. Used to surface the private Vue render worker's soft-macro warnings
-/// on [`NapiCompileBatchEntry::diagnostics`].
-fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
-    host_diagnostic_to_napi(d, None)
 }
 
 fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
@@ -1902,27 +1935,46 @@ fn napi_module_reference_analyzability_from_str(
     }
 }
 
-fn napi_module_reference_to_analysis(
+fn napi_module_reference_to_resolvable(
     input: NapiModuleReference,
-) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference> {
-    Ok(
-        verter_session_query::analysis::types::AnalyzedModuleReference {
-            syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
-            semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
-            is_type_only: input.isTypeOnly,
-            span: verter_span::Span::new(input.spanStart, input.spanEnd),
-            expr_span: verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
-            raw_text: input.rawText,
-            literal_specifier: input.literalSpecifier,
-            finite_specifiers: input.finiteSpecifiers,
-            static_prefix: input.staticPrefix,
-            analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
-        },
-    )
+) -> Result<verter_resolution::ResolvableModuleReference> {
+    // Read-back of a reference this binding published: its spans are in the
+    // declared wire encoding of the originating source, which is not part of
+    // this call. Specifier collection and known-file resolution read no
+    // position, so the read-back validates the wire contract (known tag,
+    // well-formed range) and carries only the span-free facts: a span is
+    // never converted without its source and never fabricated.
+    SpanEncodingTag::from_wire(&input.spanEncoding).ok_or_else(|| {
+        Error::new(
+            Status::InvalidArg,
+            format!(
+                "unknown module reference spanEncoding '{}' (expected 'utf8.v1' or 'utf16.v1')",
+                input.spanEncoding
+            ),
+        )
+    })?;
+    if input.spanStart > input.spanEnd || input.exprSpanStart > input.exprSpanEnd {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "module reference span is inverted",
+        ));
+    }
+    napi_module_reference_syntax_from_str(&input.syntax)?;
+    napi_module_reference_semantics_from_str(&input.semantics)?;
+    Ok(verter_resolution::ResolvableModuleReference {
+        analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
+        literal_specifier: input.literalSpecifier,
+        finite_specifiers: input.finiteSpecifiers,
+    })
 }
 
-fn host_module_reference_to_napi(input: host::ScriptModuleReference) -> NapiModuleReference {
-    NapiModuleReference {
+fn host_module_reference_to_napi(
+    input: host::ScriptModuleReference,
+    spans: &verter_ffi::convert::SpanConverter<'_>,
+) -> std::result::Result<NapiModuleReference, verter_ffi::convert::SpanConversionError> {
+    let (span_start, span_end) = spans.utf16_span(input.span)?;
+    let (expr_span_start, expr_span_end) = spans.utf16_span(input.expr_span)?;
+    Ok(NapiModuleReference {
         syntax: host_module_reference_syntax_to_str(input.syntax).to_string(),
         semantics: host_module_reference_semantics_to_str(input.semantics).to_string(),
         isTypeOnly: input.is_type_only,
@@ -1931,15 +1983,33 @@ fn host_module_reference_to_napi(input: host::ScriptModuleReference) -> NapiModu
         finiteSpecifiers: input.finite_specifiers,
         staticPrefix: input.static_prefix,
         analyzability: host_module_reference_analyzability_to_str(input.analyzability).to_string(),
-        spanStart: input.span.start,
-        spanEnd: input.span.end,
-        exprSpanStart: input.expr_span.start,
-        exprSpanEnd: input.expr_span.end,
-    }
+        spanStart: span_start,
+        spanEnd: span_end,
+        exprSpanStart: expr_span_start,
+        exprSpanEnd: expr_span_end,
+        spanEncoding: SpanEncodingTag::Utf16.as_wire().to_string(),
+    })
 }
 
-fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> NapiUpdateResult {
-    NapiUpdateResult {
+/// Module-reference spans are structural facts of the result: one that cannot
+/// be converted exactly against `source` refuses the whole conversion.
+fn host_update_to_napi(
+    input: host::HostUpdateResult,
+    source: Option<&str>,
+) -> Result<NapiUpdateResult> {
+    let spans = verter_ffi::convert::SpanConverter::new(source);
+    let module_references = input
+        .module_references
+        .into_iter()
+        .map(|reference| host_module_reference_to_napi(reference, &spans))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            Error::new(
+                Status::GenericFailure,
+                format!("module reference span cannot be converted exactly: {error}"),
+            )
+        })?;
+    Ok(NapiUpdateResult {
         canonicalId: input.canonical_id,
         changed: input.changed,
         sliceChanges: NapiSliceChanges {
@@ -1974,7 +2044,7 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
         removedVirtualIds: input.removed_virtual_ids,
         changedLspIds: input.changed_lsp_ids,
         removedLspIds: input.removed_lsp_ids,
-        diagnostics: host_diagnostics_to_napi(&input.diagnostics, source),
+        diagnostics: host_diagnostics_to_napi_with(&input.diagnostics, &spans),
         externalSourceRequests: input
             .external_source_requests
             .into_iter()
@@ -1998,11 +2068,7 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
                 bindings: imp.bindings,
             })
             .collect(),
-        moduleReferences: input
-            .module_references
-            .into_iter()
-            .map(host_module_reference_to_napi)
-            .collect(),
+        moduleReferences: module_references,
         preprocessorRequests: input
             .preprocessor_requests
             .iter()
@@ -2054,7 +2120,7 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
             })
             .collect(),
         parseDurationMs: input.parse_duration_ms,
-    }
+    })
 }
 
 fn host_virtual_file_to_napi(
@@ -2500,8 +2566,8 @@ impl NapiVerterHost {
         };
         let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
         catch_panic(std::panic::AssertUnwindSafe(|| self.inner.upsert(host_req)))?
-            .map(|result| host_update_to_napi(result, Some(source_for_spans.as_str())))
             .map_err(host_error)
+            .and_then(|result| host_update_to_napi(result, Some(source_for_spans.as_str())))
     }
 
     /// Execute one typed compile request against an already-registered source.
@@ -2937,13 +3003,21 @@ impl NapiVerterHost {
                         .diagnostics
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|d| FfiPreprocessorDiagnostic {
-                            severity: d.severity,
-                            message: d.message,
-                            line: d.line,
-                            column: d.column,
+                        .map(|d| {
+                            Ok(FfiPreprocessorDiagnostic {
+                                severity: d.severity,
+                                message: d.message,
+                                line: d.line,
+                                column: d.column,
+                                position_encoding: d
+                                    .positionEncoding
+                                    .as_deref()
+                                    .map(verter_ffi::convert::parse_request_encoding_tag)
+                                    .transpose()
+                                    .map_err(ffi_err)?,
+                            })
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>>>()?,
                     processor_identity: e.processorIdentity,
                     processor_version: e.processorVersion,
                     config_fingerprint: e.configFingerprint,
@@ -2967,7 +3041,7 @@ impl NapiVerterHost {
         }))?
         .map_err(host_error)?;
         let source = self.inner.get_source(&canonical_for_source);
-        Ok(host_update_to_napi(result, source.as_deref()))
+        host_update_to_napi(result, source.as_deref())
     }
 
     /// Retrieves a single compiled virtual file (script, template, or style).
@@ -3060,7 +3134,7 @@ impl NapiVerterHost {
         }))
         .map(|opt| {
             opt.map(|snapshot| {
-                serde_json::to_string(&snapshot).map_err(|e| {
+                serde_json::to_string(&Utf8SpanPayload::new(&snapshot)).map_err(|e| {
                     Error::new(
                         Status::GenericFailure,
                         format!("analysis serialization error: {e}"),
@@ -3146,7 +3220,15 @@ impl NapiVerterHost {
             self.inner.get_ide(&canonical_id, &host_profile)
         }))?;
         let sfc_source = self.inner.get_source(&canonical_id);
-        Ok(result.map(|response| host_ide_to_napi(response, sfc_source.as_deref().unwrap_or(""))))
+        let source = sfc_source.as_deref().ok_or_else(|| {
+            Error::new(
+                Status::GenericFailure,
+                format!("no source snapshot registered for '{canonical_id}'"),
+            )
+        })?;
+        result
+            .map(|response| host_ide_to_napi(response, source))
+            .transpose()
     }
 
     /// Ensure the IDE (`CachedTsx`) projection exists for a file.
@@ -3239,7 +3321,7 @@ impl NapiVerterHost {
     ) -> Result<Vec<String>> {
         let module_references = module_references
             .into_iter()
-            .map(napi_module_reference_to_analysis)
+            .map(napi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>>>()?;
         Ok(verter_resolution::collect_resolvable_module_reference_specifiers(&module_references))
     }
@@ -3256,7 +3338,7 @@ impl NapiVerterHost {
     ) -> Result<Vec<String>> {
         let module_references = module_references
             .into_iter()
-            .map(napi_module_reference_to_analysis)
+            .map(napi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>>>()?;
         let extensions = extensions.unwrap_or_else(|| self.inner.known_dependency_extensions());
         Ok(
@@ -3445,24 +3527,29 @@ impl NapiVerterHost {
         };
 
         let source = self.inner.get_source(&canonical_or_alias);
-        let ffi_diagnostics = lint_diagnostics_to_utf16(diagnostics, source.as_deref());
+        let ffi_diagnostics = lint_diagnostics_to_wire_utf16(diagnostics, source.as_deref());
 
         Ok(ffi_diagnostics
             .into_iter()
-            .map(|d| NapiLintDiagnostic {
-                rule: d.rule,
-                category: d.category,
-                severity: match d.severity {
-                    verter_diagnostics::Severity::Error => "error".to_string(),
-                    verter_diagnostics::Severity::Warning => "warning".to_string(),
-                    verter_diagnostics::Severity::Info => "info".to_string(),
-                    verter_diagnostics::Severity::Hint => "hint".to_string(),
-                },
-                message: d.message,
-                spanStart: d.span.start,
-                spanEnd: d.span.end,
-                tags: d.tags.iter().map(|t| format!("{:?}", t)).collect(),
-                spanKind: format!("{:?}", d.span_kind),
+            .map(|wire| {
+                let d = wire.diagnostic;
+                NapiLintDiagnostic {
+                    rule: d.rule,
+                    category: d.category,
+                    severity: match d.severity {
+                        verter_diagnostics::Severity::Error => "error".to_string(),
+                        verter_diagnostics::Severity::Warning => "warning".to_string(),
+                        verter_diagnostics::Severity::Info => "info".to_string(),
+                        verter_diagnostics::Severity::Hint => "hint".to_string(),
+                    },
+                    message: d.message,
+                    spanStart: wire.span.start,
+                    spanEnd: wire.span.end,
+                    spanEncoding: wire.span.encoding.as_wire().to_string(),
+                    spanError: wire.span.error.map(str::to_string),
+                    tags: d.tags.iter().map(|t| format!("{:?}", t)).collect(),
+                    spanKind: format!("{:?}", d.span_kind),
+                }
             })
             .collect())
     }
@@ -3475,13 +3562,19 @@ impl NapiVerterHost {
     /// with UTF-16 spans.
     ///
     /// - `canonical_or_alias` — the file to get actions for.
-    /// - `offset` — UTF-16 cursor offset in the SFC source.
+    /// - `offset` — UTF-16 cursor offset in the SFC source. An offset inside a
+    ///   surrogate pair or past the end of the source is rejected, never snapped.
     #[napi(js_name = "getCodeActions")]
     pub fn get_code_actions(
         &self,
         canonical_or_alias: String,
         offset: u32,
+        offset_encoding: String,
     ) -> Result<Vec<NapiCodeAction>> {
+        // The request names the encoding of `offset`; an untagged or unknown
+        // tag is refused before any source is read.
+        let offset_encoding =
+            verter_ffi::convert::parse_request_encoding_tag(&offset_encoding).map_err(ffi_err)?;
         let analysis = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.get_analysis(&canonical_or_alias)
         }))?;
@@ -3489,7 +3582,9 @@ impl NapiVerterHost {
 
         let actions = match (analysis, source.as_deref()) {
             (Some(snapshot), Some(source)) => {
-                let byte_offset = utf16_to_byte_offset(source, offset);
+                let byte_offset =
+                    verter_ffi::convert::request_offset_to_byte(source, offset, offset_encoding)
+                        .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
                 let script = build_script_snapshot(&snapshot);
                 let linter = Linter::with_registry(
                     verter_diagnostics::LintConfig::default(),
@@ -3532,8 +3627,14 @@ impl NapiVerterHost {
                     let index = verter_ffi::convert::OffsetIndex::new(source);
                     actions
                         .iter()
-                        .map(|a| code_action_to_ffi(a, &index).into())
-                        .collect::<Vec<NapiCodeAction>>()
+                        .map(|a| code_action_to_ffi(a, &index).map(NapiCodeAction::from))
+                        .collect::<std::result::Result<Vec<NapiCodeAction>, _>>()
+                        .map_err(|error| {
+                            Error::new(
+                                Status::GenericFailure,
+                                format!("code action range cannot be converted exactly: {error}"),
+                            )
+                        })?
                 }
             }
             _ => Vec::new(),
@@ -3573,7 +3674,13 @@ impl NapiVerterHost {
 
         let symbols = match (analysis, source.as_deref()) {
             (Some(snapshot), Some(source)) => {
-                build_document_symbols_from_analysis(&snapshot, source)
+                verter_ffi::convert::build_document_symbols_from_analysis(&snapshot, source)
+                    .map_err(|error| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("document symbol span cannot be converted exactly: {error}"),
+                        )
+                    })?
                     .into_iter()
                     .map(Into::into)
                     .collect()
@@ -3601,10 +3708,18 @@ impl NapiVerterHost {
         let source = self.inner.get_source(&canonical_or_alias);
 
         let results = match (analysis, source.as_deref()) {
-            (Some(snapshot), Some(source)) => build_selector_match_results(&snapshot, source)
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            (Some(snapshot), Some(source)) => {
+                verter_ffi::convert::build_selector_match_results(&snapshot, source)
+                    .map_err(|error| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("selector match span cannot be converted exactly: {error}"),
+                        )
+                    })?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect()
+            }
             _ => Vec::new(),
         };
 
@@ -3665,6 +3780,13 @@ impl NapiVerterHost {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // Each entry's diagnostics are converted against the exact source
+        // snapshot the batch supplied for that input (shared `Arc`, no copy).
+        // Entries come back one per input in the caller's order, so the
+        // snapshots pair with them by position: the host canonicalizes every
+        // input id, so a caller-spelled id is never a valid lookup key.
+        let input_sources: Vec<std::sync::Arc<str>> =
+            inputs.iter().map(|input| input.source.clone()).collect();
         let default_mode = opts
             .defaultMode
             .map(|m| ffi_compile_cache_mode_to_host(&m))
@@ -3749,9 +3871,17 @@ impl NapiVerterHost {
                 target,
             )
         }))?;
+        if entries.len() != input_sources.len() {
+            return Err(ffi_err(format!(
+                "compileMany returned {} entries for {} inputs",
+                entries.len(),
+                input_sources.len()
+            )));
+        }
         Ok(entries
             .into_iter()
-            .map(|e| {
+            .zip(input_sources)
+            .map(|(e, input_source)| {
                 // Flatten the typed outcome ARM BY ARM, exhaustively (no
                 // wildcard — a new variant is a compile error here, not a
                 // silently mis-serialized entry). The JS-visible shape is
@@ -3768,7 +3898,17 @@ impl NapiVerterHost {
                         source_map.map(|s| s.to_string()),
                         lang,
                         Vec::new(),
-                        diagnostics.iter().map(napi_diagnostic_from_host).collect(),
+                        {
+                            let spans =
+                                verter_ffi::convert::SpanConverter::new(Some(&*input_source));
+                            diagnostics
+                                .iter()
+                                .map(|d| {
+                                    verter_ffi::convert::host_diagnostic_to_ffi_with(d, &spans)
+                                        .into()
+                                })
+                                .collect()
+                        },
                     ),
                     host_compile::CompileBatchOutcome::Failed { errors } => {
                         (String::new(), None, None, errors.into_vec(), Vec::new())
@@ -4253,240 +4393,6 @@ fn build_script_snapshot(
     }
 }
 
-/// Convert a UTF-16 offset to a UTF-8 byte offset.
-fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
-    verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset)
-}
-
-/// Monaco SymbolKind constants (subset used for document symbols).
-mod symbol_kind {
-    pub const MODULE: u32 = 1;
-    pub const VARIABLE: u32 = 12;
-    pub const FUNCTION: u32 = 11;
-    pub const CLASS: u32 = 4;
-    pub const STRUCT: u32 = 22;
-    pub const PROPERTY: u32 = 6;
-    pub const KEY: u32 = 19;
-}
-
-/// Build document symbols from analysis data.
-fn build_document_symbols_from_analysis(
-    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
-    source: &str,
-) -> Vec<FfiDocumentSymbol> {
-    // One index per source, shared by every symbol span.
-    let index = verter_ffi::convert::OffsetIndex::new(source);
-    let mut symbols = Vec::new();
-
-    if !snapshot.bindings.is_empty() || !snapshot.imports.is_empty() || !snapshot.macros.is_empty()
-    {
-        let mut children = Vec::new();
-
-        for imp in &snapshot.imports {
-            children.push(FfiDocumentSymbol {
-                name: imp.source.clone(),
-                detail: if imp.is_type_only {
-                    Some("type import".to_string())
-                } else {
-                    None
-                },
-                kind: symbol_kind::MODULE,
-                span_start: 0,
-                span_end: 0,
-                selection_start: 0,
-                selection_end: 0,
-                children: Vec::new(),
-            });
-        }
-
-        for binding in &snapshot.bindings {
-            let kind = match binding.kind {
-                verter_session_query::analysis::types::AnalyzedBindingKind::Function
-                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
-                    symbol_kind::FUNCTION
-                }
-                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
-                    symbol_kind::CLASS
-                }
-                _ => symbol_kind::VARIABLE,
-            };
-            children.push(FfiDocumentSymbol {
-                name: binding.name.clone(),
-                detail: binding.type_annotation.clone(),
-                kind,
-                span_start: index.to_utf16(binding.span.start),
-                span_end: index.to_utf16(binding.span.end),
-                selection_start: index.to_utf16(binding.span.start),
-                selection_end: index.to_utf16(binding.span.end),
-                children: Vec::new(),
-            });
-        }
-
-        for m in snapshot.macros.iter() {
-            children.push(FfiDocumentSymbol {
-                name: format!("{:?}", m.kind),
-                detail: if m.is_type_based {
-                    Some("type-based".to_string())
-                } else {
-                    None
-                },
-                kind: symbol_kind::FUNCTION,
-                span_start: 0,
-                span_end: 0,
-                selection_start: 0,
-                selection_end: 0,
-                children: Vec::new(),
-            });
-        }
-
-        symbols.push(FfiDocumentSymbol {
-            name: "script".to_string(),
-            detail: Some(format!(
-                "{} binding(s), {} import(s)",
-                snapshot.bindings.len(),
-                snapshot.imports.len()
-            )),
-            kind: symbol_kind::MODULE,
-            span_start: 0,
-            span_end: 0,
-            selection_start: 0,
-            selection_end: 0,
-            children,
-        });
-    }
-
-    if let Some(template) = &snapshot.template {
-        let mut children = Vec::new();
-
-        for comp in &template.components {
-            children.push(FfiDocumentSymbol {
-                name: comp.name.clone(),
-                detail: Some(format!("{} prop(s)", comp.props.len())),
-                kind: symbol_kind::CLASS,
-                span_start: index.to_utf16(comp.span.start),
-                span_end: index.to_utf16(comp.span.end),
-                selection_start: index.to_utf16(comp.span.start),
-                selection_end: index.to_utf16(comp.span.end),
-                children: Vec::new(),
-            });
-        }
-
-        symbols.push(FfiDocumentSymbol {
-            name: "template".to_string(),
-            detail: Some(format!("{} component(s)", template.components.len())),
-            kind: symbol_kind::STRUCT,
-            span_start: 0,
-            span_end: index.to_utf16(source.len() as u32),
-            selection_start: 0,
-            selection_end: 0,
-            children,
-        });
-    }
-
-    for (i, style) in snapshot.styles.iter().enumerate() {
-        let mut children = Vec::new();
-
-        if let Some(css) = &style.css {
-            for class in &css.classes {
-                children.push(FfiDocumentSymbol {
-                    name: format!(".{}", class.name),
-                    detail: None,
-                    kind: symbol_kind::PROPERTY,
-                    span_start: index.to_utf16(class.span.start),
-                    span_end: index.to_utf16(class.span.end),
-                    selection_start: index.to_utf16(class.span.start),
-                    selection_end: index.to_utf16(class.span.end),
-                    children: Vec::new(),
-                });
-            }
-        }
-
-        symbols.push(FfiDocumentSymbol {
-            name: format!(
-                "style{}{}",
-                if i > 0 {
-                    format!(" {}", i)
-                } else {
-                    String::new()
-                },
-                if style.scoped { " (scoped)" } else { "" }
-            ),
-            detail: None,
-            kind: symbol_kind::KEY,
-            span_start: 0,
-            span_end: 0,
-            selection_start: 0,
-            selection_end: 0,
-            children,
-        });
-    }
-
-    symbols
-}
-
-/// Build CSS selector match results for visualization.
-fn build_selector_match_results(
-    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
-    source: &str,
-) -> Vec<FfiSelectorMatchResult> {
-    let template = match &snapshot.template {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
-    // One index per source, shared by every selector and element span.
-    let index = verter_ffi::convert::OffsetIndex::new(source);
-    let mut results = Vec::new();
-
-    for style in snapshot.styles.iter() {
-        let css = match &style.css {
-            Some(c) => c,
-            None => continue,
-        };
-
-        for selector in &css.selectors {
-            let parsed = match &selector.structure {
-                Some(s) => s.clone(),
-                None => continue,
-            };
-
-            let mut matches = Vec::new();
-            for (idx, element) in template.elements.iter().enumerate() {
-                let result = verter_semantic::analysis::selector_match::match_selector(
-                    &parsed,
-                    idx,
-                    &template.elements,
-                );
-                matches.push(FfiElementMatch {
-                    tag: element.tag.clone(),
-                    span_start: index.to_utf16(element.span.start),
-                    span_end: index.to_utf16(element.span.end),
-                    result: match result {
-                        verter_semantic::analysis::selector_match::MatchResult::Matches => {
-                            "match".to_string()
-                        }
-                        verter_semantic::analysis::selector_match::MatchResult::MaybeMatches => {
-                            "maybe".to_string()
-                        }
-                        verter_semantic::analysis::selector_match::MatchResult::NoMatch => {
-                            "no".to_string()
-                        }
-                    },
-                });
-            }
-
-            results.push(FfiSelectorMatchResult {
-                selector_text: selector.text.clone(),
-                selector_start: index.to_utf16(selector.span.start),
-                selector_end: index.to_utf16(selector.span.end),
-                matches,
-            });
-        }
-    }
-
-    results
-}
-
 // =============================================================================
 // host-backed batch compile (NAPI surface)
 //
@@ -4858,7 +4764,12 @@ mod tests {
         let projected =
             compile_request_failure_to_napi(failure, "/src/A.vue".to_string(), Some("a😀b"));
         let diagnostic = &projected.diagnostics.diagnostics[0];
-        assert_eq!((diagnostic.spanStart, diagnostic.spanEnd), (1, 3));
+        assert_eq!(
+            (diagnostic.spanStart, diagnostic.spanEnd),
+            (Some(1), Some(3))
+        );
+        assert_eq!(diagnostic.spanEncoding, "utf16.v1");
+        assert_eq!(diagnostic.spanError, None);
     }
 
     #[test]
@@ -4991,7 +4902,8 @@ mod tests {
                 ..host::HostUpdateResult::no_change("/test/App.vue".to_string())
             },
             Some("const x = import(`./${name}.vue`)"),
-        );
+        )
+        .expect("module reference spans convert");
 
         assert_eq!(result.moduleReferences.len(), 1);
         assert_eq!(result.moduleReferences[0].syntax, "dynamicImport");
@@ -5006,14 +4918,14 @@ mod tests {
     #[test]
     fn host_update_to_napi_exposes_export_signatures() {
         // Use the host to produce real export signatures from a barrel file
+        let barrel_source =
+            "export { default as Button } from './Button.vue';\nexport type { Props } from './types';";
         let h = host::VerterHost::new_standalone(host::HostConfig::default());
         let host_result = h
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/barrel.ts".to_string()),
                 input_id: "/src/barrel.ts".to_string(),
-                source: std::sync::Arc::from(
-                    "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
-                ),
+                source: std::sync::Arc::from(barrel_source),
                 file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
@@ -5024,7 +4936,7 @@ mod tests {
             "barrel file must produce export signatures"
         );
 
-        let result = host_update_to_napi(host_result, None);
+        let result = host_update_to_napi(host_result, Some(barrel_source)).expect("spans convert");
 
         // Positive: re-export signatures mapped with camelCase fields
         let button = result.exportSignatures.iter().find(|s| s.name == "Button");
@@ -5054,7 +4966,7 @@ mod tests {
             })
             .unwrap();
 
-        let result = host_update_to_napi(host_result, None);
+        let result = host_update_to_napi(host_result, None).expect("no spans to convert");
 
         let greet = result.exportSignatures.iter().find(|s| s.name == "greet");
         assert!(greet.is_some(), "local export must be present");
@@ -5072,7 +4984,8 @@ mod tests {
         let result = host_update_to_napi(
             host::HostUpdateResult::no_change("/src/Empty.vue".to_string()),
             None,
-        );
+        )
+        .expect("nothing to convert");
         assert!(
             result.exportSignatures.is_empty(),
             "no-change result must have empty exportSignatures"
@@ -5347,7 +5260,11 @@ defineProps<{ value: Unsafe }>()
         assert!(matches!(
             attrs_error.subject,
             Either3::B(NapiTscScriptSetupAttrsFailureSubject {
-                sourceRange: NapiSourceRange { start: 31, end: 37 },
+                sourceRange: NapiSourceRange {
+                    start: 31,
+                    end: 37,
+                    ..
+                },
                 ..
             })
         ));

@@ -24,7 +24,8 @@ fn wasm_boundary_charges_one_top_level_parse_entry() {
     let analysis = host.get_analysis(&update.canonical_id).expect("analysis");
     assert!(analysis.styles[0].css.is_some());
     let source = host.get_source(&update.canonical_id).expect("source");
-    let _ = verter_wasm::build_selector_match_results(&analysis, &source);
+    let _ = verter_ffi::convert::build_selector_match_results(&analysis, &source)
+        .expect("selector spans in extent");
     let charged = parse_style_ir_thread_invocations() - before;
     assert!(
         charged <= 1,

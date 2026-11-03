@@ -133,11 +133,11 @@ kind: AuditDiagnosticKind,
  */
 message: string,
 /**
- * SFC-absolute span the diagnostic applies to. `None` when the
- * session-side projector could not attribute the diagnostic to a
- * concrete source range.
+ * SFC-absolute span the diagnostic applies to, tagged with its encoding.
+ * `None` when the session-side projector could not attribute the
+ * diagnostic to a concrete, exact source range.
  */
-span?: { start: number; end: number } | null,
+span?: AuditSpan | null,
 /**
  * Macro index within the script-analysis macro list, if the
  * diagnostic was attributable to a specific macro invocation.
@@ -168,6 +168,30 @@ value: number, } } | { "UniqueSymbol": {
  * Full declaration identity of the unique symbol.
  */
 identity: AuditUniqueSymbolIdentity, } };
+
+/**
+ * A source range on the audit wire: `[start, end)` in `encoding` units.
+ */
+export type AuditSpan = {
+/**
+ * Inclusive start offset.
+ */
+start: number,
+/**
+ * Exclusive end offset.
+ */
+end: number,
+/**
+ * The unit `start`/`end` are measured in.
+ */
+encoding: AuditSpanEncoding, };
+
+/**
+ * Versioned encoding tag of an [`AuditSpan`]. The audit substrate carries
+ * Rust-native facts, so the only encoding is UTF-8 bytes; the tag exists so a
+ * consumer of the generated binding never has to guess the unit.
+ */
+export type AuditSpanEncoding = "utf8.v1";
 
 /**
  * Audit-side top-level lexical owner kind.

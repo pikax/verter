@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::TaggedSpan;
+
 /// File reference DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,8 +21,8 @@ pub struct BindingRefDto {
     pub file_id: String,
     pub binding_key: String,
     pub name: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 /// Component reference DTO.
@@ -30,8 +32,8 @@ pub struct ComponentRefDto {
     pub file_id: String,
     pub component_key: String,
     pub export_name: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Range in the owning file, tagged with its encoding (`utf8.v1`).
+    pub span: TaggedSpan,
 }
 
 #[cfg(test)]
@@ -54,8 +56,7 @@ mod tests {
             file_id: "app.vue".into(),
             binding_key: "setup_0".into(),
             name: "count".into(),
-            span_start: 10,
-            span_end: 15,
+            span: TaggedSpan::utf8(verter_span::Span::new(10, 15)).unwrap(),
         };
         let json = serde_json::to_string(&dto).unwrap();
         let back: BindingRefDto = serde_json::from_str(&json).unwrap();
@@ -68,8 +69,7 @@ mod tests {
             file_id: "button.vue".into(),
             component_key: "default".into(),
             export_name: "default".into(),
-            span_start: 0,
-            span_end: 100,
+            span: TaggedSpan::utf8(verter_span::Span::new(0, 100)).unwrap(),
         };
         let json = serde_json::to_string(&dto).unwrap();
         let back: ComponentRefDto = serde_json::from_str(&json).unwrap();
@@ -94,13 +94,13 @@ mod tests {
             file_id: "f.vue".into(),
             binding_key: "k".into(),
             name: "x".into(),
-            span_start: 0,
-            span_end: 1,
+            span: TaggedSpan::utf8(verter_span::Span::new(0, 1)).unwrap(),
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"bindingKey\""));
-        assert!(json.contains("\"spanStart\""));
-        assert!(json.contains("\"spanEnd\""));
+        // A tagged range, never a bare unit-less pair.
+        assert!(json.contains("\"span\":{\"start\":0,\"end\":1,\"encoding\":\"utf8.v1\"}"));
+        assert!(!json.contains("\"spanStart\""));
         // Negative: no snake_case
         assert!(!json.contains("\"binding_key\""));
         assert!(!json.contains("\"span_start\""));

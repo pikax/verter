@@ -335,23 +335,26 @@ fn ffi_module_reference_analyzability_from_str(
     }
 }
 
-fn ffi_module_reference_to_analysis(
+fn ffi_module_reference_to_resolvable(
     input: FfiModuleReference,
-) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference, JsValue> {
-    Ok(
-        verter_session_query::analysis::types::AnalyzedModuleReference {
-            syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
-            semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
-            is_type_only: input.is_type_only,
-            span: verter_span::Span::new(input.span_start, input.span_end),
-            expr_span: verter_span::Span::new(input.expr_span_start, input.expr_span_end),
-            raw_text: input.raw_text,
-            literal_specifier: input.literal_specifier,
-            finite_specifiers: input.finite_specifiers,
-            static_prefix: input.static_prefix,
-            analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
-        },
-    )
+) -> Result<verter_resolution::ResolvableModuleReference, JsValue> {
+    // Read-back of a reference this binding published: its spans are in the
+    // declared wire encoding (`span_encoding`, required by the schema) of the
+    // originating source, which is not part of this call. Specifier
+    // collection and known-file resolution read no position, so the read-back
+    // validates the wire contract (well-formed range) and carries only the
+    // span-free facts: a span is never converted without its source and never
+    // fabricated.
+    if input.span_start > input.span_end || input.expr_span_start > input.expr_span_end {
+        return Err(ffi_err("module reference span is inverted"));
+    }
+    ffi_module_reference_syntax_from_str(&input.syntax)?;
+    ffi_module_reference_semantics_from_str(&input.semantics)?;
+    Ok(verter_resolution::ResolvableModuleReference {
+        analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
+        literal_specifier: input.literal_specifier,
+        finite_specifiers: input.finite_specifiers,
+    })
 }
 
 // =============================================================================
@@ -647,7 +650,9 @@ impl WasmVerterHost {
         let source_for_spans = ffi_req.source.clone();
         let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
         let result = catch_panic(|| self.inner.upsert(host_req))?.map_err(host_err)?;
-        to_wasm_value(&host_update_to_ffi(result, Some(source_for_spans.as_str())))
+        let update =
+            host_update_to_ffi(result, Some(source_for_spans.as_str())).map_err(ffi_err)?;
+        to_wasm_value(&update)
     }
 
     /// Lists all virtual node kinds for a given canonical file ID.
@@ -708,7 +713,7 @@ impl WasmVerterHost {
     #[wasm_bindgen(js_name = getAnalysis)]
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
         let output = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
-        to_wasm_value(&output)
+        to_wasm_value(&output.as_ref().map(Utf8SpanPayload::new))
     }
 
     /// Execute ONE typed compile request against an already-registered
@@ -866,7 +871,7 @@ impl WasmVerterHost {
     ) -> Result<JsValue, JsValue> {
         let module_references = parse_wasm_input::<Vec<FfiModuleReference>>(module_references)?
             .into_iter()
-            .map(ffi_module_reference_to_analysis)
+            .map(ffi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
             verter_resolution::collect_resolvable_module_reference_specifiers(&module_references);
@@ -885,7 +890,7 @@ impl WasmVerterHost {
     ) -> Result<JsValue, JsValue> {
         let module_references = parse_wasm_input::<Vec<FfiModuleReference>>(module_references)?
             .into_iter()
-            .map(ffi_module_reference_to_analysis)
+            .map(ffi_module_reference_to_resolvable)
             .collect::<Result<Vec<_>, _>>()?;
         let known_ids: Vec<String> = parse_wasm_input(known_ids)?;
         let extensions = if extensions.is_undefined() || extensions.is_null() {
@@ -952,7 +957,7 @@ impl WasmVerterHost {
             None => Vec::new(),
         };
         let source = self.inner.get_source(canonical_or_alias);
-        let diagnostics = lint_diagnostics_to_utf16(diagnostics, source.as_deref());
+        let diagnostics = lint_diagnostics_to_wire_utf16(diagnostics, source.as_deref());
         to_wasm_value(&diagnostics)
     }
 
@@ -964,20 +969,29 @@ impl WasmVerterHost {
     /// with UTF-16 spans.
     ///
     /// - `canonical_or_alias` — the file to get actions for.
-    /// - `offset` — UTF-16 cursor offset in the SFC source.
+    /// - `offset` — cursor offset in the SFC source, in the encoding named by
+    ///   `offset_encoding`. An offset inside a surrogate pair or past the end
+    ///   of the source is rejected, never snapped.
+    /// - `offset_encoding` — the versioned encoding tag of `offset`
+    ///   (`"utf16.v1"` or `"utf8.v1"`); an untagged or unknown tag is rejected.
     #[wasm_bindgen(js_name = getCodeActions)]
     pub fn get_code_actions(
         &self,
         canonical_or_alias: &str,
         offset: u32,
+        offset_encoding: &str,
     ) -> Result<JsValue, JsValue> {
+        let offset_encoding =
+            verter_ffi::convert::parse_request_encoding_tag(offset_encoding).map_err(ffi_err)?;
         let analysis = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
         let source = self.inner.get_source(canonical_or_alias);
 
         let actions = match (analysis, source.as_deref()) {
             (Some(snapshot), Some(source)) => {
                 // Convert UTF-16 offset to byte offset for the action engine
-                let byte_offset = utf16_to_byte_offset(source, offset);
+                let byte_offset =
+                    verter_ffi::convert::request_offset_to_byte(source, offset, offset_encoding)
+                        .map_err(ffi_err)?;
 
                 let script = build_script_snapshot(&snapshot);
                 let linter = Linter::default();
@@ -1023,7 +1037,12 @@ impl WasmVerterHost {
                     actions
                         .iter()
                         .map(|a| code_action_to_ffi(a, &index))
-                        .collect::<Vec<_>>()
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| {
+                            JsValue::from_str(&format!(
+                                "code action range cannot be converted exactly: {error}"
+                            ))
+                        })?
                 }
             }
             _ => Vec::new(),
@@ -1059,7 +1078,12 @@ impl WasmVerterHost {
 
         let symbols = match (analysis, source.as_deref()) {
             (Some(snapshot), Some(source)) => {
-                build_document_symbols_from_analysis(&snapshot, source)
+                verter_ffi::convert::build_document_symbols_from_analysis(&snapshot, source)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "document symbol span cannot be converted exactly: {error}"
+                        ))
+                    })?
             }
             _ => Vec::new(),
         };
@@ -1079,7 +1103,14 @@ impl WasmVerterHost {
         let source = self.inner.get_source(canonical_or_alias);
 
         let results = match (analysis, source.as_deref()) {
-            (Some(snapshot), Some(source)) => build_selector_match_results(&snapshot, source),
+            (Some(snapshot), Some(source)) => verter_ffi::convert::build_selector_match_results(
+                &snapshot, source,
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "selector match span cannot be converted exactly: {error}"
+                ))
+            })?,
             _ => Vec::new(),
         };
 
@@ -1686,248 +1717,9 @@ fn build_script_snapshot(
     }
 }
 
-/// Convert a UTF-16 offset to a UTF-8 byte offset.
-fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
-    verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset)
-}
-
-/// Monaco SymbolKind constants (subset used for document symbols).
-mod symbol_kind {
-    pub const MODULE: u32 = 1;
-    pub const VARIABLE: u32 = 12;
-    pub const FUNCTION: u32 = 11;
-    pub const CLASS: u32 = 4;
-    pub const STRUCT: u32 = 22;
-    pub const PROPERTY: u32 = 6;
-    pub const KEY: u32 = 19;
-}
-
-/// Build document symbols from analysis data.
-///
-/// Generates a hierarchical tree of SFC blocks → children.
-fn build_document_symbols_from_analysis(
-    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
-    source: &str,
-) -> Vec<FfiDocumentSymbol> {
-    // One index per source, shared by every symbol span.
-    let index = verter_ffi::convert::OffsetIndex::new(source);
-    let mut symbols = Vec::new();
-
-    // Script block with bindings/imports/macros
-    if !snapshot.bindings.is_empty() || !snapshot.imports.is_empty() || !snapshot.macros.is_empty()
-    {
-        let mut children = Vec::new();
-
-        for imp in &snapshot.imports {
-            children.push(FfiDocumentSymbol {
-                name: imp.source.clone(),
-                detail: if imp.is_type_only {
-                    Some("type import".to_string())
-                } else {
-                    None
-                },
-                kind: symbol_kind::MODULE,
-                span_start: 0,
-                span_end: 0,
-                selection_start: 0,
-                selection_end: 0,
-                children: Vec::new(),
-            });
-        }
-
-        for binding in &snapshot.bindings {
-            let kind = match binding.kind {
-                verter_session_query::analysis::types::AnalyzedBindingKind::Function
-                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
-                    symbol_kind::FUNCTION
-                }
-                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
-                    symbol_kind::CLASS
-                }
-                _ => symbol_kind::VARIABLE,
-            };
-            children.push(FfiDocumentSymbol {
-                name: binding.name.clone(),
-                detail: binding.type_annotation.clone(),
-                kind,
-                span_start: index.to_utf16(binding.span.start),
-                span_end: index.to_utf16(binding.span.end),
-                selection_start: index.to_utf16(binding.span.start),
-                selection_end: index.to_utf16(binding.span.end),
-                children: Vec::new(),
-            });
-        }
-
-        for m in snapshot.macros.iter() {
-            children.push(FfiDocumentSymbol {
-                name: format!("{:?}", m.kind),
-                detail: if m.is_type_based {
-                    Some("type-based".to_string())
-                } else {
-                    None
-                },
-                kind: symbol_kind::FUNCTION,
-                span_start: 0,
-                span_end: 0,
-                selection_start: 0,
-                selection_end: 0,
-                children: Vec::new(),
-            });
-        }
-
-        symbols.push(FfiDocumentSymbol {
-            name: "script".to_string(),
-            detail: Some(format!(
-                "{} binding(s), {} import(s)",
-                snapshot.bindings.len(),
-                snapshot.imports.len()
-            )),
-            kind: symbol_kind::MODULE,
-            span_start: 0,
-            span_end: 0,
-            selection_start: 0,
-            selection_end: 0,
-            children,
-        });
-    }
-
-    // Template block with components
-    if let Some(template) = &snapshot.template {
-        let mut children = Vec::new();
-
-        for comp in &template.components {
-            children.push(FfiDocumentSymbol {
-                name: comp.name.clone(),
-                detail: Some(format!("{} prop(s)", comp.props.len())),
-                kind: symbol_kind::CLASS,
-                span_start: index.to_utf16(comp.span.start),
-                span_end: index.to_utf16(comp.span.end),
-                selection_start: index.to_utf16(comp.span.start),
-                selection_end: index.to_utf16(comp.span.end),
-                children: Vec::new(),
-            });
-        }
-
-        symbols.push(FfiDocumentSymbol {
-            name: "template".to_string(),
-            detail: Some(format!("{} component(s)", template.components.len())),
-            kind: symbol_kind::STRUCT,
-            span_start: 0,
-            span_end: index.to_utf16(source.len() as u32),
-            selection_start: 0,
-            selection_end: 0,
-            children,
-        });
-    }
-
-    // Style blocks with classes
-    for (i, style) in snapshot.styles.iter().enumerate() {
-        let mut children = Vec::new();
-
-        if let Some(css) = &style.css {
-            for class in &css.classes {
-                children.push(FfiDocumentSymbol {
-                    name: format!(".{}", class.name),
-                    detail: None,
-                    kind: symbol_kind::PROPERTY,
-                    span_start: index.to_utf16(class.span.start),
-                    span_end: index.to_utf16(class.span.end),
-                    selection_start: index.to_utf16(class.span.start),
-                    selection_end: index.to_utf16(class.span.end),
-                    children: Vec::new(),
-                });
-            }
-        }
-
-        symbols.push(FfiDocumentSymbol {
-            name: format!(
-                "style{}{}",
-                if i > 0 {
-                    format!(" {}", i)
-                } else {
-                    String::new()
-                },
-                if style.scoped { " (scoped)" } else { "" }
-            ),
-            detail: None,
-            kind: symbol_kind::KEY,
-            span_start: 0,
-            span_end: 0,
-            selection_start: 0,
-            selection_end: 0,
-            children,
-        });
-    }
-
-    symbols
-}
-
-/// Build CSS selector match results for visualization.
-pub fn build_selector_match_results(
-    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
-    source: &str,
-) -> Vec<FfiSelectorMatchResult> {
-    let template = match &snapshot.template {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
-    // One index per source, shared by every selector and element span.
-    let index = verter_ffi::convert::OffsetIndex::new(source);
-    let mut results = Vec::new();
-
-    for style in snapshot.styles.iter() {
-        let css = match &style.css {
-            Some(c) => c,
-            None => continue,
-        };
-
-        for selector in &css.selectors {
-            let parsed = match &selector.structure {
-                Some(s) => s.clone(),
-                None => continue,
-            };
-
-            let mut matches = Vec::new();
-            for (idx, element) in template.elements.iter().enumerate() {
-                let result = verter_semantic::analysis::selector_match::match_selector(
-                    &parsed,
-                    idx,
-                    &template.elements,
-                );
-                matches.push(FfiElementMatch {
-                    tag: element.tag.clone(),
-                    span_start: index.to_utf16(element.span.start),
-                    span_end: index.to_utf16(element.span.end),
-                    result: match result {
-                        verter_semantic::analysis::selector_match::MatchResult::Matches => {
-                            "match".to_string()
-                        }
-                        verter_semantic::analysis::selector_match::MatchResult::MaybeMatches => {
-                            "maybe".to_string()
-                        }
-                        verter_semantic::analysis::selector_match::MatchResult::NoMatch => {
-                            "no".to_string()
-                        }
-                    },
-                });
-            }
-
-            results.push(FfiSelectorMatchResult {
-                selector_text: selector.text.clone(),
-                selector_start: index.to_utf16(selector.span.start),
-                selector_end: index.to_utf16(selector.span.end),
-                matches,
-            });
-        }
-    }
-
-    results
-}
-
 #[cfg(test)]
 mod tests {
-    use super::lint_diagnostics_to_utf16;
+    use super::lint_diagnostics_to_wire_utf16;
     use super::{host, FfiConversionError, PublicApiProjectionSubject, WasmVerterHost};
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2339,11 +2131,13 @@ defineProps<{ value: Unsafe }>()
             related_files: Vec::new(),
         }];
 
-        let out = lint_diagnostics_to_utf16(diagnostics, Some(source));
+        let out = lint_diagnostics_to_wire_utf16(diagnostics, Some(source));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].span.start, 1);
-        assert_eq!(out[0].span.end, 3);
-        assert!(out[0].tags.is_empty());
+        assert_eq!((out[0].span.start, out[0].span.end), (Some(1), Some(3)));
+        assert_eq!(out[0].span.error, None);
+        // The native byte span is never rewritten in place.
+        assert_eq!(out[0].diagnostic.span, verter_span::Span::new(1, 5));
+        assert!(out[0].diagnostic.tags.is_empty());
     }
 }
 

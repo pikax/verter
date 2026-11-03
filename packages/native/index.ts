@@ -663,7 +663,8 @@ export interface HostTscMacroFailureSubject {
 
 export interface HostTscScriptSetupAttrsFailureSubject {
   kind: "scriptSetupAttrs";
-  sourceRange: { start: number; end: number };
+  /** UTF-8 byte range in the authored SFC, tagged with its encoding. */
+  sourceRange: { start: number; end: number; encoding: import("./host-types").HostSpanEncoding };
 }
 
 /** The whole source: a failure not attributable to one syntax slot. */
@@ -953,9 +954,16 @@ export declare class VerterHost {
    */
   lint(canonicalOrAlias: string, config?: string): import("./host-types").HostLintDiagnostic[];
   /**
-   * Returns code actions (quick fixes) available at a given UTF-16 offset.
+   * Returns code actions (quick fixes) available at `offset`, counted from the
+   * start of the file in the encoding `offsetEncoding` declares. The tag is
+   * required: an untagged or unknown tag is rejected, and an offset inside a
+   * surrogate pair or past the end of the source is rejected, never snapped.
    */
-  getCodeActions(canonicalOrAlias: string, offset: number): import("./host-types").HostCodeAction[];
+  getCodeActions(
+    canonicalOrAlias: string,
+    offset: number,
+    offsetEncoding: import("./host-types").HostSpanEncoding,
+  ): import("./host-types").HostCodeAction[];
   /**
    * Returns metadata for all registered lint rules.
    */

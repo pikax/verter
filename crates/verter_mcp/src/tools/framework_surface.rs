@@ -169,12 +169,19 @@ fn project_member_origin(
     strings: &[String],
 ) -> serde_json::Value {
     let declaration = origin.declaration.as_ref().map(|d| {
-        serde_json::json!({
+        let mut declaration = serde_json::json!({
             "resolvedName": resolve_string(strings, d.resolved_name_id),
             "canonicalSource": resolve_string(strings, d.canonical_source_id),
-            "spanStart": d.span_start,
-            "spanEnd": d.span_end,
-        })
+            // The framework-surface wire states UTF-8 bytes (schema 9).
+            "spanEncoding": verter_protocol::types::SpanEncodingTag::Utf8.as_wire(),
+        });
+        // The offsets are meaningful only when the producer marked the range
+        // exact; an absent range publishes no offsets.
+        if d.has_span {
+            declaration["spanStart"] = d.span_start.into();
+            declaration["spanEnd"] = d.span_end.into();
+        }
+        declaration
     });
     let chain: Vec<serde_json::Value> = origin
         .chain
@@ -383,6 +390,7 @@ mod tests {
                 span_start: 0,
                 span_end: 0,
                 kind: wire::FrameworkSurfaceDeclarationKind::TypeAlias as i32,
+                has_span: false,
             }),
             chain: vec![
                 // LOCAL: no string fields at all.

@@ -8,6 +8,22 @@
  * Source: crates/verter_protocol/src/schema/
  */
 
+// ── Coordinates (from types.rs) ────────────────────────────────
+
+/**
+ * Versioned tag naming the unit a span is measured in (0-based, half-open,
+ * counted from the start of the file the owning record names). A consumer MUST
+ * reject a tag it does not know.
+ */
+export type SpanEncodingTag = "utf8.v1" | "utf16.v1";
+
+/** A range that names its own encoding. */
+export interface TaggedSpan {
+  start: number;
+  end: number;
+  encoding: SpanEncodingTag;
+}
+
 // ── Refs (from schema/refs.rs) ─────────────────────────────────
 
 export interface FileRefDto {
@@ -18,16 +34,14 @@ export interface BindingRefDto {
   fileId: string;
   bindingKey: string;
   name: string;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface ComponentRefDto {
   fileId: string;
   componentKey: string;
   exportName: string;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 // ── Query (from schema/query.rs) ───────────────────────────────
@@ -57,16 +71,14 @@ export interface PropDto {
   typeText?: string | null;
   defaultValue?: string | null;
   description?: string | null;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface EventDto {
   name: string;
   payloadType?: string | null;
   description?: string | null;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface SlotBindingDto {
@@ -79,21 +91,18 @@ export interface SlotDto {
   isRequired?: boolean;
   bindings?: SlotBindingDto[];
   description?: string | null;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface ModelDto {
   name: string;
   typeText?: string | null;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface ExposeDto {
   name: string;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface ComponentSurfaceDto {
@@ -110,15 +119,13 @@ export interface BoundaryIssueDto {
   kind: string;
   componentName: string;
   memberName: string;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface ProvenanceStepDto {
   kind: string;
   description: string;
-  spanStart: number;
-  spanEnd: number;
+  span: TaggedSpan;
 }
 
 export interface ReactivityDto {

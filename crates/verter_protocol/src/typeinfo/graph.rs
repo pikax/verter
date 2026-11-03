@@ -327,7 +327,17 @@ pub use wire::UniqueSymbolKeyExpr;
 /// `GraphOpaque` (which is reserved for genuinely unrepresentable
 /// constructs). A v7 payload carries no intrinsic node, so v7 stays
 /// accepted for requests that do not need the v8 vocabulary.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 8;
+///
+/// v9 states the coordinate contract the earlier schemas left implicit:
+/// every span on this schema (`GraphSpanRef`, `GraphDiagnostic`,
+/// `SymbolEntryDto`, `FrameworkSurfaceMemberDeclaration`) is a 0-based
+/// half-open range of UTF-8 byte offsets into the file the span's
+/// `canonical_id` names. No field is added or removed; a producer emits a
+/// span only when exact and otherwise leaves it absent (`has_span = false`),
+/// and an inverted or file-less `GraphSpanRef` on a request is a typed
+/// `MalformedPayload` before execution. v8 stays accepted: the unit was
+/// already UTF-8 bytes where a producer existed.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 9;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

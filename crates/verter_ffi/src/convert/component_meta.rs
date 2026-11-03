@@ -279,6 +279,7 @@ fn structure_range(
         source_space_token: structure.source_space_tokens[span.source_space.get() as usize].clone(),
         start: span.start,
         end: span.end,
+        encoding: SpanEncodingTag::Utf8,
     }
 }
 
@@ -689,8 +690,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                         requested_name: meta.declaration.requested_name.clone(),
                         resolved_name: meta.declaration.resolved_name.clone(),
                         canonical_source: meta.declaration.canonical_source.clone(),
-                        span_start: meta.declaration.span.start,
-                        span_end: meta.declaration.span.end,
+                        span: TaggedSpan::utf8(meta.declaration.span).ok(),
                         kind: resolved_declaration_kind_to_string(meta.declaration.kind),
                         text: meta.declaration.text.clone(),
                     });
@@ -1410,8 +1410,7 @@ pub(super) fn resolved_macro_to_ffi(
             requested_name: resolved.declaration.requested_name.clone(),
             resolved_name: resolved.declaration.resolved_name.clone(),
             canonical_source: resolved.declaration.canonical_source.clone(),
-            span_start: resolved.declaration.span.start,
-            span_end: resolved.declaration.span.end,
+            span: TaggedSpan::utf8(resolved.declaration.span).ok(),
             kind: resolved_declaration_kind_to_string(resolved.declaration.kind),
             text: resolved.declaration.text.clone(),
         },
@@ -1423,8 +1422,7 @@ pub(super) fn resolved_macro_to_ffi(
                 is_optional: prop.is_optional,
                 type_annotation: prop.type_annotation.clone(),
                 visibility: member_visibility_to_string(prop.visibility),
-                span_start: prop.span.start,
-                span_end: prop.span.end,
+                span: TaggedSpan::utf8(prop.span).ok(),
             })
             .collect(),
         jsdoc: resolved.jsdoc.as_ref().map(|jsdoc| FfiResolvedJsdocBlock {
