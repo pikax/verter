@@ -79,6 +79,22 @@ const EXPORTS = Object.freeze({
 /** Owner exports that must be JSON arrays; anything else is misuse, refused before a read is spent. */
 const ARRAY_EXPORTS = new Set(["pushes", "readyEvents", "bindings", "requiredContexts"]);
 
+/** A binding must name the pull requests to read; a malformed one is refused before a read is spent. */
+const bindingShapeProblem = (binding) => {
+  const isPull = (value) => Number.isInteger(value) && value > 0;
+  if (binding === null || typeof binding !== "object" || Array.isArray(binding))
+    return "must be an object";
+  if (!binding.stream) {
+    return isPull(binding.pullRequest) ? "" : "needs a positive integer pullRequest";
+  }
+  const roles = binding.pullRequests;
+  if (roles === null || typeof roles !== "object" || Array.isArray(roles))
+    return "needs a pullRequests object";
+  return Object.values(roles).every(isPull)
+    ? ""
+    : "names a pull request that is not a positive integer";
+};
+
 const fail = (message) => {
   throw new Error(`ci-baseline: ${message}`);
 };
@@ -263,7 +279,9 @@ class Session {
       reply = { status: 0, pages: [], detail: String(error?.message ?? error), requests: 1 };
     }
     this.requests += reply.requests;
-    const outcome = reply.partial ? "partial" : classifyAttempt(reply.status, reply.detail);
+    // A limit hit after a read's first page is still a limit: it stops the session whether or not pages were kept.
+    const classified = classifyAttempt(reply.status, reply.detail);
+    const outcome = classified !== "rate-limited" && reply.partial ? "partial" : classified;
     const receipt = {
       family,
       ...key,
@@ -330,6 +348,8 @@ export async function collect({
   if (Date.parse(until) <= Date.parse(since)) fail("--until must follow --since");
   if (existsSync(out) && readdirSync(out).length > 0) fail(`${out} already holds a collection`);
 
+  // Sampled before any record is written: an --out inside the checkout would otherwise dirty it.
+  const dirty = gitValue(root, ["status", "--porcelain"]) !== "";
   const { corpus, digest } = loadCorpus(corpusFile);
   const exported = {};
   const exportSources = {};
@@ -344,6 +364,12 @@ export async function collect({
     }
     if (ARRAY_EXPORTS.has(family) && !Array.isArray(body))
       fail(`export ${name} must be a JSON array`);
+    if (family === "bindings") {
+      body.forEach((binding, index) => {
+        const problem = bindingShapeProblem(binding);
+        if (problem) fail(`export ${name} entry ${index} ${problem}`);
+      });
+    }
     exported[family] = body;
     exportSources[family] = source;
   }
@@ -454,7 +480,7 @@ export async function collect({
     collectedAt: new Date().toISOString(),
     head: gitValue(root, ["rev-parse", "HEAD"]),
     tree: gitValue(root, ["rev-parse", "HEAD^{tree}"]),
-    dirty: gitValue(root, ["status", "--porcelain"]) !== "",
+    dirty,
     requests: session.requests,
     node: process.version,
     platform: process.platform,
@@ -603,7 +629,7 @@ const heldRunner = (job) => job.conclusion !== "skipped" && !neverAssigned(job);
 export function runClass(run, jobs, { pullStream = false } = {}) {
   if (run.event === "pull_request") return "pull-request";
   if (run.event !== "push") return "other";
-  if (pullStream || run.pull_requests?.length > 0) return "pull-request";
+  if (pullStream) return "pull-request";
   if (run.path && !/(^|\/)ci\.yml$/.test(run.path)) return "push-other-workflow";
   if (jobs.length === 0) return "push-unclassified";
   const lanesRan = jobs.some((job) => !LANDED_PROOF_JOBS.has(job.name) && heldRunner(job));
@@ -745,6 +771,10 @@ function summarize(label, runs, ctx) {
 
   const perStream = [...groupBy(runs, streamOf)].map(([stream, streamRuns]) => {
     const own = runnerIntervals(streamRuns.flatMap(ctx.jobsOf)).intervals;
+    // A stream whose jobs were not read observed no runner: its peak is unknown, never zero.
+    if (own.length === 0) {
+      return { stream, peakRunners: null, peakShareOfObservedPool: null, runnerMinutes: null };
+    }
     return {
       stream,
       peakRunners: peakRunners(own),
@@ -752,6 +782,7 @@ function summarize(label, runs, ctx) {
       runnerMinutes: own.reduce((total, { seconds }) => total + seconds, 0) / 60,
     };
   });
+  const observedStreams = perStream.filter(({ peakRunners: peak }) => peak !== null);
 
   return {
     runs: runs.length,
@@ -791,10 +822,10 @@ function summarize(label, runs, ctx) {
       { skipped, invalid, outstanding, neverAssigned, copied },
     ),
     peakRunnersPerStream:
-      perStream.length > 0
+      observedStreams.length > 0
         ? {
             status: label,
-            max: Math.max(...perStream.map(({ peakRunners: peak }) => peak)),
+            max: Math.max(...observedStreams.map(({ peakRunners: peak }) => peak)),
             perStream,
           }
         : { status: "unavailable", reason: "no runner intervals" },
@@ -838,16 +869,25 @@ export function familyStatus(receipts, family) {
 const sameFiles = (left, right) =>
   JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
 
-/** The release kind `ci.yml` derives from a pull request's title. */
-const releaseKindOf = (title) =>
-  title.startsWith("release(ide): ") ? "ide" : title.startsWith("release: ") ? "project" : "";
+/**
+ * The release kind `ci.yml` derives for a pull request: from its title, and only when its head
+ * lives in the collected repository itself. A fork's pull request runs with no release kind.
+ */
+const releaseKindOf = ({ title, head }, repo) => {
+  if (head?.repo?.full_name !== repo) return "";
+  return title.startsWith("release(ide): ")
+    ? "ide"
+    : title.startsWith("release: ")
+      ? "project"
+      : "";
+};
 
 /**
  * Runs count for a scenario only when a pull request really carried its exact changed files
  * and release kind, and each pull request measures one repetition of one row: a pull request
  * bound twice would otherwise be counted as several repetitions of its single run.
  */
-function resolveBindings(corpus, bindings, filesOf, titleOf) {
+function resolveBindings(corpus, bindings, filesOf, pullOf, repo) {
   const samples = corpus.scenarios
     .filter(({ kind }) => kind === "change")
     .flatMap((scenario) =>
@@ -870,9 +910,9 @@ function resolveBindings(corpus, bindings, filesOf, titleOf) {
     if (!sample) return "names no corpus sample";
     if (!files) return `pull request ${pr} changed files are unavailable`;
     if (!sameFiles(files, sample.files)) return `pull request ${pr} changed different files`;
-    const title = titleOf(pr);
-    if (title === undefined) return `pull request ${pr} title is unavailable`;
-    const kind = releaseKindOf(title);
+    const pull = pullOf(pr);
+    if (pull?.title === undefined) return `pull request ${pr} title is unavailable`;
+    const kind = releaseKindOf(pull, repo);
     // A landed release commit is the merge of a release pull request of either kind.
     const matches = sample.release === "landed" ? kind !== "" : kind === sample.release;
     return matches ? "" : `pull request ${pr} is release kind "${kind}", not "${sample.release}"`;
@@ -1001,6 +1041,19 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
     ]);
   const fromExport = contextRecords.filter((entry) => typeof entry === "string");
   const liveRequired = [...fromRules, ...fromProtection, ...fromExport].filter(Boolean);
+  // Name the route that answered: a hand-supplied list is not a value read live.
+  const requiredSources = [
+    ...(fromRules.some(Boolean) ? ["live ruleset"] : []),
+    ...(fromProtection.some(Boolean) ? ["live branch protection"] : []),
+    ...(fromExport.some(Boolean) ? ["owner export"] : []),
+  ];
+  // Classic protection can require contexts the rules do not. Only a definite answer (a record, or
+  // "not protected") or an owner export settles it; a denied or failed read leaves the set unproven.
+  const protectionReads = receipts.filter(({ family }) => family === "branchProtection");
+  const protectionSettled =
+    receipts.some(({ family, outcome }) => family === "requiredContexts" && outcome === "export") ||
+    protectionReads.some(({ outcome }) => outcome === "ok" || outcome === "not-found");
+  const protectionBad = protectionReads.find(({ outcome }) => outcome !== "ok");
   const required = liveRequired.length > 0 ? [...new Set(liveRequired)] : [SOURCE_REQUIRED_CHECK];
 
   const pushes = new Map();
@@ -1055,15 +1108,24 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
     return row
       ? read(row.file)
           .flat()
-          .map(({ filename }) => filename)
+          // A detected rename is one record naming both paths; the corpus sample lists both.
+          .flatMap(({ filename, previous_filename: previous }) =>
+            previous ? [filename, previous] : [filename],
+          )
       : null;
   };
   const pulls = pagesOf("pulls")
     .flat()
     .filter((pull) => pull?.number !== undefined);
-  const titleOf = (pr) => pulls.find(({ number }) => number === pr)?.title;
+  const pullOf = (pr) => pulls.find(({ number }) => number === pr);
   const bindings = pagesOf("bindings");
-  const { accepted, streams, rejected } = resolveBindings(corpus, bindings, filesOf, titleOf);
+  const { accepted, streams, rejected } = resolveBindings(
+    corpus,
+    bindings,
+    filesOf,
+    pullOf,
+    manifest.repo,
+  );
   const corpusUnavailable = unavailableByCorpus(corpus);
   // The runs API leaves `pull_requests` empty on many pull request runs, so the head branch counts.
   const headBranchOf = new Map(
@@ -1106,13 +1168,14 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
   const coverage = (id, bound, pullsOf) => {
     const prs = [...new Set(bound.flatMap(pullsOf))];
     const rowRuns = [...new Map(prs.flatMap(runsOfPull).map((row) => [row.id, row])).values()];
-    // Each bound pull request is one repetition: it must itself reach a push-to-green sample.
-    const unsampled = prs.filter(
-      (pr) =>
-        !headSamples(runsOfPull(pr), ctx.jobsOf, ctx).some(
-          ({ pushToGreen }) => pushToGreen !== null,
-        ),
-    );
+    // Each bound pull request is one repetition: its own head, the one whose files were verified,
+    // must reach a push-to-green sample. An earlier head's timing says nothing about that change.
+    const unsampled = prs.filter((pr) => {
+      const head = pullOf(pr)?.head?.sha;
+      return !headSamples(runsOfPull(pr), ctx.jobsOf, ctx).some(
+        (sample) => sample.pushToGreen !== null && head !== undefined && sample.head === head,
+      );
+    });
     const { readyToLanded: rowReady, landings } = landingOf(
       ready.filter(({ pullRequest }) => prs.includes(pullRequest)),
     );
@@ -1155,6 +1218,12 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
       families.readyEvents.reason ?? "export held none"
     })`;
   }
+  // The pooled figures authorise comparison on the corpus as a whole. A bound row whose own pull
+  // requests never landed contributes nothing to them, and is named rather than left implied.
+  const rowsWithoutProvenLanding = [...scenarios, ...concurrent].flatMap(
+    ({ id, metrics, landings: n }) => (metrics && n === 0 ? [id] : []),
+  );
+  readyToLanded.rowsWithoutProvenLanding = rowsWithoutProvenLanding;
   const merged = pulls.flatMap(({ merged_at: mergedAt }) =>
     mergedAt && inWindow(mergedAt) ? [mergedAt] : [],
   );
@@ -1258,6 +1327,13 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
     gaps.push(`ready-to-landed unavailable: ${readyToLanded.reason}`);
   if (landingsPerDay.status !== "measured") gaps.push("landings/day has no exact-tree proof");
   if (liveRequired.length === 0) gaps.push("no live required context was read");
+  else if (!protectionSettled) {
+    gaps.push(
+      `classic branch protection was not read (${
+        protectionBad ? `${protectionBad.outcome}: ${protectionBad.detail}` : "no read attempted"
+      }): the required contexts may be incomplete`,
+    );
+  }
   // The observations stay in the report; only the authority to compare against them is refused.
   if (currentDefinitions !== undefined && manifest.definitionsDigest !== currentDefinitions) {
     gaps.push(
@@ -1273,6 +1349,11 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
   ];
   if (manifest.dirty) {
     limitations.push("The collector ran on a tree with uncommitted changes.");
+  }
+  if (rowsWithoutProvenLanding.length > 0) {
+    limitations.push(
+      `Ready-to-landed and landings/day are pooled over corpus-bound pull requests; ${rowsWithoutProvenLanding.length} bound row(s) have no proven landing of their own: ${rowsWithoutProvenLanding.join(", ")}.`,
+    );
   }
   if (liveRequired.length === 0) {
     limitations.push(
@@ -1308,7 +1389,7 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
     families,
     requiredContexts: {
       contexts: required,
-      source: liveRequired.length > 0 ? "live ruleset" : "workflow source",
+      source: requiredSources.length > 0 ? requiredSources.join(" + ") : "workflow source",
     },
     scenarios,
     concurrentStreams: concurrent,

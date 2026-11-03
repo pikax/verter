@@ -490,7 +490,14 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
     table[`repos/o/r/actions/runs/${id}/`] = [{ jobs: [job("CI Required", pr + 1, pr + 13)] }];
     table[`repos/o/r/pulls/${pr}/files`] = [changedFiles.map((filename) => ({ filename }))];
     const title = release === "ide" ? "release(ide): v1" : release ? "release: v1" : "feat: change";
-    table[`repos/o/r/pulls/${pr}`] = [{ number: pr, title, merged_at: at(pr + 20) }];
+    table[`repos/o/r/pulls/${pr}`] = [
+      {
+        number: pr,
+        title,
+        merged_at: at(pr + 20),
+        head: { sha: head, ref: `pr-${pr}`, repo: { full_name: "o/r" } },
+      },
+    ];
     return pr;
   };
   const filesOf = (scenario, sample) =>
@@ -526,6 +533,9 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
         parameters: { required_status_checks: [{ context: "CI Required" }] },
       },
     ],
+  ];
+  table["repos/o/r/branches/main/protection/required_status_checks"] = [
+    { contexts: [], checks: [] },
   ];
   // Reads share prefixes (`pulls/1`, `pulls/10`, `pulls/1/files`), so longer keys answer first.
   const ordered = Object.fromEntries(
@@ -638,7 +648,7 @@ test("a run whose API record names no pull request still counts through its head
         const pr = reply.pages[0];
         return {
           ...reply,
-          pages: [{ ...pr, head: { ref: `branch-${pr.number}`, repo: { full_name: "o/r" } } }],
+          pages: [{ ...pr, head: { ...pr.head, ref: `branch-${pr.number}` } }],
         };
       }
       if (!path.includes("/actions/runs?")) return reply;
@@ -1034,6 +1044,7 @@ test("required contexts can come from an owner export or from branch protection"
     await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
     const report = reportFromDirectory(out);
     assert.deepEqual(report.requiredContexts.contexts, ["CI Required", "Lint"]);
+    assert.equal(report.requiredContexts.source, "owner export");
     assert.equal(report.families.requiredContexts.status, "available");
   });
   await withTempDir(async (dir) => {
@@ -1053,6 +1064,7 @@ test("required contexts can come from an owner export or from branch protection"
     await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
     const report = reportFromDirectory(out);
     assert.deepEqual(report.requiredContexts.contexts, ["CI Required"]);
+    assert.equal(report.requiredContexts.source, "live branch protection");
     assert.ok(!report.baseline.gaps.includes("no live required context was read"));
   });
 });
@@ -1131,6 +1143,229 @@ test("malformed flags are misuse", async () => {
     assert.equal(
       run(["collect", "--out", join(dir, "x"), "--repo", "o/r", "--max-requests", "many"]).status,
       2,
+    );
+  });
+});
+
+/** Receipts for a rules read naming `CI Required`, beside whatever the protection read answered. */
+function contextsReport(protection, { exported = false } = {}) {
+  return buildReport({
+    manifest: { window: WINDOW },
+    receipts: [
+      { family: "requiredContexts", outcome: exported ? "export" : "ok", file: "rules" },
+      ...protection,
+    ],
+    read: () => [
+      [
+        {
+          type: "required_status_checks",
+          parameters: { required_status_checks: [{ context: "CI Required" }] },
+        },
+      ],
+    ],
+    corpus,
+  });
+}
+
+test("required contexts name their source, and an unread classic protection is a gap", () => {
+  const denied = contextsReport([
+    { family: "branchProtection", outcome: "denied", detail: "gh: Bad credentials (HTTP 401)" },
+  ]);
+  assert.equal(denied.requiredContexts.source, "live ruleset");
+  assert.ok(
+    denied.baseline.gaps.some((gap) =>
+      /classic branch protection was not read \(denied: /.test(gap),
+    ),
+  );
+  // "Not protected" is a definite answer, as is a record.
+  for (const outcome of ["not-found", "ok"]) {
+    const answered = contextsReport([{ family: "branchProtection", outcome, detail: "" }]);
+    assert.ok(
+      !answered.baseline.gaps.some((gap) => /classic branch protection/.test(gap)),
+      outcome,
+    );
+  }
+  // An owner export of the contexts answers for both routes, so no protection read is owed.
+  const exported = contextsReport([], { exported: true });
+  assert.ok(!exported.baseline.gaps.some((gap) => /classic branch protection/.test(gap)));
+});
+
+test("a pull request's sample must come from the head whose files were checked", async () => {
+  await withTempDir(async (dir) => {
+    // Pull request 1 gains a later head whose required check fails; the earlier head stays green.
+    const { exports, transport: base } = completeCollection(dir);
+    const transport = (path) => {
+      const reply = base(path);
+      if (path === "repos/o/r/pulls/1") {
+        const [pull] = reply.pages;
+        return { ...reply, pages: [{ ...pull, head: { ...pull.head, sha: "final-head" } }] };
+      }
+      if (path.includes("/actions/runs?")) {
+        const [page] = reply.pages;
+        const extra = run(9999, "final-head", 40, { pull_requests: [{ number: 1 }] });
+        return { ...reply, pages: [{ ...page, workflow_runs: [...page.workflow_runs, extra] }] };
+      }
+      if (path.startsWith("repos/o/r/actions/runs/9999/")) {
+        return {
+          ...reply,
+          pages: [{ jobs: [job("CI Required", 41, 43, { conclusion: "failure" })] }],
+        };
+      }
+      return reply;
+    };
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    markClean(out);
+    const { baseline } = reportFromDirectory(out);
+    assert.equal(baseline.status, "missing-data");
+    assert.ok(
+      baseline.gaps.some((gap) =>
+        /^CH01\/docs pull request\(s\) 1 reach no push-to-green/.test(gap),
+      ),
+      baseline.gaps.join("; "),
+    );
+  });
+});
+
+test("a renamed file counts under both of its paths, and a fork pull request is no release sample", async () => {
+  await withTempDir(async (dir) => {
+    const { exports, transport: base } = completeCollection(dir);
+    const [from, to] = corpus.scenarios
+      .find(({ id }) => id === "CH15")
+      .samples.find(({ id }) => id === "rename-within-crate").changedFiles;
+    const transport = (path) => {
+      const reply = base(path);
+      // GitHub reports a detected rename as one record carrying both paths.
+      return /\/pulls\/\d+\/files/.test(path) &&
+        reply.pages[0].some(({ filename }) => filename === from || filename === to)
+        ? { ...reply, pages: [[{ filename: to, previous_filename: from, status: "renamed" }]] }
+        : reply;
+    };
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    markClean(out);
+    const { baseline } = reportFromDirectory(out);
+    assert.deepEqual(baseline.gaps, []);
+  });
+  await withTempDir(async (dir) => {
+    const { exports, transport: base } = completeCollection(dir);
+    const transport = (path) => {
+      const reply = base(path);
+      if (!/\/pulls\/\d+$/.test(path) || !reply.pages[0].title.startsWith("release: "))
+        return reply;
+      const [pull] = reply.pages;
+      return {
+        ...reply,
+        pages: [{ ...pull, head: { ...pull.head, repo: { full_name: "fork/r" } } }],
+      };
+    };
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    const { baseline } = reportFromDirectory(out);
+    assert.ok(
+      baseline.gaps.some((gap) =>
+        /CH17\/project-release-pr rejected: pull request \d+ is release kind ""/.test(gap),
+      ),
+    );
+  });
+});
+
+test("a malformed binding is refused before any read, and an output inside the tree is not dirt", async () => {
+  await withTempDir(async (dir) => {
+    const exports = join(dir, "exports");
+    mkdirSync(exports);
+    const { transport, seen } = tableTransport({});
+    for (const bad of [
+      [null],
+      [{}],
+      [{ stream: "CC01", pullRequests: { a: "x" } }],
+      [{ scenario: "s", pullRequest: 0 }],
+    ]) {
+      writeFileSync(join(exports, "bindings.json"), JSON.stringify(bad));
+      await assert.rejects(
+        collect({ out: join(dir, "run"), repo: "o/r", ...WINDOW, transport, exportDir: exports }),
+        /export bindings\.json entry 0/,
+      );
+    }
+    assert.equal(seen.length, 0);
+
+    // A clean checkout stays clean however the output is placed inside it.
+    const root = join(dir, "tree");
+    mkdirSync(root);
+    const git = (...args) =>
+      spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+        cwd: root,
+        encoding: "utf8",
+      });
+    git("init", "-q");
+    writeFileSync(join(root, "file.txt"), "x");
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+    // An export copied into the output is a record written before the manifest is.
+    writeFileSync(join(exports, "bindings.json"), "[]");
+    const { manifest } = await collect({
+      out: join(root, "out"),
+      repo: "o/r",
+      ...WINDOW,
+      transport,
+      exportDir: exports,
+      root,
+    });
+    assert.equal(manifest.dirty, false);
+  });
+});
+
+test("a rate limit after a read's first page stops collection and keeps its classification", async () => {
+  await withTempDir(async (dir) => {
+    const seen = [];
+    const transport = (path) => {
+      seen.push(path);
+      return {
+        status: 403,
+        pages: [[1]],
+        detail: "API rate limit exceeded",
+        partial: true,
+        requests: 2,
+      };
+    };
+    await collect({ out: join(dir, "run"), repo: "o/r", ...WINDOW, transport });
+    assert.equal(seen.length, 1);
+    const receipts = JSON.parse(readFileSync(join(dir, "run", "receipts.json"), "utf8"));
+    assert.equal(
+      receipts.find(({ family }) => family === "requiredContexts").outcome,
+      "rate-limited",
+    );
+  });
+});
+
+test("runs with no job records report an unknown peak, not zero runners", () => {
+  const push = {
+    ...run(1, "h", 0),
+    event: "push",
+    path: ".github/workflows/ci.yml",
+    pull_requests: [],
+    head_branch: "main",
+  };
+  const report = buildReport({
+    manifest: { window: WINDOW },
+    receipts: [{ family: "runs", outcome: "ok", file: "runs" }],
+    read: () => [{ total_count: 1, workflow_runs: [push] }],
+    corpus,
+  });
+  const { peakRunnersPerStream } = report.observational.populations["push-unclassified"];
+  assert.equal(peakRunnersPerStream.status, "unavailable");
+});
+
+test("a bound row with no proven landing of its own is named beside the pooled figure", async () => {
+  await withTempDir(async (dir) => {
+    const { exports, transport } = completeCollection(dir);
+    const out = join(dir, "run");
+    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
+    const report = reportFromDirectory(out);
+    assert.ok(report.readyToLanded.rowsWithoutProvenLanding.includes("CH02/wasm-root"));
+    assert.ok(!report.readyToLanded.rowsWithoutProvenLanding.includes("CH01/docs"));
+    assert.ok(
+      report.limitations.some((line) => /pooled over corpus-bound pull requests/.test(line)),
     );
   });
 });
