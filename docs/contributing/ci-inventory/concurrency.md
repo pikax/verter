@@ -1,6 +1,6 @@
 # Queued cancellation and slot behaviour
 
-Observed 2026-11-02 from public `pikax/verter` Actions records. **Job-level slot behaviour is still unmeasured, so slot adoption stays held.** No workflow here declares a job-level `concurrency` group. The operator ruled that a throwaway trial workflow on the candidate branch may measure it; that trial has not run (see [Trial status](#trial-status)).
+Observed 2026-11-02 from public `pikax/verter` Actions records. **Outcome: not adopted.** Job-level slot behaviour is unmeasured, and slots are not adopted. No workflow here declares a job-level `concurrency` group. On 2026-11-02 the operator declined to supply a trial environment and removed the live trial from this investigation (see [Trial status](#trial-status)). This completes the bounded research without a slot-safety or supersession-only claim.
 
 What the records do show is workflow-level supersession. Every cancelled run sampled ended with a failing `CI Required`, and none read as passing. They also show one hazard that a slot layout would inherit: re-running an older run can cancel the newest push.
 
@@ -11,9 +11,9 @@ What the records do show is workflow-level supersession. Every cancelled run sam
 | A cancelled or pending **slot** job is not read as passing | **Unmeasured**: no slot job exists to observe                                                            |
 | Static slots leave acceptable idle capacity                | **Unmeasured**: no slot occupancy or account capacity records                                            |
 
-This supports neither `slot-groups-safe` nor `supersession-only` yet, because both are claims about slot jobs. The result stays an undeclared discovery until the trial below produces measurements; declaring either outcome now would assert a measurement that does not exist.
+This supports neither `slot-groups-safe` nor `supersession-only`, because both are claims about slot jobs. The recorded disposition is **not adopted**, represented as an undeclared discovery rather than either measured outcome. It closes this investigation; it does not resolve slot safety or authorize downstream slot adoption. A later live trial would be separately authorized new work, not unfinished work in this investigation.
 
-Either outcome is decided by one scenario each:
+The retained design describes how a future trial could distinguish the measured outcomes:
 
 - **`supersession-only`** if any one of these is observed: a cross-ref eviction of an unsuperseded run's pending slot job; a slot sitting idle beside a queued, unsuperseded job; or a cancelled or pending slot job read as passing.
 - **`slot-groups-safe`** only if the whole contract holds across every scenario in the trial.
@@ -119,11 +119,11 @@ These come from GitHub's [concurrency documentation](https://docs.github.com/en/
 - `queue: max` allows up to 100 pending jobs, handled first in, first out, though the documentation says ordering is not guaranteed.
 - `queue: max` with `cancel-in-progress: true` is a workflow validation error.
 
-Read against the current aggregate, which treats a cancelled dependency as failure, the default queue suggests a specific risk. Three pull requests contending for one slot could cancel the middle one's job, turning a run nobody superseded red. That would be a false failure and unfair progress rather than a false pass, and neither declared outcome covers it. It needs measuring, as does whether `queue: max` jobs are released promptly when their run is superseded.
+Read against the current aggregate, which treats a cancelled dependency as failure, the default queue suggests a specific risk. Three pull requests contending for one slot could cancel the middle one's job, turning a run nobody superseded red. That would be a false failure and unfair progress rather than a false pass. Under the retained trial interpretation, observing this would decide `supersession-only`; documentation alone is not that observation. A future trial could also measure whether `queue: max` jobs are released promptly when their run is superseded.
 
 ## Trial status
 
-The operator ruled that the trial runs on the candidate branch under existing permissions: a throwaway, path-filtered, non-required workflow with trial-prefixed group names, deleted from the branch before review. It has **not** been run, and the cause is environmental:
+The earlier operator ruling authorized a candidate-branch trial under existing permissions: a throwaway, path-filtered, non-required workflow with trial-prefixed group names, deleted from the branch before review. It was **not** run. The author turns retained these access limitations:
 
 | Evidence                                           | Result                                                                                       |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -132,11 +132,13 @@ The operator ruled that the trial runs on the candidate branch under existing pe
 | When the branch reaches GitHub                     | After the job ends; the workflow publishes the committed head, so no run exists during a job |
 | Controlled superseding pushes, re-runs, dispatches | Need GitHub write access during the job, which no worker class provides                      |
 
-So a branch push never reaches Actions while a job is running, and the trial's scenarios (superseding a waiting job, three refs contending for one slot, re-running an older head, idle capacity) cannot be driven or observed from here. Per the ruling the hold stands and the choice of trial environment goes back to the operator; the question is recorded with the job. The measurements below stay owed, not waived.
+These limitations prevented the authors from driving and observing the trial's scenarios (superseding a waiting job, three refs contending for one slot, re-running an older head, idle capacity). Public read access is available; it does not supply controlled slot experiments.
 
-## Trial design
+The subsequent operator decision on 2026-11-02 supplies the disposition: no trial environment is being supplied now, the live trial leaves this task, and the outcome is **not adopted**. The investigation retains its observer, supersession observations and access/error evidence. It owes no live slot measurement. Slot adoption remains held, and any later trial requires new authorization and its own scope. This decision is not negative experimental evidence about slots.
 
-The layout under test, which has not been run:
+## Retained design for a future trial
+
+The proposed layout below has not been run. It is reference material for separately authorized future work, not a prerequisite for completing this investigation:
 
 ```yaml
 concurrency: # workflow level: per-ref supersession, mirrors the live group
@@ -159,7 +161,7 @@ Coordinate jobs with an explicit release signal. Deadlines may only guard agains
 4. **Idle capacity.** Compare contended static slots with an available-slot control under the same workload. Retain occupancy, runnable waiting demand and unused capacity together. A job waiting alone does not prove capacity is idle.
 5. **Evidence.** Capture every attempt with `node scripts/ci-concurrency-observe.mjs --repo <trial> --token-env <NAME> --annotations-all --obligation <job> --run ...`, polling while transitions are live. In-progress jobs count toward peak running until observed complete. A record that cannot be read stays missing and never counts as success. Cancel causes are kept per Actions job id, because display names repeat; each is a `group`, an `unrecognised` message kept verbatim (GitHub does not document the annotation wording, so the driver only knows the text read from the runs above), or `none`. A job record without a `check_run_url` is reported missing rather than read by job id.
 
-Outcome decision, fixed by the ruling: `supersession-only` if a cross-ref eviction of an unsuperseded run's pending slot job occurs, if a slot idles beside a queued unsuperseded job, or if any cancelled or pending slot job reads as passing; `slot-groups-safe` only when none occurs across scenarios 1 to 4. The record names the deciding scenario.
+The earlier ruling's trial interpretation remains useful for future work: `supersession-only` if a cross-ref eviction of an unsuperseded run's pending slot job occurs, if a slot idles beside a queued unsuperseded job, or if any cancelled or pending slot job reads as passing; `slot-groups-safe` only when none occurs across scenarios 1 to 4. Such a future record would name the deciding scenario. Neither outcome was measured here.
 
 ## Findings outside this research
 
@@ -170,4 +172,4 @@ Both are correctness observations that this research does not own. They are rout
 
 ## Disposition
 
-Slot adoption stays held, and per-ref supersession remains the only configured concurrency. This research does not establish a cross-PR throttle, fair progress, or full-before-merge delivery, and it changes no production workflow or required-check policy. The concurrency-layout outcome stays undeclared until the trial produces measurements.
+**Not adopted; bounded research complete.** Slot adoption stays held, and per-ref supersession remains the only configured concurrency. This research does not establish slot safety, supersession-only, a cross-PR throttle, fair progress, or full-before-merge delivery, and it changes no production workflow or required-check policy. The discovery record carries this non-adoption disposition without selecting either measured outcome. Downstream work must retain its existing evidence requirements; completion here does not unblock slot enablement. A later trial is new work.
