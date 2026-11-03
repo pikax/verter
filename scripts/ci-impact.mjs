@@ -320,6 +320,9 @@ export const PATH_FILTERS = Object.freeze({
   // rules. A script a lane executes is named in that lane's filter as well.
   scripts: [
     "scripts/**",
+    // The CLI contract tests run in js-build-test and read both JSON inputs.
+    "tests/cli/**",
+    "docs/arch/cli/*.json",
     "tests/formatter/**",
     "tests/kernel/LRA0/**",
     // The rule/action inventory's data test requires these row sources to exist.
@@ -919,7 +922,7 @@ const COMPILED_CI_INERT_PATHS = INERT.compiled;
  * filter may be missing paths or an inert path may force the fallback, so the
  * gates run every lane and the audit fails, naming the file.
  */
-const SELECTION_CONFIG_ERRORS = Object.freeze(
+export const SELECTION_CONFIG_ERRORS = Object.freeze(
   [STP1.error, INERT.error].filter(Boolean).map(({ file, message }) => ({
     file,
     message: `${file}: ${message}`,
@@ -1181,7 +1184,7 @@ function summaryMarkdown(changedFiles, filterHits, impact, gates) {
   return lines.join("\n");
 }
 
-function loadCargoMetadata(cwd) {
+export function loadCargoMetadata(cwd) {
   const raw = execFileSync(
     "cargo",
     ["metadata", "--format-version=1", "--all-features", "--locked"],

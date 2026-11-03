@@ -34,5 +34,7 @@ pub(in crate::compat) use support::{
     SupportStatement, SupportVerdict, UnknownReason, VersionAdded, VersionRemoved,
 };
 pub(in crate::compat) use vocabulary::{
-    browserslist_family, BrowserslistQueryForm, QueryAdmission, UnsupportedQueryReason,
+    all_family_coverage, browserslist_family, AllFamilyCoverage, BrowserslistQueryForm,
+    QueryAdmission, UncarriedFamily, UncarriedFamilyReason, UnsupportedQueryReason,
+    BROWSERSLIST_FAMILIES,
 };

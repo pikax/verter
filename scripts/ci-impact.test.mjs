@@ -310,6 +310,24 @@ test("a change to CI-inert paths only runs no lane", () => {
   assert.deepEqual(gatesOn(gates), []);
 });
 
+test("CLI contract validation inputs select the script lane without a full fallback", () => {
+  for (const file of [
+    "tests/cli/contract.test.mjs",
+    "tests/cli/validate.mjs",
+    "docs/arch/cli/command-contract.v1.json",
+    "docs/arch/cli/ownership-schema.v1.json",
+  ]) {
+    const { hits, impact, gates } = select([file]);
+    assert.equal(hits.scripts, true, file);
+    assert.equal(impact.everything, false, file);
+    assert.equal(gates.js, "true", file);
+  }
+  // The contract test also reads the release workflows it inventories.
+  for (const file of [".github/workflows/release.yml", ".github/workflows/release-ide.yml"]) {
+    assert.equal(select([file]).gates.js, "true", file);
+  }
+});
+
 test("an exclusion removes only what the filter's own includes matched", () => {
   // The js filter covers packages/** except the playground, which has its
   // own lane; a paths-filter negation once made it cover every other file.
