@@ -99,6 +99,16 @@ storage) and the `test_`-prefixed hooks are ratified for narrowing to
 `pub(crate)` / test configuration — do not add new consumers of them; they are not a
 supported API for contributions.
 
+Owned request admission uses `begin_owned_request` with the waiting root task
+and cancellation token; polling yields without driving or parking.
+`enter_execution_scope` establishes execution authority at an external synchronous
+boundary. Its dependency driver may call `pump_owned_dependency`, which respects
+worker routing and the active path; poll-only dependencies do not receive this
+capability. On native targets, `stage_task_boundary` captures the submitted-stage
+frontier and `wait_stage_tasks_before` waits until those tasks finish dropping
+their captures. Later submissions do not extend that wait, and stage work must
+never call it.
+
 Hooks used by cross-crate integration tests, including
 `Scheduler::test_wait_until_job_queue_depth`, stay `pub` behind
 `cfg(any(test, feature = "test-support"))`. Each has a `test-configuration`
