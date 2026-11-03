@@ -7,6 +7,7 @@ fn forge(callee: &SymbolicCallee) -> SymbolicCallee {
     SymbolicCallee {
         ty: callee.ty().clone(),
         frame_root: None,
+        member_spans: std::sync::Arc::from([]),
     }
 }
 

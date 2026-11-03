@@ -259,6 +259,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return None;
         }
         let mut members = Vec::with_capacity(bindings.len());
+        // A name the table cannot give a type (an ambiguous star export, an
+        // export that does not resolve) is one the checker can still read:
+        // leaving it out says nothing about whether the module has it.
+        let mut withheld = Vec::new();
         for (name, binding) in bindings {
             let node = match binding {
                 Some(ModuleExportBinding::Value(identity)) => {
@@ -273,7 +277,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         // selected member's TypeOf is resolved by its consumer.
                         match self.scoped_typeof_carrier(root) {
                             Some(node) => node,
-                            None => continue,
+                            None => {
+                                withheld.push(verter_type_expr::OwnedStr::from(name.as_ref()));
+                                continue;
+                            }
                         }
                     } else {
                         match self.execute_read(self.typeof_key_for(root, context)).value {
@@ -285,7 +292,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             {
                                 node
                             }
-                            _ => continue,
+                            _ => {
+                                withheld.push(verter_type_expr::OwnedStr::from(name.as_ref()));
+                                continue;
+                            }
                         }
                     }
                 }
@@ -305,7 +315,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         },
                     )
                 }
-                None => continue,
+                None => {
+                    withheld.push(verter_type_expr::OwnedStr::from(name.as_ref()));
+                    continue;
+                }
             };
             members.push(Self::module_member(name.clone(), node, module));
         }
@@ -317,7 +330,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         Some((
             self.graph().intern_node_with_scope(
-                SemanticNodeData::Object(SurfaceView::from_members(members, None)),
+                SemanticNodeData::Object(
+                    SurfaceView::from_members(members, None).withholding_keys(withheld),
+                ),
                 scope,
             ),
             roots,

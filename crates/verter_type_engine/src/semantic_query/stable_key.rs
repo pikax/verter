@@ -1316,10 +1316,24 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.header(category::SYNTHETIC, subtag::KEYOF);
             enc.child(*base);
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        // Which access a shell stands for decides what an absent key answers,
+        // so two origins are two keys: equal keys license a collapse. A
+        // written access, the authored form, adds nothing, so it keeps the
+        // order it sorts in; the others add one trailing byte, which the
+        // length-prefixed child keys keep unambiguous.
+        SemanticNodeData::IndexedAccess {
+            object,
+            index,
+            origin,
+        } => {
             enc.header(category::SYNTHETIC, subtag::INDEXED_ACCESS);
             enc.child(*object);
             encode_property_key(&mut enc, index);
+            match origin {
+                crate::semantic_query::IndexedAccessOrigin::Written => {}
+                crate::semantic_query::IndexedAccessOrigin::Composed => enc.u8(1),
+                crate::semantic_query::IndexedAccessOrigin::Instantiated => enc.u8(2),
+            }
         }
         SemanticNodeData::Mapped { source, mapper } => {
             enc.header(category::SYNTHETIC, subtag::MAPPED);
@@ -1584,6 +1598,11 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 encode_surface_entry(&mut enc, entry);
             }
             enc.bool(surface.has_known_index_signature());
+            // Nothing for the ordinary surface: its order may not move.
+            surface.encode_withheld_keys(|name| {
+                enc.u8(2);
+                enc.str(name);
+            });
             match surface.keyspace {
                 None => enc.u8(0),
                 Some(ks) => {
@@ -2112,6 +2131,9 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
                 crate::semantic_query::CheckerDiagnosticOperation::TypeAliasDeclaration => 12,
                 crate::semantic_query::CheckerDiagnosticOperation::TypeReference => 13,
+                crate::semantic_query::CheckerDiagnosticOperation::MemberRead => 14,
+                crate::semantic_query::CheckerDiagnosticOperation::ReturnInference => 15,
+                crate::semantic_query::CheckerDiagnosticOperation::ParameterDeclaration => 16,
             });
             // Frozen: a proven recovery and a budget recovery are distinct nodes.
             enc.u8(match basis {

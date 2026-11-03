@@ -2925,6 +2925,31 @@ impl DeclBodyMemo {
         }
     }
 
+    /// Lease-only read of the name span of each reference to the type `name`
+    /// a binder inside the file does not scope. `Ready(None)` with no service
+    /// or on a fatal parse; `LeaseMiss` on a broken lease pin.
+    pub fn type_reference_name_spans(&self, name: &str) -> DemandOutcome<Vec<verter_span::Span>> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let name = name.to_owned();
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            Some(
+                verter_semantic::analysis::function_program::type_reference_name_spans(
+                    program.borrow_dependent(),
+                    &name,
+                ),
+            )
+        });
+        match outcome {
+            None => DemandOutcome::LeaseMiss,
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(spans)) => DemandOutcome::Ready(Some(Arc::new(spans))),
+        }
+    }
+
     /// Lease-only re-borrow of ONE selected position of the single-statement
     /// class declaration `name`: the instance members `member` names (every
     /// overload and accessor of it), or the `extends` reference — the class's other

@@ -733,7 +733,7 @@ fn node_has_direct_macro_reference<M: verter_audit::observe::ObserveExec>(
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
                 worklist.extend(expressions.iter().copied());
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 worklist.push(*object);
                 if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);

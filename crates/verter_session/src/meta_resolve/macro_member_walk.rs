@@ -211,7 +211,7 @@ pub(crate) fn slot_binding_targets_define_props_root<M: verter_audit::observe::O
             loop {
                 let data = dispatch.graph().read_in_scope(current)?;
                 match data.as_ref() {
-                    SemanticNodeData::IndexedAccess { object, index } => {
+                    SemanticNodeData::IndexedAccess { object, index, .. } => {
                         if !matches!(index, IndexKey::String(_) | IndexKey::Number(_)) {
                             return None;
                         }

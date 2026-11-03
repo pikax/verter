@@ -1374,7 +1374,7 @@ fn indexed_access_string_key_spine<M: verter_audit::observe::ObserveExec>(
 ) -> Option<(Vec<String>, SemanticNodeId)> {
     let mut path_rev: Vec<String> = Vec::new();
     let mut cursor = registry_unalias(dispatch, node);
-    while let Some(SemanticNodeData::IndexedAccess { object, index }) =
+    while let Some(SemanticNodeData::IndexedAccess { object, index, .. }) =
         registry_node_data(dispatch, cursor).as_deref()
     {
         let IndexKey::String(member) = index else {
@@ -1868,7 +1868,7 @@ fn collect_registry_refs_node_inner<M: verter_audit::observe::ObserveExec>(
                 );
             }
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             collect_registry_refs_node_inner(
                 ctx,
                 dispatch,
@@ -2005,7 +2005,7 @@ fn collect_registry_member_surface_refs_node<M: verter_audit::observe::ObserveEx
                 visited,
             );
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             // Route-root operand positions: a plain ref head here IS the
             // root of an actively demanded projection, so it is always
             // dependency-eligible regardless of the inherited policy.

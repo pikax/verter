@@ -10917,6 +10917,85 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Whether the class and everything it extends declare no member
+    /// `name`, read from their declarations alone, so it holds while the
+    /// class is being composed. Augmentation, a merged declaration or an
+    /// `extends` arm that names no class proves nothing.
+    pub(super) fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool {
+        let mut followed: FxHashSet<(String, verter_type_expr::TopLevelOwnerId, String)> =
+            FxHashSet::default();
+        let mut at: (
+            String,
+            verter_type_expr::TopLevelOwnerId,
+            String,
+            Vec<SemanticNodeId>,
+        ) = (canonical.to_owned(), owner, class.to_owned(), args.to_vec());
+        loop {
+            let (canonical, owner, class, args) = at;
+            if !followed.insert((canonical.clone(), owner, class.clone()))
+                || self.class_takes_module_augmentation(&canonical, &class)
+            {
+                return false;
+            }
+            match self.class_member_step(&canonical, owner, &class, &args, name) {
+                Some(ClassMemberStep::Inherited {
+                    base: Some((base, base_args)),
+                    ..
+                }) => {
+                    at = (
+                        base.canonical_id.as_str().to_owned(),
+                        base.owner,
+                        base.decl_name.as_str().to_owned(),
+                        base_args,
+                    );
+                }
+                Some(_) => return false,
+                None => return self.class_has_no_heritage(&canonical, owner, &class, name),
+            }
+        }
+    }
+
+    /// Whether the selectively served class declares no `extends` arm: the
+    /// step that found no member of `name` stopped there, not at a declaration
+    /// the selective route cannot serve.
+    fn class_has_no_heritage(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        name: &str,
+    ) -> bool {
+        let Some(prepared) = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, class)
+        else {
+            return false;
+        };
+        if prepared.kind != verter_session_query::declarations::TypeDeclKind::Class {
+            return false;
+        }
+        let slot = |step| verter_type_expr::locators::TypeBodySlot {
+            anchor: prepared.body_facts.body_slot.anchor.clone(),
+            path: verter_type_expr::OwnedSlice::from(vec![step].into_boxed_slice()),
+        };
+        let members = verter_type_expr::locators::TypeBodyPathStep::ClassMembersNamed {
+            name_hash: verter_type_expr::locators::class_member_name_hash(name),
+        };
+        super::raise::deref_slot_body(self.ctx, &slot(members)).is_some()
+            && super::raise::deref_slot_body(
+                self.ctx,
+                &slot(verter_type_expr::locators::TypeBodyPathStep::ClassHeritage),
+            )
+            .is_none()
+    }
+
     /// One class of the inheritance path a [`Self::class_member_source`]
     /// read follows: the class's own members named `name`, else its
     /// `extends` arm and the class declaration that arm references.
@@ -13975,7 +14054,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         stack.extend(expressions.iter().copied());
                     }
                     SemanticNodeData::KeyOf { base } => stack.push(*base),
-                    SemanticNodeData::IndexedAccess { object, index } => {
+                    SemanticNodeData::IndexedAccess { object, index, .. } => {
                         stack.push(*object);
                         if let IndexKey::Computed(idx_node) = index {
                             stack.push(*idx_node);
@@ -14367,6 +14446,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     SemanticNodeData::IndexedAccess {
                         object: base,
                         index: index.clone(),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     },
                 );
                 let mut out = super::walk::QueryBuildOutput::from((
@@ -14501,7 +14581,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.finite_index_keys(index)
     }
 
-    fn finite_index_keys(
+    pub(super) fn finite_index_keys(
         &self,
         index: SemanticNodeId,
     ) -> Option<Vec<crate::semantic_query::IndexKey>> {
@@ -15254,13 +15334,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.construction_meter(),
         );
         self.deposit_canonical_evidence(reduced.evidence);
-        matches!(
-            self.graph().node_data(reduced.node).as_deref(),
+        match self.graph().node_data(reduced.node).as_deref() {
             Some(SemanticNodeData::Primitive(
-                PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined
-            ))
-        )
-        .then_some(reduced.node)
+                PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined,
+            )) => Some(reduced.node),
+            Some(SemanticNodeData::Opaque(error)) if is_certified_recovery(error) => {
+                Some(reduced.node)
+            }
+            _ => None,
+        }
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -16554,6 +16636,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.graph().intern_node(SemanticNodeData::IndexedAccess {
                     object: container,
                     index: self.normalized_index_key_node(key),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                 })
             }
             crate::semantic_query::MapperKind::Computed => {
@@ -17336,6 +17419,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => graph.intern_node(SemanticNodeData::IndexedAccess {
                         object: source,
                         index: IndexKey::from_known(key.key.clone()),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }),
                 }
             } else if value_expr_is_k_independent {
@@ -17472,6 +17556,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (None, true) => graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: source,
                     index: IndexKey::Computed(index_key.key_type),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                 }),
                 (_, false) if value_expr_is_k_independent => {
                     if shared_value.is_none() {
@@ -17662,7 +17747,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// queries; object interiors stay addressable, though Expanded
     /// publication reads their closed operators. Operational partiality
     /// retains its completion and cache-suppression evidence. An opaque
-    /// result keeps the substituted carrier, never the free mapper binder.
+    /// result keeps the substituted carrier, never the free mapper binder;
+    /// a certified checker recovery is the member's answer.
     pub(super) fn materialize_mapped_member_value_for_key(
         &self,
         mapper: &crate::semantic_query::MapperKey,
@@ -17691,13 +17777,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let evaluated = self
             .evaluate_mapped_member_value_outcome(substituted, context)
             .into_active_query_build_node(self);
-        if matches!(
-            self.graph().node_data(evaluated).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ) {
-            substituted
-        } else {
-            evaluated
+        match self.graph().node_data(evaluated).as_deref() {
+            Some(SemanticNodeData::Opaque(error)) if !is_certified_recovery(error) => substituted,
+            _ => evaluated,
         }
     }
 
@@ -17740,6 +17822,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             if matches!(data.as_ref(), SemanticNodeData::IndexedAccess {
                 object, index: crate::semantic_query::IndexKey::Computed(index),
+                ..
             } if (*object == source || *object == resolved_source) && *index == mapper.parameter_node)
             {
                 reads.push(node);
@@ -18485,7 +18568,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);
@@ -22836,4 +22919,11 @@ impl TransactionReadRecording<'_> {
         };
         Some((reuse, replay))
     }
+}
+
+/// Whether `error` is the checker's error type after a diagnostic it
+/// recovers from: an answer, where any other error leaves a position unread.
+pub(super) fn is_certified_recovery(error: &QueryError) -> bool {
+    super::query_error_disposition::query_error_disposition(error)
+        == super::query_error_disposition::QueryErrorDisposition::CheckerRecovery
 }

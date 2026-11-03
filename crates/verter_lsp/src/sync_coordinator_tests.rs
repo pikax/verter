@@ -2023,6 +2023,37 @@ async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface
     );
 }
 
+/// An injected provider can serve explicit feature queries while the selected
+/// route is native-only. Its absent carrier surface must not leave diagnostics
+/// incomplete, and an existing one must not contribute provider diagnostics.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_neutral_route_certifies_native_diagnostics_with_an_injected_provider() {
+    let (documents, states, provider, canonical_id, _, mut deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    deps.type_provider_kind = crate::TypeProviderKind::None;
+    provider.clear_calls();
+
+    let diagnostics = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "PROVIDER_DIAG_SENTINEL"),
+        "a native route must not merge an injected provider's diagnostics"
+    );
+    assert!(
+        provider.calls().is_empty(),
+        "native diagnostics must not query the injected provider"
+    );
+
+    states.clear();
+    assert!(publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await);
+    assert!(
+        documents.diagnostics_ready(&uri),
+        "a native route is complete without a committed provider surface"
+    );
+}
+
 /// `needs_provider_sync` is a reconciliation work bit, not a document revision:
 /// an interactive IDE sync may reinsert it for deferred API work after the
 /// coordinator has synchronized the current carrier. Valid diagnostics for that

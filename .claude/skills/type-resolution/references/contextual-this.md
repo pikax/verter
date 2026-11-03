@@ -40,13 +40,21 @@ not a marker, even in the module whose own `declare global` block contributes
 the marker every other module reads; with no declaration of the name the
 receiver recovers without the marker, never through it.
 Without the marker, a method reading a member its object literal's own
-receiver does not declare (the checker's TS2339 recovery, which the flow rail
-does not model) records `FlowReturnDegradation::AbsentReceiverMember` as the
-first cause; a generic call inferring from that method's return is then
-refused with `FlowReturnDegradation::ContextSensitiveInference` beneath it,
-never collapsed into `UnrepresentableCallee` and never answered through the
-marker. A refusal for any other reason (a missing dependency) keeps the call's
-own cause, so the two stay distinguishable on the shared flow result.
+receiver does not declare is the checker's TS2339 and its error type
+(`checker-diagnostics.md`, "Error recovery in a flow"); a generic call infers
+through that recovery, never through the marker. A refusal for any other reason
+(a missing dependency, a callee that is not callable) keeps the call's own
+typed cause, so a recovery and a refusal stay distinguishable on the shared
+flow result. With no `ThisType` declared at all, a project whose `noLib`
+program declares every name reads the reference as the checker's TS2304 error
+type: `G & <error>` is the error type wherever it is reached, an argument
+relates to it, inference deposits nothing into its other arms, and the call
+completes with those parameters uninferred. A member the resulting store proves
+absent is a written access's TS2339 and `any`, and the store literal's `this`
+reads the error type, so what its functions reported on their own is forgotten:
+see `checker-diagnostics.md`. A contextual `this` holding the type the literal
+infers (`ThisType<A & M>`) is not the error type: a member it lacks is TS2339,
+and TS7023 at the method whose return reads it.
 Structural readers still instantiate the empty interface normally.
 
 Top-level contextual literals and calls containing context-sensitive object

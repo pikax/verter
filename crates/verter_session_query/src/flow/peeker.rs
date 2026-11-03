@@ -480,6 +480,8 @@ impl<'g> ReturnPathPeeker<'g> {
         // reachability is untouched — it flows through the effect
         // frontier regardless of this stop.
         let mut stopped_object_entries = false;
+        let mut object_entries: Vec<FlowNodeId> = Vec::new();
+        let mut entry_matched = false;
         for edge in edges.iter().rev() {
             let (write_path, certainty, object_entry) = match &edge.kind {
                 FlowEdgeKind::PathWrite {
@@ -496,12 +498,16 @@ impl<'g> ReturnPathPeeker<'g> {
             if object_entry && stopped_object_entries {
                 continue;
             }
+            if object_entry {
+                object_entries.push(edge.to);
+            }
             match match_write_path(write_path, &state.paths, path) {
                 WritePathMatch::None => {}
                 WritePathMatch::Static {
                     consumed,
                     remainder,
                 } => {
+                    entry_matched = true;
                     state.worklist.push(WorkItem::Value {
                         node: edge.to,
                         path: remainder,
@@ -518,6 +524,7 @@ impl<'g> ReturnPathPeeker<'g> {
                     }
                 }
                 WritePathMatch::Unknown { remainder } => {
+                    entry_matched = true;
                     // An unknown-key write may either provision the
                     // demanded key (consume it) or merge a whole source
                     // object (spread — the demand projects INTO the
@@ -532,6 +539,17 @@ impl<'g> ReturnPathPeeker<'g> {
                         path,
                     });
                 }
+            }
+        }
+        // A member no entry of the literal writes reads the literal's whole
+        // type: an apparent member, or the absent member the checker reports
+        // with that type in its message.
+        if path != 0 && !entry_matched {
+            for entry in object_entries {
+                state.worklist.push(WorkItem::Value {
+                    node: entry,
+                    path: 0,
+                });
             }
         }
         Ok(())
