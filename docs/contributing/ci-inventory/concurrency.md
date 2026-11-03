@@ -1,0 +1,175 @@
+# Queued cancellation and slot behaviour
+
+Observed 2026-11-02 from public `pikax/verter` Actions records. **Outcome: not adopted.** Job-level slot behaviour is unmeasured, and slots are not adopted. No workflow here declares a job-level `concurrency` group. On 2026-11-02 the operator declined to supply a trial environment and removed the live trial from this investigation (see [Trial status](#trial-status)). This completes the bounded research without a slot-safety or supersession-only claim.
+
+What the records do show is workflow-level supersession. Every cancelled run sampled ended with a failing `CI Required`, and none read as passing. They also show one hazard that a slot layout would inherit: re-running an older run can cancel the newest push.
+
+| Contract clause                                            | Result                                                                                                   |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| A cancelled run's aggregate is not read as passing         | Held in every sampled run, at workflow level only                                                        |
+| The latest run's aggregate reflects only its own jobs      | Held per attempt, but "latest" is unsafe unless keyed to the tested tree ([PR 1080](#older-tree-re-run)) |
+| A cancelled or pending **slot** job is not read as passing | **Unmeasured**: no slot job exists to observe                                                            |
+| Static slots leave acceptable idle capacity                | **Unmeasured**: no slot occupancy or account capacity records                                            |
+
+This supports neither `slot-groups-safe` nor `supersession-only`, because both are claims about slot jobs. The recorded disposition is **not adopted**, represented as an undeclared discovery rather than either measured outcome. It closes this investigation; it does not resolve slot safety or authorize downstream slot adoption. A later live trial would be separately authorized new work, not unfinished work in this investigation.
+
+The retained design describes how a future trial could distinguish the measured outcomes:
+
+- **`supersession-only`** if any one of these is observed: a cross-ref eviction of an unsuperseded run's pending slot job; a slot sitting idle beside a queued, unsuperseded job; or a cancelled or pending slot job read as passing.
+- **`slot-groups-safe`** only if the whole contract holds across every scenario in the trial.
+
+## Access
+
+| Operation                                      | Result                                                                          |
+| ---------------------------------------------- | ------------------------------------------------------------------------------- |
+| `gh api repos/pikax/verter/actions/runs`       | HTTP 401 `Bad credentials`: the job is deliberately kept from writing to GitHub |
+| Unauthenticated `GET` of runs, jobs and checks | HTTP 200: the repository is public, limited to 60 requests an hour per address  |
+| Dispatching, cancelling or pushing a trial     | Not possible in this job: see [Trial status](#trial-status)                     |
+
+## Observed runs
+
+Reproduce with the read-only driver. It exits non-zero if any record is unreadable or any aggregate misreports its own jobs:
+
+```sh
+node scripts/ci-concurrency-observe.mjs --repo pikax/verter --annotations \
+  --run 40324254479 --run 40327765458 --run 40328263341 \
+  --run 41349220820@1 --run 41286541386@1 --run 41286541386@2 --run 41286541386@3 \
+  --run 40276061212 --run 40277406274 --run 40098863892 --run 41362800277
+```
+
+The command spends 29 requests with the default budget of 60: a run record and a job page for each of the eleven runs, plus one annotation read for each of the seven runs with a cancelled job. The final re-run on 2026-11-02 used the unauthenticated API (60 requests an hour) and exhausted it, so 41362800277's job page answered HTTP 403 and the driver reported it as `missing` with exit status 2; the other ten records were read, matched every table row below and had no verdict violation. 41362800277's cancel cause and failing `CI Required` below come from the earlier read of that run, and are the one claim here not reproduced by the last run. Without `@attempt` the driver reads the latest attempt, so a run that was re-run since (41349220820, now at attempt 2) needs its attempt named. `--annotations` reads only the first cancelled job's cause; `--annotations-all` reads every cancelled job and needs a larger `--max-requests` or a token.
+
+"Cancelled, ran" means the job held a runner when it was cancelled. "Cancelled, no runner" means it never reached one. Peak is the most jobs running at once in that attempt.
+
+| Run and attempt | Pull request | Run conclusion | `CI Required` | Cancelled, ran | Cancelled, no runner | Peak | Cancel cause (group)      |
+| --------------- | ------------ | -------------- | ------------- | -------------- | -------------------- | ---- | ------------------------- |
+| 40324254479 #1  | 1032         | cancelled      | failure       | 2              | 0                    | 17   | `ci-refs/pull/1032/merge` |
+| 40327765458 #1  | 1032         | cancelled      | failure       | 1              | 33                   | 1    | `ci-refs/pull/1032/merge` |
+| 40328263341 #1  | 1032         | success        | success       | 0              | 0                    | 20   | none                      |
+| 40276061212 #1  | 1030         | cancelled      | failure       | 1              | 29                   | 1    | `ci-refs/pull/1030/merge` |
+| 40277406274 #1  | 1018         | cancelled      | failure       | 3              | 16                   | 6    | `ci-refs/pull/1018/merge` |
+| 41286541386 #1  | 1080         | failure        | failure       | 0              | 0                    | 17   | none                      |
+| 41286541386 #2  | 1080         | failure        | failure       | 0              | 0                    | 17   | none                      |
+| 41286541386 #3  | 1080         | success        | success       | 0              | 0                    | 17   | none                      |
+| 41349220820 #1  | 1080         | cancelled      | failure       | 0              | 34                   | 1    | `ci-refs/pull/1080/merge` |
+| 40098863892 #1  | 1013         | cancelled      | failure       | 1              | 0                    | 20   | `ci-refs/pull/1013/merge` |
+
+The driver found no verdict violations in these attempts. One other cancelled run agrees: 41362800277, a push to `main` cancelled by `ci-refs/heads/main`, ended with a failing `CI Required`. This is a hand-picked sample of cancelled runs, not the population, and none of it involves a job-level queue.
+
+### Superseded pushes on one ref
+
+Pull request 1032 went through three pushes in a row, covering both running and waiting jobs:
+
+| Time (UTC, 2026-10-26) | Transition                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| 12:39:47               | First run created                                                                         |
+| 13:06:32               | Second run created; the first still has two jobs running                                  |
+| 13:07:39 to 13:07:44   | The first run's two running jobs end cancelled                                            |
+| 13:09:38 to 13:09:41   | The first run's aggregate runs on a runner and fails: "at least one CI job was cancelled" |
+| 13:09:42               | First run ends cancelled                                                                  |
+| 13:09:45               | Second run's first job starts, 3m13s after the run was created                            |
+| 13:10:11               | Third run created                                                                         |
+| 13:10:25               | Second run ends its running job and its 33 waiting jobs as cancelled, not skipped         |
+| 13:10:28 to 13:10:32   | Second run's aggregate fails, then the run ends cancelled                                 |
+| 13:49:10               | Third run's aggregate succeeds                                                            |
+
+Three things follow from these records:
+
+- Each head's `CI Required` check reads its own run: failure, failure, success.
+- A superseded run still takes a runner for its aggregate, because `if: always()` runs it after cancellation.
+- Supersession is not instant. The newer run waited for the older run to finish, including that aggregate.
+
+The waiting jobs here were waiting on `needs`, and the no-runner job in 41349220820 had not yet got a runner. Neither is a wait in a job-level concurrency queue, so these records do not predict how a slot queue behaves.
+
+### Distinct-ref control
+
+Pull request 1030's older run was cancelled at 06:05:23 on 2026-10-26. Run 40277406274, on a different ref, had one job running across that moment and started 23 more after it. Per-ref supersession did not reach the other ref. This is one control. That run was later cancelled by its own pull request's group (`ci-refs/pull/1018/merge`), not by pull request 1030's.
+
+### Older-tree re-run
+
+Pull request 1080 shows supersession running backwards, on 2026-11-01:
+
+| Time (UTC) | Transition                                                                                                                               |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 20:54:20   | Run 41349220820 created for the pull request's current head                                                                              |
+| 20:54:21   | Attempt 3 of run 41286541386 starts, on an older head of the same pull request                                                           |
+| 20:54:23   | The newest run's `detect-changes` is cancelled before reaching a runner: "higher priority waiting request for `ci-refs/pull/1080/merge`" |
+| 20:54:28   | The newest run's `CI Required` fails                                                                                                     |
+| 21:00:03   | The older head's `CI Required` succeeds                                                                                                  |
+
+The API does not name the request that displaced a run. Attributing this one to attempt 3 is an inference from its timing and from it being the only other CI run active on that ref. The driver reports it as a candidate, with `groupEvidence` saying how the two runs were shown to share a group: `pull-request` (both records list a common pull request), `cancel-group` (the recorded cancel groups are equal), `ref` (a push event on one ref) or `unknown` (a pull request event with neither, which is not claimed as shared). Records whose pull requests or cancel groups differ are never candidates.
+
+The check on the current head correctly reads failure, and the pull request was still open when observed, so nothing wrong landed. The hazard is in how results get read:
+
+- **Keyed to the tested head:** reads failure, which is correct.
+- **Keyed to the pull request or branch, taking the latest completed run:** reads success, from a tree that is no longer the head.
+
+The current head is also left with no complete result until someone pushes or re-runs it. Any verdict reader has to key on the tested tree and the run attempt, and a re-run of a superseded head can stop current work.
+
+### Other observations
+
+- **`main` pushes supersede each other too.** The group is `ci-${{ github.ref }}`, so a landing can cancel the previous landing's run, which leaves that commit with a failing `CI Required` and no complete post-merge result. Run 41362800277 ended this way: its `detect-changes` job was cancelled by `ci-refs/heads/main`.
+- **Per-run demand is well above one slot.** Complete runs peaked at 17 to 20 running jobs. This is demand only. It says nothing about account capacity or idle slots.
+
+## Documented queue rules
+
+These come from GitHub's [concurrency documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency), read 2026-11-02. They are documented behaviour, not measurements, and they shape what a trial has to test:
+
+- A group has at most one running job. With the default `queue: single` it has at most one pending job, and a new arrival cancels and replaces the existing pending one.
+- `queue: max` allows up to 100 pending jobs, handled first in, first out, though the documentation says ordering is not guaranteed.
+- `queue: max` with `cancel-in-progress: true` is a workflow validation error.
+
+Read against the current aggregate, which treats a cancelled dependency as failure, the default queue suggests a specific risk. Three pull requests contending for one slot could cancel the middle one's job, turning a run nobody superseded red. That would be a false failure and unfair progress rather than a false pass. Under the retained trial interpretation, observing this would decide `supersession-only`; documentation alone is not that observation. A future trial could also measure whether `queue: max` jobs are released promptly when their run is superseded.
+
+## Trial status
+
+The earlier operator ruling authorized a candidate-branch trial under existing permissions: a throwaway, path-filtered, non-required workflow with trial-prefixed group names, deleted from the branch before review. It was **not** run. The author turns retained these access limitations:
+
+| Evidence                                           | Result                                                                                       |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `git remote -v` for this job                       | `origin` is the fleet's mirror, not GitHub                                                   |
+| `gh api` with the job's token                      | HTTP 401: the job is kept from writing to GitHub                                             |
+| When the branch reaches GitHub                     | After the job ends; the workflow publishes the committed head, so no run exists during a job |
+| Controlled superseding pushes, re-runs, dispatches | Need GitHub write access during the job, which no worker class provides                      |
+
+These limitations prevented the authors from driving and observing the trial's scenarios (superseding a waiting job, three refs contending for one slot, re-running an older head, idle capacity). Public read access is available; it does not supply controlled slot experiments.
+
+The subsequent operator decision on 2026-11-02 supplies the disposition: no trial environment is being supplied now, the live trial leaves this task, and the outcome is **not adopted**. The investigation retains its observer, supersession observations and access/error evidence. It owes no live slot measurement. Slot adoption remains held, and any later trial requires new authorization and its own scope. This decision is not negative experimental evidence about slots.
+
+## Retained design for a future trial
+
+The proposed layout below has not been run. It is reference material for separately authorized future work, not a prerequisite for completing this investigation:
+
+```yaml
+concurrency: # workflow level: per-ref supersession, mirrors the live group
+  group: trial-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  heavy:
+    concurrency: # job level: the slot under test
+      group: trial-heavy-slot-1
+      queue: max # repeat with the default, `single`
+  aggregate:
+    if: ${{ always() }} # reads needs.* with the live CI Required predicate
+```
+
+Coordinate jobs with an explicit release signal. Deadlines may only guard against hangs, and no fixed sleep or elapsed time may establish a transition.
+
+1. **Superseded while waiting.** Occupy the slot, confirm a second job is waiting for it, then supersede that ref. Record both runs' terminal states and the aggregate's. Repeat with the job running.
+2. **Contention across refs.** Have three refs contend for one slot under each queue setting, with no supersession, and record whether any job is displaced and what its aggregate reads. Keep a distinct-ref control.
+3. **Older-tree re-run.** Re-run a superseded head's attempt while the newest run waits, and check which verdict each key reads.
+4. **Idle capacity.** Compare contended static slots with an available-slot control under the same workload. Retain occupancy, runnable waiting demand and unused capacity together. A job waiting alone does not prove capacity is idle.
+5. **Evidence.** Capture every attempt with `node scripts/ci-concurrency-observe.mjs --repo <trial> --token-env <NAME> --annotations-all --obligation <job> --run ...`, polling while transitions are live. In-progress jobs count toward peak running until observed complete. A record that cannot be read stays missing and never counts as success. Cancel causes are kept per Actions job id, because display names repeat; each is a `group`, an `unrecognised` message kept verbatim (GitHub does not document the annotation wording, so the driver only knows the text read from the runs above), or `none`. A job record without a `check_run_url` is reported missing rather than read by job id.
+
+The earlier ruling's trial interpretation remains useful for future work: `supersession-only` if a cross-ref eviction of an unsuperseded run's pending slot job occurs, if a slot idles beside a queued unsuperseded job, or if any cancelled or pending slot job reads as passing; `slot-groups-safe` only when none occurs across scenarios 1 to 4. Such a future record would name the deciding scenario. Neither outcome was measured here.
+
+## Findings outside this research
+
+Both are correctness observations that this research does not own. They are routed to the work that owns the verdict and integration, as recorded dispositions (defer, no production workflow change here):
+
+- **Older-tree re-run** (above) goes to the exact-tree required-obligation verdict work: a verdict must key on the tested tree and run attempt, never on the pull request's latest completed run.
+- **`main` landing cancellation** (above) goes to the serialised final-gate integration work: concurrent landings share `ci-refs/heads/main`, so one can cancel the previous landing's post-merge result.
+
+## Disposition
+
+**Not adopted; bounded research complete.** Slot adoption stays held, and per-ref supersession remains the only configured concurrency. This research does not establish slot safety, supersession-only, a cross-PR throttle, fair progress, or full-before-merge delivery, and it changes no production workflow or required-check policy. The discovery record carries this non-adoption disposition without selecting either measured outcome. Downstream work must retain its existing evidence requirements; completion here does not unblock slot enablement. A later trial is new work.
