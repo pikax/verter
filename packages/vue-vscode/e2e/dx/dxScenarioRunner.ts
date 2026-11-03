@@ -15,10 +15,10 @@
  */
 import * as vscode from "vscode";
 
-import { readTestLog, sleep } from "../helpers";
+import { pollBudget, readTestLog, sleep } from "../helpers";
 import {
   acceptCompletion,
-  extractStaticImportText,
+  vscodeAcceptCompletionDeps,
   type AcceptCompletionDeps,
   type AcceptOutcome,
 } from "./dxAcceptCompletion";
@@ -29,9 +29,6 @@ import {
   type EvaluateStartupLog,
 } from "./dxReadiness";
 import { importEsm } from "./esmImport";
-
-/** Default time to let the suggestion widget populate between accept commands. */
-const DEFAULT_SETTLE_MS = 300;
 
 /** The shape consumed from the harness `@verter/dx-harness/startup-gate` subpath. */
 interface HarnessStartupGate {
@@ -68,39 +65,35 @@ export async function waitForDxReady(uri: vscode.Uri): Promise<{ matchedGenerati
   return waitForDxReadiness({ ...dxReadinessDeps(uri), evaluateLog: parseExtensionStartupLog });
 }
 
-/** The text of the `<script>` block (where an auto-import lands), or the whole doc. */
-export function scriptBlockText(doc: vscode.TextDocument): string {
-  const text = doc.getText();
-  const start = text.indexOf("<script");
-  const end = text.indexOf("</script>");
-  return start >= 0 && end > start ? text.slice(start, end) : text;
-}
-
 /**
- * Wire the real accept-path dependencies for an editor: commands run through
- * `vscode.commands.executeCommand`, the document text is the whole document, and
- * the import fingerprint contains only parsed static import declarations, so a
- * completion that changes an identifier without applying its additional import
- * edit cannot produce a false positive.
+ * Wire the real accept-path dependencies for an editor through the live `vscode`
+ * API (see {@link vscodeAcceptCompletionDeps}). The hang guard takes the registered
+ * `acceptCompletion` budget, checked against the awaiting test's deadline; it bounds
+ * a stuck interaction and never decides a pass.
  */
 export function acceptCompletionDeps(
   editor: vscode.TextEditor,
-  settleMs: number = DEFAULT_SETTLE_MS,
+  expectedSuggestion: string,
 ): AcceptCompletionDeps {
-  return {
-    runCommand: (command) => vscode.commands.executeCommand(command),
-    readDocText: () => editor.document.getText(),
-    readImportText: () => extractStaticImportText(scriptBlockText(editor.document)),
-    settle: () => sleep(settleMs),
-  };
+  const budgetMs = pollBudget("acceptCompletion");
+  return vscodeAcceptCompletionDeps(vscode, editor, {
+    expectedSuggestion,
+    armDeadline: (onExpired) => {
+      const timer = setTimeout(onExpired, budgetMs);
+      return { dispose: () => clearTimeout(timer) };
+    },
+  });
 }
 
-/** Drive the real accept path on `editor` and assert the auto-import completed. */
+/**
+ * Drive the real accept path on `editor`: one trigger, one accept of the focused
+ * `expectedSuggestion`, and assert the identifier and its static import both landed.
+ */
 export function acceptCompletionInEditor(
   editor: vscode.TextEditor,
-  settleMs?: number,
+  expectedSuggestion: string,
 ): Promise<AcceptOutcome> {
-  return acceptCompletion(acceptCompletionDeps(editor, settleMs));
+  return acceptCompletion(acceptCompletionDeps(editor, expectedSuggestion));
 }
 
 /** Read the current extension log and produce the log-canary verdict. */
