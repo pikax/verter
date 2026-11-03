@@ -1218,12 +1218,16 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
       families.readyEvents.reason ?? "export held none"
     })`;
   }
-  // The pooled figures authorise comparison on the corpus as a whole. A bound row whose own pull
-  // requests never landed contributes nothing to them, and is named rather than left implied.
+  // The pooled figures are observations over whichever bound rows landed; they authorise nothing on
+  // their own. Every bound row owes a proven landing of its own, so one row's landing never stands in
+  // for another's: a row without one is named here and is a gap. A row with bindings has no exemption.
   const rowsWithoutProvenLanding = [...scenarios, ...concurrent].flatMap(
     ({ id, metrics, landings: n }) => (metrics && n === 0 ? [id] : []),
   );
   readyToLanded.rowsWithoutProvenLanding = rowsWithoutProvenLanding;
+  if (rowsWithoutProvenLanding.length > 0 && readyToLanded.status === "measured") {
+    readyToLanded.coverage = "partial";
+  }
   const merged = pulls.flatMap(({ merged_at: mergedAt }) =>
     mergedAt && inWindow(mergedAt) ? [mergedAt] : [],
   );
@@ -1235,6 +1239,9 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
       count: landings,
       windowDays,
       perDay: landings / windowDays,
+      ...(rowsWithoutProvenLanding.length > 0
+        ? { coverage: "partial", rowsWithoutProvenLanding }
+        : {}),
     };
   } else if (merged.length > 0 || localLandings.length > 0) {
     const source =
@@ -1299,7 +1306,7 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
   if (Number.isFinite(declared) && declared > runs.length) {
     gaps.push(`runs read in part: the window declares ${declared}, ${runs.length} were read`);
   }
-  for (const { id, repetitions, unavailable, unsampledPullRequests, metrics } of [
+  for (const { id, repetitions, unavailable, unsampledPullRequests, metrics, landings } of [
     ...scenarios,
     ...concurrent,
   ]) {
@@ -1308,6 +1315,11 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
     if (unsampledPullRequests?.length > 0) {
       gaps.push(
         `${id} pull request(s) ${unsampledPullRequests.join(", ")} reach no push-to-green sample`,
+      );
+    }
+    if (metrics && landings === 0) {
+      gaps.push(
+        `${id} has no exact-tree proven landing: its ready-to-landed and landings/day are unavailable`,
       );
     }
     // A bound row owes queue and execution separately, not only push-to-green.
@@ -1352,7 +1364,7 @@ export function buildReport({ manifest, receipts, read, corpus, currentDefinitio
   }
   if (rowsWithoutProvenLanding.length > 0) {
     limitations.push(
-      `Ready-to-landed and landings/day are pooled over corpus-bound pull requests; ${rowsWithoutProvenLanding.length} bound row(s) have no proven landing of their own: ${rowsWithoutProvenLanding.join(", ")}.`,
+      `Ready-to-landed and landings/day are pooled over corpus-bound pull requests and cover only the rows that landed; ${rowsWithoutProvenLanding.length} bound row(s) have no proven landing of their own, each a gap: ${rowsWithoutProvenLanding.join(", ")}.`,
     );
   }
   if (liveRequired.length === 0) {

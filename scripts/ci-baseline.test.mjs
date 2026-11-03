@@ -472,8 +472,12 @@ test("a window read in part is reported as partial, never as complete", async ()
   });
 });
 
-/** A complete collection: every corpus sample and stream bound, every owner export present. */
-function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
+/**
+ * A complete collection: every corpus sample and stream bound, every owner export present, and
+ * every bound row landed once with exact-tree proof. `landOnly` keeps proven landings to the
+ * listed pull requests.
+ */
+function completeCollection(dir, { mutate = (bindings) => bindings, landOnly } = {}) {
   const exports = join(dir, "exports");
   mkdirSync(exports, { recursive: true });
   const table = {};
@@ -481,6 +485,8 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
   const bindings = [];
   const pushEvents = [];
   let pr = 0;
+  // Repetition 1 lands every row once; one later pull request is ready but never proven.
+  const landed = [];
   const pull = (changedFiles, release = "") => {
     pr += 1;
     const head = `head-${pr}`;
@@ -515,6 +521,7 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
           repetition,
           pullRequest: pull(sample.changedFiles, sample.release),
         });
+        if (repetition === 1) landed.push(pr);
       }
     }
     for (const stream of corpus.streams) {
@@ -522,6 +529,7 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
       for (const [role, { scenario, sample }] of Object.entries(stream.pullRequests)) {
         pullRequests[role] = pull(filesOf(scenario, sample), releaseOf(scenario, sample));
       }
+      if (repetition === 1) landed.push(pr);
       bindings.push({ stream: stream.id, repetition, pullRequests });
     }
   }
@@ -545,9 +553,18 @@ function completeCollection(dir, { mutate = (bindings) => bindings } = {}) {
   write("push-events.json", pushEvents);
   write("billing.json", { usageItems: [{ product: "Actions", netAmount: 0 }] });
   write("allocation.json", { concurrentJobs: 20, source: "account owner" });
+  const unproven = landed.at(-1) + 1;
   write("ready-events.json", [
-    { pullRequest: 1, head: "head-1", readyAt: at(20), landedAt: at(30), exactTreeProven: true },
-    { pullRequest: 2, head: "head-2", readyAt: at(25), exactTreeProven: false },
+    ...landed
+      .filter((number) => landOnly === undefined || landOnly.includes(number))
+      .map((number) => ({
+        pullRequest: number,
+        head: `head-${number}`,
+        readyAt: at(number + 15),
+        landedAt: at(number + 25),
+        exactTreeProven: true,
+      })),
+    { pullRequest: unproven, head: `head-${unproven}`, readyAt: at(25), exactTreeProven: false },
   ]);
   write("bindings.json", mutate(bindings));
   return { exports, ...tableTransport(ordered) };
@@ -1004,7 +1021,7 @@ test("landing figures need a literal proof, the window, and a corpus-bound pull 
     });
   }
   await withTempDir(async (dir) => {
-    const report = await reportAfter(dir);
+    const report = await reportAfter(dir, () => {}, { landOnly: [1] });
     const docs = report.scenarios.find(({ id }) => id === "CH01/docs");
     assert.equal(docs.landings, 1);
     assert.equal(docs.readyToLanded.p50, 600);
@@ -1356,16 +1373,35 @@ test("runs with no job records report an unknown peak, not zero runners", () => 
   assert.equal(peakRunnersPerStream.status, "unavailable");
 });
 
-test("a bound row with no proven landing of its own is named beside the pooled figure", async () => {
+test("one row's proven landing never completes another bound row's", async () => {
   await withTempDir(async (dir) => {
-    const { exports, transport } = completeCollection(dir);
-    const out = join(dir, "run");
-    await collect({ out, repo: "o/r", ...WINDOW, transport, exportDir: exports });
-    const report = reportFromDirectory(out);
+    // Pull requests 1 and 2 are CH01/docs and CH02/wasm-root at repetition 1: drop CH02's landing.
+    const report = await reportAfter(dir, () => {}, { landOnly: [1] });
+    assert.equal(report.readyToLanded.status, "measured");
+    assert.equal(report.readyToLanded.n, 1);
+    assert.equal(report.readyToLanded.coverage, "partial");
+    assert.equal(report.landingsPerDay.status, "measured");
+    assert.equal(report.landingsPerDay.coverage, "partial");
     assert.ok(report.readyToLanded.rowsWithoutProvenLanding.includes("CH02/wasm-root"));
     assert.ok(!report.readyToLanded.rowsWithoutProvenLanding.includes("CH01/docs"));
+    assert.equal(report.baseline.status, "missing-data");
+    assert.equal(report.baseline.satisfiesComparisons, false);
     assert.ok(
-      report.limitations.some((line) => /pooled over corpus-bound pull requests/.test(line)),
+      report.baseline.gaps.includes(
+        "CH02/wasm-root has no exact-tree proven landing: its ready-to-landed and landings/day are unavailable",
+      ),
+      report.baseline.gaps.join("; "),
     );
+    assert.ok(!report.baseline.gaps.some((gap) => gap.startsWith("CH01/docs ")));
+    assert.ok(report.baseline.gaps.some((gap) => gap.startsWith("CC01 has no exact-tree")));
+    assert.ok(report.limitations.some((line) => /cover only the rows that landed/.test(line)));
+  });
+  await withTempDir(async (dir) => {
+    // A row the corpus exempts while unbound owes no landing, since it has no bound pull request.
+    const report = await reportAfter(dir, () => {}, {
+      mutate: (bindings) => bindings.filter(({ stream }) => !stream),
+    });
+    assert.deepEqual(report.baseline.gaps, []);
+    assert.equal(report.readyToLanded.coverage, undefined);
   });
 });
