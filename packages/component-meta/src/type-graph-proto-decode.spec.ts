@@ -60,6 +60,21 @@ describe("decodeTypedComponentMetaPayload", () => {
     ).toThrow(/expected 15, found 7/);
   });
 
+  it.each([13, 14])(
+    "refuses a schema %i payload whose flat authored spans are no longer readable",
+    (schemaVersion) => {
+      const current = createTestComponentMetaPayload();
+      expect(() =>
+        decodeTypedComponentMetaPayload(
+          toBinary(
+            ComponentMetaPayloadSchema,
+            create(ComponentMetaPayloadSchema, { ...current, schemaVersion }),
+          ),
+        ),
+      ).toThrow(new RegExp(`expected 15, found ${schemaVersion}`));
+    },
+  );
+
   it("decodes supported contract type references from the shared graph", () => {
     const current = createTestComponentMetaPayload();
     const result = decodeTypedComponentMetaPayload(
