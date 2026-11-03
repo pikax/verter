@@ -200,8 +200,9 @@ export async function pollUntil<T>(
   request: () => Promise<T>,
   ready: (value: T) => boolean,
   timeoutMs = pollBudget("parityHarnessSettle"),
+  describe?: (value: T) => string,
 ): Promise<T> {
-  return pollUntilWithin(label, request, ready, timeoutMs);
+  return pollUntilWithin(label, request, ready, timeoutMs, undefined, describe);
 }
 
 export function toLocations(
@@ -327,17 +328,20 @@ export async function assertHoverNeedles(
   // while dependency/slot synthesis catches up. Poll for this assertion's
   // declared semantic contract; a provider that remains degraded still times
   // out and fails as the same unapproved product gap.
-  const hovers = await pollUntil(
+  const text = await pollUntil(
     `semantic hover ${anchor.file}#${anchor.token}`,
     async () =>
-      (await vscode.commands.executeCommand<vscode.Hover[]>(
-        "vscode.executeHoverProvider",
-        doc.uri,
-        position,
-      )) ?? [],
-    (result) => semanticHoverReady(hoverText(result), needles, options),
+      hoverText(
+        (await vscode.commands.executeCommand<vscode.Hover[]>(
+          "vscode.executeHoverProvider",
+          doc.uri,
+          position,
+        )) ?? [],
+      ),
+    (result) => semanticHoverReady(result, needles, options),
+    undefined,
+    (result) => result,
   );
-  const text = hoverText(hovers);
   for (const needle of needles) {
     assert.ok(text.includes(needle), `hover missing ${needle}: ${text}`);
   }

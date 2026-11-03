@@ -76,6 +76,24 @@ impl ImportSyncOutcome {
     }
 }
 
+/// Run `work` as its own task and await it, carrying the caller's request
+/// deadline. A cancelled caller drops only its wait: `work` still settles, and
+/// its provider writes stay bounded by the instant the caller was bounded by.
+async fn settle_on_own_task(work: impl std::future::Future<Output = ()> + Send + 'static) {
+    let deadline = verter_type_runtime::deadline::current();
+    let task = tokio::spawn(async move {
+        match deadline {
+            Some(at) => verter_type_runtime::deadline::with_deadline_at(at, work).await,
+            None => work.await,
+        }
+    });
+    if let Err(error) = task.await {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+    }
+}
+
 impl VerterLanguageServer {
     pub(super) fn imported_child_contract_freshness_key(
         &self,
@@ -1011,7 +1029,21 @@ impl VerterLanguageServer {
     /// document's sync lane. The publish records and versions the document's
     /// companion surfaces, so it must not supersede a lane holder's recorded
     /// surface mid-transaction; like every interactive path it waits its turn.
+    ///
+    /// The publish runs as its own task, so a caller the client cancels drops
+    /// only its wait. The lane stays held until the store write settles: the
+    /// write runs on the blocking pool and cannot be stopped by a drop, so a
+    /// lane released early would let a newer revision commit first and this
+    /// write land on top of it, leaving bytes no recorded surface describes.
     pub(super) async fn publish_open_carrier_to_external_ts(&self, uri: &Uri) {
+        let server = self.clone();
+        let uri = uri.clone();
+        settle_on_own_task(async move { server.publish_open_carrier_on_lane(&uri).await }).await;
+    }
+
+    /// The body of [`Self::publish_open_carrier_to_external_ts`], run on the
+    /// publish's own task.
+    async fn publish_open_carrier_on_lane(&self, uri: &Uri) {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
@@ -1477,19 +1509,7 @@ impl VerterLanguageServer {
     pub(super) async fn ensure_current_file_synced(&self, uri: &Uri) {
         let server = self.clone();
         let uri = uri.clone();
-        let deadline = verter_type_runtime::deadline::current();
-        let repair = tokio::spawn(async move {
-            let repair = server.repair_current_file(&uri);
-            match deadline {
-                Some(at) => verter_type_runtime::deadline::with_deadline_at(at, repair).await,
-                None => repair.await,
-            }
-        });
-        if let Err(error) = repair.await {
-            if error.is_panic() {
-                std::panic::resume_unwind(error.into_panic());
-            }
-        }
+        settle_on_own_task(async move { server.repair_current_file(&uri).await }).await;
     }
 
     /// The body of [`Self::ensure_current_file_synced`], run on the repair's
