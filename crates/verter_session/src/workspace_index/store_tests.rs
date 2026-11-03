@@ -488,6 +488,51 @@ fn a_cancelled_publication_discards_the_delta_at_every_boundary() {
 }
 
 #[test]
+fn a_cancellation_predicate_that_reenters_the_store_never_waits_on_the_writer() {
+    let account = account();
+    let a = unit("a");
+    let owners = Owners::with_source(&a, "v1");
+    // The predicate clears the store, which takes the writer lock. Run under
+    // that lock it would wait on its own thread forever. Before fencing, the
+    // delta lands on the cleared snapshot; immediately before the swap, the
+    // clear replaced the fenced base, so the delta is refused whole.
+    for (boundary, published) in [(0, true), (1, false)] {
+        let index = store(&account);
+        let calls = Cell::new(0);
+        let is_cancelled = || {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == boundary {
+                index.clear();
+            }
+            false
+        };
+        let outcome = index.publish(
+            delta(vec![upsert(
+                sealed(draft(&a, "v1", &["x"]), &account),
+                ExpectedPrior::Absent,
+            )]),
+            &owners,
+            &is_cancelled,
+        );
+        if published {
+            assert!(
+                matches!(outcome, PublishOutcome::Published),
+                "boundary {boundary}"
+            );
+            assert_eq!(index.snapshot().contribution_count(), 1);
+        } else {
+            assert!(
+                matches!(outcome, PublishOutcome::Refused(PublishRefusal::Superseded)),
+                "boundary {boundary}"
+            );
+            assert_eq!(index.snapshot().contribution_count(), 0);
+        }
+        assert_eq!(calls.get(), 2, "boundary {boundary}");
+    }
+}
+
+#[test]
 fn old_and_new_schema_layouts_cannot_stay_current_together() {
     let account = account();
     let index = store(&account);

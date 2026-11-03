@@ -355,6 +355,9 @@ pub(crate) enum PublishRefusal {
     CoverageWithoutPartition(ContributionId),
     /// Publication was cancelled before the swap.
     Cancelled,
+    /// Another writer replaced the current snapshot after this delta was
+    /// fenced: replan on a fresh view.
+    Superseded,
     /// The account refused long-lived retention; the value stays uncached.
     RetentionPressure,
 }

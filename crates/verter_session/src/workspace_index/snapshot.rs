@@ -420,35 +420,48 @@ impl WorkspaceIndex {
     /// every consumed observation, retention, cancellation. A failure at any
     /// step leaves the current snapshot untouched, including for sibling
     /// changes in the same delta.
+    ///
+    /// `is_cancelled` is caller code and never runs under the writer lock: a
+    /// predicate may re-enter the host (close it, remove a file, query the
+    /// index again), and those paths take the host's admission fence or this
+    /// writer. The fenced snapshot commits only if no other writer replaced
+    /// the current snapshot while the predicate ran; otherwise the delta is
+    /// refused as superseded and the caller replans.
     pub(crate) fn publish(
         &self,
         delta: ContributionDelta,
         oracle: &dyn ObservationOracle,
         is_cancelled: &dyn Fn() -> bool,
     ) -> PublishOutcome {
-        let _writer = self.writer.lock();
         if is_cancelled() {
             return PublishOutcome::Refused(PublishRefusal::Cancelled);
         }
-        let current = self.current.load_full();
+        let (base, next) = {
+            let _writer = self.writer.lock();
+            let current = self.current.load_full();
 
-        if let Err(refusal) = check_epochs(&delta, oracle) {
-            return PublishOutcome::Refused(refusal);
-        }
-        let plan = match PublicationPlan::fence(&current, delta, oracle) {
-            Ok(plan) => plan,
-            Err(refusal) => return PublishOutcome::Refused(refusal),
-        };
-        if plan.is_noop() {
-            return PublishOutcome::AlreadyCurrent;
-        }
-        let next = match plan.apply(&current) {
-            Ok(next) => next,
-            Err(refusal) => return PublishOutcome::Refused(refusal),
+            if let Err(refusal) = check_epochs(&delta, oracle) {
+                return PublishOutcome::Refused(refusal);
+            }
+            let plan = match PublicationPlan::fence(&current, delta, oracle) {
+                Ok(plan) => plan,
+                Err(refusal) => return PublishOutcome::Refused(refusal),
+            };
+            if plan.is_noop() {
+                return PublishOutcome::AlreadyCurrent;
+            }
+            match plan.apply(&current) {
+                Ok(next) => (current, next),
+                Err(refusal) => return PublishOutcome::Refused(refusal),
+            }
         };
         // Cancellation at the last boundary still discards the whole delta.
         if is_cancelled() {
             return PublishOutcome::Refused(PublishRefusal::Cancelled);
+        }
+        let _writer = self.writer.lock();
+        if !Arc::ptr_eq(&self.current.load(), &base) {
+            return PublishOutcome::Refused(PublishRefusal::Superseded);
         }
         self.current.store(Arc::new(next));
         PublishOutcome::Published
