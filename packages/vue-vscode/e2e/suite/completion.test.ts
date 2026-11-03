@@ -14,7 +14,8 @@ import {
   TYPE_PROVIDER,
   waitForCompletionsMatching,
 } from "../helpers";
-import { acceptCompletionInEditor, scriptBlockText } from "../dx/dxScenarioRunner";
+import { scriptBlockText } from "../dx/dxAcceptCompletion";
+import { acceptCompletionInEditor } from "../dx/dxScenarioRunner";
 
 function completionLabel(item: vscode.CompletionItem): string {
   return typeof item.label === "string" ? item.label : item.label.label;
@@ -888,7 +889,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(templateStart, "the fixture has a <template> block").to.be.greaterThan(0);
     const templateBefore = originalText.slice(templateStart);
     try {
-      const outcome = await acceptCompletionInEditor(editor!, 500);
+      const outcome = await acceptCompletionInEditor(editor!, "computed");
       expect(outcome.accepted, "the real completion accept applies its import action").to.equal(
         true,
       );

@@ -2,7 +2,7 @@
  * Vue intellisense: component tag completion, symbol auto-import, v-if narrowing.
  */
 import * as vscode from "vscode";
-import { FIXTURE_NAME, sleep } from "../../../helpers";
+import { FIXTURE_NAME } from "../../../helpers";
 import {
   assertHoverLooksNarrowed,
   assertHoverNeedles,
@@ -14,23 +14,21 @@ import {
   pollUntil,
   failParityGap,
 } from "../../../lib/parityHarness";
-import {
-  ACCEPT_SUGGESTION_COMMAND,
-  TRIGGER_SUGGEST_COMMAND,
-  classifyAcceptOutcome,
-} from "../../../dx/dxAcceptCompletion";
+import { acceptCompletionInEditor } from "../../../dx/dxScenarioRunner";
 
 function onlyVueParity(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "vue-parity")
     throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
 }
 
-function scriptBlockText(doc: vscode.TextDocument): string {
-  const text = doc.getText();
-  const start = text.search(/<script\b[^>]*>/i);
-  const end = text.search(/<\/script>/i);
-  if (start < 0 || end < 0) return text;
-  return text.slice(start, end);
+/** Discard the accept's in-memory edits so later cases see the fixture as on disk. */
+async function revertIfDirty(relative: string): Promise<void> {
+  const open = vscode.workspace.textDocuments.find((d) =>
+    d.uri.fsPath.replace(/\\/g, "/").endsWith(relative),
+  );
+  if (!open?.isDirty) return;
+  await vscode.window.showTextDocument(open);
+  await vscode.commands.executeCommand("workbench.action.files.revert");
 }
 
 suite(`Vue intellisense [${FIXTURE_NAME}]`, function () {
@@ -97,46 +95,12 @@ suite(`Vue intellisense [${FIXTURE_NAME}]`, function () {
         20_000,
       );
 
-      const docBefore = editor.document.getText();
-      const importBefore = scriptBlockText(editor.document);
-      await vscode.commands.executeCommand(TRIGGER_SUGGEST_COMMAND);
-      await sleep(400);
-      await vscode.commands.executeCommand(ACCEPT_SUGGESTION_COMMAND);
-      await sleep(600);
-      const docAfter = editor.document.getText();
-      const importAfter = scriptBlockText(editor.document);
-      const outcome = classifyAcceptOutcome({
-        docBefore,
-        docAfter,
-        importBefore,
-        importAfter,
-      });
-      if (!outcome.accepted && !/import\s*\{[^}]*\bcomputed\b/.test(importAfter)) {
-        // Fallback: resolve path via completion item additionalTextEdits.
-        const list = await vscode.commands.executeCommand<vscode.CompletionList>(
-          "vscode.executeCompletionItemProvider",
-          doc.uri,
-          pos,
-        );
-        const item = (list?.items ?? []).find((i) => {
-          const label = typeof i.label === "string" ? i.label : i.label.label;
-          return label === "computed";
-        });
-        if (!item) throw new Error("computed not offered for resolve fallback");
-        // Resolve may not be exposed as a stable execute* command on all hosts;
-        // accept command-path + additionalTextEdits on the raw item when present.
-        const extras = item.additionalTextEdits ?? [];
-        const looksLikeImport =
-          /vue/i.test(item.detail ?? "") ||
-          /vue/i.test(typeof item.label === "string" ? "" : (item.label.description ?? "")) ||
-          extras.some((e) => /import\s*\{[^}]*computed/.test(e.newText));
-        if (extras.length === 0 && !looksLikeImport && !outcome.docChanged) {
-          throw new Error(
-            `auto-import accept failed; importAfter=${importAfter.slice(0, 200)}; labels sample ok but no import edit`,
-          );
-        }
-      } else if (!/import\s*\{[^}]*\bcomputed\b/.test(importAfter) && !outcome.importChanged) {
-        throw new Error(`computed import not applied: ${importAfter.slice(0, 240)}`);
+      // One genuine editor accept: the shared driver waits for the suggestion widget
+      // to focus `computed`, accepts it once, and passes only when the identifier
+      // and its static import have both landed.
+      const outcome = await acceptCompletionInEditor(editor, "computed");
+      if (!/import\s*\{[^}]*\bcomputed\b/.test(outcome.importAfter)) {
+        throw new Error(`computed import not applied: ${outcome.importAfter.slice(0, 240)}`);
       }
     } catch (err) {
       failParityGap(
@@ -145,6 +109,8 @@ suite(`Vue intellisense [${FIXTURE_NAME}]`, function () {
         "ISSUE-vue-symbol-auto-import",
         `Symbol auto-import accept failed: ${String(err)}`,
       );
+    } finally {
+      await revertIfDirty("src/features/AutoImportSymbol.vue");
     }
   });
 

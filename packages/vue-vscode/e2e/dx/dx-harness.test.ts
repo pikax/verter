@@ -27,12 +27,8 @@ import * as vscode from "vscode";
 import { getCompletionLabel, getCompletions, openVueFile, readTestLog, sleep } from "../helpers";
 import { type DxScenario, validateCanaryPreconditions, validateDxScenario } from "./dxScenario";
 import { typeChars } from "./dxTyping";
-import {
-  acceptCompletionInEditor,
-  runLogCanary,
-  scriptBlockText,
-  waitForDxReady,
-} from "./dxScenarioRunner";
+import { scriptBlockText } from "./dxAcceptCompletion";
+import { acceptCompletionInEditor, runLogCanary, waitForDxReady } from "./dxScenarioRunner";
 
 const DX_ENABLED = process.env.VERTER_E2E_DX === "1";
 const CANARY_MODE = process.env.VERTER_E2E_DX_CANARY === "1";
@@ -146,11 +142,11 @@ suite("DX extension-host gate", function () {
     );
 
     const importBefore = scriptBlockText(editor!.document);
-    const outcome = await acceptCompletionInEditor(editor!);
+    const outcome = await acceptCompletionInEditor(editor!, scenario.acceptExpect);
 
-    // The real accept must have changed BOTH the document body and the import block.
-    expect(outcome.accepted, "completion accept mutated document + import").to.equal(true);
-    expect(outcome.docChanged).to.equal(true);
+    // The real accept must have inserted the identifier AND changed the import block.
+    expect(outcome.accepted, "completion accept inserted identifier + import").to.equal(true);
+    expect(outcome.identifierChanged).to.equal(true);
     expect(outcome.importChanged).to.equal(true);
     const importAfter = scriptBlockText(editor!.document);
     expect(importAfter).to.not.equal(importBefore);

@@ -308,6 +308,19 @@ writeFileOnDisk("src/MyComp.vue", newContent);
 invalidateFileCache("src/MyComp.vue");
 ```
 
+### `acceptCompletionInEditor(editor, expectedSuggestion)` — Real completion accept
+
+```typescript
+// The cursor sits after the incomplete word (`comput|`); `computed` carries an
+// auto-import through `completionItem/resolve`.
+const outcome = await acceptCompletionInEditor(editor, "computed");
+expect(outcome.importAfter).to.match(/import\s*\{[^}]*\bcomputed\b/);
+```
+
+**When to use:** Any test that must prove an editor accept applies a completion's edits (identifier AND additional import edits). Never fake it with a `WorkspaceEdit` or by inspecting `additionalTextEdits` on a provider list.
+
+**How it synchronizes** (`e2e/dx/dxAcceptCompletion.ts`): one `editor.action.triggerSuggest`, then it waits until the suggestion widget has focused `expectedSuggestion` — observed through a no-op inline completion provider, because VS Code re-requests inline completions with `selectedCompletionInfo` whenever the visible widget's selection changes — then one `acceptSelectedSuggestion`, then it waits on `onDidChangeTextDocument` until the expected identifier has landed outside the static imports (judged on the document with its static import declarations excluded, as a whole-identifier occurrence) AND the static imports have changed (a resolve-carried import lands after the identifier). It never re-triggers or re-accepts; the `pollBudget("acceptCompletion")` deadline only fails a stuck interaction. An identifier-only change, an import-only change whose identifier never changed, a no-op accept, or a widget that never focuses the expected item fails.
+
 ### Never use `sleep()` for LSP readiness
 
 `sleep()` is only acceptable for:
