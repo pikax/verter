@@ -3477,7 +3477,7 @@ fn css_var_flow_across_files() {
         aliases: Vec::new(),
     });
 
-    let flow = host.css_var_flow("--theme-color", None);
+    let flow = host.css_var_flow("--theme-color", None).flow;
     assert_eq!(flow.name, "--theme-color");
     assert_eq!(
         flow.style_definitions.len(),
@@ -3511,8 +3511,8 @@ fn unissued_template_content_is_refused_without_affecting_css_var_flow() {
         HostError::BlockContentRefused(BlockContentRefusal::CorrelationMismatch)
     ));
 
-    let raw_flow = host.css_var_flow("--theme-color", None);
-    let override_flow = host.css_var_flow("--theme-color", Some(&profile));
+    let raw_flow = host.css_var_flow("--theme-color", None).flow;
+    let override_flow = host.css_var_flow("--theme-color", Some(&profile)).flow;
 
     assert_eq!(
         raw_flow.template_definitions.len(),
@@ -3559,8 +3559,8 @@ fn refused_unissued_content_does_not_poison_compile_or_raw_css_var_flow() {
         })
         .expect("override profile should compile");
 
-    let raw_flow = host.css_var_flow("--theme-color", None);
-    let override_flow = host.css_var_flow("--theme-color", Some(&profile));
+    let raw_flow = host.css_var_flow("--theme-color", None).flow;
+    let override_flow = host.css_var_flow("--theme-color", Some(&profile)).flow;
 
     assert_eq!(
         raw_flow.template_definitions.len(),

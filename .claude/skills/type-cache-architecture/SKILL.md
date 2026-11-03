@@ -465,7 +465,11 @@ from `BudgetExceeded`, which means the compute stopped early and its
 value may be partial.
 
 **Participants** (each charges the account, none keeps a parallel byte
-quota): `IdentityInterner` (each pooled `OwnedStr` is held by the pool and
+quota): `WorkspaceIndex` (a contribution is staged under an ACTIVE charge and
+adopted as RETAINED at publication; a refusal rejects the whole delta under
+`PublishRefusal::RetentionPressure` and the request answers from private rows;
+the charge rides the `Contribution`, so it is released when the last snapshot
+holding that contribution drops), `IdentityInterner` (each pooled `OwnedStr` is held by the pool and
 charged by its own cell, its map slot is a separate charge,
 `pooled_entry_bytes`; sheds pool-only entries and retries once on refusal,
 else returns the string un-pooled; when the pool lets go, the string's

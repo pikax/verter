@@ -82,6 +82,7 @@ mod virtual_file_naming_characterization;
 mod virtual_file_naming_ts_freshness;
 mod vue_macro_tsc_typecheck_gate;
 mod warm_style_parse_reuse;
+mod workspace_index;
 
 mod continuation_mutations;
 

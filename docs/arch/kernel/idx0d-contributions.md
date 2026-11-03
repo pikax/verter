@@ -12,8 +12,10 @@ component view and facet ownership (#875)`, 2026-10-13. The title is descriptive
 context, never acceptance evidence. It follows the [docs-only rule](README.md):
 this file is the contract, inventory and case table. It changes no production
 route, test, dependency, schema implementation or CI gate, and deletes nothing.
-IDX0 implements the storage and migration; UAO0 validates the ownership table
-under `UAO0-AC-R1`.
+IDX0 implements the storage, the host producer and the I10 cutover;
+IDX0-PROJECT, IDX0-LSP and IDX0-MCP retire the remaining displaced routes
+(I01–I09, I11–I13, I15) with parity, each consuming IDX0's lookup; UAO0
+validates the ownership table under `UAO0-AC-R1`.
 
 ## Imported boundaries and intent
 
@@ -279,30 +281,33 @@ here; its older empty framework-index population is not current evidence.
 
 | Route | Current index/walk, producer and consumers | Disposition; sole later owner and receiving acceptance |
 | ----- | ------------------------------------------ | ----------------------------------------------------- |
-| I01 | `verter_semantic::analysis::ProjectIndex.files`, `provide_index`, `inject_index`; input `FileUsageInfoOwned` via `add_file`/`remove_file`; queried by provider/inject accessors, summaries and diagnostics `build_cross_file_snapshot` | Replace candidate storage with typed name/registration postings; IDX0 `IDX0-AC1` |
-| I02 | `ProjectIndex.component_graph`, `component_reverse_index`; component usages supplied in `FileUsageInfoOwned`; component accessors/summary and cross-file snapshot consumers | Replace adjacency and reverse candidate storage, retain producer relation meaning; IDX0 `IDX0-AC1` |
-| I03 | `ProjectIndex.class_index`, `id_index`, `v_bind_css_index`, `custom_property_index`, `var_reference_index`, `template_css_var_index`, `script_css_var_index`; file usage producers; stylesheet accessors and `css_var_flow` | Replace style postings, preserving definition/reference/template/script distinctions; IDX0 `IDX0-AC1` |
-| I04 | `ProjectIndex.emit_index`, `listener_index`, `template_id_index`; file usage producers; event flow/template-ID accessors and cross-file diagnostics | Replace event/ID candidate postings; IDX0 `IDX0-AC1` |
-| I05 | `ProjectIndex.store_usage_index`, `store_definition_index`, `store_dep_graph`; file usage producers; store flow/summary and diagnostics cycle candidate input | Replace store registration/link storage; IDX0 `IDX0-AC1` |
-| I06 | `ProjectIndex.route_snapshot` from `set_route_snapshot`; route accessors/flattening; snapshots contain owner-produced route definitions | Replace route candidate storage without deriving routing semantics; IDX0 `IDX0-AC1` |
-| I07 | LSP `server_utils::build_workspace_components`: `host.list_files` + carrier classification + basename projection; completion in `server/nav_features.rs` | UAK0 `D18`: retire per-request discovery in favor of component candidates, preserving Vue/Svelte name/import-path results; IDX0 `IDX0-AC1` |
-| I08 | LSP `features/workspace_symbol::workspace_symbols`: `list_files` + binding/template/style analyses; `server/aux_features.rs` workspace-symbol handler | Replace all-file candidate aggregation with scoped name/component/style lookup; IDX0 `IDX0-AC1` |
-| I09 | LSP `css/global_classes.rs` all-host-files lookup: cached style/template analyses; references and rename in `server/nav_features_css.rs` | Replace candidate discovery, preserving scoped/module/global distinctions; IDX0 `IDX0-AC1` |
+| I01 | `verter_semantic::analysis::ProjectIndex.files`, `provide_index`, `inject_index`; input `FileUsageInfoOwned` via `add_file`/`remove_file`; queried by provider/inject accessors, summaries and diagnostics `build_cross_file_snapshot` | Replace candidate storage with typed name/registration postings; IDX0-PROJECT `IDX0-PROJECT-AC1` |
+| I02 | `ProjectIndex.component_graph`, `component_reverse_index`; component usages supplied in `FileUsageInfoOwned`; component accessors/summary and cross-file snapshot consumers | Replace adjacency and reverse candidate storage, retain producer relation meaning; IDX0-PROJECT `IDX0-PROJECT-AC1` |
+| I03 | `ProjectIndex.class_index`, `id_index`, `v_bind_css_index`, `custom_property_index`, `var_reference_index`, `template_css_var_index`, `script_css_var_index`; file usage producers; stylesheet accessors and `css_var_flow` | Replace style postings, preserving definition/reference/template/script distinctions; IDX0-PROJECT `IDX0-PROJECT-AC1` |
+| I04 | `ProjectIndex.emit_index`, `listener_index`, `template_id_index`; file usage producers; event flow/template-ID accessors and cross-file diagnostics | Replace event/ID candidate postings; IDX0-PROJECT `IDX0-PROJECT-AC1` |
+| I05 | `ProjectIndex.store_usage_index`, `store_definition_index`, `store_dep_graph`; file usage producers; store flow/summary and diagnostics cycle candidate input | Replace store registration/link storage; IDX0-PROJECT `IDX0-PROJECT-AC1` |
+| I06 | `ProjectIndex.route_snapshot` from `set_route_snapshot`; route accessors/flattening; snapshots contain owner-produced route definitions | Replace route candidate storage without deriving routing semantics; IDX0-PROJECT `IDX0-PROJECT-AC1` |
+| I07 | LSP `server_utils::build_workspace_components`: `host.list_files` + carrier classification + basename projection; completion in `server/nav_features.rs` | UAK0 `D18`: retire per-request discovery in favor of component candidates, preserving Vue/Svelte name/import-path results; IDX0-LSP `IDX0-LSP-AC1` |
+| I08 | LSP `features/workspace_symbol::workspace_symbols`: `list_files` + binding/template/style analyses; `server/aux_features.rs` workspace-symbol handler | Replace all-file candidate aggregation with scoped name/component/style lookup; IDX0-LSP `IDX0-LSP-AC1` |
+| I09 | LSP `css/global_classes.rs` all-host-files lookup: cached style/template analyses; references and rename in `server/nav_features_css.rs` | Replace candidate discovery, preserving scoped/module/global distinctions; IDX0-LSP `IDX0-LSP-AC1` |
 | I10 | Host `host_manage/analysis_io.rs::css_var_flow`: scheduler node IDs and effective style/script/raw-template facts; public host callers and tests | Replace per-query candidate walk, preserving profileless and override-aware distinctions; IDX0 `IDX0-AC1` |
-| I11 | LSP `server/custom_methods/mod.rs` `get_project_overview`, `get_route_tree`, `get_component_parents`: `list_files` and per-file analyses | Replace consumer-private component/population discovery; IDX0 `IDX0-AC1` |
-| I12 | MCP `server.rs` `get_component_graph`, `check_component_props`, `detect_prop_drilling`, `trace_event_flow`, `validate_provide_inject`, `get_store_usage`, `get_store_graph`, `trace_store_flow`, `build_route_snapshot`: private maps/graphs from `list_files` and cached analyses | Replace candidate walks and retained whole-workspace copies with bounded typed relation queries; IDX0 `IDX0-AC1`. Owner operations still validate props, flow and registrations. |
-| I13 | MCP `detect_css_bleed`: all-file class/template maps from analysis; project CSS comparison | Replace class candidate discovery; IDX0 `IDX0-AC1`; CSS interpretation remains CSS-owned |
+| I11 | LSP `server/custom_methods/mod.rs` `get_project_overview`, `get_route_tree`, `get_component_parents`: `list_files` and per-file analyses | Replace consumer-private component/population discovery; IDX0-LSP `IDX0-LSP-AC1` |
+| I12 | MCP `server.rs` `get_component_graph`, `check_component_props`, `detect_prop_drilling`, `trace_event_flow`, `validate_provide_inject`, `get_store_usage`, `get_store_graph`, `trace_store_flow`, `build_route_snapshot`: private maps/graphs from `list_files` and cached analyses | Replace candidate walks and retained whole-workspace copies with bounded typed relation queries; IDX0-MCP `IDX0-MCP-AC1`. Owner operations still validate props, flow and registrations. |
+| I13 | MCP `detect_css_bleed`: all-file class/template maps from analysis; project CSS comparison | Replace class candidate discovery; IDX0-MCP `IDX0-MCP-AC1`; CSS interpretation remains CSS-owned |
 | I14 | MCP `find_orphan_components`, `get_test_impact`: local traversal of component/import facts; orphan/affected-file responses | Retire private reachability/impact interpretation over a guessed closed graph; WSI4Q `WSI4Q-AC1`/`AC2`, consuming IDX0 candidates and PM roots |
-| I15 | MCP `get_project_stats`, `detect_migration_targets`, `ssr_project_report`, `analyze_route_health`: all-file population walks for aggregate owner facts | Replace population discovery with scoped typed candidate enumeration; IDX0 `IDX0-AC1`; scoring, migration, SSR and route judgments stay with their producing operations |
+| I15 | MCP `get_project_stats`, `detect_migration_targets`, `ssr_project_report`, `analyze_route_health`: all-file population walks for aggregate owner facts | Replace population discovery with scoped typed candidate enumeration; IDX0-MCP `IDX0-MCP-AC1`; scoring, migration, SSR and route judgments stay with their producing operations |
 | I16 | LSP references/rename in `server/nav_features_navigation.rs`, `rename_plan.rs`, `child_prop_rename.rs`: local/provider occurrences and child declaration validation; feature-specific candidate/occurrence planning | Converge on bounded `OccurrencePlanner`, preserve authoritative declaration validation and completeness guards; LSO4 `LSO4-AC1`, consuming IDX0 |
 | I17 | LSP workspace/native/framework/provider completion composition and label collision handling, `server/nav_features.rs` and completion features | Retire private semantic candidate composition; LSO6 `LSO6-AC1`, consuming IDX0; presentation names never deduplicate distinct targets |
 
 I01–I13 and I15 assign the indexed discovery/storage boundary, not the
-consumer's semantic body or public tool retirement. In particular, the MCP
-consumer migrations retain their existing owners below. They use the typed
-lookup instead of copying candidate walks; they do not implement another
-index. I14 assigns reachability/impact interpretation to WSI, while the public
-test operation remains its own consumer.
+consumer's semantic body or public tool retirement. IDX0 delivers the store,
+the host producer and I10; IDX0-PROJECT (I01–I06), IDX0-LSP (I07–I09, I11)
+and IDX0-MCP (I12, I13, I15) retire the remaining routes, each consuming
+IDX0's lookup, with parity before retirement and no second index. In
+particular, the MCP consumer migrations retain their existing owners below.
+They use the typed lookup instead of copying candidate walks; they do not
+implement another index. I14 assigns reachability/impact interpretation to
+WSI, while the public test operation remains its own consumer.
 
 | Consumer | Current operations consuming the indexed facts | Sole later consumer owner and receiving acceptance |
 | -------- | ---------------------------------------------- | -------------------------------------------------- |
@@ -408,7 +413,7 @@ production implementation. Each case names the distinct boundary it tests.
 | C11 | Unknown payload version, malformed/unattributed extension, missing read evidence, declaration/registration without a delivered operation | Reject ingress or return unsupported; preserve cause/producer. No complete-empty decode, callback in storage or invented executable capability. | IDX0 `IDX0-AC2`; XSDK2 `XSDK2-AC1` |
 | C12 | Native child refusal under exact profile/context and failed-prefix evidence inside a partial index walk | Child owner may reuse eligible refusal; index remains Partial/ReturnOnly. Cancellation leaves no retained refusal. | IDX0 `IDX0-AC3`, `IDX0-AC-R1` |
 | C13 | Grow unrelated files, grow matching postings beyond B, repeat edit/delete cycles and release readers | Query visits obey family bounds; saturation stays Partial; retained live rows/postings/read edges plateau. No hidden whole-workspace scan or negative budget admission. | IDX0 `IDX0-AC4`, `IDX0-AC-R1` |
-| C14 | Scoped/module/global CSS classes and profileless/override-aware CSS-variable facts in Vue/Svelte | Preserve candidate/result parity and exact scope/basis. No cross-file scoped-class match or profile override leaking into raw results. | IDX0 `IDX0-AC1`/`AC2`; CSS1 `CSS1-AC1` |
+| C14 | Scoped/module/global CSS classes and profileless/override-aware CSS-variable facts in Vue/Svelte | Preserve candidate/result parity and exact scope/basis. No cross-file scoped-class match or profile override leaking into raw results. | IDX0 `IDX0-AC1`/`AC2` (CSS-variable facts, I10); IDX0-LSP `IDX0-LSP-AC1` (scoped/module/global classes, I09); CSS1 `CSS1-AC1` |
 | C15 | Unknown dynamic edge, incomplete project roots or missing deployment env/test producer | Explicit uncertainty; no definitely-dead verdict, secret absence or exact missing-test result from postings. | IDX0 `IDX0-AC2`; WSI4Q `WSI4Q-AC2`; CENV4 `CENV4-AC2`; TST1 `TST1-AC2` |
 
 ## Evidence selection and acceptance
@@ -420,12 +425,14 @@ contribution service exists:
 
 - `crates/verter_semantic/src/analysis/project_index_tests.rs`: `component_graph`,
   `update_file_reindexes`, `remove_file`, `provide_index`, `inject_index` and
-  stylesheet/event/store cases cover current standalone storage.
+  stylesheet/event/store cases cover current standalone storage
+  (IDX0-PROJECT parity controls).
 - LSP `server/tests/workspace.rs`:
   `build_workspace_components_enumerates_svelte_and_strips_extension` and
   `build_workspace_components_dotted_collision_is_deterministic`;
   `integration_tests.rs::workspace_symbols_includes_svelte_components`
-  cover current cross-framework candidate presentation.
+  cover current cross-framework candidate presentation (IDX0-LSP parity
+  controls).
 - Host `tests/cases/g_misc0/host_tests.rs::css_var_flow_across_files` and
   `unissued_template_content_is_refused_without_affecting_css_var_flow`
   cover the current raw/override boundary.

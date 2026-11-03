@@ -824,6 +824,9 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // and `HostFenceValidator`; Stage 4d retires the
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
+        // The workspace candidate index's read side and host route; its writer
+        // is crate-private inside the module.
+        "pub mod workspace_index",
         "pub(crate) mod template_convert",
         // ─── test-only re-export shim ──────────────────────────────
         "pub mod for_tests",

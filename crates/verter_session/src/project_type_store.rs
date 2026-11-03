@@ -1239,6 +1239,9 @@ pub struct ProjectTypeStore {
     /// engine's stores) receive clones of this handle — they share the
     /// account, they never mint one.
     retention_account: verter_session_query::retention::StoreAccount,
+    /// Typed candidate postings over the workspace. Candidate storage only:
+    /// every semantic answer stays with the fact's owner.
+    workspace_index: crate::workspace_index::WorkspaceIndex,
     /// What document closes have cost so far ([`Self::close_stats`]).
     close_stats: parking_lot::Mutex<SemanticCloseStats>,
     /// Debug / diagnostic counters.
@@ -1318,6 +1321,12 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn fact_policy(&self) -> verter_session_query::facts::policy::FactPolicy {
         self.fact_policy
+    }
+
+    /// The workspace candidate index.
+    #[must_use]
+    pub fn workspace_index(&self) -> &crate::workspace_index::WorkspaceIndex {
+        &self.workspace_index
     }
 
     /// The aggregate retained-byte account this store's caches charge.
@@ -1463,6 +1472,7 @@ impl ProjectTypeStore {
             ),
             mapper_binder_registry,
             identity_interner,
+            workspace_index: crate::workspace_index::WorkspaceIndex::new(retention_account.clone()),
             retention_account,
             counters,
             close_stats: Default::default(),
