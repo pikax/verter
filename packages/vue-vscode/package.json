@@ -28,7 +28,7 @@
     "watch": "node esbuild.mjs --watch",
     "pretest": "pnpm run prepare:unit",
     "prepare:unit": "pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build",
-    "test": "vitest run --dir src && pnpm run test:e2e:lib:unit && pnpm run test:e2e:acceptance:unit",
+    "test": "vitest run --dir src && pnpm run test:e2e:lib:unit && pnpm run test:e2e:acceptance:unit && pnpm run test:e2e:dx:unit",
     "vscode:prepublish": "node esbuild.mjs --production",
     "prepare:e2e:rust": "cargo build -p verter_lsp -p verter_relay_shim -p verter_mcp --manifest-path ../../Cargo.toml",
     "prepare:e2e:ts": "pnpm run prepare:unit && pnpm run build:dev && tsc -p tsconfig.test.json && pnpm run attest:e2e:build",

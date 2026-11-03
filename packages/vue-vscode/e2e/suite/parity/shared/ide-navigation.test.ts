@@ -664,11 +664,12 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         12_000,
       );
 
-      // This is an editor-acceptance proof, not a latency assertion. A fresh
-      // tsserver completion request may still be resolving the selected item
-      // after the list-readiness probe above, so use the shared real-accept
-      // driver with a settle budget that does not race the suggestion widget.
-      await acceptCompletionInEditor(editor, 750);
+      // This is an editor-acceptance proof, not a latency assertion. The probe above
+      // only proves the provider offers `computed`; the suggestion widget's own
+      // request and the selected item's resolve answer later. The shared driver
+      // accepts once the widget has focused `computed` and judges the outcome
+      // when the identifier and its import have landed.
+      await acceptCompletionInEditor(editor, "computed");
       const importAfter = scriptBlockText(editor.document);
       if (!/import\s*\{[^}]*\bcomputed\b/.test(importAfter)) {
         throw new Error(

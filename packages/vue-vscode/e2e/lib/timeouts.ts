@@ -345,6 +345,11 @@ export const POLL_BUDGETS = {
   // the style-css parity suite awaits them under a declared 20s.
   parityDiagnosticsSettle: { budgetMs: 12_000, parentTimeoutMs: 20_000 },
   completionContractSettle: { budgetMs: 8_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
+  // ── dx/** ────────────────────────────────────────────────────
+  // The real completion accept (`dx/dxAcceptCompletion.ts`): one hang guard over the
+  // whole interaction — the suggestion widget focusing the expected item, then the
+  // identifier and its static import landing. It only ever fails a stuck accept.
+  acceptCompletion: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
 } as const satisfies Record<string, PollBudgetSpec>;
 
 export type PollBudgetName = keyof typeof POLL_BUDGETS;
