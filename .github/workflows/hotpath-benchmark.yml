@@ -44,7 +44,6 @@ jobs:
           HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/merged.json
           HOTPATH_MERGE_REPORT: ${{ runner.temp }}/native.json
           HOTPATH_CALLGRIND_OUT_FILE: ${{ runner.temp }}/callgrind.out.%p
-          # Cargo starts the benchmark under Valgrind.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: valgrind -q --tool=callgrind --instr-atstart=no --callgrind-out-file=${{ runner.temp }}/callgrind.out.%p
         run: |
           cargo bench $BENCH_ARGS -- --test --exact new_pipeline/real/full/kitchen-sink
@@ -87,11 +86,9 @@ jobs:
         run: cargo bench $BENCH_ARGS -- --test --exact new_pipeline/real/full/kitchen-sink
       - name: Run benchmark under Callgrind and write the merged report
         env:
-          # Absolute: Cargo starts the benchmark in the package directory.
           HOTPATH_OUTPUT_PATH: ${{ github.workspace }}/report.json
           HOTPATH_MERGE_REPORT: ${{ runner.temp }}/native.json
           HOTPATH_CALLGRIND_OUT_FILE: ${{ runner.temp }}/callgrind.out.%p
-          # Cargo starts the benchmark under Valgrind.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: valgrind -q --tool=callgrind --instr-atstart=no --callgrind-out-file=${{ runner.temp }}/callgrind.out.%p
         run: |
           cargo bench $BENCH_ARGS -- --test --exact new_pipeline/real/full/kitchen-sink
