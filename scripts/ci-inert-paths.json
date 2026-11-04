@@ -68,6 +68,18 @@
     "reason": "Runs on its own trigger and inside the release rehearsal, which a release pull request runs regardless of paths."
   },
   {
+    "glob": ".github/workflows/hotpath-benchmark.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": ".github/workflows/hotpath-relay.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": "hotpath/policy.toml",
+    "reason": "hotpath-cloud regression policy, embedded in reports by the hotpath benchmark workflow; no ci.yml job reads it."
+  },
+  {
     "glob": ".github/workflows/integration-test.yml",
     "reason": "Runs on its own trigger and after a publish; no ci.yml job reads the file."
   },
