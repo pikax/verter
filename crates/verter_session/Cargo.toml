@@ -196,7 +196,7 @@ proc-macro2 = { version = "1.0", features = ["span-locations"], optional = true 
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
 bitflags = "2.13"
 dashmap = { version = "6.2", features = ["raw-api"] }
-hotpath = { version = "0.23", optional = true }
+hotpath = { version = "0.31", optional = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
@@ -261,7 +261,7 @@ windows-sys = { version = "0.61.2", features = [
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The profiler itself is native-only: on wasm32 `hotpath` stays in its
 # no-op mode, so `semantic-observe` builds for every target.
-hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
+hotpath = { version = "0.31", optional = true, features = ["hotpath"] }
 rayon = { workspace = true }
 # uuid 1.22 split RNG into explicit features. Native targets use
 # `rng-getrandom` for v4 generation.

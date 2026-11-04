@@ -6,7 +6,7 @@
 //! Tests across real fixtures and synthetic templates of varying size and
 //! expression density. Includes a phase breakdown to identify bottlenecks.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use hotpath::criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
 use oxc_allocator::Allocator;
