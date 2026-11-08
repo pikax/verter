@@ -49,7 +49,8 @@ fn create_temp_worktree(root: &Path, branch: &str) -> PathBuf {
         .expect("git worktree add failed");
     if !status.success() {
         panic!(
-            "Failed to create temporary worktree at {}",
+            "Failed to create temporary worktree at {}: this tool needs `git worktree`, \
+             which a Gin workspace does not provide; run it from a Git clone",
             tmp_dir.display()
         );
     }

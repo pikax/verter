@@ -76,13 +76,14 @@ fn no_bare_origin_reads_outside_audit_paths() {
         .args(["grep", "-nE", "--", ORIGIN_PATTERN, "packages/"])
         .current_dir(&workspace_root)
         .output()
-        .expect("git grep must succeed (run from a git repo)");
+        .expect("git must be on PATH (a Git clone, or the stand-in in a Gin workspace)");
 
     // git grep exits 1 when no matches found; treat that as "no
-    // violations, no work to do" rather than a panic.
-    if !output.status.success() && !output.stdout.is_empty() {
+    // violations, no work to do" rather than a panic. Any other failure
+    // (no repository, an unsupported form) must not pass as a clean scan.
+    if !matches!(output.status.code(), Some(0 | 1)) {
         panic!(
-            "git grep exited non-zero with output: status={:?}\nstderr={}",
+            "git grep failed: status={:?}\nstderr={}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
@@ -172,17 +173,27 @@ fn has_preceding_block_guard(workspace_root: &Path, hit: &GrepHit<'_>) -> bool {
     any_needle(&context, BLOCK_GUARD_NEEDLES)
 }
 
+/// The repository root: the ancestor holding `packages/` and either
+/// `pnpm-workspace.yaml` or the Cargo `[workspace]` manifest. It does not
+/// look for `.git`, which a Gin workspace checkout does not have.
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
-        if p.join("packages").is_dir() && p.join(".git").exists() {
+        if p.join("packages").is_dir()
+            && (p.join("pnpm-workspace.yaml").is_file() || is_cargo_workspace_manifest(&p))
+        {
             return p;
         }
         if !p.pop() {
             panic!(
-                "could not find workspace root (no `.git` + `packages/` ancestor of {})",
+                "could not find workspace root (no `packages/` + `pnpm-workspace.yaml` or Cargo `[workspace]` ancestor of {})",
                 env!("CARGO_MANIFEST_DIR")
             );
         }
     }
+}
+
+fn is_cargo_workspace_manifest(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "[workspace]"))
 }
