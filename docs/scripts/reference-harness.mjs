@@ -14,6 +14,12 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
+import {
+  compareIds,
+  loadShardedIndex,
+  ShardedIndexError,
+} from "../../scripts/lib/sharded-index.mjs";
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 
@@ -338,13 +344,20 @@ function existsAbs(absPath, overlays, repoRoot) {
 function isFileAbs(absPath, overlays, repoRoot) {
   const rel = posixRel(repoRoot, absPath);
   if (overlays && Object.prototype.hasOwnProperty.call(overlays, rel)) return overlays[rel] != null;
-  return existsSync(absPath) && statSync(absPath).isFile();
+  try {
+    return statSync(absPath).isFile();
+  } catch (cause) {
+    if (cause.code === "ENOENT" || cause.code === "ENOTDIR") return false;
+    throw cause;
+  }
 }
 
 function listNames(absDir, overlays, repoRoot) {
   const names = new Set();
-  if (existsSync(absDir) && statSync(absDir).isDirectory()) {
+  try {
     for (const name of readdirSync(absDir)) names.add(name);
+  } catch (cause) {
+    if (cause.code !== "ENOENT") throw cause;
   }
   const relDir = posixRel(repoRoot, absDir);
   const prefix = relDir ? `${relDir}/` : "";
@@ -578,16 +591,108 @@ export function resolvedEntryKinds(example, facts, packages, bins) {
   return kinds;
 }
 
-function duplicateIds(rows) {
-  const seen = new Set();
-  const duplicates = new Set();
-  for (const row of rows) {
-    const id = row?.id;
-    if (typeof id !== "string") continue;
-    if (seen.has(id)) duplicates.add(id);
-    seen.add(id);
+/**
+ * Maps one sharded-index loader failure to the harness error item for its
+ * collection; a broken or duplicated fragment never silently drops rows.
+ * (Duplicate and idless rows are rejected by the loader itself — the old
+ * per-collection duplicate scans died with the monolithic arrays.)
+ */
+function shardFailure(collection, error) {
+  if (error instanceof ShardedIndexError && error.code === "duplicate-id") {
+    if (collection === "examples") {
+      return err("duplicate-example", "duplicate example id", { id: error.id });
+    }
+    if (collection === "sdkGuides") {
+      return err("sdk-duplicate-topic", "sdk guide topic is declared more than once", {
+        id: error.id,
+      });
+    }
+    if (collection === "recipes") {
+      return err("recipes-duplicate-topic", "recipe topic is declared more than once", {
+        id: error.id,
+      });
+    }
+    return err("duplicate-journey", "duplicate journey id", { journey: error.id });
   }
-  return [...duplicates].sort();
+  return err("manifest-fragment-invalid", error.message, {
+    collection,
+    ...(error instanceof ShardedIndexError && error.fragment ? { fragment: error.fragment } : {}),
+  });
+}
+
+/**
+ * Resolves an example home's manifest from its header plus the four fragment
+ * directories through the shared sharded-index loader: `examples` rows from
+ * `<home>/<id>/example.json`, sdk guide topics from `<home>/sdk-guides/`,
+ * recipe topics from `<home>/recipes/` and journeys from
+ * `<home>/journeys/<id>.json`. The merged view keeps today's six-field shape;
+ * `sdkGuides`/`recipes` stay absent when the header declares no index and no
+ * node registered a topic. On failure, returns a null manifest plus typed
+ * harness errors; dependent validation must not consume an incomplete view.
+ */
+export function resolveExampleManifest(examplesRoot, options = {}) {
+  const io = options.io;
+  const readBytes = io?.read ?? defaultRead;
+  const manifestPath = options.manifestPath ?? join(examplesRoot, "manifest.json");
+  const failures = [];
+  let manifest;
+  try {
+    manifest = JSON.parse(readBytes(manifestPath));
+  } catch (cause) {
+    failures.push(
+      err("manifest-fragment-invalid", "example home manifest header is not valid JSON", {
+        collection: "manifest",
+        detail: String(cause?.message ?? cause),
+      }),
+    );
+    return { manifest: null, failures };
+  }
+  if (manifest == null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    return {
+      manifest: null,
+      failures: [
+        err("manifest-header-invalid", "manifest header must be an object", { key: "manifest" }),
+      ],
+    };
+  }
+  for (const [key, owner, property] of [
+    ["examples", manifest, "examples"],
+    ["journeys", manifest, "journeys"],
+    ["sdkGuides.topics", manifest.sdkGuides, "topics"],
+    ["recipes.topics", manifest.recipes, "topics"],
+  ]) {
+    if (owner != null && Object.hasOwn(owner, property)) {
+      failures.push(
+        err(
+          "manifest-header-invalid",
+          `manifest header must not contain rows at ${key}; register fragments instead`,
+          { key },
+        ),
+      );
+    }
+  }
+  if (failures.length > 0) return { manifest: null, failures };
+  const load = (collection, dir, entry) => {
+    try {
+      return loadShardedIndex(dir, manifestPath, { io, ...(entry ? { entry } : {}) }).rows;
+    } catch (error) {
+      failures.push(shardFailure(collection, error));
+      return [];
+    }
+  };
+  manifest.examples = load("examples", examplesRoot, "example.json");
+  const sdkTopics = load("sdkGuides", join(examplesRoot, "sdk-guides"));
+  const recipeTopics = load("recipes", join(examplesRoot, "recipes"));
+  manifest.journeys = load("journeys", join(examplesRoot, "journeys"));
+  // The header index declares a topic collection; registered topics surface
+  // even without one (an unindexed topic fails its own checks).
+  if (manifest.sdkGuides != null || sdkTopics.length > 0) {
+    manifest.sdkGuides = { ...manifest.sdkGuides, topics: sdkTopics };
+  }
+  if (manifest.recipes != null || recipeTopics.length > 0) {
+    manifest.recipes = { ...manifest.recipes, topics: recipeTopics };
+  }
+  return { manifest: failures.length > 0 ? null : manifest, failures };
 }
 
 export async function validate(options = {}) {
@@ -684,9 +789,57 @@ export async function validate(options = {}) {
     receipt.errors = errors;
     return receipt;
   }
-  const manifestBytes = read(manifestPath);
-  digestEntries.push({ path: posixRel(repoRoot, manifestPath), bytes: manifestBytes });
-  const manifest = JSON.parse(manifestBytes);
+  // Fragment resolution through the shared loader, with every header and
+  // fragment read joining the source digest exactly once (an edited fragment
+  // must invalidate an incremental receipt like any other material input).
+  const digestedPaths = new Set();
+  const shardIo = {
+    // Overlay-aware fragment listing for both layouts: on-disk children plus
+    // fragment paths that exist only as overlays (listNames covers flat
+    // direct children; nested `<id>/<entry>` fragments need the deeper walk).
+    list(absDir, entry) {
+      const relDir = posixRel(repoRoot, absDir);
+      const prefix = relDir ? `${relDir}/` : "";
+      const names = new Set(listNames(absDir, overlays, repoRoot));
+      if (overlays) {
+        for (const [rel, value] of Object.entries(overlays)) {
+          if (value == null || !rel.startsWith(prefix)) continue;
+          const rest = rel.slice(prefix.length).split("/");
+          if (entry == null) {
+            if (rest.length === 1 && rest[0].endsWith(".json")) names.add(rest[0]);
+          } else if (rest.length === 2 && rest[1] === entry) {
+            names.add(rest[0]);
+          }
+        }
+      }
+      const fragments = [];
+      for (const name of [...names].sort()) {
+        const abs = entry == null ? join(absDir, name) : join(absDir, name, entry);
+        if (isFileAbs(abs, overlays, repoRoot)) fragments.push(abs);
+      }
+      return fragments;
+    },
+    read(abs) {
+      const bytes = read(abs);
+      const rel = posixRel(repoRoot, abs);
+      if (!digestedPaths.has(rel)) {
+        digestedPaths.add(rel);
+        digestEntries.push({ path: rel, bytes });
+      }
+      return bytes;
+    },
+  };
+  const { manifest, failures: manifestFailures } = resolveExampleManifest(examplesRoot, {
+    manifestPath,
+    io: shardIo,
+  });
+  for (const item of manifestFailures) fail(item);
+  if (manifest == null) {
+    receipt.completenessState = "failed";
+    receipt.errors = errors;
+    receipt.sourceRevisions.digest = sourceDigest(digestEntries);
+    return receipt;
+  }
   if (!Array.isArray(manifest.examples) || manifest.examples.length === 0) {
     fail(err("empty-examples", "public example home declares no examples"));
   }
@@ -698,8 +851,6 @@ export async function validate(options = {}) {
       fail(err("partial-example", "example is missing id"));
       continue;
     }
-    if (byId.has(example.id))
-      fail(err("duplicate-example", "duplicate example id", { id: example.id }));
     byId.set(example.id, example);
   }
   const exampleFacts = new Map();
@@ -714,7 +865,7 @@ export async function validate(options = {}) {
     if (signal?.aborted) {
       receipt.completenessState = "cancelled";
       receipt.errors = [...errors, err("cancelled", "validation aborted during example discovery")];
-      receipt.examples = exampleRows.sort((a, b) => a.id.localeCompare(b.id));
+      receipt.examples = exampleRows.sort((a, b) => compareIds(a.id, b.id));
       receipt.sourceRevisions.digest = sourceDigest(digestEntries);
       return receipt;
     }
@@ -874,7 +1025,7 @@ export async function validate(options = {}) {
     });
   }
 
-  exampleRows.sort((a, b) => a.id.localeCompare(b.id));
+  exampleRows.sort((a, b) => compareIds(a.id, b.id));
   receipt.examples = exampleRows;
 
   for (const name of listNames(examplesRoot, overlays, repoRoot)) {
@@ -912,9 +1063,6 @@ export async function validate(options = {}) {
     const declaredIds = new Set(
       declaredTopics.map((topic) => topic?.id).filter((id) => typeof id === "string"),
     );
-    for (const id of duplicateIds(declaredTopics)) {
-      fail(err("sdk-duplicate-topic", "sdk guide topic is declared more than once", { id }));
-    }
     const missingTopics = REQUIRED_SDK_GUIDE_TOPICS.filter((id) => !declaredIds.has(id));
     if (missingTopics.length > 0) {
       fail(
@@ -975,7 +1123,7 @@ export async function validate(options = {}) {
     }
 
     const orderedTopics = [...declaredTopics].sort((a, b) =>
-      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+      compareIds(String(a?.id ?? ""), String(b?.id ?? "")),
     );
     for (const topic of orderedTopics) {
       const id = typeof topic?.id === "string" ? topic.id : null;
@@ -1135,9 +1283,6 @@ export async function validate(options = {}) {
     const declaredRecipeIds = new Set(
       declaredTopics.map((topic) => topic?.id).filter((id) => typeof id === "string"),
     );
-    for (const id of duplicateIds(declaredTopics)) {
-      fail(err("recipes-duplicate-topic", "recipe topic is declared more than once", { id }));
-    }
     const missingRecipeTopics = REQUIRED_RECIPE_TOPICS.filter((id) => !declaredRecipeIds.has(id));
     if (missingRecipeTopics.length > 0) {
       fail(
@@ -1184,7 +1329,7 @@ export async function validate(options = {}) {
     }
 
     const orderedRecipeTopics = [...declaredTopics].sort((a, b) =>
-      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+      compareIds(String(a?.id ?? ""), String(b?.id ?? "")),
     );
     for (const topic of orderedRecipeTopics) {
       const id = typeof topic?.id === "string" ? topic.id : null;
@@ -1331,28 +1476,18 @@ export async function validate(options = {}) {
     receipt.recipes = recipes;
   }
 
-  const declaredJourneys = manifest.journeys;
-  if (
-    declaredJourneys != null &&
-    (!Array.isArray(declaredJourneys) || declaredJourneys.length === 0)
-  ) {
-    fail(err("journeys-empty", "the example home declares an empty journeys model"));
-  }
+  // Journey rows arrive id-unique from the sharded resolver; a producer that
+  // has not landed yet simply registers no journey fragment (an absent — not
+  // an "explicitly empty" — journeys model, which stays legal).
   const journeyRows = [];
-  const journeyIds = new Set();
   const structuralJourneyError = (id) => errors.some((item) => item.journey === id);
-  for (const journey of Array.isArray(declaredJourneys) ? declaredJourneys : []) {
+  for (const journey of manifest.journeys) {
     const id = typeof journey?.id === "string" && journey.id.length > 0 ? journey.id : null;
     if (!id) {
       fail(err("journey-missing-id", "journey declares no id"));
       continue;
     }
     let journeyOk = true;
-    if (journeyIds.has(id)) {
-      fail(err("duplicate-journey", "duplicate journey id", { journey: id }));
-      journeyOk = false;
-    }
-    journeyIds.add(id);
     if (typeof journey.description !== "string" || journey.description.length === 0) {
       fail(err("journey-description-missing", "journey declares no description", { journey: id }));
       journeyOk = false;
@@ -1507,7 +1642,7 @@ export async function validate(options = {}) {
       ok: journeyOk,
     });
   }
-  journeyRows.sort((a, b) => a.id.localeCompare(b.id));
+  journeyRows.sort((a, b) => compareIds(a.id, b.id));
 
   if (options.runJourneys === true) {
     const timeoutMs = options.journeyStepTimeoutMs ?? JOURNEY_STEP_TIMEOUT_MS;
@@ -1788,10 +1923,10 @@ export async function validate(options = {}) {
 
 export function canonicalizeReceipt(receipt) {
   const clone = JSON.parse(JSON.stringify(receipt));
-  clone.examples?.sort((a, b) => a.id.localeCompare(b.id));
-  clone.sdkGuides?.topics?.sort((a, b) => a.id.localeCompare(b.id));
-  clone.recipes?.topics?.sort((a, b) => a.id.localeCompare(b.id));
-  clone.journeys?.sort((a, b) => a.id.localeCompare(b.id));
+  clone.examples?.sort((a, b) => compareIds(a.id, b.id));
+  clone.sdkGuides?.topics?.sort((a, b) => compareIds(a.id, b.id));
+  clone.recipes?.topics?.sort((a, b) => compareIds(a.id, b.id));
+  clone.journeys?.sort((a, b) => compareIds(a.id, b.id));
   clone.contributorDocs?.pages?.sort((a, b) => String(a.id).localeCompare(String(b.id)));
   clone.contributorDocs?.taughtInterfaces?.sort((a, b) =>
     `${a.capability}:${a.path}:${a.symbol}:${a.taughtIn}`.localeCompare(

@@ -2,7 +2,7 @@
   "id": "sdk-docs-model.v1",
   "harness": "docs-reference-harness",
   "owner": "DOC7",
-  "interface": "docs/scripts/reference-harness.mjs (sdkGuides manifest section, receipt.sdkGuides, sdkGate option)",
+  "interface": "docs/scripts/reference-harness.mjs (sdk-guides/<id>.json topic fragments resolved with manifest.json sdkGuides.index into receipt.sdkGuides; sdkGate option)",
   "commands": {
     "check": "pnpm --filter docs check",
     "direct": "node docs/scripts/reference-harness.mjs",
@@ -35,6 +35,6 @@
   "runtimeClaim": "none",
   "uncertaintyNotes": "The SDK guide model requires actual SDK examples when the producing nodes land; today all six slots are pending and no page claims a working SDK example. Executable here means an executable source file plus a shipped-bin command or public import, validated statically; runtime execution of examples stays with the later executable-journey and SDK tooling nodes.",
   "permissions": "the harness reads the repository and spawns the existing typeinfo freshness command; the sdk gate adds no new process, network or write permission",
-  "migrationNotes": "additive to the DOC1 harness and the examples/reference manifest. Editors' shipped pages under docs/editor remain the official-extension truth; topic pages link them and never restate a capability matrix. XSDK9 migrates slots from pending to supplied by binding example ids in manifest.json sdkGuides and turning on --sdk-gate in the release lane.",
+  "migrationNotes": "The reference harness resolves manifest.json metadata with <id>/example.json example fragments and sdk-guides/<id>.json topic fragments. Editors' shipped pages under docs/editor remain the official-extension truth. XSDK9 changes each owned sdk-guides/<id>.json slot from pending to supplied by binding registered example ids and turns on --sdk-gate in the release lane. The metadata header stays unchanged and rejects topic arrays.",
   "resourceRationale": "synchronous static validation over a small authored tree; no new latency, allocation or RSS budget is bound to the ratified performance methodology"
 }

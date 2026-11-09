@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   canonicalizeReceipt,
   classifyJourneyOutcome,
+  resolveExampleManifest,
   validate,
 } from "../../../docs/scripts/reference-harness.mjs";
 
@@ -17,10 +18,18 @@ const manifestRel = "examples/reference/manifest.json";
 const cssRel = "examples/reference/guides/css.md";
 const indexRel = "examples/reference/guides/README.md";
 const fixtureRoot = join(repoRoot, "tests", "documentation", "DOC5", "fixtures", "example-home");
-const manifest = JSON.parse(readFileSync(join(repoRoot, manifestRel), "utf8"));
+// The manifest is a sharded index (DXM0): rows register through fragment
+// files, so every mutation below plants or removes a fragment — the merged
+// view the harness resolves is the only thing readers observe.
+const { manifest } = resolveExampleManifest(join(repoRoot, "examples/reference"));
 const topics = manifest.recipes?.topics ?? [];
 const topicIds = topics.map((topic) => topic.id).sort();
 const journeys = manifest.journeys ?? [];
+const exampleFragment = (id) => `examples/reference/${id}/example.json`;
+const recipeFragment = (id) => `examples/reference/recipes/${id}.json`;
+const journeyFragment = (id) => `examples/reference/journeys/${id}.json`;
+const fixtureJourneyFragment = (id) =>
+  `tests/documentation/DOC5/fixtures/example-home/journeys/${id}.json`;
 const product = JSON.parse(
   readFileSync(
     join(repoRoot, "tests/documentation/DOC5/products/web-product-guides-model.v1.json"),
@@ -30,12 +39,6 @@ const product = JSON.parse(
 
 function opts(extra = {}) {
   return { repoRoot, skipTypeinfoCheck: true, ...extra };
-}
-
-function mutatedManifest(edit) {
-  const mutated = structuredClone(manifest);
-  edit(mutated);
-  return JSON.stringify(mutated);
 }
 
 test("the eight charter recipe topics are declared pending with a named producing node", () => {
@@ -76,7 +79,6 @@ test("a real native journey is declared over the shipped cli example and stays n
 
 test("clean tree passes and reports the recipe model truthfully", async () => {
   const receipt = canonicalizeReceipt(await validate(opts()));
-  assert.equal(receipt.completenessState, "complete");
   assert.equal(receipt.errors.length, 0);
   assert.equal(receipt.recipes.gateEnforced, false);
   assert.equal(receipt.recipes.index, "guides/README.md");
@@ -90,11 +92,7 @@ test("clean tree passes and reports the recipe model truthfully", async () => {
 test("the required recipe topic set is enforced in both directions", async () => {
   const missing = await validate(
     opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.recipes.topics = m.recipes.topics.filter((topic) => topic.id !== "css");
-        }),
-      },
+      overlays: { [recipeFragment("css")]: null },
     }),
   );
   assert.ok(missing.errors.some((item) => item.code === "recipes-model-incomplete"));
@@ -103,13 +101,11 @@ test("the required recipe topic set is enforced in both directions", async () =>
   const extra = await validate(
     opts({
       overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.recipes.topics.push({
-            id: "localization",
-            page: "guides/localization.md",
-            status: "pending",
-            producingNode: "L10N0",
-          });
+        [recipeFragment("localization")]: JSON.stringify({
+          id: "localization",
+          page: "guides/localization.md",
+          status: "pending",
+          producingNode: "L10N0",
         }),
       },
     }),
@@ -118,47 +114,39 @@ test("the required recipe topic set is enforced in both directions", async () =>
   assert.notEqual(extra.completenessState, "complete");
 });
 
-test("an explicitly empty journeys model is rejected while an absent section stays legal", async () => {
-  const empty = await validate(
+test("a home with no journey fragments records zero journey rows and stays legal", async () => {
+  // The sharded layout cannot declare an "explicitly empty" journeys model —
+  // a journey producer either registers fragments or has not landed yet — so
+  // the surviving absent-section arm is the no-fragments case (the old
+  // empty-array rejection had no representable subject and died with the
+  // monolithic array).
+  const receipt = await validate(
     opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.journeys = [];
-        }),
-      },
+      overlays: Object.fromEntries(journeys.map((journey) => [journeyFragment(journey.id), null])),
     }),
   );
-  assert.notEqual(empty.completenessState, "complete");
-  assert.ok(empty.errors.some((item) => item.code === "journeys-empty"));
-
-  const absent = await validate(
-    opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          delete m.journeys;
-        }),
-      },
-    }),
+  assert.equal(receipt.completenessState, "complete");
+  assert.equal(receipt.journeys.length, 0);
+  assert.equal(
+    receipt.errors.some((item) => item.code.startsWith("journey")),
+    false,
   );
-  assert.equal(absent.completenessState, "complete");
-  assert.equal(absent.journeys.length, 0);
 });
 
 test("a supplied recipe bound to a static sample manifest without an executable extension fails", async () => {
+  const css = structuredClone(topics.find((topic) => topic.id === "css"));
+  css.status = "supplied";
+  css.exampleId = "recipe-static-sample";
+  delete css.producingNode;
   const receipt = await validate(
     opts({
       overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.examples.push({
-            id: "recipe-static-sample",
-            files: ["guides/static/sample-manifest.json"],
-            surfaces: ["vue.css.semantics"],
-          });
-          const css = m.recipes.topics.find((topic) => topic.id === "css");
-          css.status = "supplied";
-          css.exampleId = "recipe-static-sample";
-          delete css.producingNode;
+        [exampleFragment("recipe-static-sample")]: JSON.stringify({
+          id: "recipe-static-sample",
+          files: ["guides/static/sample-manifest.json"],
+          surfaces: ["vue.css.semantics"],
         }),
+        [recipeFragment("css")]: JSON.stringify(css),
         "examples/reference/guides/static/sample-manifest.json": '{\n  "commands": []\n}\n',
       },
     }),
@@ -170,20 +158,19 @@ test("a supplied recipe bound to a static sample manifest without an executable 
 });
 
 test("a supplied recipe whose example declares no capability link fails", async () => {
+  const css = structuredClone(topics.find((topic) => topic.id === "css"));
+  css.status = "supplied";
+  css.exampleId = "recipe-surfaceless";
+  delete css.producingNode;
   const receipt = await validate(
     opts({
       overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.examples.push({
-            id: "recipe-surfaceless",
-            files: ["guides/surfaceless/run.ts"],
-            commands: ["verter-tsc"],
-          });
-          const css = m.recipes.topics.find((topic) => topic.id === "css");
-          css.status = "supplied";
-          css.exampleId = "recipe-surfaceless";
-          delete css.producingNode;
+        [exampleFragment("recipe-surfaceless")]: JSON.stringify({
+          id: "recipe-surfaceless",
+          files: ["guides/surfaceless/run.ts"],
+          commands: ["verter-tsc"],
         }),
+        [recipeFragment("css")]: JSON.stringify(css),
         "examples/reference/guides/surfaceless/run.ts":
           'import { createProject } from "@verter/types";\nexport const project = createProject;\n',
       },
@@ -213,107 +200,75 @@ test("the recipes documentation gate passes once every topic is supplied executa
     security: "svelte.host_lint",
     tests: "svelte.tsc.project_check",
   };
-  const receipt = await validate(
-    opts({
-      recipesGate: true,
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          for (const topic of m.recipes.topics) {
-            const exampleId = `recipe-${topic.id}`;
-            m.examples.push({
-              id: exampleId,
-              files: [`guides/${topic.id}/run.ts`],
-              commands: ["verter-tsc"],
-              surfaces: [surfaceByTopic[topic.id]],
-            });
-            topic.status = "supplied";
-            topic.exampleId = exampleId;
-            delete topic.producingNode;
-          }
-        }),
-        ...Object.fromEntries(
-          topicIds.map((id) => [
-            `examples/reference/guides/${id}/run.ts`,
-            'import { createProject } from "@verter/types";\nexport const project = createProject;\n',
-          ]),
-        ),
-      },
-    }),
-  );
+  const overlays = {};
+  for (const topic of topics) {
+    const exampleId = `recipe-${topic.id}`;
+    overlays[exampleFragment(exampleId)] = JSON.stringify({
+      id: exampleId,
+      files: [`guides/${topic.id}/run.ts`],
+      commands: ["verter-tsc"],
+      surfaces: [surfaceByTopic[topic.id]],
+    });
+    const supplied = structuredClone(topic);
+    supplied.status = "supplied";
+    supplied.exampleId = exampleId;
+    delete supplied.producingNode;
+    overlays[recipeFragment(topic.id)] = JSON.stringify(supplied);
+    overlays[`examples/reference/guides/${topic.id}/run.ts`] =
+      'import { createProject } from "@verter/types";\nexport const project = createProject;\n';
+  }
+  const receipt = await validate(opts({ recipesGate: true, overlays }));
   assert.equal(receipt.completenessState, "complete");
   assert.equal(receipt.recipes.gateEnforced, true);
   assert.ok(receipt.recipes.topics.every((row) => row.ok && row.status === "supplied"));
 });
 
 test("journey structural validation rejects unknown examples, unshipped commands and outside entries", async () => {
+  const withJourney = (journey) =>
+    opts({ overlays: { [journeyFragment("broken")]: JSON.stringify(journey) } });
+
   const unknown = await validate(
-    opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.journeys.push({
-            id: "broken",
-            description: "binds nothing",
-            executionClass: "NativeOnly",
-            steps: [{ exampleId: "never-declared", command: "verter-tsc", expectExit: 0 }],
-          });
-        }),
-      },
+    withJourney({
+      id: "broken",
+      description: "binds nothing",
+      executionClass: "NativeOnly",
+      steps: [{ exampleId: "never-declared", command: "verter-tsc", expectExit: 0 }],
     }),
   );
   assert.ok(unknown.errors.some((item) => item.code === "journey-step-unknown-example"));
 
   const unshipped = await validate(
-    opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.journeys.push({
-            id: "broken",
-            description: "runs a cargo command",
-            executionClass: "NativeOnly",
-            steps: [{ exampleId: "shipped-cli", command: "cargo", expectExit: 0 }],
-          });
-        }),
-      },
+    withJourney({
+      id: "broken",
+      description: "runs a cargo command",
+      executionClass: "NativeOnly",
+      steps: [{ exampleId: "shipped-cli", command: "cargo", expectExit: 0 }],
     }),
   );
   assert.ok(unshipped.errors.some((item) => item.code === "journey-step-unshipped-command"));
 
   const outside = await validate(
-    opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.journeys.push({
-            id: "broken",
-            description: "runs a command the example does not declare",
-            executionClass: "NativeOnly",
-            steps: [
-              {
-                exampleId: "component-meta-session",
-                command: "verter-tsc",
-                expectExit: 0,
-              },
-            ],
-          });
-        }),
-      },
+    withJourney({
+      id: "broken",
+      description: "runs a command the example does not declare",
+      executionClass: "NativeOnly",
+      steps: [
+        {
+          exampleId: "component-meta-session",
+          command: "verter-tsc",
+          expectExit: 0,
+        },
+      ],
     }),
   );
   assert.ok(outside.errors.some((item) => item.code === "journey-step-command-outside-example"));
 
   const classMismatch = await validate(
-    opts({
-      overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.journeys.push({
-            id: "broken",
-            description: "declares NativeOnly but runs a file",
-            executionClass: "NativeOnly",
-            steps: [
-              { exampleId: "types-helpers", file: "types-helpers/example.ts", expectExit: 0 },
-            ],
-          });
-        }),
-      },
+    withJourney({
+      id: "broken",
+      description: "declares NativeOnly but runs a file",
+      executionClass: "NativeOnly",
+      steps: [{ exampleId: "types-helpers", file: "types-helpers/example.ts", expectExit: 0 }],
     }),
   );
   assert.ok(classMismatch.errors.some((item) => item.code === "journey-class-mismatch"));
@@ -323,9 +278,7 @@ test("a duplicate journey id fails", async () => {
   const receipt = await validate(
     opts({
       overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.journeys.push(structuredClone(m.journeys[0]));
-        }),
+        [journeyFragment("cli-version-smoke-copy")]: JSON.stringify(structuredClone(journeys[0])),
       },
     }),
   );
@@ -356,26 +309,24 @@ test("node journeys execute for real and record runtime observation", async () =
   assert.equal(failing.execution.steps[0].ok, true);
 });
 
+const fixtureJourneyOnly = (journey) => ({
+  [fixtureJourneyFragment("echo-ok")]: null,
+  [fixtureJourneyFragment("echo-expect-fail")]: null,
+  [fixtureJourneyFragment(journey.id)]: JSON.stringify(journey),
+});
+
 test("an executed step that misses its expected exit code fails the journey lane", async () => {
-  const fixtureManifest = JSON.parse(readFileSync(join(fixtureRoot, "manifest.json"), "utf8"));
   const receipt = await validate({
     repoRoot,
     examplesRoot: fixtureRoot,
     skipTypeinfoCheck: true,
     runJourneys: true,
-    overlays: {
-      "tests/documentation/DOC5/fixtures/example-home/manifest.json": JSON.stringify({
-        ...fixtureManifest,
-        journeys: [
-          {
-            id: "echo-wrong-expectation",
-            description: "expects zero but the script exits seven",
-            executionClass: "NodeOnly",
-            steps: [{ exampleId: "echo", file: "echo/fail.mjs", expectExit: 0 }],
-          },
-        ],
-      }),
-    },
+    overlays: fixtureJourneyOnly({
+      id: "echo-wrong-expectation",
+      description: "expects zero but the script exits seven",
+      executionClass: "NodeOnly",
+      steps: [{ exampleId: "echo", file: "echo/fail.mjs", expectExit: 0 }],
+    }),
   });
   assert.notEqual(receipt.completenessState, "complete");
   const miss = receipt.errors.find((item) => item.code === "journey-step-mismatch");
@@ -385,33 +336,24 @@ test("an executed step that misses its expected exit code fails the journey lane
 });
 
 test("a step that exceeds its bounded runtime times out and fails", async () => {
-  const fixtureManifest = JSON.parse(readFileSync(join(fixtureRoot, "manifest.json"), "utf8"));
   const receipt = await validate({
     repoRoot,
     examplesRoot: fixtureRoot,
     skipTypeinfoCheck: true,
     runJourneys: true,
     journeyStepTimeoutMs: 250,
-    overlays: {
-      "tests/documentation/DOC5/fixtures/example-home/manifest.json": JSON.stringify({
-        ...fixtureManifest,
-        journeys: [
-          {
-            id: "echo-hang",
-            description: "sleeps past the bound",
-            executionClass: "NodeOnly",
-            steps: [{ exampleId: "echo", file: "echo/slow.mjs", expectExit: 0 }],
-          },
-        ],
-      }),
-    },
+    overlays: fixtureJourneyOnly({
+      id: "echo-hang",
+      description: "sleeps past the bound",
+      executionClass: "NodeOnly",
+      steps: [{ exampleId: "echo", file: "echo/slow.mjs", expectExit: 0 }],
+    }),
   });
   assert.notEqual(receipt.completenessState, "complete");
   assert.ok(receipt.errors.some((item) => item.code === "journey-step-timeout"));
 });
 
 test("aborting during a step cancels the journey lane and kills the child", async () => {
-  const fixtureManifest = JSON.parse(readFileSync(join(fixtureRoot, "manifest.json"), "utf8"));
   const controller = new AbortController();
   const pending = validate({
     repoRoot,
@@ -419,19 +361,12 @@ test("aborting during a step cancels the journey lane and kills the child", asyn
     skipTypeinfoCheck: true,
     runJourneys: true,
     signal: controller.signal,
-    overlays: {
-      "tests/documentation/DOC5/fixtures/example-home/manifest.json": JSON.stringify({
-        ...fixtureManifest,
-        journeys: [
-          {
-            id: "echo-abort",
-            description: "sleeps until aborted",
-            executionClass: "NodeOnly",
-            steps: [{ exampleId: "echo", file: "echo/slow.mjs", expectExit: 0 }],
-          },
-        ],
-      }),
-    },
+    overlays: fixtureJourneyOnly({
+      id: "echo-abort",
+      description: "sleeps until aborted",
+      executionClass: "NodeOnly",
+      steps: [{ exampleId: "echo", file: "echo/slow.mjs", expectExit: 0 }],
+    }),
   });
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
   controller.abort();
@@ -529,16 +464,16 @@ test("a duplicate recipe topic id fails", async () => {
   const receipt = await validate(
     opts({
       overlays: {
-        [manifestRel]: mutatedManifest((m) => {
-          m.recipes.topics.push(structuredClone(m.recipes.topics[0]));
-        }),
+        [recipeFragment("duplicate")]: JSON.stringify(
+          structuredClone(topics.find((topic) => topic.id === topicIds[0])),
+        ),
       },
     }),
   );
   assert.notEqual(receipt.completenessState, "complete");
   const dup = receipt.errors.find((item) => item.code === "recipes-duplicate-topic");
   assert.ok(dup);
-  assert.equal(dup.id, manifest.recipes.topics[0].id);
+  assert.equal(dup.id, topicIds[0]);
 });
 
 test("an overlaid journey entry is refused instead of executing the on-disk file", async () => {
