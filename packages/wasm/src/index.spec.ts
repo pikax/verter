@@ -25,6 +25,7 @@ const mockHostUpsert = vi.fn(() => ({
       spanEnd: 10,
       exprSpanStart: 0,
       exprSpanEnd: 10,
+      spanEncoding: "utf16.v1",
     },
   ],
 }));
@@ -155,6 +156,7 @@ describe("@verter/wasm host wrapper", () => {
           spanEnd: 12,
           exprSpanStart: 0,
           exprSpanEnd: 12,
+          spanEncoding: "utf16.v1",
         },
       ];
 

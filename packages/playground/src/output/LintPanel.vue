@@ -166,7 +166,7 @@ function severityBadgeClass(severity: string): string {
               >
                 Fix
               </button>
-              <span v-if="d.spanStart != null" class="lint-span">
+              <span v-if="d.spanStart != null && d.spanEnd != null" class="lint-span">
                 {{ d.spanStart }}:{{ d.spanEnd }}
               </span>
             </div>

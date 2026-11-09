@@ -534,6 +534,8 @@ interface StyleBlockEntry {
 interface HostStructureRange {
   start: number;
   end: number;
+  /** Versioned encoding tag of `start`/`end`; the native structure is UTF-8 bytes. */
+  encoding: string;
 }
 
 interface HostStructureAttribute {
@@ -550,6 +552,27 @@ interface HostStructureSection {
 
 interface HostDocumentStructure {
   blocks: Array<{ kind: string; section?: HostStructureSection }>;
+}
+
+/**
+ * Convert a structure range endpoint to UTF-16 through the range's declared
+ * encoding. Exact or refused: an unknown tag, an offset inside a UTF-8
+ * sequence, or one past the end of the source throws; it never skips the block
+ * or reads the number as another unit.
+ */
+function structureOffsetToUtf16(source: string, range: HostStructureRange, offset: number): number {
+  if (range.encoding !== "utf8.v1") {
+    throw new Error(
+      `document structure range declares encoding '${String(range.encoding)}'; expected 'utf8.v1'`,
+    );
+  }
+  const units = utf8OffsetToUtf16(source, offset);
+  if (units === null) {
+    throw new Error(
+      `document structure offset ${offset} is not a UTF-8 character boundary of the ${Buffer.byteLength(source)}-byte source`,
+    );
+  }
+  return units;
 }
 
 function utf8OffsetToUtf16(source: string, target: number): number | null {
@@ -577,9 +600,13 @@ function styleEntriesFromStructure(
   for (const block of structure.blocks) {
     const section = block.kind === "section" ? block.section : undefined;
     if (section?.role.kind !== "style") continue;
-    const start = utf8OffsetToUtf16(source, section.contentRange.start);
-    const end = utf8OffsetToUtf16(source, section.contentRange.end);
-    if (start === null || end === null) continue;
+    if (section.contentRange.start > section.contentRange.end) {
+      throw new Error(
+        `document structure content range ${section.contentRange.start}..${section.contentRange.end} is inverted`,
+      );
+    }
+    const start = structureOffsetToUtf16(source, section.contentRange, section.contentRange.start);
+    const end = structureOffsetToUtf16(source, section.contentRange, section.contentRange.end);
     const attribute = (name: string) =>
       section.attributes.find((entry) => entry.name?.normalized === name);
     const module = attribute("module");

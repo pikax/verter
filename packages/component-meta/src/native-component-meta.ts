@@ -355,12 +355,23 @@ export interface NativeResolvedTypeMeta {
   declaration?: NativeResolvedTypeDeclaration;
 }
 
+/**
+ * A range that names its own encoding: 0-based, half-open, counted from the
+ * start of the file the owning record names. A consumer MUST reject a tag it
+ * does not know.
+ */
+export interface NativeTaggedSpan {
+  start: number;
+  end: number;
+  encoding: "utf8.v1" | "utf16.v1";
+}
+
 export interface NativeResolvedTypeDeclaration {
   requestedName: string;
   resolvedName: string;
   canonicalSource: string;
-  spanStart: number;
-  spanEnd: number;
+  /** The declaration's range in `canonicalSource`; absent when not exact. */
+  span?: NativeTaggedSpan;
   kind: "interface" | "typeAlias" | "class" | "unknown";
   text?: string;
 }
@@ -370,8 +381,8 @@ export interface NativeResolvedNativeProp {
   isOptional: boolean;
   typeAnnotation?: string;
   visibility: "public" | "protected" | "private";
-  spanStart: number;
-  spanEnd: number;
+  /** The property's range in the owning component's source; absent when not exact. */
+  span?: NativeTaggedSpan;
 }
 
 export interface NativeResolvedJsdocTag extends NativeJsdocTag {

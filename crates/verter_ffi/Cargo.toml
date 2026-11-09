@@ -30,6 +30,7 @@ verter_identity = { path = "../verter_identity" }
 verter_span = { path = "../verter_span" }
 verter_language = { path = "../verter_language" }
 log = "0.4"
+serde = { workspace = true }
 
 [dev-dependencies]
 verter_audit = { path = "../verter_audit" }

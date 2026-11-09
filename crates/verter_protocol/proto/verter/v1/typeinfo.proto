@@ -78,7 +78,9 @@ message SymbolEntryDto {
   // "function", "async_function", "class_value", "enum".
   string kind = 2;
   // SFC-absolute span. Encoded as `(start, end)`; absent when the
-  // host had no analysis-snapshot span for this symbol.
+  // host had no analysis-snapshot span for this symbol. UTF-8 byte
+  // offsets, 0-based half-open, in the file the symbol list was requested for
+  // (schema 9 unit contract).
   uint32 span_start = 3;
   uint32 span_end = 4;
   // Discriminator for the optional span — a separate field instead
@@ -789,7 +791,9 @@ message GraphNodeStatus {
 message GraphDiagnostic {
   GraphDiagnosticSeverity severity = 1;
   uint32 message_name_id = 2;
-  // Optional originating span. SFC-absolute byte offsets.
+  // Optional originating span. SFC-absolute UTF-8 byte offsets, 0-based
+  // half-open, in the file `span_canonical_name_id` names. Emitted only when
+  // exact; otherwise `has_span` is false and the offsets are not meaningful.
   uint32 span_canonical_name_id = 3;
   uint32 span_start = 4;
   uint32 span_end = 5;
@@ -1003,6 +1007,9 @@ message GraphTypeNodeRef {
   bool is_canonical = 3;
 }
 
+// A range in the file `canonical_id` names: UTF-8 byte offsets, 0-based
+// half-open (schema 9 unit contract). On a request an inverted or file-less
+// ref is a typed MalformedPayload before execution.
 message GraphSpanRef {
   string canonical_id = 1;
   uint32 start = 2;
@@ -1106,9 +1113,14 @@ message FrameworkSurfaceMemberDeclaration {
   uint32 requested_name_id = 1;
   uint32 resolved_name_id = 2;
   uint32 canonical_source_id = 3;
+  // UTF-8 byte offsets, 0-based half-open, in the file `canonical_source_id`
+  // names (schema 9 unit contract). Meaningful only when `has_span` is true;
+  // a producer sets it only for an exact range (`span_start <= span_end`) and
+  // otherwise leaves both offsets 0 with `has_span` false.
   uint32 span_start = 4;
   uint32 span_end = 5;
   FrameworkSurfaceDeclarationKind kind = 6;
+  bool has_span = 7;
 }
 
 // One hop in a framework-surface member's origin chain (schema 4).

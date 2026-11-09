@@ -120,11 +120,29 @@ fn ffi_preprocessor_diagnostic_to_host(
             ))
         }
     };
+    // The ingress contract: line/column are 1-based with UTF-16 columns,
+    // declared by the versioned tag on the diagnostic. A position that does
+    // not declare it, or declares another encoding, is rejected here; the
+    // host validates the rest against the input the tool consumed.
+    let has_position = diagnostic.line.is_some() || diagnostic.column.is_some();
+    let refusal = match (has_position, diagnostic.position_encoding) {
+        (false, _) | (true, Some(SpanEncodingTag::Utf16)) => None,
+        (true, None) => Some(host::PreprocessorPositionRefusal::EncodingNotDeclared),
+        (true, Some(SpanEncodingTag::Utf8)) => {
+            Some(host::PreprocessorPositionRefusal::UnsupportedEncoding)
+        }
+    };
+    let (line, column) = if refusal.is_some() {
+        (None, None)
+    } else {
+        (diagnostic.line, diagnostic.column)
+    };
     Ok(host::PreprocessorDiagnostic {
         severity,
         message: diagnostic.message,
-        line: diagnostic.line,
-        column: diagnostic.column,
+        line,
+        column,
+        position_refusal: refusal,
     })
 }
 

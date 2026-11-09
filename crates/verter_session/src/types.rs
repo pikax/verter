@@ -2232,20 +2232,69 @@ pub(crate) struct PendingPreprocessorRequest {
     pub(crate) custom_type: Option<String>,
 }
 
+/// Why a preprocessor diagnostic's reported position was rejected. The
+/// diagnostic keeps its message; the position is never passed through or
+/// guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreprocessorPositionRefusal {
+    /// The caller supplied a position without declaring the versioned
+    /// UTF-16 ingress encoding it is measured in.
+    EncodingNotDeclared,
+    /// The caller declared an encoding other than the ingress contract's
+    /// UTF-16 columns.
+    UnsupportedEncoding,
+    /// Not a valid position of the input the tool consumed: line or column
+    /// zero, past the last line, past the end of its line, or a column
+    /// without a line ([`verter_span::CoordError::InvalidBoundary`]), or a
+    /// column inside a surrogate pair
+    /// ([`verter_span::CoordError::NotCharBoundary`]).
+    Coord(verter_span::CoordError),
+}
+
 /// A diagnostic reported by an external preprocessor tool (e.g. a Sass
 /// compiler error/warning) for one [`BlockOverrideEntry`]. The host carries
-/// this typed record but never interprets or remaps its position — mapping
-/// it back through the sealed source map into SFC-absolute coordinates is a
-/// later concern, not this boundary's.
+/// this typed record but never remaps its position — mapping it back through
+/// the sealed source map into SFC-absolute coordinates is a later concern,
+/// not this boundary's. The host does validate the position against the
+/// input the tool was given at admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreprocessorDiagnostic {
     pub severity: HostSeverity,
     pub message: String,
-    /// Line/column within the preprocessor's OWN source (its input, e.g. a
+    /// 1-based line within the preprocessor's OWN source (its input, e.g. a
     /// `.scss` file) — NOT SFC-absolute, unlike [`HostDiagnostic::span`].
-    /// `None` when the tool reported no position.
+    /// Lines end at `\n`, `\r\n` or a lone `\r`. `None` when the tool
+    /// reported no position or the position was rejected
+    /// (`position_refusal`).
     pub line: Option<u32>,
+    /// 1-based column in UTF-16 code units within `line`. `None` as `line`.
     pub column: Option<u32>,
+    /// Why a reported position was rejected; `None` when the position was
+    /// absent or admitted.
+    pub position_refusal: Option<PreprocessorPositionRefusal>,
+}
+
+impl PreprocessorDiagnostic {
+    /// Validate the reported position against the indexed `input`, the exact
+    /// text the tool consumed. An invalid position is dropped with a typed refusal;
+    /// the message and severity are kept.
+    #[must_use]
+    pub(crate) fn validated_against(
+        mut self,
+        input: &crate::block_content::PreprocessorInputIndex<'_>,
+    ) -> Self {
+        if self.position_refusal.is_some() {
+            self.line = None;
+            self.column = None;
+            return self;
+        }
+        if let Err(error) = input.check(self.line, self.column) {
+            self.line = None;
+            self.column = None;
+            self.position_refusal = Some(PreprocessorPositionRefusal::Coord(error));
+        }
+        self
+    }
 }
 
 /// A single preprocessed block override to inject into the compile pipeline.

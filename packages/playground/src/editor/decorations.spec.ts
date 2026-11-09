@@ -206,6 +206,58 @@ describe("computeBindingDecorations", () => {
   });
 });
 
+describe("decoration offsets are converted from utf8.v1 bytes to UTF-16", () => {
+  it("converts binding spans after a non-ASCII prefix and skips inexact spans", () => {
+    // "é" is 2 UTF-8 bytes / 1 UTF-16 unit; the emoji is 4 bytes / 2 units.
+    const source = "é😀count";
+    const analysis = makeAnalysis({
+      bindings: [
+        // bytes 6..11 are "count" (2 + 4 = 6 bytes of prefix); UTF-16 3..8.
+        {
+          name: "count",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: null,
+          spanStart: 6,
+          spanEnd: 11,
+        },
+        // byte 3 is inside the emoji: refused, not snapped.
+        {
+          name: "bad",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: null,
+          spanStart: 3,
+          spanEnd: 11,
+        },
+        // inverted and past-the-end ranges are refused too.
+        {
+          name: "inv",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: null,
+          spanStart: 11,
+          spanEnd: 6,
+        },
+        {
+          name: "past",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: null,
+          spanStart: 6,
+          spanEnd: 99,
+        },
+      ],
+    });
+    const result = computeBindingDecorations(source, analysis);
+    expect(result.map((d) => [d.start, d.end])).toEqual([[3, 8]]);
+  });
+});
+
 describe("computeBindingInlayHints", () => {
   it("produces type hint for ref binding", () => {
     const analysis = makeAnalysis({
@@ -294,7 +346,7 @@ describe("computeBindingInlayHints", () => {
 describe("computeCssClassDecorations", () => {
   it("returns empty array when no styles", () => {
     const analysis = makeAnalysis();
-    const result = computeCssClassDecorations(analysis);
+    const result = computeCssClassDecorations("", analysis);
     expect(result).toEqual([]);
   });
 
@@ -323,7 +375,7 @@ describe("computeCssClassDecorations", () => {
         },
       ],
     });
-    const result = computeCssClassDecorations(analysis);
+    const result = computeCssClassDecorations("x".repeat(300), analysis);
     expect(result.length).toBe(2);
     expect(result[0].start).toBe(100);
     expect(result[0].end).toBe(104);

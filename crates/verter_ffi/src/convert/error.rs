@@ -4,7 +4,7 @@
 //! into its native error type via the `Display` impl.
 
 /// Typed error for FFI → host conversion failures.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FfiConversionError {
     /// Invalid `compileErrorPolicy` string.
     InvalidCompileErrorPolicy(String),
@@ -39,6 +39,13 @@ pub enum FfiConversionError {
     InvalidBlockContentToken(&'static str),
     /// Invalid preprocessor-diagnostic `severity` string.
     InvalidPreprocessorDiagnosticSeverity(String),
+    /// A span could not be converted exactly to its wire encoding (no source
+    /// snapshot, off-boundary, past-end or inverted). Refused, never clamped.
+    SpanConversion(&'static str),
+    /// A request offset or position carried an unknown or missing encoding tag.
+    InvalidEncodingTag(String),
+    /// A request position is not a valid position of the content it indexes.
+    InvalidPosition(&'static str),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -100,6 +107,14 @@ impl std::fmt::Display for FfiConversionError {
             Self::InvalidBlockContentToken(field) => {
                 write!(f, "invalid sealed block-content token in '{field}'")
             }
+            Self::SpanConversion(code) => {
+                write!(f, "span cannot be converted to its wire encoding: {code}")
+            }
+            Self::InvalidEncodingTag(v) => write!(
+                f,
+                "invalid coordinate encoding tag '{v}' (expected 'utf8.v1' or 'utf16.v1')"
+            ),
+            Self::InvalidPosition(code) => write!(f, "invalid position: {code}"),
             Self::InvalidPreprocessorDiagnosticSeverity(v) => write!(
                 f,
                 "invalid preprocessor diagnostic severity '{v}' (expected 'error', 'warning', or 'info')"
@@ -113,5 +128,11 @@ impl std::error::Error for FfiConversionError {}
 impl From<FfiConversionError> for String {
     fn from(e: FfiConversionError) -> String {
         e.to_string()
+    }
+}
+
+impl From<super::wire_span::SpanConversionError> for FfiConversionError {
+    fn from(error: super::wire_span::SpanConversionError) -> Self {
+        Self::SpanConversion(error.code())
     }
 }

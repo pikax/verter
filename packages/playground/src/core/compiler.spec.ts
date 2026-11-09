@@ -265,6 +265,7 @@ describe("resolveKnownModuleReferenceDependencies", () => {
         spanEnd: 8,
         exprSpanStart: 0,
         exprSpanEnd: 8,
+        spanEncoding: "utf16.v1",
       },
       {
         syntax: "dynamicImport",
@@ -277,6 +278,7 @@ describe("resolveKnownModuleReferenceDependencies", () => {
         spanEnd: 24,
         exprSpanStart: 10,
         exprSpanEnd: 24,
+        spanEncoding: "utf16.v1",
       },
       {
         syntax: "dynamicImport",
@@ -290,6 +292,7 @@ describe("resolveKnownModuleReferenceDependencies", () => {
         spanEnd: 42,
         exprSpanStart: 26,
         exprSpanEnd: 42,
+        spanEncoding: "utf16.v1",
       },
     ];
 
@@ -724,8 +727,14 @@ const greeting = café.toUpperCase()
       const block = file.compiled.destructuredBlock;
       expect(block).not.toBeNull();
       expect(block!.bindings).toEqual([
-        { name: localName, sourceStart: localStart, sourceEnd: localStart + localName.length },
+        {
+          name: localName,
+          sourceStart: localStart,
+          sourceEnd: localStart + localName.length,
+          sourceEncoding: "utf16.v1",
+        },
       ]);
+      expect(block!.blockEncoding).toBe("utf16.v1");
       expect(block!.blockStart).toBeGreaterThanOrEqual(0);
       expect(block!.blockEnd).toBeGreaterThan(block!.blockStart);
 
@@ -1005,6 +1014,7 @@ function createMockPlaygroundHost(options: {
             spanEnd: 8,
             exprSpanStart: 0,
             exprSpanEnd: 8,
+            spanEncoding: "utf16.v1",
           },
         ]
       : [],

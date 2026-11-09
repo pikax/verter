@@ -353,9 +353,15 @@ fn push_checker_diagnostic(
             severity: verter_protocol::verter::v1::GraphDiagnosticSeverity::Error as i32,
             message_name_id,
             span_canonical_name_id,
-            span_start: span.start,
-            span_end: span.end,
-            has_span: true,
+            // Only an exact half-open range is published; an inverted one is
+            // absent rather than swapped or emptied.
+            span_start: if span.start <= span.end {
+                span.start
+            } else {
+                0
+            },
+            span_end: if span.start <= span.end { span.end } else { 0 },
+            has_span: span.start <= span.end,
         });
 }
 

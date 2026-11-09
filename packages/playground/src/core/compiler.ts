@@ -9,6 +9,7 @@ import type {
   PublicApiModeOutcome,
   PublicApiResponse,
   OrderedSfcStructure,
+  DestructuredBlockMeta,
 } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
@@ -37,6 +38,8 @@ import type {
 export interface HostTextEdit {
   spanStart: number;
   spanEnd: number;
+  /** Versioned encoding tag of the span (`"utf16.v1"`). */
+  spanEncoding: string;
   newText: string;
 }
 
@@ -62,6 +65,7 @@ export interface HostDocumentSymbol {
   spanEnd: number;
   selectionStart: number;
   selectionEnd: number;
+  spanEncoding: string;
   children: HostDocumentSymbol[];
 }
 
@@ -69,6 +73,7 @@ export interface HostElementMatch {
   tag: string;
   spanStart: number;
   spanEnd: number;
+  spanEncoding: string;
   result: "match" | "maybe" | "no";
 }
 
@@ -76,17 +81,14 @@ export interface HostSelectorMatchResult {
   selectorText: string;
   selectorStart: number;
   selectorEnd: number;
+  spanEncoding: string;
   matches: HostElementMatch[];
 }
 
 interface HostIdeResponse {
   code: string;
   sourceMap?: string;
-  destructuredBlock?: {
-    bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
-    blockStart: number;
-    blockEnd: number;
-  } | null;
+  destructuredBlock?: DestructuredBlockMeta | null;
 }
 
 interface HostPublicApiResult {
@@ -179,6 +181,8 @@ export interface HostModuleReference {
   spanEnd: number;
   exprSpanStart: number;
   exprSpanEnd: number;
+  /** Versioned encoding tag of all four span fields (`"utf16.v1"`). */
+  spanEncoding: string;
 }
 
 interface HostDependencyResolution {
@@ -211,7 +215,11 @@ interface HostBinding {
   getAnalysis(canonicalOrAlias: string): FileAnalysis | null;
   getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostPublicApiResult;
   lint(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
-  getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
+  getCodeActions?(
+    canonicalOrAlias: string,
+    offset: number,
+    offsetEncoding: "utf16.v1" | "utf8.v1",
+  ): HostCodeAction[];
   getLintRuleMetadata?(): HostLintRuleMetadata[];
   getDocumentSymbols?(canonicalOrAlias: string): HostDocumentSymbol[];
   matchCssSelectors?(canonicalOrAlias: string): HostSelectorMatchResult[];
@@ -1214,11 +1222,15 @@ export async function compileFile(
 // Host accessor functions for new playground features
 // =============================================================================
 
-/** Returns code actions at a UTF-16 offset, or empty array if unavailable. */
+/**
+ * Returns code actions at a UTF-16 offset (Monaco model offsets), or an empty
+ * array if unavailable. The request declares its encoding; the host refuses an
+ * offset inside a surrogate pair or past the end rather than snapping it.
+ */
 export function getCodeActions(canonicalOrAlias: string, offset: number): HostCodeAction[] {
   if (!wasmHost || typeof wasmHost.getCodeActions !== "function") return [];
   try {
-    return wasmHost.getCodeActions(canonicalOrAlias, offset) ?? [];
+    return wasmHost.getCodeActions(canonicalOrAlias, offset, "utf16.v1") ?? [];
   } catch {
     return [];
   }

@@ -10,7 +10,8 @@ use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryK
 
 use crate::compile_request_response::compile_request_response_to_wasm;
 use crate::host_compile_request_from_wire;
-use crate::{build_selector_match_results, typeinfo};
+use crate::typeinfo;
+use verter_ffi::convert::build_selector_match_results;
 
 const FIXTURE_TS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -155,8 +156,10 @@ pub(crate) fn native_feasibility_receipt() -> Value {
     let style = match host.get_analysis(CANONICAL_VUE) {
         Some(snapshot) => {
             let source = host.get_source(CANONICAL_VUE).unwrap_or_default();
-            serde_json::to_value(build_selector_match_results(&snapshot, &source))
-                .expect("style json")
+            serde_json::to_value(
+                build_selector_match_results(&snapshot, &source).expect("selector spans in extent"),
+            )
+            .expect("style json")
         }
         None => json!([]),
     };

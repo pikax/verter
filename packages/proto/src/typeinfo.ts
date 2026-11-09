@@ -172,7 +172,10 @@ export type {
  * Schema 6 adds typed property-key oneofs and explicit member kinds.
  * Schema 7 adds the tag-33 canonical ordered object-spread program with
  * lossless direct effects and raw spread operands.
+ * Schema 9 states the coordinate contract: every span is a 0-based half-open
+ * range of UTF-8 byte offsets into the file its `canonicalId` names; no field
+ * is added or removed.
  * Schema 2 stays accepted for the legacy
  * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 8;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 9;

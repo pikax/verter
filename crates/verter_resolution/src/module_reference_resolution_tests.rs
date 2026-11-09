@@ -1,24 +1,16 @@
 use super::*;
-use verter_span::Span;
 
 fn module_reference(
     analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-) -> verter_session_query::analysis::types::AnalyzedModuleReference {
-    verter_session_query::analysis::types::AnalyzedModuleReference {
-        syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport,
-        semantics: verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
-        is_type_only: false,
-        span: Span::new(0, 1),
-        expr_span: Span::new(0, 1),
-        raw_text: String::new(),
+) -> ResolvableModuleReference {
+    ResolvableModuleReference {
         literal_specifier: literal_specifier.map(str::to_string),
         finite_specifiers: finite_specifiers
             .iter()
             .map(|value| (*value).to_string())
             .collect(),
-        static_prefix: None,
         analyzability,
     }
 }

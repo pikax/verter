@@ -3,6 +3,9 @@
  * All field names use camelCase to match serde(rename_all = "camelCase").
  * `spanStart`/`spanEnd` are always absolute source offsets in the boundary encoding
  * chosen by the transport (negotiated LSP encoding for the language server).
+ * The native/WASM `getAnalysis` payload states its encoding as a top-level
+ * `spanEncoding` (`"utf8.v1"`: the Rust-native byte offsets); a consumer converts
+ * through that tag, exact or refused, and never recounts locally.
  */
 
 // ── Script Analysis Types ──────────────────────────────────────

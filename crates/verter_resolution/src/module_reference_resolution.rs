@@ -3,9 +3,21 @@ use std::collections::HashSet;
 use crate::resolve_known_dependency_id;
 use verter_session_query::resolution::{build_known_file_index, normalize_known_file_id};
 
+/// The span-free facts of one module reference that specifier collection and
+/// known-file resolution read: how analyzable it is and which specifiers it
+/// names. Positions are not an input of either operation, so a caller that
+/// holds a reference in a wire encoding it cannot convert (a read-back
+/// without its source) supplies these facts without inventing a span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvableModuleReference {
+    pub analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
+    pub literal_specifier: Option<String>,
+    pub finite_specifiers: Vec<String>,
+}
+
 #[must_use]
 pub fn collect_resolvable_module_reference_specifiers(
-    module_references: &[verter_session_query::analysis::types::AnalyzedModuleReference],
+    module_references: &[ResolvableModuleReference],
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut specifiers = Vec::new();
@@ -40,7 +52,7 @@ pub fn collect_resolvable_module_reference_specifiers(
 #[must_use]
 pub fn resolve_known_module_reference_dependencies(
     owner_id: &str,
-    module_references: &[verter_session_query::analysis::types::AnalyzedModuleReference],
+    module_references: &[ResolvableModuleReference],
     known_ids: &[String],
     extensions: &[String],
 ) -> Vec<String> {

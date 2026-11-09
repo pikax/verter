@@ -41,6 +41,7 @@ import type {
   HostIdeProductOptions,
   HostIdeResponse,
   HostRuntimeProductOptions,
+  HostSpanEncoding,
   HostSvelteCompileOptions,
   HostVirtualMeta,
   HostVirtualNodeKind,
@@ -162,15 +163,23 @@ export interface HostCompiledRuntimeProduct {
  *
  * Declared here because the shared `HostIdeResponse` does not carry it,
  * while every binding that publishes an IDE projection does. Offsets are
- * UTF-16 code units.
+ * UTF-16 code units, and each coordinate domain names its encoding.
  */
 export interface HostDestructuredBlockMeta {
   /** Binding spans in UTF-16 code units into the registered source. */
-  bindings: { name: string; sourceStart: number; sourceEnd: number }[];
+  bindings: {
+    name: string;
+    sourceStart: number;
+    sourceEnd: number;
+    /** Encoding of `sourceStart`/`sourceEnd` (domain: the registered source). */
+    sourceEncoding: HostSpanEncoding;
+  }[];
   /** UTF-16 start offset into the IDE product row's generated `code`. */
   blockStart: number;
   /** UTF-16 end offset into the IDE product row's generated `code`. */
   blockEnd: number;
+  /** Encoding of `blockStart`/`blockEnd` (domain: the generated `code`). */
+  blockEncoding: HostSpanEncoding;
 }
 
 /**

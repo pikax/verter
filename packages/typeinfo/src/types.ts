@@ -32,6 +32,8 @@ export interface TypeInfoSessionConfig {
 export interface SymbolEntry {
   name: string;
   kind: SymbolKind;
+  /** The unit of {@link SymbolEntry.span}: UTF-8 byte offsets (`utf8.v1`). */
+  spanEncoding: "utf8.v1";
   /** SFC-absolute span. `undefined` when no analysis-snapshot span was available. */
   span?: { start: number; end: number };
   isExported: boolean;

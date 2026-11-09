@@ -97,6 +97,40 @@ impl ClientHandler for ClientRequestingUntestedRevision {
     }
 }
 
+/// Every tool states the fixed, versioned position encoding of its offsets
+/// and spans on its schema (`_meta`): a client never infers the unit from a
+/// description. DISCRIMINATING: a tool the router registers without the
+/// stamp fails this.
+#[tokio::test]
+async fn every_tool_declares_the_utf8_position_encoding() {
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        let running = build_server()
+            .serve(server_transport)
+            .await
+            .expect("server accepts the client's initialize handshake");
+        running.waiting().await.ok();
+    });
+    let client = ().serve(client_transport).await.expect("client initializes");
+    let tools = client.list_tools(None).await.expect("tools/list succeeds");
+    assert!(!tools.tools.is_empty());
+    for tool in &tools.tools {
+        let coordinates = tool
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.0.get("verter.dev/coordinates"))
+            .unwrap_or_else(|| panic!("tool {} states no position encoding", tool.name));
+        assert_eq!(coordinates["encoding"], "utf8.v1", "{}", tool.name);
+        assert_eq!(coordinates["base"], 0, "{}", tool.name);
+        assert_eq!(coordinates["contractVersion"], 1, "{}", tool.name);
+    }
+    client
+        .cancel()
+        .await
+        .expect("session cancellation completes");
+    server_task.await.expect("server task exits after cancel");
+}
+
 /// `initialize` (lifecycle negotiation): a real rmcp client, paired
 /// with the real server over an in-process duplex transport,
 /// completes the handshake and retains the server's declared identity

@@ -215,12 +215,24 @@ fn six_field_preprocessor_contract_survives_the_round_trip_distinctly() {
         "/workspace/_mixins.styl".to_string(),
         "/workspace/_vars.styl".to_string(),
     ];
-    let diagnostics = vec![PreprocessorDiagnostic {
-        severity: HostSeverity::Warning,
-        message: "unused variable $legacy-tone".to_string(),
-        line: Some(3),
-        column: Some(5),
-    }];
+    let diagnostics = vec![
+        PreprocessorDiagnostic {
+            severity: HostSeverity::Warning,
+            message: "unused variable $legacy-tone".to_string(),
+            line: Some(2),
+            column: Some(5),
+            position_refusal: None,
+        },
+        // Past the last line of the tool's input: the position is refused at
+        // admission and the diagnostic keeps its message.
+        PreprocessorDiagnostic {
+            severity: HostSeverity::Error,
+            message: "position outside the input".to_string(),
+            line: Some(9),
+            column: Some(1),
+            position_refusal: None,
+        },
+    ];
     let processor_identity = "stylus".to_string();
     let processor_version = "0.63.0".to_string();
     let config_fingerprint =
@@ -283,11 +295,24 @@ fn six_field_preprocessor_contract_survives_the_round_trip_distinctly() {
     assert_eq!(got_processor_version, processor_version);
     assert_ne!(got_processor_identity, got_processor_version);
     assert_eq!(got_config_fingerprint, Some(config_fingerprint));
-    assert_eq!(got_diagnostics.len(), 1);
+    assert_eq!(got_diagnostics.len(), 2);
     assert_eq!(got_diagnostics[0].severity, HostSeverity::Warning);
     assert_eq!(got_diagnostics[0].message, diagnostics[0].message);
-    assert_eq!(got_diagnostics[0].line, Some(3));
+    assert_eq!(got_diagnostics[0].line, Some(2));
     assert_eq!(got_diagnostics[0].column, Some(5));
+    assert_eq!(got_diagnostics[0].position_refusal, None);
+    assert_eq!(got_diagnostics[1].message, diagnostics[1].message);
+    assert_eq!(
+        (got_diagnostics[1].line, got_diagnostics[1].column),
+        (None, None),
+        "a position outside the tool's input is dropped, never passed through"
+    );
+    assert_eq!(
+        got_diagnostics[1].position_refusal,
+        Some(verter_session::PreprocessorPositionRefusal::Coord(
+            verter_span::CoordError::InvalidBoundary
+        ))
+    );
 }
 
 /// The zero-value case is distinct too: an entry with no dependencies, no

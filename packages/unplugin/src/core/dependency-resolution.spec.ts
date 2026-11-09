@@ -19,6 +19,7 @@ describe("collectResolvableModuleReferenceSpecifiers", () => {
         spanEnd: 10,
         exprSpanStart: 0,
         exprSpanEnd: 10,
+        spanEncoding: "utf16.v1",
       },
       {
         syntax: "dynamicImport",
@@ -31,6 +32,7 @@ describe("collectResolvableModuleReferenceSpecifiers", () => {
         spanEnd: 28,
         exprSpanStart: 12,
         exprSpanEnd: 28,
+        spanEncoding: "utf16.v1",
       },
     ];
 
@@ -54,6 +56,7 @@ describe("collectResolvableModuleReferenceSpecifiers", () => {
         spanEnd: 15,
         exprSpanStart: 0,
         exprSpanEnd: 15,
+        spanEncoding: "utf16.v1",
       },
     ]);
 

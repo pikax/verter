@@ -3,6 +3,7 @@ import { fromBinary } from "@bufbuild/protobuf";
 import {
   ComponentMetaPayloadSchema,
   LegacyComponentMetaPayloadSchema,
+  PositionEncoding,
   SurfacePartialReason,
   type ComponentMetaPayload,
   type ProtoRecord,
@@ -263,9 +264,6 @@ const GENERIC_RESOLUTION_FAILURE_UNSUPPORTED_EXPRESSION = 4;
 const GENERIC_RESOLUTION_FAILURE_MISSING_USAGE_LINK = 5;
 const GENERIC_RESOLUTION_FAILURE_UNRESOLVED_CHILD_GENERIC_SURFACE = 6;
 
-/** Schema 14 only adds the fan-out reason, so schema 13 decodes as it is. */
-const PREVIOUS_GRAPH_FORMAT_VERSION = 13;
-
 export function decodeTypedComponentMetaPayload(
   payload: ArrayBuffer | ArrayBufferView,
 ): NativeComponentMetaResult {
@@ -306,10 +304,11 @@ function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMeta
 }
 
 function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
-  if (
-    message.schemaVersion !== GRAPH_FORMAT_VERSION &&
-    message.schemaVersion !== PREVIOUS_GRAPH_FORMAT_VERSION
-  )
+  // Schema 15 replaced the flat declaration/prop span fields with a tagged
+  // range, and those field numbers are reserved: a schema 13 or 14 payload's
+  // authored spans cannot be read, so it is refused rather than decoded with
+  // its known spans reported as absent.
+  if (message.schemaVersion !== GRAPH_FORMAT_VERSION)
     throw graphError(
       `component-meta protobuf payload version mismatch: expected ${GRAPH_FORMAT_VERSION}, found ${message.schemaVersion}`,
     );
@@ -2573,8 +2572,7 @@ function decodeResolvedNativeProp(
     visibility: graph.getString(
       readRequiredId(prop.visibilityId, "resolved native prop visibility"),
     ),
-    spanStart: Number(prop.spanStart ?? 0),
-    spanEnd: Number(prop.spanEnd ?? 0),
+    ...maybe("span", decodeCanonicalSpan(prop.span as ProtoRecord | undefined, "native prop span")),
   };
 }
 
@@ -2685,8 +2683,10 @@ function decodeResolvedTypeDeclaration(
     canonicalSource: graph.getString(
       readRequiredId(declaration.canonicalSourceId, "resolved declaration canonical source"),
     ),
-    spanStart: Number(declaration.spanStart ?? 0),
-    spanEnd: Number(declaration.spanEnd ?? 0),
+    ...maybe(
+      "span",
+      decodeCanonicalSpan(declaration.span as ProtoRecord | undefined, "resolved declaration span"),
+    ),
     kind: graph.getString(readRequiredId(declaration.kindId, "resolved declaration kind")),
     ...maybe("text", graph.getStringMaybe(Number(declaration.textId ?? 0))),
   };
@@ -2951,6 +2951,45 @@ function maybe<T>(key: string, value: T | undefined) {
 
 function maybeArray<T>(key: string, value: T[]) {
   return value.length === 0 ? {} : { [key]: value };
+}
+
+/**
+ * Decode a `ResolvedTypeDeclaration.span` / `ResolvedNativeProp.span`
+ * `CanonicalRange` into a tagged span. The schema fixes both fields to
+ * UTF-8 byte offsets in the file the owning record names, with an empty
+ * `source_space_token`; a payload that says otherwise is rejected rather than
+ * read as another unit or attributed to another source. An absent range stays
+ * absent (never a zero-filled `0..0`); a non-offset representation or an
+ * inverted range is rejected.
+ */
+function decodeCanonicalSpan(
+  range: ProtoRecord | undefined,
+  context: string,
+): { start: number; end: number; encoding: "utf8.v1" } | undefined {
+  if (!range) return undefined;
+  if (range.encoding !== PositionEncoding.UTF8_BYTES) {
+    throw graphError(
+      `component-meta graph ${context} declares position encoding ${String(range.encoding)}, which this field does not allow (UTF-8 bytes only)`,
+    );
+  }
+  if (typeof range.sourceSpaceToken === "string" && range.sourceSpaceToken !== "") {
+    throw graphError(
+      `component-meta graph ${context} names a source space, but this field's range is in the owning record's own file`,
+    );
+  }
+  const encoding = "utf8.v1";
+  const representation = range.representation as
+    | { case?: string; value?: { start?: number; end?: number } }
+    | undefined;
+  if (representation?.case !== "offsetRange" || !representation.value) {
+    throw graphError(`component-meta graph ${context} is not an offset range`);
+  }
+  const start = Number(representation.value.start ?? 0);
+  const end = Number(representation.value.end ?? 0);
+  if (start > end) {
+    throw graphError(`component-meta graph ${context} is inverted (${start}..${end})`);
+  }
+  return { start, end, encoding };
 }
 
 function readRequiredId(value: unknown, context: string): number {
