@@ -1,0 +1,379 @@
+{
+  "contract": "synthetic-plan-export@1",
+  "planSlug": "synthetic",
+  "tasks": [
+    {
+      "slug": "H0",
+      "name": "Synthetic H0",
+      "train": "rev11.lock",
+      "semanticRole": "history",
+      "labels": ["kind:implementation"],
+      "predecessors": [],
+      "optional": false
+    },
+    {
+      "slug": "B-BRIDGE",
+      "name": "Synthetic B-BRIDGE",
+      "train": "compiler.compiler-bridge",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["H0"],
+      "optional": false
+    },
+    {
+      "slug": "S-ENG",
+      "name": "Synthetic S-ENG",
+      "train": "rev11.structure",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["H0", "B-BRIDGE"],
+      "optional": false
+    },
+    {
+      "slug": "S-OBS",
+      "name": "Synthetic S-OBS",
+      "train": "rev11.structure",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["S-ENG"],
+      "optional": false
+    },
+    {
+      "slug": "CP-STRUCT",
+      "name": "Synthetic CP-STRUCT",
+      "train": "rev11.structure",
+      "semanticRole": "verification",
+      "labels": ["kind:conformance-checkpoint"],
+      "predecessors": ["S-ENG", "S-OBS"],
+      "optional": false
+    },
+    {
+      "slug": "L4-A",
+      "name": "Synthetic L4-A",
+      "train": "rev11.finalization",
+      "semanticRole": "convergence",
+      "labels": ["kind:implementation"],
+      "predecessors": ["S-ENG", "S-OBS", "CP-STRUCT"],
+      "optional": false
+    },
+    {
+      "slug": "P-COND",
+      "name": "Synthetic P-COND",
+      "train": "rev11.semantic-closure",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["L4-A"],
+      "optional": false
+    },
+    {
+      "slug": "P-PERF",
+      "name": "Synthetic P-PERF",
+      "train": "rev11.semantic-closure",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["P-COND"],
+      "optional": false
+    },
+    {
+      "slug": "CP-SEM",
+      "name": "Synthetic CP-SEM",
+      "train": "rev11.semantic-closure",
+      "semanticRole": "verification",
+      "labels": ["kind:conformance-checkpoint"],
+      "predecessors": ["P-PERF"],
+      "optional": false
+    },
+    {
+      "slug": "K-8",
+      "name": "Synthetic K-8",
+      "train": "rev11.signature-kernel",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["S-ENG"],
+      "optional": false
+    },
+    {
+      "slug": "V9",
+      "name": "Synthetic V9",
+      "train": "rev11.signature-kernel",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["K-8"],
+      "optional": true,
+      "selected": false
+    },
+    {
+      "slug": "ECRV8",
+      "name": "Synthetic ECRV8",
+      "train": "conformance.external-corrections",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["H0"],
+      "optional": false
+    },
+    {
+      "slug": "ECRX2",
+      "name": "Synthetic ECRX2",
+      "train": "conformance.external-corrections",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["H0"],
+      "optional": false
+    },
+    {
+      "slug": "REL3",
+      "name": "Synthetic REL3",
+      "train": "governance.release-control",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["H0"],
+      "optional": false
+    },
+    {
+      "slug": "L4-V",
+      "name": "Synthetic L4-V",
+      "train": "rev11.finalization",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["S-ENG"],
+      "optional": false
+    },
+    {
+      "slug": "L4",
+      "name": "Synthetic L4",
+      "train": "rev11.finalization",
+      "semanticRole": "convergence",
+      "labels": ["kind:implementation"],
+      "predecessors": ["L4-A", "CP-SEM", "K-8", "ECRV8", "ECRX2", "REL3", "L4-V"],
+      "optional": false
+    },
+    {
+      "slug": "LATER",
+      "name": "Synthetic LATER",
+      "train": "later.product",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["L4"],
+      "optional": false
+    },
+    {
+      "slug": "DETACHED",
+      "name": "Synthetic DETACHED",
+      "train": "later.product",
+      "semanticRole": "delivery",
+      "labels": ["kind:implementation"],
+      "predecessors": ["H0"],
+      "optional": false
+    }
+  ],
+  "closure": {
+    "structuralOwners": ["S-ENG", "S-OBS", "CP-STRUCT"],
+    "namedOwners": ["K-8", "B-BRIDGE"],
+    "requiredOutcomes": ["proposal-01", "proposal-02", "direction-no-computation-cap"],
+    "targetOutcomes": [],
+    "capabilitySurfaces": [
+      {
+        "surface": "vue-compile",
+        "class": "stable",
+        "cases": []
+      },
+      {
+        "surface": "svelte-compile",
+        "class": "stable",
+        "cases": [
+          {
+            "case": "svelte-vapor-output",
+            "kind": "unsupported"
+          }
+        ]
+      },
+      {
+        "surface": "host-lint",
+        "class": "preview",
+        "cases": []
+      },
+      {
+        "surface": "lsp-edit-loop",
+        "class": "experimental-unranked",
+        "cases": []
+      }
+    ],
+    "metricCells": [
+      {
+        "row": "wall/vue-compile",
+        "evidenceRun": "skr-perf0-structural",
+        "modes": ["normal"],
+        "evidenceKind": "performance"
+      },
+      {
+        "row": "work/limits-calibration",
+        "evidenceRun": "skr-limits-calibration",
+        "modes": ["normal"],
+        "evidenceKind": "performance"
+      },
+      {
+        "row": "work/limits-confirm",
+        "evidenceRun": "skr-limits-confirm",
+        "modes": ["normal"],
+        "evidenceKind": "performance"
+      },
+      {
+        "row": "rss/soak",
+        "evidenceRun": "rev11-l1-soak",
+        "modes": ["normal", "pressure"],
+        "evidenceKind": "performance"
+      },
+      {
+        "row": "lifecycle/soak-drain",
+        "evidenceRun": "rev11-l1-soak",
+        "modes": ["normal", "pressure"],
+        "evidenceKind": "lifecycle"
+      },
+      {
+        "row": "wall/final",
+        "evidenceRun": "rev11-l2-final",
+        "modes": ["normal", "pressure"],
+        "evidenceKind": "performance"
+      }
+    ],
+    "wsp6Counts": ["retained-entries", "live-leases"],
+    "engineRelocations": [
+      {
+        "from": "crates/old_owner/src/store.rs",
+        "to": "crates/new_owner/src/store.rs"
+      }
+    ],
+    "engineTestsBefore": ["old_owner::store::keeps_entries", "old_owner::store::evicts_entries"],
+    "engineTestsAfter": ["new_owner::store::keeps_entries", "new_owner::store::evicts_entries"],
+    "engineGuardFamilies": [
+      {
+        "family": "dependency-family",
+        "kind": "dependency"
+      },
+      {
+        "family": "feature-family",
+        "kind": "feature"
+      },
+      {
+        "family": "capability-family",
+        "kind": "capability"
+      }
+    ],
+    "futureCharterSurfaces": [
+      {
+        "surface": "crates/new_owner/src/store.rs",
+        "owner": "P-COND"
+      }
+    ],
+    "observeOwners": [
+      {
+        "owner": "S-OBS",
+        "path": "crates/observed/observe-inventory/S-OBS.md",
+        "items": [
+          {
+            "item": "retained entries accessor",
+            "classification": "REQUIRED-lifetime",
+            "gate": "always"
+          },
+          {
+            "item": "per-site timers",
+            "classification": "OPTIONAL",
+            "gate": "cfg(feature = \"semantic-observe\")"
+          }
+        ]
+      }
+    ],
+    "reuseAdmissions": [
+      {
+        "id": "complete-fact",
+        "class": "CompleteFact"
+      },
+      {
+        "id": "certified",
+        "class": "CertifiedDivergence"
+      },
+      {
+        "id": "operation-refusal",
+        "class": "OperationRefusal"
+      },
+      {
+        "id": "root-refusal",
+        "class": "IsolatedRootLedgerRefusal"
+      },
+      {
+        "id": "cancelled",
+        "class": "Never"
+      }
+    ]
+  },
+  "ledger": [
+    {
+      "slug": "H0",
+      "status": "implemented"
+    },
+    {
+      "slug": "B-BRIDGE",
+      "status": "implemented"
+    },
+    {
+      "slug": "S-ENG",
+      "status": "implemented"
+    },
+    {
+      "slug": "S-OBS",
+      "status": "implemented"
+    },
+    {
+      "slug": "CP-STRUCT",
+      "status": "implemented"
+    },
+    {
+      "slug": "L4-A",
+      "status": "implemented"
+    },
+    {
+      "slug": "P-COND",
+      "status": "implemented"
+    },
+    {
+      "slug": "P-PERF",
+      "status": "implemented"
+    },
+    {
+      "slug": "CP-SEM",
+      "status": "implemented"
+    },
+    {
+      "slug": "K-8",
+      "status": "implemented"
+    },
+    {
+      "slug": "ECRV8",
+      "status": "implemented"
+    },
+    {
+      "slug": "ECRX2",
+      "status": "implemented"
+    },
+    {
+      "slug": "REL3",
+      "status": "implemented"
+    },
+    {
+      "slug": "L4-V",
+      "status": "implemented"
+    },
+    {
+      "slug": "L4",
+      "status": "implemented"
+    },
+    {
+      "slug": "LATER",
+      "status": "pending"
+    },
+    {
+      "slug": "DETACHED",
+      "status": "implemented"
+    }
+  ]
+}
