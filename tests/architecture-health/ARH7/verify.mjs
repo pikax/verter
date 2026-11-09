@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
+import { resolveScriptTests } from "../../../scripts/run-script-tests.mjs";
 import { loadProducts as loadArh2Products, validate as validateArh2 } from "../ARH2/verify.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -319,9 +320,8 @@ export function validate(products, manifest = loadManifest()) {
     }
   }
 
-  const pkg = JSON.parse(readRel("package.json"));
-  const scripts = pkg.scripts?.["test:scripts"] ?? "";
-  if (!scripts.includes("tests/architecture-health/ARH7/arh7.test.mjs")) {
+  const scriptTests = resolveScriptTests({ ci: false });
+  if (!scriptTests.some((entry) => entry.file === "tests/architecture-health/ARH7/arh7.test.mjs")) {
     err(errors, "ARH7-ratification", "test-scripts-missing", "test:scripts");
   }
   const ci = readRel(".github/workflows/ci.yml");
