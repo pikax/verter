@@ -27,6 +27,7 @@ pub mod projection_plan;
 #[doc(hidden)]
 pub mod registered_carrier_projection;
 mod registered_geometry_state;
+pub mod structure;
 pub mod svelte_host_integration;
 pub(crate) mod typescript_directives;
 pub mod vue_bridge;
