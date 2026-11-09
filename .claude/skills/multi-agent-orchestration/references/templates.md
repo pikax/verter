@@ -7,6 +7,7 @@ These prompts deliberately contain no SHA, tree, receipt, lease, digest, or runt
 ```text
 Role: implementer for independently landable node <node> at effort <tier>.
 Dedicated node worktree/branch: <absolute path>/<ref>. Do not mix sibling-node changes into this candidate. A shared train worktree is allowed only when the user or maintainer explicitly approved one atomic multi-node landing before mutation; record every included node plus that approval and rationale here: <not-applicable|node list, approval, and atomicity rationale>.
+Source control: <Git clone|Gin workspace>. In a Gin workspace (`gin status` succeeds; see CLAUDE.md "When working in a Gin workspace"), the placed workspace is the candidate and replaces the worktree, branch, PR, squash and `Closes #<n>` instructions below: edit it in place, run `gin checkpoint --meta done=<numbered charter items>` after each finished item, then `node scripts/precheck.mjs` and `gin publish --meta done=<items> --meta unlocks=<child task ids>|all` as soon as a child's needed items are done.
 Deliverables: <exact scope>. Forbidden scope: <exclusions>.
 Confirm the node is READY from every transitive ancestor being implemented. Read its packet and charter. Map acceptance outcomes to proportionate evidence and use TDD for behavioral changes. Implement the complete scope and run <focused commands>.
 Treat production LOC and file budgets as planning references rather than pass/fail limits. Compare the cumulative candidate with them and explain material drift in either direction. If one expected production file becomes ten, investigate hidden scope and report why the candidate remains coherent or stop for an ordinary amendment; never pad or split work merely to hit an estimate.
@@ -23,7 +24,7 @@ Report the node, evidence/results, limitations, handoff, and cleanup state. If a
 
 ```text
 Role: fix agent for node <node>, review round <n>, effort <tier>.
-Candidate worktree: <absolute path>.
+Candidate worktree: <absolute path|Gin workspace>. In a Gin workspace, record fixes with `gin checkpoint`, run `node scripts/precheck.mjs`, and publish with `gin publish --meta done=<items>` instead of committing.
 Consolidated findings: <all findings once>.
 Fix the complete class for every finding. Add a regression only when the finding exposes a plausible boundary not already discriminated. Do not add DAG state, identity validation or receipt machinery to the repository.
 Keep production file/module names and comments, plus every test file/module/test name, comment, fixture, snapshot, assertion message, and guard diagnostic durable: no program/revision, roadmap/DAG, node/block/train ID, phase/stage, implementation sequence, deletion history, or DAG-managed issue/PR citation. A specific independently reported non-DAG product-defect issue may supplement—but never replace—the behavioral explanation.
@@ -35,7 +36,7 @@ Report per-finding disposition, evidence/results, updated patch, and cleanup sta
 
 ```text
 Role: fresh independent <lens> reviewer for node <node>, effort <tier>.
-Candidate: <branch/worktree and concise patch description>.
+Candidate: <branch/worktree or Gin workspace, and concise patch description>.
 Review the cumulative patch for correctness, charter conformance, scope completeness, proportionate proof, fail-closed behavior, performance, and compatibility. Use <lens> as the emphasis. DAG readiness is controller state, not proof; do not request Git identity machinery or repository-side DAG files.
 Compare actual production LOC/file scope with the charter estimates as planning references. Investigate and report material mismatch as a possible scope-coherence issue, not as an automatic threshold failure.
 Reject roadmap archaeology in production file/module names and comments, plus every test file/module/test name, comment, fixture, snapshot, assertion message, and guard diagnostic: no program/revision, DAG, node/block/train IDs, phase/stage, implementation sequence, deletion history, or DAG-managed issue/PR citations. Artifact vocabulary must state durable behavior; only a specific independently reported non-DAG GitHub defect may be cited supplementally.
@@ -46,7 +47,7 @@ For each issue report P0/P1/P2/P3, exact file:line evidence, failing sequence, v
 
 ```text
 Role: fresh independent <verification|confirmation> task for node <node>, effort <tier>.
-Candidate: <branch/worktree>. Policy: <targeted|independent-full>.
+Candidate: <branch/worktree or Gin workspace>. Policy: <targeted|independent-full>.
 Run <commands/scopes>. Check the requested behavior and complete output. Do not verify Git identity, ancestry, receipts, prompt/report digests, or controller DAG state.
 Report verdict, exact results, limitations, and cleanup state.
 ```

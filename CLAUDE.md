@@ -596,6 +596,21 @@ Tama orchestration derives readiness from the controller's database-owned DAG: a
 
 When a block runs in a dedicated `git worktree`, run `pnpm install --frozen-lockfile` in the worktree root once at creation time, before any JS/TS test or workspace-importing Node script — fresh worktrees do not get the gitignored `node_modules/`, and a missing install makes JS/TS tests fail spuriously and read as a false regression. See the skill's "Implementation and worktrees" section.
 
+### When working in a Gin workspace
+
+Tama can run a node in a Gin workspace instead of a Git clone. You are in one when `gin status` succeeds in the checkout (its root has a `.gin` file). Gin is the version control there: create no Git branch, commit, stash or push in it. `gin guide` prints the full agent guide.
+
+In a Gin workspace, the workspace Tama placed is the node's candidate. The Git landing steps in this file and in `/multi-agent-orchestration` are replaced by:
+
+- **No `git worktree`, branch, commit, squash or PR per node.** Edit the workspace in place and create no other checkout. Run `pnpm install --frozen-lockfile` once, as in a fresh worktree.
+- **Checkpoint** after each finished charter item with `gin checkpoint --meta done=<numbered charter items>`, for example `--meta done=1,2`. `done` is cumulative. Record decisions with `gin note '<text>'` and checks you ran with `gin evidence add --check <name> --status pass|fail [--log <file>]`.
+- **Check before publishing:** run `node scripts/precheck.mjs`. It applies the pre-commit checks (per-package `cargo fmt --check`, `oxfmt --check`) to the changed files, because no commit runs the husky hook there.
+- **Publish** with `gin publish --meta done=<items> --meta unlocks=<child task ids>` as soon as the items a child needs are done. Use `unlocks=all` when every child can start. Publishing hands the work over: landing and the Git/GitHub projection happen outside the workspace. Do not write commit messages or `Closes #<n>` lines.
+- **Take parent publications** with `gin update`. Conflicts come back as data: `gin conflicts` shows the hunks, `gin resolve <path> --take ours|theirs|base` (or `--text <full file>`) settles each file, then `gin update` again applies it.
+- **Git-only tools** that need `git worktree` or history, such as A/B benchmarks and release bumps, need a real Git clone. In a workspace they stop with a message.
+
+In a Git clone, nothing in this section applies; the worktree, branch, squash and PR rules above are unchanged.
+
 ### Self-Review
 
 After completing a plan, review the full implementation before declaring done:
@@ -691,6 +706,8 @@ program runs; this file carries the program banner and may cite blocks by identi
 ## CI/CD
 
 See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for CI/CD documentation: workflow specifications (CI, nightly, release), pre-release versioning flow (alpha → beta → rc → stable), publishing (npm), nightly WASM builds + playground deployment, required GitHub secrets configuration.
+
+Releases (`pnpm bump`, `pnpm bump:ide`, release tags) run from a real Git clone, never from a Gin workspace.
 
 ## Skills Reference
 
