@@ -339,7 +339,12 @@ fn an_edit_to_a_global_declaration_misses_the_warm_read() {
 fn declare_global_contributes_only_from_a_module() {
     let host = global_host();
     assert_unresolved(&host, READER, "readScriptAug");
-    assert_unresolved(&host, READER, "readFromScript");
+    assert_clean_warm(
+        &host,
+        READER,
+        "readFromScript",
+        TypeExpr::Primitive(PrimitiveName::Any),
+    );
     assert_clean_warm(
         &host,
         READER,

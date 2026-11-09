@@ -2211,6 +2211,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::IndexedAccess {
                 object,
                 index: index_key,
+                ..
             } => {
                 let object_context = self.indexed_access_operand_context(*object, context);
                 match (index, index_key) {

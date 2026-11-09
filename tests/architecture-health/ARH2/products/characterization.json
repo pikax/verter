@@ -130,7 +130,7 @@
             },
             {
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs",
-              "test": "flow_return_empty_cycle_is_return_only_and_never_never"
+              "test": "a_function_returning_only_itself_has_a_value"
             }
           ],
           "crate": "verter_session"
@@ -595,6 +595,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/dispatch_txn_flow_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/equality_value_narrowing_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/flow_error_recovery_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_accessor_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_class_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_construct_tests.rs",

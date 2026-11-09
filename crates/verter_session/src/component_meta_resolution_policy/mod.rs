@@ -507,6 +507,7 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str), M: verter_audit::observe::Obse
                     | IndexKey::Number(_)
                     | IndexKey::UniqueSymbol(_)
                     | IndexKey::Computed(_),
+                ..
             } => {}
             // STOP — no other construct surfaces role-bearing composition
             // references (function parameter/return types, mapped /

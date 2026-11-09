@@ -1013,7 +1013,7 @@ pub fn audit_key_for_node(
             expressions,
         } => format!("TemplateLiteral[{}q,{}e]", quasis.len(), expressions.len()),
         SemanticNodeData::KeyOf { base } => format!("KeyOf({})", base.0),
-        SemanticNodeData::IndexedAccess { object, index } => match index {
+        SemanticNodeData::IndexedAccess { object, index, .. } => match index {
             IndexKey::String(s) => format!("IndexedAccess({}[\"{}\"])", object.0, s),
             IndexKey::Number(n) => format!("IndexedAccess({}[{}])", object.0, n),
             IndexKey::UniqueSymbol(identity) => format!(

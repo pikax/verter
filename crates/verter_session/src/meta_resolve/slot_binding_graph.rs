@@ -1447,7 +1447,7 @@ fn closed_member_path_route_source<M: verter_audit::observe::ObserveExec>(
             SemanticNodeData::Alias(inner) => {
                 current = *inner;
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 match index {
                     IndexKey::String(key) => rev_keys.push(key.as_ref().to_string()),
                     // Numeric / type-node keys require evaluation to
@@ -1622,7 +1622,7 @@ fn node_reaches_non_owner_ref<M: verter_audit::observe::ObserveExec>(
             SemanticNodeData::Alias(inner) => vec![*inner],
             SemanticNodeData::Array { element, .. } => vec![*element],
             SemanticNodeData::KeyOf { base } => vec![*base],
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let mut parts = vec![*object];
                 if let verter_type_engine::semantic_query::IndexKey::Computed(inner) = index {
                     parts.push(*inner);
