@@ -1029,19 +1029,29 @@ test("unreadable selection data breaks no importer: every lane runs and the audi
 test("formatter catalog changes reach validation in the configured CI script lane", () => {
   const { hits } = matchPathFilters(["catalogs/formatter-performance-v1.toml"]);
   assert.equal(hits.scripts, true);
-  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const listed = spawnSync(
+    process.execPath,
+    [join(SCRIPT_DIR, "run-script-tests.mjs"), "--ci", "--list"],
+    { encoding: "utf8" },
+  );
+  assert.equal(listed.status, 0, `${listed.stdout}${listed.stderr}`);
   assert.ok(
-    pkg.scripts["test:scripts:ci"].includes("node --test scripts/benchmark/evidence-run.test.mjs"),
+    listed.stdout.split(/\r?\n/u).includes("node --test scripts/benchmark/evidence-run.test.mjs"),
   );
 });
 
 test("a rule/action inventory change reaches its data test in the configured CI script lane", () => {
   const { hits } = matchPathFilters(["tests/kernel/LRA0/products/rules-actions-inventory.v1.json"]);
   assert.equal(hits.scripts, true);
-  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const listed = spawnSync(
+    process.execPath,
+    [join(SCRIPT_DIR, "run-script-tests.mjs"), "--ci", "--list"],
+    { encoding: "utf8" },
+  );
+  assert.equal(listed.status, 0, `${listed.stdout}${listed.stderr}`);
   assert.ok(
-    pkg.scripts["test:scripts:ci"].includes(
-      "node --test tests/kernel/LRA0/rules-actions-inventory.test.mjs",
-    ),
+    listed.stdout
+      .split(/\r?\n/u)
+      .includes("node --test tests/kernel/LRA0/rules-actions-inventory.test.mjs"),
   );
 });
