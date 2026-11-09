@@ -812,7 +812,7 @@ fn lowers_indexed_access_as_deferred_shell_with_string_key() {
     };
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             assert!(
                 matches!(&*node(&graph, *object), SemanticNodeData::BareRef(_)),
                 "the object operand is structurally lowered, not resolved"

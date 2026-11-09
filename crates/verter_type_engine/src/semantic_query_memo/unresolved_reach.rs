@@ -442,7 +442,7 @@ impl SemanticGraphStore {
                 children.extend_from_slice(expressions);
             }
             SemanticNodeData::KeyOf { base } => children.push(*base),
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 children.push(*object);
                 children.extend(crate::semantic_query::authored_property_key_child(index));
             }

@@ -8,6 +8,7 @@ fn forge(leaf: &GatedLeaf) -> GatedLeaf {
     GatedLeaf {
         ty: leaf.ty().clone(),
         frame_root: None,
+        member_spans: std::sync::Arc::from([]),
     }
 }
 

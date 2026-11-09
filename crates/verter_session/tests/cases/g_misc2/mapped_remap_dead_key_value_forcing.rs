@@ -1290,6 +1290,7 @@ fn value_shape(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
         SemanticNodeData::IndexedAccess {
             object,
             index: IndexKey::String(name),
+            ..
         } => {
             // A published member value is shallow by default: it is the
             // ADDRESSABLE `Source['k']` access, which renders the same

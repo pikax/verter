@@ -1945,7 +1945,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                 children.push((*surface, position))
             }
             SemanticNodeData::KeyOf { base } => children.push((*base, OperandPosition::KeyDomain)),
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 children.push((*object, OperandPosition::ValueSensitive));
                 if let crate::semantic_query::IndexKey::Computed(node) = index {
                     children.push((*node, OperandPosition::KeyDomain));

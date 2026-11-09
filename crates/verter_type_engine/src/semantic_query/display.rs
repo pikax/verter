@@ -304,7 +304,7 @@ fn pattern_declares_infer(
                     stack.push((remap, scoped, depth - 1));
                 }
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 children.push(*object);
                 if let IndexKey::Computed(index) = index {
                     children.push(*index);
@@ -1057,6 +1057,14 @@ fn display_resolved_type_node(
                 format!("{name}.{}", literal.member)
             }
         }
+        // The checker's error type prints as what it reads as.
+        SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            diagnostic,
+            ..
+        }) if diagnostic.recovery().is_some() => {
+            visited.add_length("any".len());
+            "any".to_string()
+        }
         // Error carrier riding through display — a concise token, NOT a panic.
         // A checker message has no type for it: the part is cut, so a message
         // that would show it is not reported.
@@ -1171,7 +1179,7 @@ fn display_resolved_type_node(
             let inner = render_operand(store, *base, needs, child_depth, visited, Prec::Prefix);
             format!("keyof {inner}")
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             let obj = render_operand(store, *object, needs, child_depth, visited, Prec::Postfix);
             let key = match index {
                 IndexKey::String(s) => {

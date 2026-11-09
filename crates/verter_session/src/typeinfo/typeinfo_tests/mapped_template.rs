@@ -1035,7 +1035,7 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
         );
     };
     let data = graph.node_data(node).unwrap();
-    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
+    let SemanticNodeData::IndexedAccess { object, index, .. } = data.as_ref() else {
         panic!("the mapped index must remain: {data:?}");
     };
     let key = SemanticQueryKey::IndexedAccess {
@@ -1195,7 +1195,7 @@ fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
         );
     };
     let data = graph.node_data(node).unwrap();
-    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
+    let SemanticNodeData::IndexedAccess { object, index, .. } = data.as_ref() else {
         panic!("the mapped index must remain: {data:?}");
     };
     let context = RequestContext::with_kind_timing_and_projection_budget(

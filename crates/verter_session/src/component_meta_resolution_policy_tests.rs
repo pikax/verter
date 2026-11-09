@@ -1179,12 +1179,14 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("value"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let indexed_b = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_b,
         index: verter_type_engine::semantic_query::IndexKey::String(
             verter_type_expr::OwnedStr::from("value"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert_eq!(
         symbolic_projection_eq_for_test(&host, indexed_a, indexed_b),

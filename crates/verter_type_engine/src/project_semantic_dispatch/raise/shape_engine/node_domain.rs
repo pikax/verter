@@ -1730,7 +1730,7 @@ pub fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
             project_root_summary(dispatch, *base, active)?;
             RootOnlySummary::from_summary(summary::key_of(root_only_placeholder_facts()))
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             project_root_summary(dispatch, *object, active)?;
             if let IndexKey::Computed(index_node) = index {
                 project_root_summary(dispatch, *index_node, active)?;
