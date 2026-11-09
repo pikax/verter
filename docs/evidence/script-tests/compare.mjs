@@ -3,8 +3,8 @@
 // replaced root `package.json` chains command-for-command, in the same order.
 //
 // Recorded inputs (frozen at the conversion, before `package.json` was
-// edited): baseline-full.txt holds the 52 command lines of the replaced
-// `test:scripts` chain, baseline-ci.txt the 31 command lines of the replaced
+// edited): baseline-full.txt holds the 53 command lines of the replaced
+// `test:scripts` chain, baseline-ci.txt the 32 command lines of the replaced
 // `test:scripts:ci` chain. The CI chain's first command,
 // `node --test tests/cli/contract.test.mjs`, had no counterpart in the full
 // chain; the fragment carries it as a `full: false` entry.

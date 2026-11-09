@@ -137,6 +137,12 @@
     },
     {
       "runner": "node-test",
+      "file": "tests/engine-provisioning/EPR1/engine-contract.test.mjs",
+      "ci": true,
+      "ciIndex": 21
+    },
+    {
+      "runner": "node-test",
       "file": "scripts/check-ci-aggregate.test.mjs",
       "ci": false
     },
@@ -150,13 +156,13 @@
       "runner": "node-test",
       "file": "scripts/ci-junit-metadata.test.mjs",
       "ci": true,
-      "ciIndex": 21
+      "ciIndex": 22
     },
     {
       "runner": "node-test",
       "file": "scripts/perturbation.test.mjs",
       "ci": true,
-      "ciIndex": 22
+      "ciIndex": 23
     },
     {
       "runner": "node-test",
@@ -168,7 +174,7 @@
       "runner": "node-test",
       "file": "scripts/githubctl/tests/protection.test.mjs",
       "ci": true,
-      "ciIndex": 23
+      "ciIndex": 24
     },
     {
       "runner": "node-test",
@@ -179,19 +185,19 @@
       "runner": "node-test",
       "file": "scripts/jetbrains-gate.test.mjs",
       "ci": true,
-      "ciIndex": 24
+      "ciIndex": 25
     },
     {
       "runner": "node-test",
       "file": "scripts/browser-host-gate.test.mjs",
       "ci": true,
-      "ciIndex": 25
+      "ciIndex": 26
     },
     {
       "runner": "node-test",
       "file": "scripts/web-compat/generate.test.mjs",
       "ci": true,
-      "ciIndex": 26
+      "ciIndex": 27
     },
     {
       "runner": "node-test",
@@ -299,31 +305,31 @@
       "runner": "node-test",
       "file": "tests/kernel/LRA0/rules-actions-inventory.test.mjs",
       "ci": true,
-      "ciIndex": 27
+      "ciIndex": 28
     },
     {
       "runner": "node-test",
       "file": "scripts/check-test-relocation.test.mjs",
       "ci": true,
-      "ciIndex": 28
+      "ciIndex": 29
     },
     {
       "runner": "node-test",
       "file": "scripts/compile-fixture-artifacts.test.mjs",
       "ci": true,
-      "ciIndex": 29
+      "ciIndex": 30
     },
     {
       "runner": "pnpm",
       "script": "test:generic-interface-identity-oracle",
       "ci": true,
-      "ciIndex": 30
+      "ciIndex": 31
     },
     {
       "runner": "node-test",
       "file": "scripts/typescript-pin.test.mjs",
       "ci": true,
-      "ciIndex": 31
+      "ciIndex": 32
     },
     {
       "runner": "node-test",
