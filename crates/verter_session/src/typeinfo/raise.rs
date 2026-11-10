@@ -84,6 +84,35 @@ crate::output_sinks::define_output_capability! {
     mint: pub(in crate::typeinfo::raise)
 }
 
+/// The bounded wire graph export of `node`, a node `dispatch`'s request
+/// resolved under its own captured view: the request projects what it
+/// resolved without acquiring another view. `None` on a raise miss.
+pub(crate) fn project_ordinal_to_semantic_type_graph<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    node: SemanticNodeId,
+    budgets: &verter_protocol::typeinfo::graph_export::GraphExportBudgets,
+) -> Option<verter_protocol::typeinfo::graph::SemanticTypeGraph> {
+    let cap = TypeinfoRaiseOutputCap::new(dispatch);
+    let type_expr = cap
+        .materialize_output_type_expr(node)?
+        .into_type_expr(cap.authority());
+    Some(verter_protocol::typeinfo::graph_export::encode_type_expr_graph(&type_expr, budgets))
+}
+
+/// The checker diagnostic `node` carries, under `dispatch`'s captured view,
+/// when it is the error type the checker continues with after one
+/// (`QueryError::CheckerRecovery`): its formatted `TS<code>: <message>` and
+/// the file and span the checker reports it at. `None` for any other node,
+/// and for a recovery whose message or location this does not know.
+pub(crate) fn checker_diagnostic_in<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    node: SemanticNodeId,
+) -> Option<(String, std::sync::Arc<str>, verter_span::Span)> {
+    let message = dispatch.checker_recovery_message(node)?;
+    let (canonical, span) = dispatch.checker_recovery_location(node)?;
+    Some((message, canonical, span))
+}
+
 /// The ordinal a projection reads, proven to be the live node `node` roots
 /// in this request's graph. A root minted by another graph is foreign and a
 /// destroyed node is stale: both project nothing.
@@ -238,35 +267,7 @@ impl VerterHost {
                 crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let node = owned_projection_subject(&dispatch, node)?;
-            let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-            let type_expr = cap
-                .materialize_output_type_expr(node)?
-                .into_type_expr(cap.authority());
-            Some(verter_protocol::typeinfo::graph_export::encode_type_expr_graph(&type_expr, budgets))
-        })
-    }
-
-    /// The checker diagnostic an owned node root carries, when the root is
-    /// the error type the checker continues with after one
-    /// (`QueryError::CheckerRecovery`): its formatted `TS<code>: <message>`
-    /// and the file and span the checker reports it at. `None` for any
-    /// other root, and for a recovery whose message or location this does
-    /// not know.
-    #[must_use]
-    pub(crate) fn graph_root_checker_diagnostic(
-        &self,
-        node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
-    ) -> Option<(String, std::sync::Arc<str>, verter_span::Span)> {
-        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
-            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-            let node = owned_projection_subject(&dispatch, node)?;
-            let message = dispatch.checker_recovery_message(node)?;
-            let (canonical, span) = dispatch.checker_recovery_location(node)?;
-            Some((message, canonical, span))
+            project_ordinal_to_semantic_type_graph(&dispatch, node, budgets)
         })
     }
 

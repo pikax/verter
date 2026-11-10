@@ -2347,7 +2347,6 @@ impl HostStoreView {
     ///
     /// Demand-time only, never during a build: the cost is scalar reads and
     /// one point lookup of the owning project.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn native_environment_for(
         &self,
         canonical: &str,

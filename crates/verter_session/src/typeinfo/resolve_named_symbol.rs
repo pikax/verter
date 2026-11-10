@@ -75,6 +75,7 @@ use verter_type_expr::TypeExpr;
 #[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
+use crate::typeinfo::node_refs::DeclReplayLocator;
 use crate::VerterHost;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::request_context::RequestContextGuard;
@@ -420,41 +421,31 @@ enum NamedSymbolTypeArgs<'a> {
     Wire(&'a [Arc<TypeExpr>]),
 }
 
-/// Compute the resolver's EFFECTIVE projection mode up front — before the
-/// request even acquires a store view — so every early-miss return (a
-/// non-current view under churn, a wire-arg lowering miss) reports the mode
-/// the resolver would actually have used, not a hardcoded fallback. The
-/// generic-carrier probe reads only the host's shallow inventory (not the
-/// request view), so it is safe to compute before view acquisition; a
-/// `Some(mode)` request pins the mode verbatim.
+/// Compute the resolver's EFFECTIVE projection mode: a `Some(mode)` request
+/// pins the mode verbatim; otherwise a generic carrier defaults to Navigate
+/// (the declaration stays unexpanded) and a non-generic declaration to
+/// Expanded (callers receive the full projection). `is_generic_carrier`
+/// reads the shallow inventory of whichever view the caller resolves
+/// under, and runs only when the request names no mode.
 fn compute_effective_mode(
-    host: &VerterHost,
-    canonical_id: &str,
-    name: &str,
     requested_mode: ResolveMode,
+    is_generic_carrier: impl FnOnce() -> bool,
 ) -> ProjectionMode {
     match requested_mode {
         Some(mode) => mode,
-        None => {
-            // A generic carrier defaults to Navigate (declaration stays
-            // unexpanded); a non-generic decl defaults to Expanded (callers
-            // receive the full projection). The shallow inventory is the
-            // authority.
-            let is_generic_carrier = host
-                .shallow_file_state(canonical_id)
-                .and_then(|state| {
-                    state
-                        .symbol(name)
-                        .map(|sym| !sym.type_param_names.is_empty())
-                })
-                .unwrap_or(false);
-            if is_generic_carrier {
-                ProjectionMode::Navigate
-            } else {
-                ProjectionMode::Expanded
-            }
-        }
+        None if is_generic_carrier() => ProjectionMode::Navigate,
+        None => ProjectionMode::Expanded,
     }
+}
+
+/// Whether `state` declares `name` with declaration-site type parameters.
+fn declares_generic_carrier(
+    state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
+    name: &str,
+) -> bool {
+    state
+        .symbol(name)
+        .is_some_and(|symbol| !symbol.type_param_names.is_empty())
 }
 
 /// Package a resolve-named-symbol outcome and its audit record into the
@@ -538,20 +529,25 @@ fn resolve_named_symbol_request(
     // computing against the stale view. A non-current settle is a non-fault
     // miss (`Ok(None)`) — the FFI surface maps it to a `null` payload, so the
     // consumer re-queries once the host settles.
-    // Compute the effective mode ONCE, up front — every early-miss return
-    // below (the non-current view, a wire-arg lowering miss) reports THIS
-    // computed default, not a hardcoded `Navigate`, so the audit record
-    // records the mode the resolver would actually have used (`mode = None`
-    // on a non-generic decl defaults to `Expanded`, not `Navigate`).
-    let effective_mode = compute_effective_mode(host, canonical_id, name, requested_mode);
-
+    // Every early-miss return below (the non-current view, a wire-arg
+    // lowering miss) reports the computed default mode, not a hardcoded
+    // `Navigate`, so the audit record records the mode the resolver would
+    // actually have used (`mode = None` on a non-generic decl defaults to
+    // `Expanded`, not `Navigate`).
     let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
-        return (Ok(None), effective_mode);
+        // No coherent view exists, so nothing resolves: the live inventory
+        // only labels the audited miss.
+        let mode = compute_effective_mode(requested_mode, || {
+            host.shallow_file_state(canonical_id)
+                .is_some_and(|state| declares_generic_carrier(&state, name))
+        });
+        return (Ok(None), mode);
     };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
         let host_ctx =
             crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(host, &current_view, overlay);
+        let effective_mode = effective_mode_in(&host_ctx, canonical_id, name, requested_mode);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         // The request composes construction ordinals across several dispatcher
         // operations (lowered wire arguments, the bare declaration, the
@@ -592,6 +588,7 @@ fn resolve_named_symbol_request(
 
         let (outcome, mode) = resolve_named_symbol_in_current_view(
             host,
+            &host_ctx,
             &dispatch,
             canonical_id,
             name,
@@ -637,12 +634,13 @@ pub(crate) fn deliver_resolved_root(
 ///
 /// `type_args` are ALREADY-LOWERED node ids produced under the SAME view as
 /// `dispatch`; no `TypeExpr` enters the semantic API. `effective_mode` is the
-/// resolver's already-resolved projection mode (computed by
-/// [`compute_effective_mode`] before view acquisition, so the request body's
-/// early-miss returns and this path report the SAME mode).
+/// resolver's already-resolved projection mode ([`effective_mode_in`] under
+/// the same view, so the request body's early-miss returns and this path
+/// report the SAME mode).
 #[allow(clippy::type_complexity)]
 pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
+    ctx: &crate::resolver_core::HostResolverContext<'_, M>,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
     name: &str,
@@ -652,6 +650,66 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
     Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
     ProjectionMode,
 ) {
+    let resolved = resolve_named_symbol_located(
+        host,
+        ctx,
+        dispatch,
+        canonical_id,
+        name,
+        type_args,
+        effective_mode,
+    );
+    (resolved.outcome, resolved.mode)
+}
+
+/// The resolver's effective projection mode for `name` in `canonical_id`,
+/// read through `ctx`'s captured view.
+pub(crate) fn effective_mode_in<M: verter_audit::observe::ObserveExec>(
+    ctx: &crate::resolver_core::HostResolverContext<'_, M>,
+    canonical_id: &str,
+    name: &str,
+    requested_mode: ResolveMode,
+) -> ProjectionMode {
+    use verter_type_engine::resolver_core::request_ports::IndexedInputs;
+    compute_effective_mode(requested_mode, || {
+        IndexedInputs::shallow_file_state(ctx, canonical_id)
+            .is_some_and(|state| declares_generic_carrier(&state, name))
+    })
+}
+
+/// A named-symbol resolution together with the replay locator of the
+/// declaration it resolved.
+pub(crate) struct LocatedResolution {
+    /// The resolved node, a non-fault miss, or the dispatch fault.
+    pub(crate) outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    /// The projection mode the resolution ran with.
+    pub(crate) mode: ProjectionMode,
+    /// How to replay this resolution: present exactly when the request
+    /// reached its declaration slot with no substitutions. A substituted
+    /// resolution has no canonical substitution locator (its arguments
+    /// are request-local node ordinals), so it is never addressable.
+    pub(crate) locator: Option<DeclReplayLocator>,
+}
+
+/// [`resolve_named_symbol_in_current_view`] with the declaration's replay
+/// locator. `ctx` must be the context `dispatch` was built over: the
+/// entry owner, the shallow inventory and the slot are all read through
+/// its one captured view, never through the live host.
+pub(crate) fn resolve_named_symbol_located<M: verter_audit::observe::ObserveExec>(
+    host: &VerterHost,
+    ctx: &crate::resolver_core::HostResolverContext<'_, M>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    canonical_id: &str,
+    name: &str,
+    type_args: crate::typeinfo::types::TypeArgList<'_>,
+    effective_mode: ProjectionMode,
+) -> LocatedResolution {
+    use verter_type_engine::resolver_core::request_ports::{IndexedInputs, RouteLookup};
+    let unlocated = |outcome| LocatedResolution {
+        outcome,
+        mode: effective_mode,
+        locator: None,
+    };
     let scope_arc: Arc<str> = Arc::from(canonical_id);
 
     // Owner-agnostic entry → exact authored owner. This public
@@ -663,8 +721,7 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
     // owner, where the script-setup `generic="T"` params bind), and the
     // ordinary-file view otherwise (import-routed names, ambient names,
     // multi-owner ambiguity — each fails closed exactly as before).
-    let entry_owner = host
-        .routed_shallow_state(canonical_id)
+    let entry_owner = RouteLookup::routed_shallow_state(ctx, canonical_id)
         .and_then(|state| crate::VerterHost::unique_local_type_declaration_owner_in(&state, name))
         .unwrap_or_else(verter_type_expr::TopLevelOwnerId::ordinary_file);
 
@@ -700,7 +757,7 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
             // the fallback node `None` and the Instantiate path below
             // continues.
             match TypeResolutionRequestError::from_query_error(&err) {
-                Some(fault) => return (Err(fault), effective_mode),
+                Some(fault) => return unlocated(Err(fault)),
                 None => None,
             }
         }
@@ -722,8 +779,8 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
     // - `Navigate` / `Expanded` / `Shallow`: dispatch with the
     //   chosen mode, unwrap one `SemanticNodeData::Alias(inner)`
     //   hop afterwards.
-    let Some(shallow) = host.shallow_file_state(canonical_id) else {
-        return (Ok(decl_node_opt), effective_mode);
+    let Some(shallow) = IndexedInputs::shallow_file_state(ctx, canonical_id) else {
+        return unlocated(Ok(decl_node_opt));
     };
     let scope_node = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(scope_arc.clone()),
@@ -732,6 +789,16 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
         local_scope: None,
     };
     let base = dispatch.type_slot_for(Arc::clone(&scope_arc), entry_owner, Arc::from(name));
+    // The slot the request instantiates is the one its reference
+    // addresses; a substituted instantiation has no canonical locator.
+    let locator = type_args.is_empty().then(|| DeclReplayLocator {
+        entry_canonical: Arc::clone(&scope_arc),
+        entry_owner,
+        requested_name: Arc::from(name),
+        resolved_slot: base.clone(),
+        effective_mode,
+        demand: verter_type_engine::semantic_query::ReductionDemand::Published,
+    });
 
     let instantiate_key =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
@@ -751,8 +818,10 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
             // Instantiate failed. A genuine dispatch fault is surfaced
             // as `Err`; a non-fault miss falls back to the original
             // `ResolveDecl` node (when present) so callers still
-            // receive *something* identifiable rather than a None.
-            return (classify_dispatch_error(&err, decl_node_opt), effective_mode);
+            // receive *something* identifiable rather than a None. The
+            // fallback is a failed instantiation, so it is never
+            // addressable.
+            return unlocated(classify_dispatch_error(&err, decl_node_opt));
         }
     };
     let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
@@ -763,10 +832,14 @@ pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::Obs
             // A hard dispatch fault during nested materialization
             // propagates as `Err` rather than silently degrading to
             // the un-materialised placeholder.
-            Err(fault) => return (Err(fault), effective_mode),
+            Err(fault) => return unlocated(Err(fault)),
         }
     };
-    (Ok(Some(final_node)), effective_mode)
+    LocatedResolution {
+        outcome: Ok(Some(final_node)),
+        mode: effective_mode,
+        locator,
+    }
 }
 
 /// Classify a `QueryResult::Error(err)` arm into the carrier outcome a

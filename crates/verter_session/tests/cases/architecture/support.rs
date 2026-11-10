@@ -104,6 +104,10 @@ pub(super) fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'
             "query_profile",
             "phase-06b-report.md §F10: execution-policy state, not a result memoiser. Different artifact type than anything in ProjectTypeStore.",
         ),
+        (
+            "typeinfo_issued_refs",
+            "TIF1 seam 2 ruling: the private host-issued typeinfo reference index (typed query identity, committed native basis and replay locators per fact; 64 records, 1 MiB). Not a result memoiser: it retains no graph or evaluated IR, and every use re-validates the basis.",
+        ),
         // (b) Single-cell handles whose `RwLock<Arc<dyn>>` shape matches
         //     the cache-detection pattern but whose semantics are
         //     config-handle, not hashmap-cache. Documented here for

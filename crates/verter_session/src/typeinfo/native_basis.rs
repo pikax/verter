@@ -33,9 +33,8 @@
 //! never silently replace it, and any change to a committed observation is
 //! a stale basis.
 //!
-//! The issued-reference executor is this module's production caller; until
-//! it lands, the boundary is exercised by its own tests only.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The resolve-symbol graph executor is this module's production caller,
+//! through [`crate::typeinfo::node_refs::issue_resolve_symbol`].
 
 use std::sync::Arc;
 
@@ -69,14 +68,18 @@ impl NativeFactBasis {
         &self.basis
     }
 
-    /// The fence bound to [`Self::basis`] at commit.
+    /// The fence bound to [`Self::basis`] at commit. The ExpandAround
+    /// admission is its production reader.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn fence(&self) -> &SnapshotFence {
         &self.fence
     }
 
-    /// Metadata this basis retains: every committed row and every scope
-    /// name. The traced signature's evidence is charged to the retention
-    /// account by its own receipts, not here.
+    /// Metadata this basis retains: every committed row (one per fact
+    /// leaf, receipts expanded, so the observed evidence itself), every
+    /// scope name, and the traced signature's direct entries. The receipts
+    /// those entries share are charged to the retention account by their
+    /// own owners.
     pub(crate) fn retained_bytes(&self) -> usize {
         let rows: usize = self
             .basis
@@ -84,7 +87,8 @@ impl NativeFactBasis {
             .map(|row| row.canonical().len() + row.value_bytes().map_or(0, <[u8]>::len) + 32)
             .sum();
         let scopes: usize = self.scopes.iter().map(|scope| scope.len()).sum();
-        std::mem::size_of::<Self>() + rows + scopes
+        let signature = self.signature.entry_count() * std::mem::size_of::<FactVersionRef>();
+        std::mem::size_of::<Self>() + rows + scopes + signature
     }
 }
 

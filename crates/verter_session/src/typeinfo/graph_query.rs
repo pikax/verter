@@ -27,12 +27,13 @@
 //!    not offer (member-path following / a required projection); it is
 //!    refused with a typed `MalformedPayload` rather than answered with
 //!    an unrequested shape.
-//! 4. **Resolution** — the ONE shared engine
-//!    ([`VerterHost::resolve_named_symbol_with_audit`]); this executor
-//!    is not a second resolver.
+//! 4. **Resolution** — the ONE shared engine (the request body of
+//!    [`VerterHost::resolve_named_symbol_with_audit`]); this executor is
+//!    not a second resolver. Resolution, export and reference issuance
+//!    share ONE captured view.
 //! 5. **Bounded export** — the resolved node raises through the sealed
-//!    output capability
-//!    ([`VerterHost::project_node_to_semantic_type_graph`]) and the
+//!    output capability (the in-view sibling of
+//!    [`VerterHost::project_node_to_semantic_type_graph`]) and the
 //!    terminal `TypeExpr` encodes into the wire
 //!    [`SemanticTypeGraph`] under the request's closure budgets (the
 //!    inherently bounded closure kinds bound the exported walk's depth
@@ -41,6 +42,10 @@
 //!    typed `graph`-arm answer carrying the fault as an opaque error
 //!    root — neither is an empty graph, neither loses the audit
 //!    envelope.
+//! 6. **Issuance** — the exported declaration root's reference is
+//!    registered in the host's private issued-reference index
+//!    (`typeinfo::node_refs`) under the native basis the answer
+//!    observed. The wire answer is unchanged.
 
 #[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
@@ -289,30 +294,23 @@ impl VerterHost {
         let budgets = closure_budgets(resolve.closure.as_ref());
         let query = query_identity(&resolve);
 
-        // The ONE shared engine — no second resolver, no string
-        // evaluator on this route.
-        let (outcome, _inner_record) = self
-            .resolve_named_symbol_with_audit(&resolve.canonical_id, &resolve.name, Some(mode))
-            .into_parts();
-        let graph = match outcome {
-            Ok(Some(node)) => match self.project_node_to_semantic_type_graph(&node, &budgets) {
-                Some(mut graph) => {
-                    graph.query = Some(query);
-                    if resolve.include_diagnostics {
-                        if let Some(diagnostic) = self.graph_root_checker_diagnostic(&node) {
-                            push_checker_diagnostic(&mut graph, diagnostic);
-                        }
-                    }
-                    graph
-                }
-                None => single_opaque_root_graph(miss_error(), None, Some(query)),
-            },
+        let graph = match self.resolve_symbol_graph_in_one_view(
+            &resolve.canonical_id,
+            &resolve.name,
+            mode,
+            &budgets,
+            resolve.include_diagnostics,
+        ) {
+            SymbolGraphAnswer::Graph(mut graph) => {
+                graph.query = Some(query);
+                *graph
+            }
             // A non-fault miss is a typed graph answer: the opaque Miss
             // root, never an empty graph and never a fabricated shape.
-            Ok(None) => single_opaque_root_graph(miss_error(), None, Some(query)),
+            SymbolGraphAnswer::Miss => single_opaque_root_graph(miss_error(), None, Some(query)),
             // A dispatch fault is a typed graph answer carrying the
             // fault — the envelope was valid; the resolution faulted.
-            Err(fault) => {
+            SymbolGraphAnswer::Fault(fault) => {
                 let (error, detail) = fault_error(&fault);
                 single_opaque_root_graph(error, detail, Some(query))
             }
@@ -320,6 +318,86 @@ impl VerterHost {
         let payload = graph_payload(mode, &resolve, &graph);
         (graph_response(graph), payload)
     }
+
+    /// Resolve `name` in `canonical_id` and export its bounded graph under
+    /// ONE captured view, then issue the declaration root's reference.
+    ///
+    /// Resolution runs through the ONE shared engine (no second resolver,
+    /// no string evaluator on this route), and the export reads the node
+    /// it resolved under the same view and construction scope. Both run
+    /// under one native fact trace, so the basis committed for the
+    /// reference is exactly what the answer observed; issuance adds no
+    /// semantic traversal. A host that cannot settle on a coherent view
+    /// answers a non-fault miss. Issuance never changes the answer: a fact
+    /// whose basis cannot commit, or went stale before registration, is
+    /// answered unaddressed.
+    fn resolve_symbol_graph_in_one_view(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        mode: ProjectionMode,
+        budgets: &GraphExportBudgets,
+        include_diagnostics: bool,
+    ) -> SymbolGraphAnswer {
+        let Some(current) = crate::typeinfo::current_store_view_for_query(self) else {
+            return SymbolGraphAnswer::Miss;
+        };
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current, overlay);
+            let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            let _scope = dispatch.enter_construction_scope();
+            let ((answer, locator), trace) = crate::typeinfo::native_basis::trace_native_fact(
+                &ctx,
+                &[canonical_id],
+                || {
+                    let resolved = crate::typeinfo::resolve_named_symbol::resolve_named_symbol_located(
+                        self, &ctx, &dispatch, canonical_id, name, &[], mode,
+                    );
+                    let node = match resolved.outcome {
+                        Ok(Some(node)) => node,
+                        Ok(None) => return (SymbolGraphAnswer::Miss, None),
+                        Err(fault) => return (SymbolGraphAnswer::Fault(fault), None),
+                    };
+                    let Some(mut graph) =
+                        crate::typeinfo::raise::project_ordinal_to_semantic_type_graph(&dispatch, node, budgets)
+                    else {
+                        return (SymbolGraphAnswer::Miss, None);
+                    };
+                    if include_diagnostics {
+                        if let Some(diagnostic) = crate::typeinfo::raise::checker_diagnostic_in(&dispatch, node) {
+                            push_checker_diagnostic(&mut graph, diagnostic);
+                        }
+                    }
+                    (SymbolGraphAnswer::Graph(Box::new(graph)), resolved.locator)
+                },
+            );
+            if let Some(locator) = locator {
+                // The schema-12 cutover publishes the issued key on the
+                // exported root; until then it stays host-internal.
+                let _issued = crate::typeinfo::node_refs::issue_resolve_symbol(
+                    self,
+                    current.view(),
+                    &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
+                    trace,
+                    locator,
+                );
+            }
+            answer
+        })
+    }
+}
+
+/// What one captured view answered for a resolve-symbol graph request.
+enum SymbolGraphAnswer {
+    /// The bounded export of the resolved declaration.
+    Graph(Box<SemanticTypeGraph>),
+    /// A non-fault miss: nothing resolved, no coherent view, or a raise
+    /// miss.
+    Miss,
+    /// A dispatch fault.
+    Fault(TypeResolutionRequestError),
 }
 
 /// Add the checker diagnostic the resolved root carries to `graph`'s

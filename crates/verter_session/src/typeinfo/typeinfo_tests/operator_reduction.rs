@@ -534,6 +534,7 @@ fn a_reducer_fault_during_composite_publication_fails_the_request() {
     // `Skeleton` delivers the written composite unreduced.
     let (written, _mode) = resolve_named_symbol_in_current_view(
         &host,
+        &host_ctx,
         &dispatch,
         FILE,
         "__Probe",
