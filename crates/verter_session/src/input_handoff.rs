@@ -145,7 +145,9 @@ impl CommittedInputHandoff {
                     // non-handoff basis was projected through this
                     // seam. Fail loudly rather than silently equating a
                     // directory listing with a missing input.
-                    panic!("committed handoff projected a directory observation as a file wave")
+                    panic!(
+                        "committed handoff projected a directory or native value observation as a file wave"
+                    )
                 }
             },
             Err(crate::input_basis::ObserveError::Negative(_)) => HandoffObserve::Absent {
