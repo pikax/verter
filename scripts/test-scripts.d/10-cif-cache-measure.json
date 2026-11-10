@@ -1,0 +1,10 @@
+{
+  "owner": "CIF-CACHE-MEASURE",
+  "tests": [
+    {
+      "runner": "node-test",
+      "file": "scripts/ci-cache-fit.test.mjs",
+      "ci": true
+    }
+  ]
+}
