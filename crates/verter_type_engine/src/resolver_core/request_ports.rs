@@ -84,35 +84,82 @@ pub enum ConsumedLoad {
 pub type ConsumedLoads = Vec<(Arc<str>, ConsumedLoad)>;
 
 std::thread_local! {
-    static CONSUMED_LOADS: std::cell::RefCell<ConsumedLoads> =
+    /// The consumed loads of every reader stepping on this thread, the
+    /// innermost reader's last. A read consults them innermost first, so a
+    /// nested reader answers from its own retained outcomes before an
+    /// enclosing reader's; a load a reader consumes while it steps joins
+    /// the innermost reader's.
+    static CONSUMED_LOADS: std::cell::RefCell<Vec<ConsumedLoads>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Run a waiting reader with its consumed load outcomes installed. Failures
 /// suppress retries, and indexed deliveries preserve complete ReturnOnly
 /// values without rebuilding them. On return `ends` keeps the outcomes for
-/// the reader's next step. Any outcome
-/// installed by an enclosing reader is restored, unwinding included. An
-/// empty `ends` installs nothing.
+/// the reader's next step — those it was installed with, and every load it
+/// consumed while it ran ([`retain_consumed_load`]). The outcomes an
+/// enclosing reader installed stay readable beneath them and are left as
+/// they were, unwinding included.
 pub(crate) fn with_consumed_loads<R>(ends: &mut ConsumedLoads, body: impl FnOnce() -> R) -> R {
-    if ends.is_empty() {
-        return body();
-    }
     struct Restore<'e> {
         ends: &'e mut ConsumedLoads,
-        outer: ConsumedLoads,
     }
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
-            let outer = std::mem::take(&mut self.outer);
-            *self.ends = CONSUMED_LOADS
-                .with(|installed| std::mem::replace(&mut *installed.borrow_mut(), outer));
+            *self.ends = CONSUMED_LOADS.with(|stack| {
+                stack
+                    .borrow_mut()
+                    .pop()
+                    .expect("a reader's consumed loads are installed while it runs")
+            });
         }
     }
     let installed = std::mem::take(ends);
-    let outer = CONSUMED_LOADS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), installed));
-    let _restore = Restore { ends, outer };
+    CONSUMED_LOADS.with(|stack| stack.borrow_mut().push(installed));
+    let _restore = Restore { ends };
     body()
+}
+
+/// Retain `load`, the terminal outcome of the owned load of `file` the
+/// innermost stepping reader waited on, for that reader's later reads of
+/// the file: they answer from it and never begin the load again. Outside
+/// any reader nothing retains it; the in-place driver that stands there
+/// loads the file itself.
+pub(crate) fn retain_consumed_load(file: Arc<str>, load: ConsumedLoad) {
+    CONSUMED_LOADS.with(|stack| {
+        if let Some(innermost) = stack.borrow_mut().last_mut() {
+            innermost.push((file, load));
+        }
+    });
+}
+
+/// Whether a stepping reader already consumed a load of a file matching
+/// `is_file`, whichever way it ended: a reader never begins such a load
+/// again, and answers its reads of the file from the retained outcome.
+pub(crate) fn consumed_load_known(is_file: impl Fn(&str) -> bool) -> bool {
+    CONSUMED_LOADS.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .rev()
+            .any(|ends| ends.iter().any(|(file, _)| is_file(file)))
+    })
+}
+
+/// The retained outcome for a file matching `is_file`, from the innermost
+/// reader that consumed one outwards.
+fn consumed_load<R>(
+    is_file: impl Fn(&str) -> bool,
+    select: impl Fn(&ConsumedLoad) -> Option<R>,
+) -> Option<R> {
+    CONSUMED_LOADS.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|ends| ends.iter().find(|(file, _)| is_file(file)))
+            .and_then(|(_, load)| select(load))
+    })
 }
 
 /// [`with_consumed_loads`] for a request adapter's test: the reader state a
@@ -128,28 +175,18 @@ pub fn with_consumed_loads_for_tests<R>(ends: &mut ConsumedLoads, body: impl FnO
 /// failed load synchronously. `None` when no installed outcome names the
 /// file. Independent readers outside this scope may load the file again.
 pub fn consumed_load_end(is_file: impl Fn(&str) -> bool) -> Option<IndexedLoadEnd> {
-    CONSUMED_LOADS.with(|slot| {
-        let ends = slot.borrow();
-        ends.iter()
-            .find(|(file, _)| is_file(file))
-            .and_then(|(_, end)| match end {
-                ConsumedLoad::End(end) => Some(*end),
-                ConsumedLoad::Indexed(_) => None,
-            })
+    consumed_load(is_file, |load| match load {
+        ConsumedLoad::End(end) => Some(*end),
+        ConsumedLoad::Indexed(_) => None,
     })
 }
 
 /// The waiting reader's retained indexed delivery, never a shared cache.
 /// Repeated reads preserve the same artifact and publication status.
 pub fn consumed_indexed_input(is_file: impl Fn(&str) -> bool) -> Option<IndexedInputServe> {
-    CONSUMED_LOADS.with(|slot| {
-        slot.borrow()
-            .iter()
-            .find(|(file, _)| is_file(file))
-            .and_then(|(_, load)| match load {
-                ConsumedLoad::Indexed(serve) => Some(serve.clone()),
-                ConsumedLoad::End(_) => None,
-            })
+    consumed_load(is_file, |load| match load {
+        ConsumedLoad::Indexed(serve) => Some(serve.clone()),
+        ConsumedLoad::End(_) => None,
     })
 }
 
@@ -345,6 +382,23 @@ pub trait IndexedInputs {
     /// does not complete that handoff. Without a scheduler driver the caller
     /// remains responsible for driving the serve in place.
     fn begin_indexed_load(&self, canonical_id: &str) -> IndexedReadiness<'_>;
+
+    /// [`Self::begin_indexed_load`] for a contributor pending ingestion
+    /// ([`OwnedLowering::pending_global_contributors`]), which the reader
+    /// only materializes ahead of the population read: the load observes
+    /// no content version of the file, as the population read's own
+    /// in-place materialization observes none.
+    fn begin_pending_contributor_index(&self, canonical_id: &str) -> IndexedReadiness<'_> {
+        self.begin_indexed_load(canonical_id)
+    }
+
+    /// Make the contributor `canonical_id`, pending ingestion, IndexedReady
+    /// in place, exactly as the population read would — loading its source
+    /// and indexing it without observing its content version. The
+    /// synchronous entry's driver of a pending-contributor transition.
+    fn materialize_pending_contributor(&self, canonical_id: &str) {
+        let _ = self.ensure_indexed_ready_serve(canonical_id);
+    }
 
     /// Begin the loads [`Self::prepared_decl_bundle`] of `canonical_id`
     /// would perform while materializing the bundle — the files it routes
@@ -551,6 +605,21 @@ pub trait RouteLookup {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String>;
+
+    /// [`Self::resolve_type_dependency_canonical`] for one edge of a route
+    /// a memoized build follows itself, with the resolution's own witness
+    /// — the facts the resolution policy read to pick the target —
+    /// observed onto the active tracer, as the host's route walk observes
+    /// them for every edge it traverses: a dependency appearing or
+    /// retargeting then misses the warm entry. A host without a witness
+    /// resolves as the plain port does.
+    fn resolve_type_dependency_canonical_witnessed(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        self.resolve_type_dependency_canonical(owner_canonical, import_source)
+    }
 
     /// fetch the routed shallow state for a canonical id.
     /// Used by macro-shape materialisation when re-resolving paths
@@ -878,6 +947,15 @@ pub trait OwnedLowering {
         name: &str,
         space: verter_session_query::facts::SymbolSpace,
     ) -> ContributorAnswer;
+    /// The contributors recorded at construction or upsert that
+    /// [`Self::global_contributor_answer`] would make IndexedReady in place
+    /// before it reads the population, classified but not materialized: a
+    /// reader that must not load in place reads each as a load of its own
+    /// first, after which the population read finds them indexed. A host
+    /// without such a record has none.
+    fn pending_global_contributors(&self) -> Vec<Arc<str>> {
+        Vec::new()
+    }
     /// The contributors of `name` to `target`, read for `anchor`, the
     /// requesting file: every library among them, for
     /// [`Self::augmentation_contributor_order`] to keep the ones `anchor`'s

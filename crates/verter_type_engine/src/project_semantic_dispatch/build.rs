@@ -856,41 +856,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(roots)
     }
 
-    /// Whether a declaration lookup can answer from its own indexed headers,
-    /// without preparing or following an import/export route. Both the source
-    /// handoff and the builder use this predicate, including framework and
-    /// augmentation declarations.
-    pub(super) fn resolve_decl_is_local(
-        key: &ResolveDeclKey,
-        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
-    ) -> bool {
-        shallow.effective_type_header_present_in(key.scope.owner, key.name.as_ref())
-            || shallow.effective_value_header_present_in(key.scope.owner, key.name.as_ref())
-            || if key.scope.owner.is_global_augmentation() {
-                shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
-            } else {
-                key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
-                    && shallow
-                        .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
-                        .is_some()
-            }
-    }
-
-    /// Whether this lookup follows a route rather than answering locally or
-    /// missing without touching its imports.
-    pub(super) fn resolve_decl_needs_route(
-        key: &ResolveDeclKey,
-        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
-    ) -> bool {
-        !Self::resolve_decl_is_local(key, shallow)
-            && (shallow
-                .import_target_in(key.scope.owner, key.name.as_ref())
-                .is_some()
-                || (key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
-                    && (shallow.exports.contains_key(key.name.as_ref())
-                        || shallow.has_wildcard_reexports())))
-    }
-
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
     /// Declaration identity is carried by the `Instantiate` key's
@@ -903,158 +868,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveDeclKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        self.drive_family_in_place(self.begin_resolve_decl(key))
+        self.drive_family_in_place(self.continuation_stage().begin_resolve_decl(key))
     }
 
-    /// Resolve the local headers and route once, retaining the selected
-    /// target across its semantic read. Route preparation is still a driver
-    /// port operation; the target build itself is an owned family need.
-    pub(super) fn begin_resolve_decl(
+    /// The in-place bare-name resolver over the declaration scope
+    /// `(canonical, owner)`: the route a declaration lookup's hop walk could
+    /// not settle from the shallow inventories it read
+    /// ([`PortRead::BareName`](super::port_continuations::PortRead::BareName)).
+    /// It reads the scope's prepared bundle for its declaration-scope payload
+    /// and resolves through the host's export-target resolvers, observing
+    /// the route facts, where the driver stands.
+    pub(super) fn resolve_decl_route_in_place(
         &self,
-        key: &ResolveDeclKey,
-    ) -> super::family_continuation::FamilyStep {
-        use super::family_continuation::{FamilyBuild, FamilyStep};
-        self.graph().record_continuation_begun();
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
         verter_audit::attribute_scope!(ResolveDecl);
-        // Self-version rooting: observe the scope canonical.s
-        // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the
-        // overlay-aware host accessor (a `SessionResolverContext`
-        // observes the overlay artifact, not the base file). The
-        // single observed artifact roots both the node.s
-        // `NodeScopeId::File` and the memo entry.s self-root
-        // `FileWholeHash` on `indexed.whole_hash`, and its
-        // `shallow_state` is the shallow inventory this builder reads
-        // — value basis and self-root descend from one observation, so
-        // a concurrent edit cannot tear them. `shallow_file_state` is
-        // deliberately not used: it reads the base file hash under an
-        // overlay and re-reads content outside the single observation.
-        let indexed = match self
-            .ctx
-            .ensure_indexed_ready_serve(key.scope.canonical_id.as_ref())
-            .map(|serve| serve.indexed)
-        {
-            Some(indexed) => indexed,
-            None => {
-                return FamilyStep::Done(Box::new(
-                    (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
-                ))
-            }
-        };
-        let shallow = &indexed.shallow_state;
-        let observed_hash = indexed.whole_hash;
-
-        let is_ordinary = key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file();
-        let has_export = is_ordinary && shallow.exports.contains_key(key.name.as_ref());
-        let has_import_local = shallow
-            .import_target_in(key.scope.owner, key.name.as_ref())
-            .is_some();
-        let has_local_declaration = Self::resolve_decl_is_local(key, shallow);
-
-        if !has_local_declaration {
-            // Re-export fall-through. A barrel reaches the declaration via
-            // `export * from './base'` (no direct symbol / named export),
-            // `export { X } from './base'`, or `import { X } ...; export
-            // { X }`. In every shape the declaration is authored elsewhere:
-            // follow the export graph (the shared route resolver already
-            // implements direct > aliased > wildcard precedence) to the
-            // defining `(canonical, name)` and resolve THAT declaration, so
-            // the declaration's scope — and every member's
-            // `declaration_origin`, which anchors typeinfo JSDoc enrichment
-            // — labels the file the author wrote it in, not the barrel hop.
-            if Self::resolve_decl_needs_route(key, shallow) {
-                let scope_payload = self
-                    .ctx
-                    .prepared_decl_bundle(key.scope.canonical_id.as_ref())
-                    .map(|bundle| {
-                        crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                            &bundle,
-                            key.scope.owner,
-                        )
-                    });
-                if let Some(target) =
-                    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                        self.ctx,
-                        self,
-                        key.scope.canonical_id.as_ref(),
-                        key.scope.owner,
-                        scope_payload.as_ref(),
-                        key.name.as_ref(),
-                    )
-                {
-                    if target.canonical_id.as_ref() != key.scope.canonical_id.as_ref()
-                        || target.owner != key.scope.owner
-                        || target.symbol_name.as_ref() != key.name.as_ref()
-                    {
-                        let resolved_key = ResolveDeclKey {
-                            scope: crate::semantic_query::ScopeId {
-                                canonical_id: target.canonical_id.clone(),
-                                owner: target.owner,
-                                local_scope: None,
-                                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                    target.owner,
-                                ),
-                            },
-                            name: target.symbol_name.clone(),
-                        };
-                        // Re-root the barrel-resolved entry on BOTH the
-                        // barrel file (whose export surface selected the
-                        // target) AND the resolved declaration's own
-                        // self-roots, so a content edit to EITHER the
-                        // barrel's re-export clause or the defining file
-                        // misses the warm read.
-                        return FamilyStep::Need(
-                            SemanticQueryKey::ResolveDecl(resolved_key),
-                            Box::new(FamilyBuild::ResolveDecl((
-                                key.scope.canonical_id.clone(),
-                                observed_hash,
-                            ))),
-                        );
-                    }
-                }
-            }
-            if !(has_export || has_import_local) {
-                return FamilyStep::Done(Box::new(
-                    (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
-                ));
-            }
-            // The export graph could not resolve the defining site (e.g. an
-            // unresolvable specifier): fall through to the legacy
-            // placeholder scoped to this file, whose prepared-declaration
-            // builder follows the import lazily.
-        }
-
-        // Record the declaration's origin scope in the sidecar so
-        // dispatch builders reached from this placeholder can route
-        // per-base-scope lookups through the scope's declaration-scope
-        // payload.
-        let scope = NodeScopeId::File {
-            canonical_id: key.scope.canonical_id.clone(),
-            owner: key.scope.owner,
-            whole_hash: observed_hash,
-            local_scope: key
-                .scope
-                .local_scope
-                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
-        };
-        let signature = self.dep_signature_for(&key.scope.canonical_id, observed_hash);
-        // Return a DeclPlaceholder that carries enough identity for
-        // callers to construct Instantiate keys.
-        let node_id = self.graph().intern_node_with_scope(
-            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-                canonical_id: key.scope.canonical_id.clone(),
-                owner: key.scope.owner,
-                name: key.name.clone(),
-                whole_hash: observed_hash,
-            }),
-            scope,
-        );
-        FamilyStep::Done(Box::new(
-            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                QueryResult::Value(node_id),
-                signature,
-            ))
-            .with_observed_self_roots([(key.scope.canonical_id.clone(), observed_hash)]),
-        ))
+        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                &bundle, owner,
+            )
+        });
+        crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            self,
+            canonical,
+            owner,
+            scope_payload.as_ref(),
+            name,
+        )
     }
 
     /// `typeof`-rooted declaration lookup. Shape mirrors [`Self::build_resolve_decl`]
@@ -9315,19 +9158,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &str,
         space: GlobalSpace,
     ) -> Option<ResolvedRootIdentity> {
-        let project = self.project_stable_key_for_canonical(demand_canonical)?;
-        let identity = crate::resolver_core::ambient_resolve::resolve_ambient_global(
-            self.ctx,
-            demand_canonical,
-            project,
-            name,
-            match space {
-                GlobalSpace::Type => crate::resolver_core::request_ports::AmbientSymbolSpace::Type,
-                GlobalSpace::Value => {
-                    crate::resolver_core::request_ports::AmbientSymbolSpace::Value
-                }
-            },
-        )?;
+        let identity = self.lib_global_identity_in(demand_canonical, name, space)?;
         // A library the view cannot serve is still the declaring file: the
         // read of its declaration that follows fails as that read does.
         let Some(indexed) = self
@@ -9362,19 +9193,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
-            return Some(lib);
+        // One implementation, driven in place: the lookup a family steps as
+        // ports and loads ([`GlobalLookup`]) is read here where the caller
+        // stands, each port answered and each file served at once.
+        use super::port_continuations::{GlobalLookup, GlobalStep};
+        let (mut lookup, mut step) =
+            GlobalLookup::begin(Arc::from(demand_canonical), Arc::from(name));
+        loop {
+            step = match step {
+                GlobalStep::Found(found) => return found,
+                GlobalStep::Port => {
+                    let answer = self.answer_port_in_place(&lookup.port());
+                    lookup.resume_port(answer)
+                }
+                GlobalStep::Load(file) => {
+                    lookup.resume_source(self.ctx.ensure_indexed_ready_serve(&file))
+                }
+                GlobalStep::Index(file) => {
+                    self.ctx.materialize_pending_contributor(&file);
+                    lookup.resume_source(None)
+                }
+            };
         }
-        let population = self.global_contributors_in(
+    }
+
+    /// The declaration of the global `name` in the TYPE space that the
+    /// library of `demand_canonical`'s project holds, by the project's
+    /// symbol index alone — the library file is not read
+    /// ([`PortRead::GlobalLib`](super::port_continuations::PortRead::GlobalLib)).
+    pub(super) fn lib_global_identity(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        self.lib_global_identity_in(demand_canonical, name, GlobalSpace::Type)
+    }
+
+    /// [`Self::lib_global_identity`] in `space`. Consulting the library
+    /// records the consumer's dependency on it, so re-registering the
+    /// library misses every warm read that named the global through it.
+    fn lib_global_identity_in(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+        space: GlobalSpace,
+    ) -> Option<ResolvedRootIdentity> {
+        let project = self.project_stable_key_for_canonical(demand_canonical)?;
+        crate::resolver_core::ambient_resolve::resolve_ambient_global(
+            self.ctx,
             demand_canonical,
+            project,
             name,
-            verter_session_query::facts::SymbolSpace::Type,
-        );
-        let first = population
-            .entries
-            .iter()
-            .find(|entry| declares_global_type(entry))?;
-        Some(self.global_contribution_identity(first, name))
+            match space {
+                GlobalSpace::Type => crate::resolver_core::request_ports::AmbientSymbolSpace::Type,
+                GlobalSpace::Value => {
+                    crate::resolver_core::request_ports::AmbientSymbolSpace::Value
+                }
+            },
+        )
     }
 
     /// Whether `(canonical, owner, name)` addresses ONE declaration of the
@@ -22725,11 +22601,46 @@ struct ClauseBaseSubstitution<'n> {
     bases: Vec<SemanticNodeId>,
 }
 
+/// Whether a declaration lookup can answer from its own indexed headers,
+/// without preparing or following an import/export route. The source
+/// handoff, the builder and the route continuation use this predicate,
+/// including framework and augmentation declarations.
+pub(super) fn resolve_decl_is_local(
+    key: &ResolveDeclKey,
+    shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+) -> bool {
+    shallow.effective_type_header_present_in(key.scope.owner, key.name.as_ref())
+        || shallow.effective_value_header_present_in(key.scope.owner, key.name.as_ref())
+        || if key.scope.owner.is_global_augmentation() {
+            shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
+        } else {
+            key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                && shallow
+                    .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
+                    .is_some()
+        }
+}
+
+/// Whether a declaration lookup follows a route rather than answering
+/// locally or missing without touching its imports.
+pub(super) fn resolve_decl_needs_route(
+    key: &ResolveDeclKey,
+    shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+) -> bool {
+    !resolve_decl_is_local(key, shallow)
+        && (shallow
+            .import_target_in(key.scope.owner, key.name.as_ref())
+            .is_some()
+            || (key.scope.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                && (shallow.exports.contains_key(key.name.as_ref())
+                    || shallow.has_wildcard_reexports())))
+}
+
 /// Whether the contributor `entry` declares the GLOBAL type of its name: a
 /// module's `declare global` interface or alias, or a script's file-scope
 /// one. A `declare global` block in a SCRIPT is an error that binds
 /// nothing; the automatic libraries are read through the project's library.
-fn declares_global_type(
+pub(super) fn declares_global_type(
     entry: &verter_session_query::inputs::contributors::ContributorEntry,
 ) -> bool {
     use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
