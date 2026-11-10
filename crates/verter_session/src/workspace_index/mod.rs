@@ -32,6 +32,7 @@ pub use delta::{ObservationOracle, PartialCause};
 pub use facts::{
     DemandItem, FactCoverage, FactReceipt, IndexDemand, IndexDemandPartition, IndexSurface,
 };
+pub(crate) use host_projection::{carrier_profile, host_unit};
 pub use host_projection::{
     registration_domain, registration_domain_lookup, registration_posting_key, CssVarCandidates,
     IndexReconcileWork, PartitionShortfall, ReconcileStatus,

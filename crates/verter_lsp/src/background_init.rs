@@ -992,7 +992,7 @@ impl super::VerterLanguageServer {
     /// editor that said it honours the request is asked.
     ///
     /// The requests are not awaited: readiness must never wait on an editor's reply.
-    fn refresh_deferred_decorations(&self) {
+    pub(crate) fn refresh_deferred_decorations(&self) {
         use std::sync::atomic::Ordering;
         let semantic_tokens = self
             .client_refreshes_semantic_tokens

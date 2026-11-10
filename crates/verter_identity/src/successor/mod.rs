@@ -8,8 +8,8 @@
 //! [`crate::macros::digest_identity!`] or, when this crate fixes the
 //! derivation, [`crate::macros::sealed_digest_identity!`]; a sealed type has
 //! no `from_canonical`, so it is minted only by the one constructor that
-//! names exactly the inputs its law allows. The existing `CapabilityId`
-//! (`verter_language`) and [`crate::identity::SourceUnitId`] stay where
+//! names exactly the inputs its law allows. The profile-qualified `CapabilityId`
+//! (`verter_language::participation`) and [`crate::identity::SourceUnitId`] stay where
 //! they are; this module never defines a second one. Profile identities
 //! are not threaded into `HostConfig`/`CompileProfile`/`CodegenOptions`.
 

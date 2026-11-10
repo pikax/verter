@@ -34,9 +34,13 @@ export interface CssValidationProvider {
 export function createCssDiagnosticsUpdater(
   getCssService: () => CssValidationProvider,
   cssDiagnostics: Pick<vscode.DiagnosticCollection, "set">,
+  // The document's stylesheet diagnostics participation cell (COX0): a
+  // withdrawn cell validates and publishes nothing. Checked again after the
+  // await, so a withdrawal mid-validation never refills the display.
+  admits: (document: vscode.TextDocument) => boolean = () => true,
 ): (document: vscode.TextDocument) => Promise<void> {
   return async (document) => {
-    if (!isFrameworkCarrierLanguageId(document.languageId)) return;
+    if (!isFrameworkCarrierLanguageId(document.languageId) || !admits(document)) return;
     try {
       const uri = document.uri.toString();
       const source = document.getText();
@@ -49,7 +53,7 @@ export function createCssDiagnosticsUpdater(
         return;
       }
       // Publication re-admission (B-29): drop a stale invocation's return.
-      if (document.isClosed || document.version !== version) {
+      if (document.isClosed || document.version !== version || !admits(document)) {
         return;
       }
       const allDiags: vscode.Diagnostic[] = [];

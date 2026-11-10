@@ -43,12 +43,11 @@ const SRC_ROOT = join(__dirname);
  * gates:
  *   - `frameworkWiring.ts` DEFINES `isFrameworkCarrierLanguageId` and the
  *     framework-carrier language-id set (the manifest-derived authority).
- *   - `VueApiDecorationProvider.ts` decorates Vue-API call sites (lifecycle
- *     hooks, watchers, reactivity, provide/inject) — its `!== "vue"` gate is
- *     Vue-API-specific by definition (Vue-INTRINSIC content).
- * (`generated/**` is excluded by prefix.)
+ * (`generated/**` is excluded by prefix.) The API-call decoration consumes its
+ * participation cell (COX0) instead of a Vue-only language gate, so it is
+ * scanned like any other file.
  */
-const ALLOWLISTED_FILES = new Set<string>(["frameworkWiring.ts", "VueApiDecorationProvider.ts"]);
+const ALLOWLISTED_FILES = new Set<string>(["frameworkWiring.ts"]);
 
 /** Whether a `src`-relative POSIX path is excluded from the scan. */
 function isExcludedFile(relPosix: string): boolean {
@@ -306,8 +305,8 @@ describe("carrier-routing guard: no hardcoded Vue gate in verter-vscode", () => 
         `  - classify a carrier-neutral component import source against ANY carrier\n` +
         `    extension, not a hardcoded \`.endsWith(".vue")\`.\n` +
         `Allowlisted ONLY: frameworkWiring.ts (defines the set), generated/** (the\n` +
-        `manifest mirror), VueApiDecorationProvider.ts (the Vue-API \`!== "vue"\`\n` +
-        `gate), and the Vue-runtime npm import filter (\`!== "vue" && startsWith("vue/")\`).\n\n` +
+        `manifest mirror), and the Vue-runtime npm import filter\n` +
+        `(\`!== "vue" && startsWith("vue/")\`).\n\n` +
         `Violations:\n  ${rendered}`,
     ).toHaveLength(0);
   });

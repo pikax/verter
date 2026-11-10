@@ -5,7 +5,7 @@
 //! only before runtime authority exists, including genuinely overlay-only
 //! canonicals and synthetic test keys.
 
-use verter_language::{CapabilityId, FileLanguage, GatedCandidate, StaticClassification};
+use verter_language::{FileLanguage, GatedCandidate, ProjectCapabilityId, StaticClassification};
 
 #[test]
 fn static_resolution_discards_the_capability_dimension_for_fallbacks() {
@@ -14,7 +14,7 @@ fn static_resolution_discards_the_capability_dimension_for_fallbacks() {
     assert_ne!(fallback, candidate, "fixture languages must discriminate");
 
     let gated = StaticClassification::Gated(GatedCandidate {
-        capability: CapabilityId::new("verter.test.capability"),
+        capability: ProjectCapabilityId::new("verter.test.capability"),
         candidate,
         fallback: fallback.clone(),
     });

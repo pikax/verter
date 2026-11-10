@@ -809,6 +809,10 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `OwnerImportSurfaceDb::evict_if_schema_mismatch`.
         "pub mod owner_import_surface",
+        // COX0: the participation service of one host participation scope.
+        // `pub` because every host carrier (LSP, MCP, CLI) owns one and
+        // admits its demands through it.
+        "pub mod participation",
         // The session-side implementation of the query-owned host port
         // (`verter_session_query::QueryHostPort`): `pub` because the
         // composition root above BOTH crates constructs

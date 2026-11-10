@@ -210,6 +210,10 @@ async fn serve() {
         "$/verter/audit/getRecent",
         VerterLanguageServer::get_audit_recent,
     )
+    .custom_method(
+        verter_lsp::participation::UPDATE_PARTICIPATION_METHOD,
+        VerterLanguageServer::update_participation,
+    )
     .finish();
 
     verter_lsp::outbound::serve(stdin, stdout, service, outbound).await;

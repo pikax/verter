@@ -147,6 +147,17 @@ pub fn render_client_framework_manifest_ts() -> String {
         "CLIENT_CARRIER_EXTENSIONS",
         carrier_exts.into_iter(),
     );
+    out.push_str(
+        "\n// Every participation capability facet key (COX0), in vocabulary order: the\n\
+         // only operation spellings a host may name in a participation input.\n",
+    );
+    render_multiline_str_array(
+        &mut out,
+        "PARTICIPATION_OPERATIONS",
+        verter_language::participation::CapabilityOperation::ALL
+            .iter()
+            .map(|operation| operation.key()),
+    );
 
     out
 }
@@ -158,6 +169,9 @@ struct FrameworkRow {
     carrier_ext: String,
     client_language_id: String,
     adapter_module_exts: Vec<String>,
+    /// The lower-hex digest of the profile this host's registry mints from
+    /// the descriptor's manifest (COX0 participation cells name it).
+    participation_profile_id: String,
     descriptor: FrameworkAdapterDescriptor,
 }
 
@@ -180,11 +194,22 @@ impl FrameworkRow {
             .into_iter()
             .map(|ext| format!(".{ext}"))
             .collect();
+        // The same minting the registry performs, so the id is the one the
+        // server resolves.
+        let participation_profile_id = descriptor
+            .profile_manifest
+            .mint(&crate::framework::descriptor::carrier_syntax_schema(
+                crate::framework::registry::BUILT_IN_PARSER_GRAMMAR_VERSION,
+            ))
+            .ok()?
+            .digest()
+            .to_hex();
         Some(Self {
             framework_id: descriptor.id.as_str().to_string(),
             carrier_ext,
             client_language_id,
             adapter_module_exts,
+            participation_profile_id,
             descriptor: descriptor.clone(),
         })
     }
@@ -210,6 +235,10 @@ impl FrameworkRow {
         out.push_str(&format!(
             "    triggerLanguageIds: {},\n",
             render_str_array([self.client_language_id.as_str()].into_iter())
+        ));
+        out.push_str(&format!(
+            "    participationProfileId: {},\n",
+            quote(&self.participation_profile_id)
         ));
         render_virtual_file_suffixes(out, &self.descriptor);
         out.push_str("  },\n");
@@ -360,6 +389,9 @@ export interface ClientFramework {
   clientLanguageIds: readonly string[];
   // The language id(s) whose documents trigger LSP start + TS-plugin configure.
   triggerLanguageIds: readonly string[];
+  // The participation profile id (lower-hex `FrameworkProfileId` digest) the
+  // host names this framework's capability cells by. Never the display id.
+  participationProfileId: string;
   // The framework's virtual-file naming suffixes (from the descriptor column).
   virtualFileSuffixes: FrameworkVirtualFileSuffixes;
 }

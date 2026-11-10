@@ -23,6 +23,7 @@ use crate::statistics::Statistics;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
 use crate::LspConfig;
+use verter_language::participation::{CapabilityOperation as Op, DemandPurpose};
 
 // `server_tests.rs` (a child of `server`, included via `#[path]`) uses
 // `super::*` to bring server-scope identifiers into its tests. Keep
@@ -854,6 +855,135 @@ impl VerterLanguageServer {
             .reach(test_support::RequestBarrier::Settlement)
             .await;
         request.settle(&self.documents, response)
+    }
+
+    /// Admit `operation`'s participation cell for `uri` (COX0) before any
+    /// producer starts, run `answer`, and serve it only while the demand epoch
+    /// it was admitted under is current. A refused cell answers the typed
+    /// refusal and drops `answer` unpolled, so it costs no work; a statically
+    /// advertised method is never permission by itself.
+    pub(super) async fn participating<T>(
+        &self,
+        operation: Op,
+        uri: Option<&Uri>,
+        purpose: DemandPurpose,
+        answer: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.participating_with_permit(operation, uri, purpose, answer)
+            .await
+            .map(|(answer, _)| answer)
+    }
+
+    /// [`Self::participating`], also returning the permit the answer was
+    /// admitted under.
+    pub(super) async fn participating_with_permit<T>(
+        &self,
+        operation: Op,
+        uri: Option<&Uri>,
+        purpose: DemandPurpose,
+        answer: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<(T, verter_session::participation::ParticipationPermit)> {
+        let permit = crate::participation::admit(
+            &self.documents,
+            operation,
+            uri,
+            purpose,
+            verter_language::participation::ProviderRequirement::NotRequired,
+        )
+        .map_err(crate::participation::refusal_error)?;
+        let answer = Box::pin(answer).await?;
+        if self.documents.participation().is_current(&permit) {
+            Ok((answer, permit))
+        } else {
+            Err(crate::participation::superseded_error())
+        }
+    }
+
+    /// [`Self::participating`] for an interactive editor request.
+    pub(super) async fn interactive<T>(
+        &self,
+        operation: Op,
+        uri: Option<&Uri>,
+        answer: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.participating(operation, uri, DemandPurpose::Interactive, answer)
+            .await
+    }
+
+    /// Code actions: each kind is its own cell. A request no kind admits is
+    /// refused before any producer runs. Otherwise `context.only` is narrowed
+    /// to the admitted kinds (or, when absent and some kind is withdrawn, set
+    /// to them), so the producer pass never computes a withdrawn kind; every
+    /// produced action is still served only when its own kind is admitted.
+    async fn participating_code_actions<F, Fut>(
+        &self,
+        mut params: CodeActionParams,
+        answer: F,
+    ) -> Result<Option<CodeActionResponse>>
+    where
+        F: FnOnce(CodeActionParams) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<CodeActionResponse>>>,
+    {
+        const KINDS: [Op; 3] = [Op::QuickFix, Op::OrganizeImports, Op::Refactor];
+        let uri = &params.text_document.uri.clone();
+        let mut admitted = Vec::with_capacity(KINDS.len());
+        let mut refusal = None;
+        for kind in KINDS {
+            match crate::participation::admit(
+                &self.documents,
+                kind,
+                Some(uri),
+                DemandPurpose::Interactive,
+                verter_language::participation::ProviderRequirement::NotRequired,
+            ) {
+                Ok(permit) => admitted.push((kind, permit)),
+                Err(refused) => {
+                    refusal.get_or_insert(refused);
+                }
+            }
+        }
+        if let (true, Some(refused)) = (admitted.is_empty(), refusal) {
+            return Err(crate::participation::refusal_error(refused));
+        }
+        if let Some(only) = params.context.only.as_mut().filter(|only| !only.is_empty()) {
+            only.retain(|kind| {
+                let operation = crate::participation::code_action_kind_operation(kind);
+                admitted.iter().any(|(admitted, _)| *admitted == operation)
+            });
+            if only.is_empty() {
+                // Every kind the client asked for is withdrawn.
+                return Err(crate::participation::refusal_error(
+                    refusal.expect("a withdrawn requested kind left its refusal"),
+                ));
+            }
+        }
+        if params.context.only.is_none() && admitted.len() < KINDS.len() {
+            // Every producer is keyed by one of these kinds, so the producer
+            // pass runs only the admitted ones.
+            params.context.only = Some(
+                admitted
+                    .iter()
+                    .map(|(kind, _)| crate::participation::code_action_kind(*kind))
+                    .collect(),
+            );
+        }
+        let mut response = Box::pin(answer(params)).await?;
+        let participation = self.documents.participation();
+        if admitted
+            .iter()
+            .any(|(_, permit)| !participation.is_current(permit))
+        {
+            return Err(crate::participation::superseded_error());
+        }
+        if admitted.len() < KINDS.len() {
+            if let Some(actions) = response.as_mut() {
+                actions.retain(|action| {
+                    let kind = crate::participation::code_action_operation(action);
+                    admitted.iter().any(|(admitted, _)| *admitted == kind)
+                });
+            }
+        }
+        Ok(response)
     }
 
     /// Answer one foreground request: admit it, compute its answer once
@@ -1787,14 +1917,39 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        nav_features_audit::handle_hover_with_audit(self, params).await
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        self.interactive(
+            Op::Hover,
+            Some(&uri),
+            nav_features_audit::handle_hover_with_audit(self, params),
+        )
+        .await
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        nav_features_audit::handle_completion_with_audit(self, params).await
+        let uri = params.text_document_position.text_document.uri.clone();
+        let (response, permit) = self
+            .participating_with_permit(
+                Op::Completion,
+                Some(&uri),
+                DemandPurpose::Interactive,
+                nav_features_audit::handle_completion_with_audit(self, params),
+            )
+            .await?;
+        // Each item carries the epoch it was issued under, so its resolve can
+        // never outlive a participation transition.
+        Ok(response
+            .map(|response| crate::participation::stamp_completion(response, permit.fence())))
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        if crate::participation::completion_item_superseded(&self.documents, &item) {
+            return Err(crate::participation::superseded_error());
+        }
         let uri = item.data.as_ref().and_then(|data| {
             if let Some(uri) = data.get("uri").and_then(serde_json::Value::as_str) {
                 return uri.parse::<Uri>().ok();
@@ -1810,45 +1965,60 @@ impl LanguageServer for VerterLanguageServer {
                 .and_then(serde_json::Value::as_str)
                 == Some("type_provider")
         });
-        crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.completion), async {
-            let content_modified = || {
-                tower_lsp_server::jsonrpc::Error::new(
-                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                )
-            };
-            let Some(uri) = uri else {
-                if is_provider_resolve {
+        let gate_uri = uri.clone();
+        let resolve = crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.completion),
+            async {
+                let content_modified = || {
+                    tower_lsp_server::jsonrpc::Error::new(
+                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                    )
+                };
+                let Some(uri) = uri else {
+                    if is_provider_resolve {
+                        return Err(content_modified());
+                    }
+                    return nav_features::handle_completion_resolve(self, item).await;
+                };
+                let request = self
+                    .admit_foreground(crate::documents::ForegroundRoute::CompletionResolve, &uri)
+                    .await;
+                if is_provider_resolve && !request.document_was_open() {
                     return Err(content_modified());
                 }
-                return nav_features::handle_completion_resolve(self, item).await;
-            };
-            let request = self
-                .admit_foreground(crate::documents::ForegroundRoute::CompletionResolve, &uri)
-                .await;
-            if is_provider_resolve && !request.document_was_open() {
-                return Err(content_modified());
-            }
-            // A resolve always answers an item, so it always settles a `Some`.
-            let resolved = request
-                .compute(Box::pin(nav_features::handle_completion_resolve(
-                    self,
-                    item.clone(),
-                )))
-                .await?;
-            let resolved = self
-                .settle_foreground(&request, Some(resolved))
-                .await
-                .into_result()?;
-            Ok(resolved.unwrap_or(item))
-        })
-        .await
+                // A resolve always answers an item, so it always settles a `Some`.
+                let resolved = request
+                    .compute(Box::pin(nav_features::handle_completion_resolve(
+                        self,
+                        item.clone(),
+                    )))
+                    .await?;
+                let resolved = self
+                    .settle_foreground(&request, Some(resolved))
+                    .await
+                    .into_result()?;
+                Ok(resolved.unwrap_or(item))
+            },
+        );
+        self.interactive(Op::CompletionResolve, gate_uri.as_ref(), resolve)
+            .await
     }
 
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        nav_features_audit::handle_goto_definition_with_audit(self, params).await
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        self.interactive(
+            Op::Definition,
+            Some(&uri),
+            nav_features_audit::handle_goto_definition_with_audit(self, params),
+        )
+        .await
     }
 
     async fn goto_type_definition(
@@ -1860,7 +2030,7 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
-        crate::audit_harness::run_with_deadline(
+        let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
                 self.answer_repaired_foreground(
@@ -1870,12 +2040,19 @@ impl LanguageServer for VerterLanguageServer {
                 )
                 .await
             },
-        )
-        .await
+        );
+        self.interactive(Op::TypeDefinition, Some(&uri), answer)
+            .await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        nav_features_audit::handle_references_with_audit(self, params).await
+        let uri = params.text_document_position.text_document.uri.clone();
+        self.interactive(
+            Op::References,
+            Some(&uri),
+            nav_features_audit::handle_references_with_audit(self, params),
+        )
+        .await
     }
 
     async fn prepare_rename(
@@ -1883,7 +2060,7 @@ impl LanguageServer for VerterLanguageServer {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri.clone();
-        crate::audit_harness::run_with_deadline(
+        let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
                 self.answer_repaired_foreground(
@@ -1893,41 +2070,72 @@ impl LanguageServer for VerterLanguageServer {
                 )
                 .await
             },
-        )
-        .await
+        );
+        self.interactive(Op::PrepareRename, Some(&uri), answer)
+            .await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        nav_features_audit::handle_rename_with_audit(self, params).await
+        let uri = params.text_document_position.text_document.uri.clone();
+        self.interactive(
+            Op::Rename,
+            Some(&uri),
+            nav_features_audit::handle_rename_with_audit(self, params),
+        )
+        .await
     }
 
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        aux_features::handle_document_symbol_with_audit(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::DocumentSymbol,
+            Some(&uri),
+            aux_features::handle_document_symbol_with_audit(self, params),
+        )
+        .await
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
-        aux_features::handle_folding_range(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::FoldingRange,
+            Some(&uri),
+            aux_features::handle_folding_range(self, params),
+        )
+        .await
     }
 
     async fn selection_range(
         &self,
         params: SelectionRangeParams,
     ) -> Result<Option<Vec<SelectionRange>>> {
-        aux_features::handle_selection_range(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::SelectionRange,
+            Some(&uri),
+            aux_features::handle_selection_range(self, params),
+        )
+        .await
     }
 
     async fn document_highlight(
         &self,
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
-        crate::audit_harness::run_with_deadline(
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             aux_features::handle_document_highlight(self, params),
-        )
-        .await
+        );
+        self.interactive(Op::DocumentHighlight, Some(&uri), answer)
+            .await
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
@@ -1936,95 +2144,187 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
-        crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.code_action), async {
-            self.answer_repaired_foreground(
-                crate::documents::ForegroundRoute::SignatureHelp,
-                &uri,
-                aux_features::handle_signature_help(self, params),
-            )
+        let answer = crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.code_action),
+            async {
+                self.answer_repaired_foreground(
+                    crate::documents::ForegroundRoute::SignatureHelp,
+                    &uri,
+                    aux_features::handle_signature_help(self, params),
+                )
+                .await
+            },
+        );
+        self.interactive(Op::SignatureHelp, Some(&uri), answer)
             .await
-        })
-        .await
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        aux_features::handle_code_action_with_audit(self, params).await
+        self.participating_code_actions(params, |params| {
+            aux_features::handle_code_action_with_audit(self, params)
+        })
+        .await
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        aux_features::handle_semantic_tokens_full_with_audit(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::SemanticTokens,
+            Some(&uri),
+            aux_features::handle_semantic_tokens_full_with_audit(self, params),
+        )
+        .await
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
-        aux_features::handle_code_lens(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::CodeLens,
+            Some(&uri),
+            aux_features::handle_code_lens(self, params),
+        )
+        .await
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        aux_features::handle_inlay_hint_with_audit(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::InlayHint,
+            Some(&uri),
+            aux_features::handle_inlay_hint_with_audit(self, params),
+        )
+        .await
     }
 
     async fn linked_editing_range(
         &self,
         params: LinkedEditingRangeParams,
     ) -> Result<Option<LinkedEditingRanges>> {
-        aux_features::handle_linked_editing_range(self, params).await
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        self.interactive(
+            Op::LinkedEditing,
+            Some(&uri),
+            aux_features::handle_linked_editing_range(self, params),
+        )
+        .await
     }
 
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
-        aux_features::handle_document_link(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::DocumentLink,
+            Some(&uri),
+            aux_features::handle_document_link(self, params),
+        )
+        .await
     }
 
     async fn document_color(&self, params: DocumentColorParams) -> Result<Vec<ColorInformation>> {
-        aux_features::handle_document_color(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::DocumentColor,
+            Some(&uri),
+            aux_features::handle_document_color(self, params),
+        )
+        .await
     }
 
     async fn color_presentation(
         &self,
         params: ColorPresentationParams,
     ) -> Result<Vec<ColorPresentation>> {
-        aux_features::handle_color_presentation(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::ColorPresentation,
+            Some(&uri),
+            aux_features::handle_color_presentation(self, params),
+        )
+        .await
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        aux_features::handle_formatting(self, params).await
+        let uri = params.text_document.uri.clone();
+        self.interactive(
+            Op::Formatting,
+            Some(&uri),
+            aux_features::handle_formatting(self, params),
+        )
+        .await
     }
 
     async fn on_type_formatting(
         &self,
         params: DocumentOnTypeFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
-        aux_features::handle_on_type_formatting(self, params).await
+        let uri = params.text_document_position.text_document.uri.clone();
+        self.interactive(
+            Op::OnTypeTagClosing,
+            Some(&uri),
+            aux_features::handle_on_type_formatting(self, params),
+        )
+        .await
     }
 
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<WorkspaceSymbolResponse>> {
-        aux_features::handle_symbol(self, params).await
+        self.interactive(
+            Op::WorkspaceSymbol,
+            None,
+            aux_features::handle_symbol(self, params),
+        )
+        .await
     }
 
     async fn prepare_call_hierarchy(
         &self,
         params: CallHierarchyPrepareParams,
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
-        aux_features::handle_prepare_call_hierarchy(self, params).await
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        self.interactive(
+            Op::CallHierarchyPrepare,
+            Some(&uri),
+            aux_features::handle_prepare_call_hierarchy(self, params),
+        )
+        .await
     }
 
     async fn incoming_calls(
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-        aux_features::handle_incoming_calls(self, params).await
+        let uri = params.item.uri.clone();
+        self.interactive(
+            Op::CallHierarchyIncoming,
+            Some(&uri),
+            aux_features::handle_incoming_calls(self, params),
+        )
+        .await
     }
 
     async fn outgoing_calls(
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-        aux_features::handle_outgoing_calls(self, params).await
+        let uri = params.item.uri.clone();
+        self.interactive(
+            Op::CallHierarchyOutgoing,
+            Some(&uri),
+            aux_features::handle_outgoing_calls(self, params),
+        )
+        .await
     }
 }
 

@@ -41,10 +41,11 @@ pub mod embedded;
 // declaration-only until each language's formatter implementation fills its
 // own submodule; nothing here registers a formatter or a capability.
 pub mod formatter;
+pub mod participation;
 pub mod registered_source_authority;
 pub mod svelte_rune_ambient;
 
-pub use ids::{CapabilityId, FrameworkAdapterId, LanguageId};
+pub use ids::{FrameworkAdapterId, LanguageId, ProjectCapabilityId};
 pub use language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
 pub use parse_artifact::carrier_inventory::*;
 pub use parse_artifact::carrier_structure_hash::{
