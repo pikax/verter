@@ -8,8 +8,8 @@
 [test-groups.progressive-child-contract-completion]
 max-threads = 1
 
-# The flow-return speed gates that each evaluate a long chain (a 1000-step
-# `Awaited` tail run, 101- and 256-level call chains) on the debug build:
+# The flow-return speed gates that each evaluate a long chain (the
+# `Awaited` tail runs, 101- and 256-level call chains) on the debug build:
 # each is several seconds of CPU on its own, so three of them scheduled
 # together on a loaded worker contend for the same cores and read as one
 # another's load. They keep their 20-second deadline; they just do not
@@ -55,7 +55,7 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 
 # Session engine regressions retain the 20-second speed deadline.
 [[profile.default.overrides]]
-filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget))'
+filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step))'
 slow-timeout = { period = "10s", terminate-after = 2 }
 
 # Live provider tests drive a real tsgo/tsserver child and carry their own
@@ -99,7 +99,7 @@ filter = 'test(svelte_progressive_component_completion_uses_committed_child_cont
 test-group = 'progressive-child-contract-completion'
 
 [[profile.default.overrides]]
-filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_256_level_chain_returning_a_same_name_generic_answers))'
+filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_256_level_chain_returning_a_same_name_generic_answers))'
 test-group = 'flow-speed-gates'
 
 [profile.ci]
@@ -113,7 +113,7 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 
 # Session engine regressions retain the 20-second speed deadline.
 [[profile.ci.overrides]]
-filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget))'
+filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step))'
 slow-timeout = { period = "10s", terminate-after = 2 }
 
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
@@ -131,7 +131,7 @@ filter = 'test(svelte_progressive_component_completion_uses_committed_child_cont
 test-group = 'progressive-child-contract-completion'
 
 [[profile.ci.overrides]]
-filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_256_level_chain_returning_a_same_name_generic_answers))'
+filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_256_level_chain_returning_a_same_name_generic_answers))'
 test-group = 'flow-speed-gates'
 
 # Produce JUnit XML for dorny/test-reporter in CI

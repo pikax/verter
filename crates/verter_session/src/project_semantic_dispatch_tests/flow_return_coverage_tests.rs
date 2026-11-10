@@ -6592,30 +6592,94 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
     )
 }
 
-/// The lib conditional's TAIL runs go on past the checker's limit to their
+/// The lib conditional's reduction of `probe` over the chain `steps`
+/// ([`thenable_chain`]) in a fresh host, and the connected work its
+/// evaluation charged: the flow-return demand's and the reduction's.
+fn lib_awaited_probe_work(steps: &str) -> (SemanticNodeData, usize) {
+    const CHAIN: &str = "/ws/cov/thenable_chain.ts";
+    let host = host_with(&[(CHAIN, thenable_chain(steps).as_str())]);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, CHAIN, "probe");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("probe must produce a value");
+        };
+        let flow_work = dispatch.connected_demand().work_used_for_tests();
+        let node = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("probe: the demand must answer"));
+        let reduction_work = dispatch.connected_demand().work_used_for_tests();
+        let data = dispatch
+            .graph()
+            .node_data(node)
+            .unwrap_or_else(|| panic!("probe: the reduced node exists"))
+            .copy_for_tests();
+        (data, flow_work + reduction_work)
+    })
+}
+
+/// The lib conditional's TAIL runs go on past the stand-in budget to their
 /// value, and stop with the checker's TS2589 at Verter's tail budget —
 /// counted as the checker counts, a run entered through a callback union
-/// starting with one step counted. A far lower budget than production's
-/// stands in for it on the same path, so the budget's runs stay short.
+/// starting with one step counted — and every step of a run costs the same
+/// connected work.
 ///
-/// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
-/// chains of distinct thenables: 999 tail steps are `number` and 1000 are
-/// `any` under TS2589 at the `Awaited` reference, where Verter's full
-/// answer is `number`. A run entered through a callback union starts with
-/// one step counted: one nested step then 998 tail steps are `number`, then
-/// 999 are `any` under TS2589, where Verter's full answer is `number`.
+/// The gate version of
+/// [`nightly_scale::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget`],
+/// which runs the same probes over the checker's own 1000-step chain. Here
+/// the chain is 48 steps, past a stand-in budget of 40, and what lets
+/// the full-size runs answer is held directly: Verter's production tail
+/// budget is past the checker's 1000-step limit, and a run's connected work
+/// grows by the same amount for every step at 10, 20 and 30 steps, entered
+/// directly and through a callback union, so the 1000-step runs, extended
+/// from those counts, stay inside the production work budget. A step whose
+/// work grew with the run would show here as unequal increments.
 ///
-/// Every run is a suffix of ONE 1000-step chain `C0 → … → C999 → number`
-/// in one file: entering it at `Ck` is a run of `1000 - k` tail steps, and
-/// a callback-union thenable `Nk` continuing to `Ck` is one nested step
-/// then those tail steps. Each `Awaited` reference is its own evaluation
-/// that counts every step of its run; the chain's declarations are read,
-/// not re-authored, by the runs after the first.
+/// Oracle: as for the full-size test. Every run is a suffix of ONE 48-step
+/// chain `C0 → … → C47 → number`, as it is there of the 1000-step one.
 #[test]
-fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget() {
+fn lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step() {
     const CHAIN: &str = "/ws/cov/thenable_chain.ts";
-    const LINKS: usize = 1000;
-    const BUDGET: usize = 120;
+    const CHECKER_TAIL_LIMIT: usize = 1000;
+    const LINKS: usize = 48;
+    const BUDGET: usize = 40;
+    let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
+    assert!(
+        super::connected_demand::MAX_CONNECTED_TAIL_STEPS as usize > CHECKER_TAIL_LIMIT,
+        "Verter's tail budget reaches past the checker's tail limit"
+    );
+    for (entry, nested_entry) in [("a direct", false), ("a callback-union", true)] {
+        let work = [10, 20, 30].map(|steps: usize| {
+            let chain = if nested_entry {
+                format!("n{}", "t".repeat(steps - 1))
+            } else {
+                "t".repeat(steps)
+            };
+            let (data, work) = lib_awaited_probe_work(&chain);
+            assert_eq!(data, number(), "{entry} run of {steps} steps");
+            work
+        });
+        let per_ten_steps = work[1] - work[0];
+        assert!(
+            per_ten_steps > 0 && work[2] - work[1] == per_ten_steps,
+            "every step of {entry} run costs the same connected work ({work:?} at 10 / 20 / 30 steps)"
+        );
+        let full = work[0] + (CHECKER_TAIL_LIMIT - 10) / 10 * per_ten_steps;
+        assert!(
+            full <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+            "{entry} run of the checker's {CHECKER_TAIL_LIMIT} steps costs {full} units"
+        );
+    }
+
     let link = |tail_steps: usize| format!("C{}", LINKS - tail_steps);
     let mut source = thenable_chain(&"t".repeat(LINKS));
     let mut probe_run = |name: &str, nested_entry: bool, tail_steps: usize| {
@@ -6628,25 +6692,90 @@ fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budge
         };
         source.push_str(&awaited_probe(name, &operand));
     };
-    probe_run("nested_then_999_tails", true, LINKS - 1);
+    probe_run("nested_then_47_tails", true, LINKS - 1);
     probe_run("tails_below_budget", false, BUDGET - 1);
     probe_run("tails_at_budget", false, BUDGET);
     probe_run("nested_tails_below_budget", true, BUDGET - 2);
     probe_run("nested_tails_at_budget", true, BUDGET - 1);
     let host = host_with(&[(CHAIN, source.as_str())]);
     let probe = |name: &str| reduced_annotation_in(&host, CHAIN, name).0;
-    let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
-    assert_eq!(probe("probe"), number(), "1000 tail steps");
+    assert_eq!(probe("probe"), number(), "48 tail steps");
     assert_eq!(
-        probe("nested_then_999_tails"),
+        probe("nested_then_47_tails"),
         number(),
-        "one nested step then 999 tail steps"
+        "one nested step then 47 tail steps"
     );
     let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET as u32);
     assert_eq!(probe("tails_below_budget"), number());
     assert!(is_ts2589(&probe("tails_at_budget")));
     assert_eq!(probe("nested_tails_below_budget"), number());
     assert!(is_ts2589(&probe("nested_tails_at_budget")));
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// The lib conditional's TAIL runs go on past the checker's limit to their
+    /// value, and stop with the checker's TS2589 at Verter's tail budget —
+    /// counted as the checker counts, a run entered through a callback union
+    /// starting with one step counted. A far lower budget than production's
+    /// stands in for it on the same path, so the budget's runs stay short.
+    ///
+    /// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
+    /// chains of distinct thenables: 999 tail steps are `number` and 1000 are
+    /// `any` under TS2589 at the `Awaited` reference, where Verter's full
+    /// answer is `number`. A run entered through a callback union starts with
+    /// one step counted: one nested step then 998 tail steps are `number`, then
+    /// 999 are `any` under TS2589, where Verter's full answer is `number`.
+    ///
+    /// Every run is a suffix of ONE 1000-step chain `C0 → … → C999 → number`
+    /// in one file: entering it at `Ck` is a run of `1000 - k` tail steps, and
+    /// a callback-union thenable `Nk` continuing to `Ck` is one nested step
+    /// then those tail steps. Each `Awaited` reference is its own evaluation
+    /// that counts every step of its run; the chain's declarations are read,
+    /// not re-authored, by the runs after the first.
+    ///
+    /// Gate version:
+    /// [`lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step`].
+    #[test]
+    fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget() {
+        const CHAIN: &str = "/ws/cov/thenable_chain.ts";
+        const LINKS: usize = 1000;
+        const BUDGET: usize = 120;
+        let link = |tail_steps: usize| format!("C{}", LINKS - tail_steps);
+        let mut source = thenable_chain(&"t".repeat(LINKS));
+        let mut probe_run = |name: &str, nested_entry: bool, tail_steps: usize| {
+            let operand = if nested_entry {
+                let entry = format!("N{}", LINKS - tail_steps);
+                source.push_str(&thenable_link(&entry, 'n', &link(tail_steps)));
+                entry
+            } else {
+                link(tail_steps)
+            };
+            source.push_str(&awaited_probe(name, &operand));
+        };
+        probe_run("nested_then_999_tails", true, LINKS - 1);
+        probe_run("tails_below_budget", false, BUDGET - 1);
+        probe_run("tails_at_budget", false, BUDGET);
+        probe_run("nested_tails_below_budget", true, BUDGET - 2);
+        probe_run("nested_tails_at_budget", true, BUDGET - 1);
+        let host = host_with(&[(CHAIN, source.as_str())]);
+        let probe = |name: &str| reduced_annotation_in(&host, CHAIN, name).0;
+        let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
+        assert_eq!(probe("probe"), number(), "1000 tail steps");
+        assert_eq!(
+            probe("nested_then_999_tails"),
+            number(),
+            "one nested step then 999 tail steps"
+        );
+        let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET as u32);
+        assert_eq!(probe("tails_below_budget"), number());
+        assert!(is_ts2589(&probe("tails_at_budget")));
+        assert_eq!(probe("nested_tails_below_budget"), number());
+        assert!(is_ts2589(&probe("nested_tails_at_budget")));
+    }
 }
 
 /// The lib conditional's NESTED steps stop where the checker's instantiation
