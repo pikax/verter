@@ -46,6 +46,7 @@ pub mod evaluate_type_expression;
 pub(crate) mod footprint_attach;
 pub mod framework_surface;
 pub mod graph_query;
+pub(crate) mod native_basis;
 pub mod raise;
 pub mod request_validation;
 pub mod resolve_named_symbol;

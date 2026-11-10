@@ -137,9 +137,10 @@ impl CommittedInputHandoff {
                     canonical: Arc::from(canonical),
                     content: Arc::clone(content),
                 },
-                crate::input_basis::ObservationKind::Directory { .. } => {
+                crate::input_basis::ObservationKind::Directory { .. }
+                | crate::input_basis::ObservationKind::Value { .. } => {
                     // File waves are the handoff's vocabulary; a
-                    // directory row cannot arrive through
+                    // directory or native value row cannot arrive through
                     // `AcquiredFile`, so reaching here means a
                     // non-handoff basis was projected through this
                     // seam. Fail loudly rather than silently equating a

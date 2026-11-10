@@ -12,6 +12,9 @@
 
 use std::sync::Arc;
 
+use crate::facts::native_observation::{
+    NativeAuthority, NativeEncodingError, NativeObservation, NativeWriter,
+};
 use crate::facts::registry::{FactKey, FactLane, SymbolSpace};
 use crate::facts::resolution::ResolutionFactRef;
 use crate::resolution::resolution_world_identity::{ResolutionPopulation, ResolutionWorldId};
@@ -621,6 +624,317 @@ impl FactVersionRef {
             | FactAttribution::DomainAggregate(_)
             | FactAttribution::StrictSelfRootWorld
             | FactAttribution::ResultReceipt => None,
+        }
+    }
+}
+
+impl FactVersionRef {
+    /// Whether this leaf is a terminal witness scoped to one request's
+    /// completion overlay: a view-domain aggregate or a strict self-root
+    /// world whose population is [`ViewPopulation::RequestCompletion`].
+    ///
+    /// Its overlay identity is process-unique, so no later view can ever
+    /// validate it again: evidence carrying one cannot back a durable
+    /// observation. A receipt is not a leaf and answers `false`; walk its
+    /// leaves instead.
+    #[must_use]
+    pub fn is_request_completion_witness(&self) -> bool {
+        match self {
+            Self::DomainGeneration(aggregate) => matches!(
+                aggregate.population,
+                AggregatePopulation::View(ViewPopulation::RequestCompletion(_))
+            ),
+            Self::StrictSelfRootWorld(world) => {
+                matches!(world.population, ViewPopulation::RequestCompletion(_))
+            }
+            Self::FileWholeHash { .. }
+            | Self::DerivedFactHash { .. }
+            | Self::Parse(_)
+            | Self::ResolveImports(_)
+            | Self::RouteSurface(_)
+            | Self::ProgramAnalysis(_)
+            | Self::FileSourceEnv { .. }
+            | Self::ProjectGeneration { .. }
+            | Self::Receipt(_) => false,
+        }
+    }
+
+    /// This leaf's canonical native observation: the typed key it observed
+    /// and the revision it saw. Counter-based revisions carry `authority`.
+    ///
+    /// A [`Self::Receipt`] is not a leaf: its evidence is expanded through
+    /// [`crate::facts::native_observation::native_observations`], so asking
+    /// one for a single observation is an error rather than a digest.
+    pub fn native_observation(
+        &self,
+        authority: NativeAuthority,
+    ) -> Result<NativeObservation, NativeEncodingError> {
+        let mut key = NativeWriter::new("verter.native_fact.key.v1");
+        let mut revision = NativeWriter::new("verter.native_fact.revision.v1");
+        match self {
+            Self::FileWholeHash { canonical_id, hash } => {
+                key.tag(1).str(canonical_id);
+                revision.bytes(hash);
+            }
+            Self::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => {
+                key.tag(2).str(canonical_id).tag(match kind {
+                    DerivedFactKind::Route => 1,
+                    DerivedFactKind::DirectSource => 2,
+                });
+                revision.bytes(hash);
+            }
+            Self::Parse(fact) => {
+                key.tag(3).str(&fact.canonical_id);
+                key.serde(&fact.key)?;
+                encode_lane(&mut key, fact.lane);
+                revision.bytes(&fact.expected_hash);
+            }
+            Self::ResolveImports(ResolveImportsFactRef::Semantic {
+                canonical_id,
+                key: fact_key,
+                lane,
+                expected_hash,
+            }) => {
+                key.tag(4).str(canonical_id);
+                key.serde(fact_key)?;
+                encode_lane(&mut key, *lane);
+                revision.bytes(expected_hash);
+            }
+            Self::ResolveImports(ResolveImportsFactRef::Resolution(fact)) => {
+                key.tag(5);
+                fact.key.encode_native(&mut key);
+                revision.u64(authority.get()).u64(fact.version.raw());
+            }
+            Self::RouteSurface(fact) => {
+                key.tag(6).str(&fact.canonical_id);
+                key.serde(&fact.key)?;
+                encode_lane(&mut key, fact.lane);
+                revision.bytes(&fact.expected_hash);
+            }
+            Self::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
+                function,
+                flow_body_stable_hash,
+            }) => {
+                key.tag(7)
+                    .str(&function.canonical_id)
+                    .serde(&function.owner)?
+                    .str(&function.merged_symbol_name)
+                    .tag(function.symbol_space.tag())
+                    .serde(&function.function_part)?
+                    .u32(function.overload_ordinal);
+                revision.bytes(flow_body_stable_hash);
+            }
+            Self::FileSourceEnv {
+                canonical_id,
+                parse_env_hash,
+                parse_key,
+                file_language_id,
+            } => {
+                key.tag(8).str(canonical_id);
+                revision
+                    .bytes(&parse_env_hash.get())
+                    .bytes(parse_key.canonical_bytes());
+                encode_file_language(&mut revision, file_language_id);
+            }
+            Self::ProjectGeneration { generation } => {
+                key.tag(9);
+                revision.u64(authority.get()).u64(*generation);
+            }
+            Self::DomainGeneration(aggregate) => {
+                key.tag(10);
+                encode_domain(&mut key, aggregate.domain);
+                encode_aggregate_population(&mut key, aggregate.population);
+                revision.u64(authority.get());
+                encode_stamp(&mut revision, aggregate.stamp);
+            }
+            Self::StrictSelfRootWorld(world) => {
+                key.tag(11);
+                encode_view_population(&mut key, world.population);
+                revision
+                    .u64(world.authority_id)
+                    .u64(world.authority_generation)
+                    .u64(world.source_epoch)
+                    .u64(world.artifact_epoch);
+            }
+            Self::Receipt(_) => {
+                return Err(NativeEncodingError(
+                    "a receipt is expanded into its leaves, never encoded whole",
+                ));
+            }
+        }
+        Ok(NativeObservation::new(key.finish(), revision.finish()))
+    }
+}
+
+fn encode_lane(writer: &mut NativeWriter, lane: FactLane) {
+    writer.tag(match lane {
+        FactLane::Semantic => 1,
+        FactLane::Display => 2,
+    });
+}
+
+fn encode_domain(writer: &mut NativeWriter, domain: CompactionDomain) {
+    writer.tag(match domain {
+        CompactionDomain::Content => 1,
+        CompactionDomain::SourceEnv => 2,
+        CompactionDomain::SemanticImports => 3,
+        CompactionDomain::Resolution => 4,
+        CompactionDomain::RouteSurface => 5,
+        CompactionDomain::WorkspaceShape => 6,
+    });
+}
+
+fn encode_aggregate_population(writer: &mut NativeWriter, population: AggregatePopulation) {
+    match population {
+        AggregatePopulation::Resolution(population) => {
+            writer.tag(1);
+            population.encode_native(writer);
+        }
+        AggregatePopulation::View(population) => {
+            writer.tag(2);
+            encode_view_population(writer, population);
+        }
+    }
+}
+
+/// A view population, overlay identity and revision included.
+pub(crate) fn encode_view_population(writer: &mut NativeWriter, population: ViewPopulation) {
+    let parent = |writer: &mut NativeWriter, parent: ViewPopulationParent| match parent {
+        ViewPopulationParent::Base => {
+            writer.tag(1);
+        }
+        ViewPopulationParent::SessionOverlay(fingerprint) => {
+            writer.tag(2).u64(fingerprint.get());
+        }
+    };
+    match population {
+        ViewPopulation::Base => {
+            writer.tag(1);
+        }
+        ViewPopulation::SessionOverlay(fingerprint) => {
+            writer.tag(2).u64(fingerprint.get());
+        }
+        ViewPopulation::RequestCompletion(completion) => {
+            writer.tag(3);
+            parent(writer, completion.parent);
+            writer
+                .u64(completion.overlay_id.get())
+                .u64(completion.revision);
+        }
+    }
+}
+
+fn encode_roots(
+    writer: &mut NativeWriter,
+    base: ResolutionWorldId,
+    session: Option<ResolutionWorldId>,
+) {
+    writer.u64(base.raw());
+    writer.option(session, |writer, session| {
+        writer.u64(session.raw());
+    });
+}
+
+fn encode_stamp(writer: &mut NativeWriter, stamp: AggregateStamp) {
+    match stamp {
+        AggregateStamp::Generation(generation) => {
+            writer.tag(1).u64(generation);
+        }
+        AggregateStamp::ResolutionRoots { base, session } => {
+            writer.tag(2);
+            encode_roots(writer, base, session);
+        }
+        AggregateStamp::SemanticImports(stamp) => {
+            writer
+                .tag(3)
+                .u64(stamp.semantic_imports)
+                .u64(stamp.content)
+                .u64(stamp.source_env);
+            encode_roots(writer, stamp.resolution.base, stamp.resolution.session);
+            writer.u64(stamp.workspace_shape);
+        }
+        AggregateStamp::RouteSurface(stamp) => {
+            writer
+                .tag(4)
+                .u64(stamp.route_surface)
+                .u64(stamp.content)
+                .u64(stamp.source_env)
+                .u64(stamp.workspace_shape);
+        }
+    }
+}
+
+fn encode_file_language(writer: &mut NativeWriter, language: &verter_language::FileLanguage) {
+    use verter_language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
+    let js = |writer: &mut NativeWriter, kind: &JsModuleKind| {
+        writer.tag(match kind {
+            JsModuleKind::Unambiguous => 1,
+            JsModuleKind::Module => 2,
+            JsModuleKind::CommonJs => 3,
+            JsModuleKind::Script => 4,
+        });
+    };
+    match language {
+        FileLanguage::Script {
+            source_type,
+            flavor,
+        } => {
+            writer.tag(1);
+            match source_type {
+                ScriptSourceType::Ts => {
+                    writer.tag(1);
+                }
+                ScriptSourceType::Tsx => {
+                    writer.tag(2);
+                }
+                ScriptSourceType::Js(kind) => {
+                    writer.tag(3);
+                    js(writer, kind);
+                }
+                ScriptSourceType::Jsx(kind) => {
+                    writer.tag(4);
+                    js(writer, kind);
+                }
+                ScriptSourceType::Dts => {
+                    writer.tag(5);
+                }
+            }
+            match flavor {
+                ScriptFlavor::Plain => {
+                    writer.tag(1);
+                }
+                ScriptFlavor::AdapterModule {
+                    adapter_id,
+                    language_id,
+                } => {
+                    writer
+                        .tag(2)
+                        .str(adapter_id.as_str())
+                        .str(language_id.as_str());
+                }
+            }
+        }
+        FileLanguage::Framework {
+            adapter_id,
+            language_id,
+        } => {
+            writer
+                .tag(2)
+                .str(adapter_id.as_str())
+                .str(language_id.as_str());
+        }
+        FileLanguage::FrameworkTemplate {
+            adapter_id,
+            owner_hint,
+        } => {
+            writer.tag(3).str(adapter_id.as_str());
+            writer.option(owner_hint.as_deref(), |writer, owner| {
+                writer.str(owner);
+            });
         }
     }
 }
