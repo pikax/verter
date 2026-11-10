@@ -1471,30 +1471,26 @@ fn probe_merge_facts<'i>(
 ///
 /// Entries are remembered with a weak handle validating liveness (a freed
 /// allocation's address is never mistaken for a reused one). The strongly
-/// held index sets are bounded by the caps below, mirroring
-/// [`crate::facts::fact_set::subset_memo`]'s discipline, and live for one
-/// demand: [`drain_demand_fact_memos`] drops them when this thread's last
+/// held index sets are bounded by [`PrunedMemo`]'s caps, the discipline
+/// [`crate::facts::fact_set::subset_memo`] shares, and live for one
+/// demand: [`end_demand_fact_memos`] drops them when this thread's last
 /// tracer pops, so a finished demand pins no fact storage.
+///
+/// [`PrunedMemo`]: crate::facts::fact_set::PrunedMemo
 pub(crate) mod base_index {
     use super::{record_signature_work, FactVersionRef};
-    use crate::facts::fact_set::{FactSet, StorageWeak};
-    use rustc_hash::{FxHashMap, FxHashSet};
+    use crate::facts::fact_set::{FactSet, PrunedMemo, StorageWeak};
+    use rustc_hash::FxHashSet;
     use std::cell::RefCell;
     use std::sync::Arc;
-
-    /// Entries beyond this are pruned of dead bases; a memo still past
-    /// [`HARD_CAP`] after pruning starts again. Both are deterministic
-    /// functions of the merge sequence, so a demand's charge is stable.
-    const SOFT_CAP: usize = 4096;
-    const HARD_CAP: usize = 8192;
 
     /// One remembered index: the weak handle of the base it indexes, and
     /// the index itself.
     type BaseIndexEntry = (StorageWeak, Arc<FxHashSet<FactVersionRef>>);
 
     thread_local! {
-        static INDEXES: RefCell<FxHashMap<usize, BaseIndexEntry>> =
-            RefCell::new(FxHashMap::default());
+        static INDEXES: RefCell<PrunedMemo<usize, BaseIndexEntry>> =
+            RefCell::new(PrunedMemo::new());
     }
 
     /// Drop every remembered index: the demand that could consult them is
@@ -1531,14 +1527,11 @@ pub(crate) mod base_index {
             return built;
         }
         INDEXES.with(|indexes| {
-            let mut indexes = indexes.borrow_mut();
-            if indexes.len() >= SOFT_CAP {
-                indexes.retain(|_, (weak, _)| weak.address_while_alive().is_some());
-            }
-            if indexes.len() >= HARD_CAP {
-                indexes.clear();
-            }
-            indexes.insert(base.address(), (base.storage_weak(), Arc::clone(&built)));
+            indexes.borrow_mut().insert(
+                base.address(),
+                (base.storage_weak(), Arc::clone(&built)),
+                |(weak, _)| weak.address_while_alive().is_some(),
+            );
         });
         built
     }
@@ -1574,22 +1567,17 @@ pub fn end_demand_fact_memos() {
 ///
 /// Entries are remembered by storage address with weak handles validating
 /// liveness (a freed allocation's address is never mistaken for a reused
-/// one). The strongly-held additions slices are bounded by the caps below,
-/// mirroring [`crate::facts::fact_set::subset_memo`]'s discipline, and
-/// live for one demand: [`drain_demand_fact_memos`] drops them when this
+/// one). The strongly-held additions slices are bounded by [`PrunedMemo`]'s
+/// caps, the discipline [`crate::facts::fact_set::subset_memo`] shares, and
+/// live for one demand: [`end_demand_fact_memos`] drops them when this
 /// thread's last tracer pops, so a finished demand pins no fact storage.
+///
+/// [`PrunedMemo`]: crate::facts::fact_set::PrunedMemo
 pub(crate) mod seal_delta {
     use super::FactVersionRef;
-    use crate::facts::fact_set::{subset_memo, FactSet, StorageWeak};
-    use rustc_hash::FxHashMap;
+    use crate::facts::fact_set::{subset_memo, FactSet, PrunedMemo, StorageWeak};
     use std::cell::RefCell;
     use std::sync::Arc;
-
-    /// Entries beyond this are pruned of dead seals; a memo still past
-    /// [`HARD_CAP`] after pruning starts again. Both are deterministic
-    /// functions of the merge sequence, so a demand's charge is stable.
-    const SOFT_CAP: usize = 4096;
-    const HARD_CAP: usize = 8192;
 
     struct Delta {
         seal: StorageWeak,
@@ -1598,7 +1586,7 @@ pub(crate) mod seal_delta {
     }
 
     thread_local! {
-        static DELTAS: RefCell<FxHashMap<usize, Delta>> = RefCell::new(FxHashMap::default());
+        static DELTAS: RefCell<PrunedMemo<usize, Delta>> = RefCell::new(PrunedMemo::new());
     }
 
     /// Drop every remembered construction: the demand that could consult
@@ -1614,20 +1602,14 @@ pub(crate) mod seal_delta {
             return;
         }
         DELTAS.with(|deltas| {
-            let mut deltas = deltas.borrow_mut();
-            if deltas.len() >= SOFT_CAP {
-                deltas.retain(|_, delta| delta.seal.address_while_alive().is_some());
-            }
-            if deltas.len() >= HARD_CAP {
-                deltas.clear();
-            }
-            deltas.insert(
+            deltas.borrow_mut().insert(
                 sealed.address(),
                 Delta {
                     seal: sealed.storage_weak(),
                     base: base.storage_weak(),
                     additions,
                 },
+                |delta| delta.seal.address_while_alive().is_some(),
             );
         });
     }
