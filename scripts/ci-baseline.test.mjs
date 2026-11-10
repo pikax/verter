@@ -830,19 +830,36 @@ test("the report command refuses missing data only when a measured baseline is r
 
 test("local landing history is observational: no exact-tree proof backs it", async () => {
   await withTempDir(async (dir) => {
+    // A repository of this test's own: the host checkout's history (a depth-1 CI checkout of a
+    // merge ref, a worktree) is no fixture.
+    const root = join(dir, "repo");
+    mkdirSync(root);
+    const git = (...args) => {
+      const result = spawnSync(
+        "git",
+        [
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          ...args,
+        ],
+        { cwd: root, encoding: "utf8", env: { ...process.env, GIT_COMMITTER_DATE: at(60) } },
+      );
+      assert.equal(result.status, 0, result.stderr);
+    };
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(root, "landed.txt"), "landed\n");
+    git("add", "landed.txt");
+    git("commit", "-q", "-m", "landed", "--date", at(60));
     const out = join(dir, "run");
     const { transport } = tableTransport({});
-    await collect({
-      out,
-      repo: "o/r",
-      since: "2000-01-01T00:00:00Z",
-      until: "2100-01-01T00:00:00Z",
-      transport,
-      landingRef: "HEAD",
-    });
+    await collect({ out, repo: "o/r", ...WINDOW, transport, landingRef: "HEAD", root });
     const { landingsPerDay, baseline } = reportFromDirectory(out);
     assert.equal(landingsPerDay.status, "observational");
-    assert.ok(landingsPerDay.count > 0);
+    assert.equal(landingsPerDay.count, 1);
     assert.equal(baseline.status, "missing-data");
     assert.ok(baseline.gaps.includes("landings/day has no exact-tree proof"));
   });

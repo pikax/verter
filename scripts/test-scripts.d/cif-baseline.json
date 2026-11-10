@@ -1,0 +1,10 @@
+{
+  "owner": "CIF-BASELINE",
+  "tests": [
+    {
+      "runner": "node-test",
+      "file": "scripts/ci-baseline.test.mjs",
+      "ci": true
+    }
+  ]
+}
