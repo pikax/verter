@@ -1607,7 +1607,7 @@ fn an_edit_reads_one_file_and_a_removal_or_eviction_retires_every_surface_of_it(
     let (_, status, cold) = host.workspace_index_reconcile(&all, &never());
     assert_eq!(status, ReconcileStatus::Current);
     assert_eq!(cold.population_checks, 3, "the one whole read");
-    assert_eq!(cold.projections, 21, "seven surfaces of three carriers");
+    assert_eq!(cold.projections, 24, "eight surfaces of three carriers");
 
     upsert_file(
         &host,
@@ -1621,12 +1621,12 @@ fn an_edit_reads_one_file_and_a_removal_or_eviction_retires_every_surface_of_it(
         edited,
         IndexReconcileWork {
             population_checks: 1,
-            projections: 7,
+            projections: 8,
             unchanged: 0,
             retired: 0,
             publish_attempts: 1,
         },
-        "one file re-read, its seven slots re-projected, no other slot visited"
+        "one file re-read, its eight slots re-projected, no other slot visited"
     );
     let (_, _, warm) = host.workspace_index_reconcile(&all, &never());
     assert_eq!(warm, IndexReconcileWork::default());
@@ -1637,10 +1637,10 @@ fn an_edit_reads_one_file_and_a_removal_or_eviction_retires_every_surface_of_it(
     assert_eq!(removed.population_checks, 1);
     assert_eq!(removed.projections, 0);
     assert_eq!(
-        removed.retired, 7,
+        removed.retired, 8,
         "every surface's slot of the removed file"
     );
-    assert_eq!(snapshot.contribution_count(), 14);
+    assert_eq!(snapshot.contribution_count(), 16);
 
     // An eviction is the host's own membership change: the scheduler keeps
     // the node, the index still learns of it from one file.
@@ -1648,8 +1648,8 @@ fn an_edit_reads_one_file_and_a_removal_or_eviction_retires_every_surface_of_it(
     let (snapshot, status, evicted) = host.workspace_index_reconcile(&all, &never());
     assert_eq!(status, ReconcileStatus::Current);
     assert_eq!(evicted.population_checks, 1);
-    assert_eq!(evicted.retired, 7);
-    assert_eq!(snapshot.contribution_count(), 7);
+    assert_eq!(evicted.retired, 8);
+    assert_eq!(snapshot.contribution_count(), 8);
     let (_, _, warm) = host.workspace_index_reconcile(&all, &never());
     assert_eq!(warm, IndexReconcileWork::default());
 }
@@ -2040,4 +2040,193 @@ fn a_surface_the_host_cannot_produce_has_no_population_and_reads_no_file() {
         &PartialCause::UnsupportedCoverage
     ));
     assert_eq!(work.projections, 0);
+}
+
+const REGISTRATION_SOURCE: &str = "<script setup lang=\"ts\">\nimport { provide, inject } from 'vue'\nimport { useCartStore } from '@/stores/cart'\ndefineEmits(['save'])\nprovide('theme', 'dark')\nconst user = inject('user')\nconst cart = useCartStore()\n</script>\n<template><Child @close=\"user\" /></template>";
+
+fn registration_rows(page: &CandidatePage) -> Vec<(String, String, bool, String)> {
+    let mut rows: Vec<(String, String, bool, String)> = page
+        .candidates
+        .iter()
+        .filter_map(|candidate| match &candidate.record()?.row {
+            IndexRow::Registration(row) => {
+                let key = match &row.key {
+                    RegistrationKey::String(text) | RegistrationKey::Symbol(text) => text,
+                };
+                Some((
+                    candidate.contribution.basis.locator.to_string(),
+                    format!("{}:{key}", row.domain),
+                    row.is_usage,
+                    row.operation.to_string(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn registrations_answer_by_domain_key_and_keep_declarations_apart_from_uses() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        REGISTRATION_SOURCE,
+        FileLanguage::vue(),
+    );
+    upsert_file(
+        &host,
+        "/src/B.vue",
+        "<script setup>\nconst a = 1;\n</script>\n<template><div>{{ a }}</div></template>",
+        FileLanguage::vue(),
+    );
+    let demand = IndexDemand::of([IndexSurface::Registrations]);
+    let keyed = |domain: &str, key: &str| {
+        let lookup = Lookup::Keys(vec![registration_posting_key(domain, key)]);
+        let (page, _) = host.workspace_index_candidates(&demand, lookup, WIDE, None, &never());
+        assert_eq!(page.status, EnumerationStatus::Complete, "{domain}:{key}");
+        registration_rows(&page)
+    };
+    let row = |key: &str, is_usage: bool, operation: &str| {
+        (
+            "/src/A.vue".to_string(),
+            key.to_string(),
+            is_usage,
+            operation.to_string(),
+        )
+    };
+    assert_eq!(
+        keyed(registration_domain::PROVIDE_INJECT, "theme"),
+        [row("provide-inject:theme", false, "provide")]
+    );
+    assert_eq!(
+        keyed(registration_domain::PROVIDE_INJECT, "user"),
+        [row("provide-inject:user", true, "inject")]
+    );
+    assert_eq!(
+        keyed(registration_domain::STORE, "useCartStore"),
+        [row("store:useCartStore", true, "use")]
+    );
+    assert_eq!(
+        keyed(registration_domain::EVENT, "save"),
+        [row("event:save", false, "emit")]
+    );
+    assert_eq!(
+        keyed(registration_domain::EVENT, "close"),
+        [row("event:close", true, "listen")]
+    );
+    // The same spelling in another domain is another key.
+    assert!(keyed(registration_domain::EVENT, "theme").is_empty());
+
+    // A domain walk answers that domain only, and certifies it.
+    let (walk, _) = host.workspace_index_candidates(
+        &demand,
+        registration_domain_lookup(registration_domain::PROVIDE_INJECT),
+        WIDE,
+        None,
+        &never(),
+    );
+    assert_eq!(walk.status, EnumerationStatus::Complete);
+    assert_eq!(
+        registration_rows(&walk)
+            .into_iter()
+            .map(|(_, key, _, _)| key)
+            .collect::<Vec<_>>(),
+        ["provide-inject:theme", "provide-inject:user"]
+    );
+}
+
+#[test]
+fn registration_answers_after_edit_add_and_delete_equal_a_fresh_host() {
+    let incremental = VerterHost::new_standalone(HostConfig::default());
+    let mut files: BTreeMap<&str, String> = BTreeMap::new();
+    let demand = IndexDemand::of([IndexSurface::Registrations]);
+    let assert_equal = |incremental: &VerterHost, files: &BTreeMap<&str, String>, step: &str| {
+        let fresh = VerterHost::new_standalone(HostConfig::default());
+        for (id, source) in files.iter().rev() {
+            upsert_file(&fresh, id, source, FileLanguage::vue());
+        }
+        for domain in [
+            registration_domain::PROVIDE_INJECT,
+            registration_domain::STORE,
+            registration_domain::EVENT,
+        ] {
+            let lookup = registration_domain_lookup(domain);
+            let (live, _) = incremental.workspace_index_candidates(
+                &demand,
+                lookup.clone(),
+                WIDE,
+                None,
+                &never(),
+            );
+            let (clean, _) =
+                fresh.workspace_index_candidates(&demand, lookup, WIDE, None, &never());
+            assert_eq!(fingerprint(&live), fingerprint(&clean), "{step}: {domain}");
+            assert_eq!(live.status, EnumerationStatus::Complete, "{step}: {domain}");
+        }
+    };
+    files.insert("/src/A.vue", REGISTRATION_SOURCE.to_string());
+    upsert_file(
+        &incremental,
+        "/src/A.vue",
+        REGISTRATION_SOURCE,
+        FileLanguage::vue(),
+    );
+    assert_equal(&incremental, &files, "initial");
+
+    let edited = REGISTRATION_SOURCE.replace("inject('user')", "inject('account')");
+    files.insert("/src/A.vue", edited.clone());
+    upsert_file(&incremental, "/src/A.vue", &edited, FileLanguage::vue());
+    assert_equal(&incremental, &files, "edit");
+
+    files.insert("/src/B.vue", REGISTRATION_SOURCE.to_string());
+    upsert_file(
+        &incremental,
+        "/src/B.vue",
+        REGISTRATION_SOURCE,
+        FileLanguage::vue(),
+    );
+    assert_equal(&incremental, &files, "add");
+
+    files.remove("/src/A.vue");
+    incremental.remove("/src/A.vue");
+    assert_equal(&incremental, &files, "delete");
+}
+
+#[test]
+fn registrations_are_produced_on_demand_under_a_scope_that_computes_no_template() {
+    use verter_semantic::analysis::AnalysisScope;
+
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_scope: Some(AnalysisScope::BUILD),
+        ..HostConfig::default()
+    });
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        REGISTRATION_SOURCE,
+        FileLanguage::vue(),
+    );
+    let demand = IndexDemand::of([IndexSurface::Registrations]);
+    let (page, _) = host.workspace_index_candidates(
+        &demand,
+        registration_domain_lookup(registration_domain::EVENT),
+        WIDE,
+        None,
+        &never(),
+    );
+    assert_eq!(page.status, EnumerationStatus::Complete);
+    assert_eq!(
+        registration_rows(&page)
+            .into_iter()
+            .map(|(_, key, is_usage, _)| (key, is_usage))
+            .collect::<Vec<_>>(),
+        [
+            ("event:close".to_string(), true),
+            ("event:save".to_string(), false)
+        ],
+        "a cold carrier's template facts are produced for the demand"
+    );
 }

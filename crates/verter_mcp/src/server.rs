@@ -21,6 +21,7 @@ use crate::config::McpServerConfig;
 use crate::helpers::{
     batch_analysis_with_template, ensure_loaded, ensure_template_analysis, mcp_err, resolve_path,
 };
+use crate::index_tools::{self, Discovery};
 use crate::scanner;
 use crate::tools::scoring;
 
@@ -252,7 +253,7 @@ pub struct VerterMcpServer {
 
 // ── Helper: build ScriptAnalysisSnapshot from host FileAnalysisSnapshot ──
 
-fn build_script_snapshot(
+pub(crate) fn build_script_snapshot(
     analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
 ) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
@@ -384,7 +385,7 @@ fn public_api_projection_mcp_error(
 /// the sole geometry source for block-structure lint rules and block-anchored
 /// code-action edits. Empty when the file has no registered structure (fail
 /// closed).
-fn registered_block_facts(
+pub(crate) fn registered_block_facts(
     host: &VerterHost,
     canonical_or_alias: &str,
 ) -> Vec<verter_diagnostics::SfcBlockFact> {
@@ -421,8 +422,13 @@ impl VerterMcpServer {
         router
     }
 
-    fn resolve(&self, path: &str) -> String {
+    pub(crate) fn resolve(&self, path: &str) -> String {
         resolve_path(path, self.project_root.as_deref())
+    }
+
+    /// The index reads of one tool request, under the configured budgets.
+    pub(crate) fn discovery(&self) -> Discovery<'_> {
+        Discovery::new(&self.host, self.config.index_budgets)
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -847,104 +853,11 @@ impl VerterMcpServer {
     #[tool(
         description = "Detect unintended CSS class bleed across components. Finds non-scoped styles that could affect other components, shared class name collisions."
     )]
-    async fn detect_css_bleed(
+    pub async fn detect_css_bleed(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut bleeds: Vec<serde_json::Value> = Vec::new();
-
-        // Build a map of class_name -> files that define it (non-scoped only)
-        let mut global_class_files: HashMap<String, Vec<String>> = HashMap::new();
-        // Build a map of file -> template classes used
-        let mut file_template_classes: HashMap<String, HashSet<String>> = HashMap::new();
-
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        for (canonical, analysis) in &analyses {
-            // Collect non-scoped class definitions
-            for style in analysis.styles.iter() {
-                if !style.scoped {
-                    if let Some(css) = &style.css {
-                        for cls in &css.classes {
-                            global_class_files
-                                .entry(cls.name.clone())
-                                .or_default()
-                                .push(canonical.clone());
-                        }
-                    }
-                }
-            }
-
-            // Collect template class usage
-            if let Some(tpl) = &analysis.template {
-                let mut classes = HashSet::new();
-                for el in &tpl.elements {
-                    for attr in &el.attributes {
-                        if attr.name == "class" {
-                            if let Some(val) = &attr.value {
-                                for cls in val.split_whitespace() {
-                                    classes.insert(cls.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                file_template_classes.insert(canonical.clone(), classes);
-            }
-        }
-
-        // Detect bleed: non-scoped class defined in file A, used in template of file B
-        for (class_name, defining_files) in &global_class_files {
-            for (file_id, template_classes) in &file_template_classes {
-                if template_classes.contains(class_name) {
-                    for def_file in defining_files {
-                        if def_file != file_id {
-                            bleeds.push(serde_json::json!({
-                                "kind": "global_class_bleed",
-                                "class": class_name,
-                                "source_file": def_file,
-                                "affected_file": file_id,
-                                "severity": "warning",
-                            }));
-                        }
-                    }
-                }
-            }
-
-            // Shared class name collision
-            if defining_files.len() > 1 {
-                bleeds.push(serde_json::json!({
-                    "kind": "shared_class_collision",
-                    "class": class_name,
-                    "files": defining_files,
-                    "severity": "info",
-                }));
-            }
-        }
-
-        // Filter to specific file if requested
-        if let Some(path) = &params.path {
-            let resolved = self.resolve(path);
-            bleeds.retain(|b| {
-                b["source_file"].as_str() == Some(resolved.as_str())
-                    || b["affected_file"].as_str() == Some(resolved.as_str())
-                    || b["files"]
-                        .as_array()
-                        .is_some_and(|a| a.iter().any(|f| f.as_str() == Some(resolved.as_str())))
-            });
-        }
-
-        let response = serde_json::json!({
-            "bleeds": bleeds,
-            "total_bleed_count": bleeds.len(),
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::detect_css_bleed(self, &params).into_result()
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1322,51 +1235,11 @@ impl VerterMcpServer {
     #[tool(
         description = "Get the component dependency graph. Shows which components import and use which other components."
     )]
-    async fn get_component_graph(
+    pub async fn get_component_graph(
         &self,
         Parameters(params): Parameters<ComponentGraphParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut graph = serde_json::Map::new();
-
-        let root_resolved = params.root.as_ref().map(|r| self.resolve(r));
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .filter(|(id, _)| {
-                root_resolved
-                    .as_ref()
-                    .is_none_or(|root| id.starts_with(root) || id == root)
-            })
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        for (canonical, analysis) in &analyses {
-            if let Some(tpl) = &analysis.template {
-                let components: Vec<serde_json::Value> = tpl
-                    .components
-                    .iter()
-                    .map(|c| {
-                        serde_json::json!({
-                            "name": c.name,
-                            "import_source": c.import_source,
-                            "is_dynamic": c.is_dynamic,
-                            "props_count": c.props.len(),
-                        })
-                    })
-                    .collect();
-                if !components.is_empty() {
-                    graph.insert(
-                        canonical.clone(),
-                        serde_json::to_value(&components).unwrap_or_default(),
-                    );
-                }
-            }
-        }
-
-        let json = serde_json::to_string_pretty(&serde_json::Value::Object(graph))
-            .map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::get_component_graph(self, &params).into_result()
     }
 
     #[tool(description = "Find orphan components unreachable from any bundler entry point.")]
@@ -1436,181 +1309,18 @@ impl VerterMcpServer {
     #[tool(
         description = "Validate provide/inject pairs across the project. Finds inject() calls with no matching provide()."
     )]
-    async fn validate_provide_inject(&self) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut provides: HashMap<String, Vec<String>> = HashMap::new();
-        let mut injects: HashMap<String, Vec<String>> = HashMap::new();
-
-        for (id, kind) in &files {
-            if !kind.is_vue() {
-                continue;
-            }
-            let _ = ensure_loaded(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                for call in analysis.vue_api_calls.iter() {
-                    match call.api {
-                        VueApiClassification::Provide => {
-                            if let Some(key) = &call.arg_value {
-                                provides.entry(key.clone()).or_default().push(id.clone());
-                            }
-                        }
-                        VueApiClassification::Inject => {
-                            if let Some(key) = &call.arg_value {
-                                injects.entry(key.clone()).or_default().push(id.clone());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let mut missing_providers = Vec::new();
-        let mut unused_provides = Vec::new();
-
-        for (key, inject_files) in &injects {
-            if !provides.contains_key(key) {
-                missing_providers.push(serde_json::json!({
-                    "key": key,
-                    "inject_files": inject_files,
-                }));
-            }
-        }
-
-        for (key, provide_files) in &provides {
-            if !injects.contains_key(key) {
-                unused_provides.push(serde_json::json!({
-                    "key": key,
-                    "provide_files": provide_files,
-                }));
-            }
-        }
-
-        let response = serde_json::json!({
-            "total_provide_keys": provides.len(),
-            "total_inject_keys": injects.len(),
-            "missing_providers": missing_providers,
-            "unused_provides": unused_provides,
-        });
-
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    pub async fn validate_provide_inject(&self) -> Result<CallToolResult, ErrorData> {
+        index_tools::validate_provide_inject(self).into_result()
     }
 
     #[tool(
         description = "Check component props: find unknown props passed to child components and missing required props."
     )]
-    async fn check_component_props(
+    pub async fn check_component_props(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut issues: Vec<serde_json::Value> = Vec::new();
-
-        // Build a map of component name -> known prop definitions
-        let mut component_props: HashMap<String, Vec<String>> = HashMap::new();
-        let mut component_required: HashMap<String, Vec<String>> = HashMap::new();
-
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        for (canonical, analysis) in &analyses {
-            let comp_name = std::path::Path::new(canonical.as_str())
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Primary source: macro prop_fields
-            let mut prop_names: Vec<String> = Vec::new();
-            let mut required: Vec<String> = Vec::new();
-            for m in analysis.macros.iter() {
-                if matches!(
-                    m.kind,
-                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
-                ) {
-                    for f in &m.prop_fields {
-                        prop_names.push(f.name.clone());
-                    }
-                }
-            }
-            // Fallback: template prop_definitions (if macros had no prop_fields)
-            if prop_names.is_empty() {
-                if let Some(tpl) = &analysis.template {
-                    for p in &tpl.prop_definitions {
-                        prop_names.push(p.name.clone());
-                        if p.is_required {
-                            required.push(p.name.clone());
-                        }
-                    }
-                }
-            }
-            if !prop_names.is_empty() {
-                component_props.insert(comp_name.clone(), prop_names);
-            }
-            if !required.is_empty() {
-                component_required.insert(comp_name, required);
-            }
-        }
-
-        // Check prop usage against definitions
-        for (id, kind) in &files {
-            if !kind.is_framework_carrier() {
-                continue;
-            }
-            if let Some(path) = &params.path {
-                let resolved = self.resolve(path);
-                if id != &resolved {
-                    continue;
-                }
-            }
-
-            if let Some(analysis) = self.host.get_analysis(id) {
-                if let Some(tpl) = &analysis.template {
-                    for comp in &tpl.components {
-                        if let Some(known_props) = component_props.get(&comp.name) {
-                            for prop in &comp.props {
-                                if !known_props.contains(&prop.name) && !prop.from_spread {
-                                    issues.push(serde_json::json!({
-                                        "kind": "unknown_prop",
-                                        "file": id,
-                                        "component": comp.name,
-                                        "prop": prop.name,
-                                    }));
-                                }
-                            }
-
-                            if !comp.has_spread {
-                                if let Some(required) = component_required.get(&comp.name) {
-                                    let passed: HashSet<_> =
-                                        comp.props.iter().map(|p| &p.name).collect();
-                                    for req in required {
-                                        if !passed.contains(req) {
-                                            issues.push(serde_json::json!({
-                                                "kind": "missing_required_prop",
-                                                "file": id,
-                                                "component": comp.name,
-                                                "prop": req,
-                                            }));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let response = serde_json::json!({
-            "issues": issues,
-            "total": issues.len(),
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::check_component_props(self, &params).into_result()
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1807,127 +1517,8 @@ impl VerterMcpServer {
     #[tool(
         description = "Get aggregate project statistics: scores, Vue API usage, diagnostics health, component rankings."
     )]
-    async fn get_project_stats(&self) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let component_files: Vec<_> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .collect();
-
-        let mut quality_scores: Vec<(String, u32)> = Vec::new();
-        let mut total_errors = 0usize;
-        let mut total_warnings = 0usize;
-        let mut total_info = 0usize;
-        let mut vue_api_usage: HashMap<String, usize> = HashMap::new();
-        let mut macro_usage: HashMap<String, usize> = HashMap::new();
-        let mut total_selectors = 0usize;
-        let mut scoped_blocks = 0usize;
-        let mut global_blocks = 0usize;
-        let mut by_category: HashMap<String, usize> = HashMap::new();
-        let mut total_elements = 0usize;
-        let mut total_bindings = 0usize;
-
-        let ids: Vec<&str> = component_files.iter().map(|(id, _)| id.as_str()).collect();
-        let analyses = batch_analysis_with_template(&self.host, &ids);
-        for (canonical, analysis) in &analyses {
-            let source = self.host.get_source(canonical);
-            let script_snapshot = build_script_snapshot(analysis);
-
-            let block_facts = registered_block_facts(&self.host, canonical);
-            let quality = scoring::compute_quality_score(
-                Some(&script_snapshot),
-                analysis.template.as_deref(),
-                &analysis.styles,
-                source.as_deref(),
-                &block_facts,
-            );
-            quality_scores.push((canonical.clone(), quality.score));
-
-            let diags = self.linter.lint_with_source(
-                Some(&script_snapshot),
-                analysis.template.as_deref(),
-                &analysis.styles,
-                source.as_deref(),
-                &block_facts,
-            );
-            for d in diags.into_diagnostics() {
-                match d.severity {
-                    Severity::Error => total_errors += 1,
-                    Severity::Warning => total_warnings += 1,
-                    _ => total_info += 1,
-                }
-                *by_category.entry(d.category.clone()).or_default() += 1;
-            }
-
-            for call in analysis.vue_api_calls.iter() {
-                *vue_api_usage
-                    .entry(call.api.display_name().to_string())
-                    .or_default() += 1;
-            }
-
-            for m in analysis.macros.iter() {
-                *macro_usage.entry(format!("{:?}", m.kind)).or_default() += 1;
-            }
-
-            for style in analysis.styles.iter() {
-                if style.scoped {
-                    scoped_blocks += 1;
-                } else {
-                    global_blocks += 1;
-                }
-                if let Some(css) = &style.css {
-                    total_selectors += css.selectors.len();
-                }
-            }
-
-            if let Some(tpl) = &analysis.template {
-                total_elements += tpl.elements.len();
-            }
-            total_bindings += analysis.bindings.len();
-        }
-
-        quality_scores.sort_by_key(|score| score.1);
-        let avg_score = if quality_scores.is_empty() {
-            0
-        } else {
-            quality_scores.iter().map(|s| s.1 as usize).sum::<usize>() / quality_scores.len()
-        };
-
-        let worst: Vec<_> = quality_scores.iter().take(5).collect();
-        let best: Vec<_> = quality_scores.iter().rev().take(5).collect();
-
-        let response = serde_json::json!({
-            "overview": {
-                "total_files": files.len(),
-                "componentFiles": component_files.len(),
-                // deprecated alias: kept for back-compat
-                "vue_files": component_files.len(),
-                "script_deps": files.iter().filter(|(_, k)| !k.is_framework_carrier()).count(),
-            },
-            "component_stats": {
-                "avg_quality_score": avg_score,
-                "worst_components": worst.iter().map(|(p, s)| serde_json::json!({"path": p, "score": s})).collect::<Vec<_>>(),
-                "best_components": best.iter().map(|(p, s)| serde_json::json!({"path": p, "score": s})).collect::<Vec<_>>(),
-                "total_elements": total_elements,
-                "total_bindings": total_bindings,
-            },
-            "vue_api_usage": vue_api_usage,
-            "macro_usage": macro_usage,
-            "style_stats": {
-                "scoped_blocks": scoped_blocks,
-                "global_blocks": global_blocks,
-                "total_selectors": total_selectors,
-            },
-            "diagnostics_health": {
-                "total_errors": total_errors,
-                "total_warnings": total_warnings,
-                "total_info": total_info,
-                "by_category": by_category,
-            },
-        });
-
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    pub async fn get_project_stats(&self) -> Result<CallToolResult, ErrorData> {
+        index_tools::get_project_stats(self).into_result()
     }
 
     #[tool(
@@ -2253,145 +1844,21 @@ impl VerterMcpServer {
     #[tool(
         description = "Detect prop drilling: props passed through 2+ component levels. Suggests provide/inject migration."
     )]
-    async fn detect_prop_drilling(
+    pub async fn detect_prop_drilling(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut component_received_props: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut component_passed_props: HashMap<String, Vec<(String, HashSet<String>)>> =
-            HashMap::new();
-
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        for (canonical, analysis) in &analyses {
-            let comp_name = std::path::Path::new(canonical.as_str())
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(tpl) = &analysis.template {
-                let received: HashSet<String> = tpl
-                    .prop_definitions
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-                component_received_props.insert(comp_name.clone(), received);
-
-                for child in &tpl.components {
-                    let passed: HashSet<String> =
-                        child.props.iter().map(|p| p.name.clone()).collect();
-                    component_passed_props
-                        .entry(comp_name.clone())
-                        .or_default()
-                        .push((child.name.clone(), passed));
-                }
-            }
-        }
-
-        let mut drilled: Vec<serde_json::Value> = Vec::new();
-        for (comp, children) in &component_passed_props {
-            if let Some(received) = component_received_props.get(comp) {
-                for (child_name, passed) in children {
-                    let forwarded: Vec<_> = passed.intersection(received).collect();
-                    if !forwarded.is_empty() {
-                        drilled.push(serde_json::json!({
-                            "parent": comp,
-                            "child": child_name,
-                            "drilled_props": forwarded,
-                            "suggestion": "Consider using provide/inject instead of passing through intermediate components",
-                        }));
-                    }
-                }
-            }
-        }
-
-        if let Some(path) = &params.path {
-            let comp_name = std::path::Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            drilled.retain(|d| {
-                d["parent"].as_str() == Some(comp_name) || d["child"].as_str() == Some(comp_name)
-            });
-        }
-
-        let response = serde_json::json!({
-            "drilled_props": drilled,
-            "total": drilled.len(),
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::detect_prop_drilling(self, &params).into_result()
     }
 
     #[tool(
         description = "Detect Options API components that could be migrated to Composition API. Returns candidates with difficulty estimate."
     )]
-    async fn detect_migration_targets(
+    pub async fn detect_migration_targets(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut targets: Vec<serde_json::Value> = Vec::new();
-
-        for (id, kind) in &files {
-            if !kind.is_vue() {
-                continue;
-            }
-            if let Some(path) = &params.path {
-                let resolved = self.resolve(path);
-                if id != &resolved {
-                    continue;
-                }
-            }
-
-            let _ = ensure_loaded(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                let flags = AnalysisFlags::from_bits_truncate(analysis.script_flags);
-                let has_define_component = analysis
-                    .vue_api_calls
-                    .iter()
-                    .any(|c| c.api == VueApiClassification::DefineComponent);
-
-                let has_setup_macros = analysis.macros.iter().any(|m| {
-                    matches!(
-                        m.kind,
-                        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineEmits
-                    )
-                });
-
-                if has_define_component && !has_setup_macros {
-                    let complexity = if analysis.bindings.len() > 20 {
-                        "hard"
-                    } else if analysis.bindings.len() > 10 {
-                        "medium"
-                    } else {
-                        "easy"
-                    };
-
-                    targets.push(serde_json::json!({
-                        "path": id,
-                        "reason": "Uses defineComponent without script setup macros",
-                        "difficulty": complexity,
-                        "bindings": analysis.bindings.len(),
-                        "has_lifecycle": flags.contains(AnalysisFlags::HAS_LIFECYCLE_HOOKS),
-                        "has_watchers": flags.contains(AnalysisFlags::HAS_WATCHERS),
-                    }));
-                }
-            }
-        }
-
-        let response = serde_json::json!({
-            "targets": targets,
-            "total": targets.len(),
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::detect_migration_targets(self, &params).into_result()
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2737,49 +2204,11 @@ impl VerterMcpServer {
     #[tool(
         description = "Trace an event across the component graph: find which components emit it and which listen to it."
     )]
-    async fn trace_event_flow(
+    pub async fn trace_event_flow(
         &self,
         Parameters(params): Parameters<TraceEventFlowParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut emitters: Vec<String> = Vec::new();
-        let mut listeners: Vec<String> = Vec::new();
-
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        for (canonical, analysis) in &analyses {
-            if let Some(tpl) = &analysis.template {
-                // Check if component declares this emit (defineEmits)
-                for emit in &tpl.emit_definitions {
-                    if emit.event_name == params.event_name {
-                        emitters.push(canonical.clone());
-                    }
-                }
-                // Check template for @event listeners
-                for evt in &tpl.event_handlers {
-                    if evt.event_name == params.event_name {
-                        listeners.push(canonical.clone());
-                    }
-                }
-            }
-        }
-
-        emitters.sort();
-        emitters.dedup();
-        listeners.sort();
-        listeners.dedup();
-
-        let response = serde_json::json!({
-            "event_name": params.event_name,
-            "emitters": emitters,
-            "listeners": listeners,
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::trace_event_flow(self, &params).into_result()
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2907,21 +2336,22 @@ impl VerterMcpServer {
     #[tool(
         description = "Get the full route tree for the project. Detects vue-router, Nuxt, or unplugin-vue-router. Returns route hierarchy with paths, names, components, guards, layouts, and navigation links."
     )]
-    async fn get_route_tree(&self) -> Result<CallToolResult, ErrorData> {
+    pub async fn get_route_tree(&self) -> Result<CallToolResult, ErrorData> {
         let root = self
             .project_root
             .as_deref()
             .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
 
-        let snapshot = self.build_route_snapshot(root);
-        let json = serde_json::to_string_pretty(&snapshot).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        let mut discovery = self.discovery();
+        let snapshot = self.build_route_snapshot(root, &mut discovery);
+        let body = serde_json::to_value(&snapshot).map_err(|e| mcp_err(e.to_string()))?;
+        discovery.finish(body).into_result()
     }
 
     #[tool(
         description = "Given a .vue file path, find which route(s) render it. Answers: 'what URL shows this component?'"
     )]
-    async fn get_route_for_component(
+    pub async fn get_route_for_component(
         &self,
         Parameters(params): Parameters<FilePathParams>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -2930,7 +2360,8 @@ impl VerterMcpServer {
             .as_deref()
             .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
 
-        let snapshot = self.build_route_snapshot(root);
+        let mut discovery = self.discovery();
+        let snapshot = self.build_route_snapshot(root, &mut discovery);
         let canonical = self.resolve(&params.path);
         let flat = verter_semantic::analysis::flatten_routes(&snapshot.routes);
         let matching: Vec<_> = flat
@@ -2946,14 +2377,13 @@ impl VerterMcpServer {
             "component": canonical,
             "routes": matching,
         });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        discovery.finish(response).into_result()
     }
 
     #[tool(
         description = "Get all navigation links (<RouterLink>/<NuxtLink>) in the project or a specific file. Answers: 'who navigates where?'"
     )]
-    async fn get_navigation_map(
+    pub async fn get_navigation_map(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -2962,7 +2392,8 @@ impl VerterMcpServer {
             .as_deref()
             .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
 
-        let snapshot = self.build_route_snapshot(root);
+        let mut discovery = self.discovery();
+        let snapshot = self.build_route_snapshot(root, &mut discovery);
         let links: Vec<_> = if let Some(path) = &params.path {
             let canonical = self.resolve(path);
             snapshot
@@ -2978,14 +2409,13 @@ impl VerterMcpServer {
             "total": links.len(),
             "links": links,
         });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        discovery.finish(response).into_result()
     }
 
     #[tool(
         description = "Find where <RouterView>/<NuxtPage> components are placed. Answers: 'which components are view containers?'"
     )]
-    async fn get_router_views(
+    pub async fn get_router_views(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -2994,7 +2424,8 @@ impl VerterMcpServer {
             .as_deref()
             .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
 
-        let snapshot = self.build_route_snapshot(root);
+        let mut discovery = self.discovery();
+        let snapshot = self.build_route_snapshot(root, &mut discovery);
         let views: Vec<_> = if let Some(path) = &params.path {
             let canonical = self.resolve(path);
             snapshot
@@ -3010,61 +2441,28 @@ impl VerterMcpServer {
             "total": views.len(),
             "views": views,
         });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        discovery.finish(response).into_result()
     }
 
     #[tool(
         description = "Cross-reference routes with components to find issues: missing components, dead routes (no links), orphan views, duplicate paths/names."
     )]
-    async fn analyze_route_health(&self) -> Result<CallToolResult, ErrorData> {
+    pub async fn analyze_route_health(&self) -> Result<CallToolResult, ErrorData> {
         let root = self
             .project_root
             .as_deref()
             .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
-
-        let snapshot = self.build_route_snapshot(root);
-
-        // Build set of existing files from the host
-        let existing_files: std::collections::HashSet<String> = self
-            .host
-            .list_files()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let report = verter_semantic::analysis::analyze_route_health(&snapshot, &existing_files);
-        let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::analyze_route_health(self, root)?.into_result()
     }
 
-    /// Build a route analysis snapshot by combining framework detection, route extraction,
-    /// and template analysis from loaded files.
-    fn build_route_snapshot(
+    /// Build a route analysis snapshot by combining framework detection, route
+    /// extraction, and the template component uses the workspace index finds.
+    pub(crate) fn build_route_snapshot(
         &self,
         project_root: &std::path::Path,
+        discovery: &mut Discovery<'_>,
     ) -> verter_semantic::analysis::RouteAnalysisSnapshot {
-        // Collect template component usages from all loaded Vue files
-        let files = self.host.list_files();
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .map(|(id, _)| id.as_str())
-            .collect();
-
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        let template_components: Vec<(
-            String,
-            Vec<verter_session_query::analysis::template::TemplateComponentUsage>,
-        )> = analyses
-            .iter()
-            .filter_map(|(id, a)| {
-                a.template
-                    .as_ref()
-                    .map(|t| (id.clone(), t.components.clone()))
-            })
-            .collect();
-
+        let template_components = index_tools::route_template_components(discovery);
         let workspace = self.host.workspace_read();
         let project_root_str = project_root.to_string_lossy().replace('\\', "/");
         let inputs = verter_session::route_analysis_inputs::build_route_analysis_inputs(
@@ -3083,208 +2481,28 @@ impl VerterMcpServer {
     #[tool(
         description = "Per-file store usages: which stores are imported, used, destructured, and whether storeToRefs is applied."
     )]
-    async fn get_store_usage(
+    pub async fn get_store_usage(
         &self,
         Parameters(params): Parameters<OptionalPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut results: Vec<serde_json::Value> = Vec::new();
-
-        let filter_id = params.path.as_ref().map(|p| self.resolve(p));
-
-        for (id, kind) in &files {
-            if !kind.is_vue() {
-                continue;
-            }
-            if let Some(ref filter) = filter_id {
-                if id != filter {
-                    continue;
-                }
-            }
-            let _ = ensure_loaded(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                if analysis.store_usages.is_empty() && analysis.store_definitions.is_empty() {
-                    continue;
-                }
-                let usages: Vec<serde_json::Value> = analysis
-                    .store_usages
-                    .iter()
-                    .map(|u| {
-                        serde_json::json!({
-                            "binding_name": u.binding_name,
-                            "callee": u.callee,
-                            "import_source": u.import_source,
-                            "store_api": format!("{:?}", u.store_api),
-                            "has_store_to_refs": u.has_store_to_refs,
-                            "destructured_props": u.destructured_props,
-                            "destructured_without_store_to_refs": u.destructured_without_store_to_refs,
-                        })
-                    })
-                    .collect();
-                let definitions: Vec<serde_json::Value> = analysis
-                    .store_definitions
-                    .iter()
-                    .map(|d| {
-                        serde_json::json!({
-                            "store_id": d.store_id,
-                            "export_name": d.export_name,
-                            "store_api": format!("{:?}", d.store_api),
-                            "state_properties": d.state_properties,
-                            "getters": d.getters,
-                            "actions": d.actions,
-                        })
-                    })
-                    .collect();
-                results.push(serde_json::json!({
-                    "file": id,
-                    "store_usages": usages,
-                    "store_definitions": definitions,
-                }));
-            }
-        }
-
-        let response = serde_json::json!({
-            "files_with_stores": results.len(),
-            "results": results,
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::get_store_usage(self, &params).into_result()
     }
 
     #[tool(
         description = "Project-wide store dependency graph: components → stores, store → store deps, unused stores."
     )]
-    async fn get_store_graph(&self) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut store_definitions: Vec<serde_json::Value> = Vec::new();
-        let mut store_usages_by_file: Vec<serde_json::Value> = Vec::new();
-        let mut all_store_ids: Vec<String> = Vec::new();
-        let mut used_callees: HashSet<String> = HashSet::new();
-
-        for (id, kind) in &files {
-            if !kind.is_vue() {
-                continue;
-            }
-            let _ = ensure_loaded(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                for def in analysis.store_definitions.iter() {
-                    if let Some(store_id) = &def.store_id {
-                        all_store_ids.push(store_id.clone());
-                    }
-                    store_definitions.push(serde_json::json!({
-                        "file": id,
-                        "store_id": def.store_id,
-                        "export_name": def.export_name,
-                        "state_properties": def.state_properties,
-                        "getters": def.getters,
-                        "actions": def.actions,
-                        "store_dependencies": def.store_dependencies,
-                    }));
-                }
-                if !analysis.store_usages.is_empty() {
-                    let callees: Vec<&str> = analysis
-                        .store_usages
-                        .iter()
-                        .map(|u| u.callee.as_str())
-                        .collect();
-                    for c in &callees {
-                        used_callees.insert(c.to_string());
-                    }
-                    store_usages_by_file.push(serde_json::json!({
-                        "file": id,
-                        "stores_used": callees,
-                    }));
-                }
-            }
-        }
-
-        let unused_stores: Vec<&String> = all_store_ids
-            .iter()
-            .filter(|id| !used_callees.iter().any(|c| c.contains(id.as_str())))
-            .collect();
-
-        let response = serde_json::json!({
-            "total_store_definitions": store_definitions.len(),
-            "total_files_using_stores": store_usages_by_file.len(),
-            "store_definitions": store_definitions,
-            "store_usages_by_file": store_usages_by_file,
-            "all_store_ids": all_store_ids,
-            "unused_stores": unused_stores,
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    pub async fn get_store_graph(&self) -> Result<CallToolResult, ErrorData> {
+        index_tools::get_store_graph(self).into_result()
     }
 
     #[tool(
         description = "Trace a specific store: definition file, all consumers, dependency chain."
     )]
-    async fn trace_store_flow(
+    pub async fn trace_store_flow(
         &self,
         Parameters(params): Parameters<TraceStoreFlowParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let mut definition_file: Option<String> = None;
-        let mut definition_info: Option<serde_json::Value> = None;
-        let mut consumer_files: Vec<serde_json::Value> = Vec::new();
-
-        for (id, kind) in &files {
-            if !kind.is_vue() {
-                continue;
-            }
-            let _ = ensure_loaded(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                // Check if this file defines the target store
-                for def in analysis.store_definitions.iter() {
-                    if def.store_id.as_deref() == Some(params.store_id.as_str())
-                        || def.export_name == params.store_id
-                    {
-                        definition_file = Some(id.clone());
-                        definition_info = Some(serde_json::json!({
-                            "store_id": def.store_id,
-                            "export_name": def.export_name,
-                            "state_properties": def.state_properties,
-                            "getters": def.getters,
-                            "actions": def.actions,
-                            "store_dependencies": def.store_dependencies,
-                        }));
-                    }
-                }
-                // Check if this file uses the target store
-                let matching_usages: Vec<serde_json::Value> = analysis
-                    .store_usages
-                    .iter()
-                    .filter(|u| {
-                        u.callee.contains(&params.store_id)
-                            || u.import_source.contains(&params.store_id)
-                    })
-                    .map(|u| {
-                        serde_json::json!({
-                            "binding_name": u.binding_name,
-                            "callee": u.callee,
-                            "has_store_to_refs": u.has_store_to_refs,
-                            "destructured_props": u.destructured_props,
-                            "destructured_without_store_to_refs": u.destructured_without_store_to_refs,
-                        })
-                    })
-                    .collect();
-                if !matching_usages.is_empty() {
-                    consumer_files.push(serde_json::json!({
-                        "file": id,
-                        "usages": matching_usages,
-                    }));
-                }
-            }
-        }
-
-        let response = serde_json::json!({
-            "store_id": params.store_id,
-            "definition_file": definition_file,
-            "definition": definition_info,
-            "consumer_count": consumer_files.len(),
-            "consumers": consumer_files,
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        index_tools::trace_store_flow(self, &params).into_result()
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -3337,79 +2555,8 @@ impl VerterMcpServer {
     #[tool(
         description = "Scan all loaded .vue files and compute per-component SSR readiness scores. Returns a project-wide summary with score distribution, critical-path blockers, and overall SSR adoption readiness."
     )]
-    async fn ssr_project_report(&self) -> Result<CallToolResult, ErrorData> {
-        let files = self.host.list_files();
-        let vue_ids: Vec<&str> = files
-            .iter()
-            .filter(|(_, k)| k.is_vue())
-            .map(|(id, _)| id.as_str())
-            .collect();
-
-        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-
-        let mut components = Vec::new();
-        let mut total_score: f64 = 0.0;
-        let mut blocking = Vec::new();
-
-        for (canonical, analysis) in &analyses {
-            let result = compute_ssr_readiness(analysis);
-            let score = result["score"].as_u64().unwrap_or(0);
-            total_score += score as f64;
-
-            if score < 50 {
-                blocking.push(serde_json::json!({
-                    "file": canonical,
-                    "score": score,
-                    "issues": result["issues"],
-                }));
-            }
-
-            components.push(serde_json::json!({
-                "file": canonical,
-                "score": score,
-            }));
-        }
-
-        let count = components.len().max(1);
-        let avg_score = (total_score / count as f64).round() as u64;
-
-        // Score distribution buckets
-        let mut dist = [0u32; 5]; // 0-19, 20-39, 40-59, 60-79, 80-100
-        for c in &components {
-            let s = c["score"].as_u64().unwrap_or(0);
-            let bucket = (s / 20).min(4) as usize;
-            dist[bucket] += 1;
-        }
-
-        blocking.sort_by(|a, b| {
-            a["score"]
-                .as_u64()
-                .unwrap_or(0)
-                .cmp(&b["score"].as_u64().unwrap_or(0))
-        });
-
-        let report = serde_json::json!({
-            "total_components": components.len(),
-            "average_score": avg_score,
-            "score_distribution": {
-                "0-19": dist[0],
-                "20-39": dist[1],
-                "40-59": dist[2],
-                "60-79": dist[3],
-                "80-100": dist[4],
-            },
-            "ssr_ready": components.iter().filter(|c| c["score"].as_u64().unwrap_or(0) >= 80).count(),
-            "needs_work": components.iter().filter(|c| {
-                let s = c["score"].as_u64().unwrap_or(0);
-                (50..80).contains(&s)
-            }).count(),
-            "blocking": blocking.len(),
-            "critical_path_blockers": blocking.iter().take(10).collect::<Vec<_>>(),
-            "components": components,
-        });
-
-        let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    pub async fn ssr_project_report(&self) -> Result<CallToolResult, ErrorData> {
+        index_tools::ssr_project_report(self).into_result()
     }
 }
 
@@ -3427,7 +2574,7 @@ const CLIENT_ONLY_HOOKS: &[VueApiClassification] = &[
 ];
 
 /// Compute SSR readiness score (0-100) for a component.
-fn compute_ssr_readiness(
+pub(crate) fn compute_ssr_readiness(
     analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
 ) -> serde_json::Value {
     let mut score: i32 = 100;
@@ -4326,7 +3473,8 @@ import { RouterLink, RouterView } from 'vue-router'
             },
         );
 
-        let snapshot = server.build_route_snapshot(std::path::Path::new("/test"));
+        let mut discovery = server.discovery();
+        let snapshot = server.build_route_snapshot(std::path::Path::new("/test"), &mut discovery);
 
         // The snapshot should detect framework as Unknown (no package.json)
         assert_eq!(

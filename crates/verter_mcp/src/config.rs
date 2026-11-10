@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use verter_session::workspace_index::QueryBudgets;
 
 /// Verter MCP server — exposes Vue analysis, diagnostics, and compilation to AI agents.
 #[derive(Parser, Debug)]
@@ -37,7 +38,31 @@ pub struct Cli {
     /// Enable strict slot type checking in IDE/TSX output
     #[arg(long)]
     pub strict_slots: bool,
+
+    /// Workspace-index postings one project-wide tool query may visit before
+    /// its answer reports a partial population
+    #[arg(
+        long,
+        default_value_t = DEFAULT_INDEX_POSTING_BUDGET,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub index_posting_budget: u32,
+
+    /// Workspace-index records one project-wide tool query may return before
+    /// its answer reports a partial population
+    #[arg(
+        long,
+        default_value_t = DEFAULT_INDEX_RECORD_BUDGET,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub index_record_budget: u32,
 }
+
+/// Default posting visits of one index query behind a project-wide tool.
+pub const DEFAULT_INDEX_POSTING_BUDGET: u32 = 100_000;
+
+/// Default records returned by one index query behind a project-wide tool.
+pub const DEFAULT_INDEX_RECORD_BUDGET: u32 = 100_000;
 
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum Transport {
@@ -52,6 +77,8 @@ pub struct McpServerConfig {
     pub project_root: Option<PathBuf>,
     pub lint_preset: String,
     pub strict_slots: bool,
+    /// Budgets of each workspace-index query a project-wide tool runs.
+    pub index_budgets: QueryBudgets,
 }
 
 impl Default for McpServerConfig {
@@ -60,6 +87,10 @@ impl Default for McpServerConfig {
             project_root: None,
             lint_preset: "recommended".to_string(),
             strict_slots: false,
+            index_budgets: QueryBudgets {
+                postings: DEFAULT_INDEX_POSTING_BUDGET,
+                records: DEFAULT_INDEX_RECORD_BUDGET,
+            },
         }
     }
 }
@@ -70,6 +101,10 @@ impl From<&Cli> for McpServerConfig {
             project_root: cli.project_root.clone(),
             lint_preset: cli.lint_preset.clone(),
             strict_slots: cli.strict_slots,
+            index_budgets: QueryBudgets {
+                postings: cli.index_posting_budget,
+                records: cli.index_record_budget,
+            },
         }
     }
 }
@@ -91,6 +126,19 @@ mod tests {
         assert!(cli.strict_slots);
         let config = McpServerConfig::from(&cli);
         assert!(config.strict_slots);
+    }
+
+    #[test]
+    fn a_zero_index_budget_is_refused_at_parse_time() {
+        for flag in ["--index-posting-budget", "--index-record-budget"] {
+            assert!(
+                Cli::try_parse_from(["verter-mcp", flag, "0"]).is_err(),
+                "{flag}"
+            );
+            let cli = Cli::try_parse_from(["verter-mcp", flag, "1"]).expect(flag);
+            let config = McpServerConfig::from(&cli);
+            assert!(config.index_budgets.postings >= 1 && config.index_budgets.records >= 1);
+        }
     }
 
     #[test]
