@@ -3854,7 +3854,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// declared in, so the entry's key names that project. A path whose
     /// FIRST step reads a shared subject's wrapper arrives already rewritten
     /// to the demand project's wrapper
-    /// ([`ProjectSemanticDispatch::scope_apparent_wrapper_subject`]); a
+    /// (the wrapper stage of its entry's admission, `query_entry`); a
     /// later step under a shared subject, or a read with no demand site at
     /// all, is scoped to the demand, which the key cannot name — that entry
     /// stays out of the shared memo.

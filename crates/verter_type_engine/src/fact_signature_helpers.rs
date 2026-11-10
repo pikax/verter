@@ -200,6 +200,56 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     }
 }
 
+/// The fact tracer of a compute that runs in steps and owns nothing of the
+/// context that stepped it: a query entry's admission, carried across its
+/// suspensions inside the frame or root that drives it. Like
+/// [`install_fact_tracer`]'s scope it fans each observation out to the
+/// scopes below it on the running thread; it is installed only while one of
+/// the compute's steps runs, and finalised once, against the basis source of
+/// whichever context completes it, as [`install_fact_tracer`] finalises.
+pub(crate) struct OwnedStepwiseFactTracer {
+    tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
+    #[cfg(any(test, feature = "test-support"))]
+    forced: bool,
+}
+
+impl OwnedStepwiseFactTracer {
+    pub(crate) fn fanning_out<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+        source: &FactTracerBasisSource<'_, W>,
+    ) -> Self {
+        Self {
+            tracer: crate::resolver_core::resolver_context::OwnedFactTracer::fanning_out(
+                source.live_basis(),
+                source.fact_policy(),
+            ),
+            #[cfg(any(test, feature = "test-support"))]
+            forced: false,
+        }
+    }
+
+    /// Install the tracer for one step; the scope uninstalls it.
+    pub(crate) fn install<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+        &mut self,
+        #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+        source: &FactTracerBasisSource<'_, W>,
+    ) -> crate::resolver_core::resolver_context::OwnedTracerScope<'_> {
+        let scope = self.tracer.install();
+        #[cfg(any(test, feature = "test-support"))]
+        if !std::mem::replace(&mut self.forced, true) {
+            force_tracer_refusal(source, None);
+        }
+        scope
+    }
+
+    /// The compute completed: finalise what it observed.
+    pub(crate) fn finish<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+        self,
+        source: &FactTracerBasisSource<'_, W>,
+    ) -> FactReadSetFinalise {
+        finalise_compute_scope(source, self.tracer.into_read_set())
+    }
+}
+
 /// Everything a fact-tracer scope needs to compose its compaction basis,
 /// bound together at the ONE point that can answer both halves.
 ///

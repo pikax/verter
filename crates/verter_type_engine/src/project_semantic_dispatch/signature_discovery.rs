@@ -646,7 +646,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
     ///
     /// A read of a primitive subject arrives with its key already rewritten
     /// to that wrapper
-    /// ([`ProjectSemanticDispatch::scope_apparent_signature_subject`]); one
+    /// (the signature stage of its entry's admission, `query_entry`); one
     /// reached here — a union arm, an unscoped or wrapper-less read — depends
     /// on the demanding project, which its key does not name, so the answer
     /// stays out of the shared memo with every entry that reads it.

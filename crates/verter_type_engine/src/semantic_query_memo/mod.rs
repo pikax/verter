@@ -1910,6 +1910,12 @@ impl SemanticGraphStore {
             .projection_hops_walked
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped by a query entry's admission once per stage it computes.
+    pub fn record_admission_stage(&self) {
+        self.stats
+            .admission_stages_walked
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

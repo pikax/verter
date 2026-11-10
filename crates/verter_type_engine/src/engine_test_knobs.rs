@@ -40,7 +40,7 @@ pub struct TestKnobs {
     pub semantic_operand_post_child_seam: SeamHook,
     /// Per-host test-injection knob for the carrier-subject normalization
     /// prelude. When `true`, the traced carrier-normalization prelude
-    /// (`trace_carrier_subject_normalization_if_needed`) fans a synthetic
+    /// (the entry admission's last stage (`query_entry`)) fans a synthetic
     /// FENCED (ReturnOnly) serve onto its active tracer, so the prelude
     /// finalises with `non_cacheable_read_observed = true` and forces
     /// `cache_suppress` — exercising the prelude's no-poison suppress wiring
@@ -48,7 +48,7 @@ pub struct TestKnobs {
     /// must refuse warm admission) without a superseded-artifact fixture. Set
     /// directly in the inline carrier-normalization test. Test-support-gated:
     /// the only reader is the gated fence injection in
-    /// `trace_carrier_subject_normalization_if_needed`.
+    /// the entry admission's last stage (`query_entry`).
     pub carrier_normalization_force_fence_for_tests: std::sync::atomic::AtomicBool,
     /// Per-host test-injection knob for the shared cold-build closure. When
     /// `true`, the `traced_build` closure notes a synthetic FENCED (ReturnOnly)
