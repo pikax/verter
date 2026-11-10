@@ -551,6 +551,10 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 self.apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[unknown])
             }
             SemanticNodeData::KeyOf { .. } | SemanticNodeData::Mapped { .. } => Ok(Vec::new()),
+            // The checker's error type reads as `any`, which has no signatures.
+            SemanticNodeData::Opaque(error) if super::build::is_certified_recovery(error) => {
+                Ok(Vec::new())
+            }
             SemanticNodeData::Opaque(error) => Err(DiscoveryError::Incomplete(
                 IncompleteReason::from_query_error(error),
             )),
@@ -2179,6 +2183,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Some(graph.intern_node(SemanticNodeData::IndexedAccess {
                         object: rest,
                         index: crate::semantic_query::IndexKey::Computed(index),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }))
                 }
                 RawPosition::Remaining(elements) => {

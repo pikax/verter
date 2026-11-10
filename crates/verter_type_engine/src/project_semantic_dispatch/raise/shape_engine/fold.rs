@@ -261,7 +261,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             let base = fold_node(alg, dispatch, *base, active)?;
             alg.key_of(base)
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             let object = fold_node(alg, dispatch, *object, active)?;
             let index = fold_index_key(alg, dispatch, index, active)?;
             alg.indexed_access(object, index)

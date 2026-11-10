@@ -26,7 +26,8 @@ pub use component_meta::{
     AuditDiagnosticEntry, AuditDiagnosticKind, AuditSpan, AuditSpanEncoding, ComponentMetaPayload,
 };
 pub use flow_return::{
-    FlowDegradationTag, FlowFailureTag, FlowPartialityTag, FlowReturnInferencePayload,
+    FlowCheckerDiagnostic, FlowDegradationTag, FlowFailureTag, FlowPartialityTag,
+    FlowReturnInferencePayload,
 };
 pub use lsp::{LspRequestPayload, PositionInfo};
 pub use mcp::McpToolPayload;

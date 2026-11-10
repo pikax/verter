@@ -877,7 +877,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     structural_operand_context(parent_context),
                 ));
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let object_context = indexed_access_object_context(parent_context);
                 // The flow-return `ReturnType<typeof callee>['b']` member
                 // hop: the OBJECT is NOT pre-reduced — reducing the
@@ -1160,7 +1160,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
 
             // --- operator dispatches (context-aware via underlying key) ---
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let object_context = indexed_access_object_context(context);
                 let object = state
                     .mapping
@@ -1702,6 +1702,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             });
 
+        let access = match (&key, self.graph().node_data(node).as_deref()) {
+            (
+                SemanticQueryKey::IndexedAccess { base, index, .. },
+                Some(SemanticNodeData::IndexedAccess { origin, .. }),
+            ) => Some((*origin, *base, index.clone())),
+            _ => None,
+        };
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);
         // Partial-result propagation: a `result_is_partial=true` read
@@ -1724,6 +1731,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let result = match read.value {
             QueryResult::Value(result) => {
+                let result = access
+                    .filter(|_| !read.result_is_partial())
+                    .and_then(|(origin, object, index)| {
+                        self.absent_read_answer(origin, result, object, &index, context)
+                    })
+                    .unwrap_or(result);
                 if result == node {
                     node
                 } else if let Some(&already_reduced) = state.mapping.get(&(result, context)) {

@@ -595,6 +595,13 @@ impl ObligationReentryStack {
         self.frames.is_empty()
     }
 
+    /// The flow returns in flight from stack index `from` inward.
+    pub(crate) fn flow_returns_from(&self, from: usize) -> impl Iterator<Item = &FlowReturnKey> {
+        self.frames[from..]
+            .iter()
+            .filter_map(|frame| frame.identity.as_flow_return())
+    }
+
     pub(crate) fn depth(&self) -> usize {
         self.frames.len()
     }
@@ -791,17 +798,8 @@ pub enum FlowReturnPendingOutcome {
         /// The degradation the FAILED evaluation had already observed
         /// before it failed.
         ///
-        /// This field is not optional decoration: a hold-only
-        /// [`FlowReturnFailure::EmptyCycle`] member is RESURRECTED by the
-        /// component discharge (its value is the join of its hold
-        /// targets'), so a degradation observed on the way to the empty
-        /// cycle must ride the failure into the fixed point. Dropping it
-        /// launders a degraded evaluation into a clean, WARM-admissible
-        /// result — and, because only the non-root member takes the
-        /// resurrection path, it does so in exactly one of the two demand
-        /// orders. Naming the field at every construction site is what
-        /// makes "a Degraded outcome without its degradation"
-        /// unrepresentable.
+        /// Naming the field at every construction site is what makes "a
+        /// Degraded outcome without its degradation" unrepresentable.
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     },
 }
@@ -3049,6 +3047,10 @@ impl ResolveCallDomainRuntime {
 /// the per-domain runtimes. Transient; NEVER a cache key.
 #[derive(Debug, Default)]
 pub struct CheckerDispatchTransaction {
+    /// The inferred returns found to require themselves while still in
+    /// flight, the checker's `pushTypeResolution` marks: each closes as its
+    /// error type.
+    pub(crate) circular_returns: rustc_hash::FxHashSet<FlowReturnKey>,
     /// The generic obligation runtime (tagged identities, frames, pending
     /// ledger, watermarks, the tagged provisional substitution table).
     pub obligations: ObligationRuntime,
@@ -3275,8 +3277,7 @@ impl AugmentationPlanTable {
 
 /// One entry of a tagged flow component awaiting its equation fixed
 /// point: the member's current outcome (a Complete outcome IS its
-/// concrete seed join; a hold-only EmptyCycle has no seed) and the
-/// coinductive hold targets its evaluation met.
+/// concrete seed join) and the coinductive hold targets its evaluation met.
 #[derive(Debug, Clone)]
 pub(super) struct FlowDischargeEntry {
     /// The member's flow identity.

@@ -1267,7 +1267,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         crate::project_semantic_dispatch::node_data_for(dispatch.graph().store(), current)
     {
         match data.as_ref() {
-            SemanticNodeData::IndexedAccess { object, index } => match index {
+            SemanticNodeData::IndexedAccess { object, index, .. } => match index {
                 IndexKey::String(s) => {
                     rev_path.push(PathSegment::Index(IndexKey::String(s.clone())));
                     current = *object;

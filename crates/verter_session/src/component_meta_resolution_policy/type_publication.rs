@@ -310,7 +310,7 @@ fn proof_reference_map<M: verter_audit::observe::ObserveExec>(
             SemanticNodeData::KeyOf { base } => {
                 push_proof_child(&mut stack, &path, ProofPathStep::KeyOfBase, *base);
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 push_proof_child(&mut stack, &path, ProofPathStep::IndexedObject, *object);
                 if let IndexKey::Computed(index) = index {
                     push_proof_child(&mut stack, &path, ProofPathStep::IndexedIndex, *index);
@@ -695,10 +695,12 @@ fn normalized_projection_shape_equivalent<M: verter_audit::observe::ObserveExec>
                 SemanticNodeData::IndexedAccess {
                     object: left_object,
                     index: left_index,
+                    ..
                 },
                 SemanticNodeData::IndexedAccess {
                     object: right_object,
                     index: right_index,
+                    ..
                 },
             ) => {
                 stack.push((*left_object, *right_object));
@@ -1192,7 +1194,7 @@ fn collect_macro_participating_refs<M: verter_audit::observe::ObserveExec>(
             Some(SemanticNodeData::Tuple { elements, .. }) => {
                 worklist.extend(elements.iter().map(|element| element.value));
             }
-            Some(SemanticNodeData::IndexedAccess { object, index }) => {
+            Some(SemanticNodeData::IndexedAccess { object, index, .. }) => {
                 worklist.push(*object);
                 if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
@@ -1251,7 +1253,7 @@ fn raw_indexed_access_root_is_imported<M: verter_audit::observe::ObserveExec>(
     let Some(data) = ctx.node_data(node) else {
         return false;
     };
-    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
+    let SemanticNodeData::IndexedAccess { object, index, .. } = data.as_ref() else {
         return false;
     };
     let object = *object;
@@ -1339,7 +1341,7 @@ fn node_contains_imported_ref<M: verter_audit::observe::ObserveExec>(
             SemanticNodeData::Tuple { elements, .. } => {
                 worklist.extend(elements.iter().map(|element| element.value));
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 worklist.push(*object);
                 if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);

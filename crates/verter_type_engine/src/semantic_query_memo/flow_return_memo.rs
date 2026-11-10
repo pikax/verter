@@ -5,7 +5,7 @@
 //! [`ModeSlot::Single`] slot. The stored value is the
 //! [`SemanticQueryValue::FlowReturn`] payload — COMPLETE whole-function
 //! results ONLY: a typed `FlowReturnFailure` (`Unsupported` / `Missing` /
-//! `Budget` / `EmptyCycle` / `Unresolved` / `CallResolution`) has no
+//! `Budget` / `Unresolved` / `CallResolution`) has no
 //! value-domain form and is never admitted anywhere (memo / fact /
 //! reverse index). Warm reads
 //! validate the self-version-rooted carrier strictly. Project-shape

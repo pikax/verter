@@ -450,8 +450,12 @@ fn call_site(call: &oxc_ast::ast::CallExpression<'_>) -> SliceCallSite {
 struct OptionalCallChainParts<'e, 'a> {
     root: &'e oxc_ast::ast::IdentifierReference<'a>,
     links: Arc<[(Arc<str>, bool)]>,
+    /// Each callee link's member-name span, in `links` order.
+    link_spans: Vec<oxc_span::Span>,
     call: &'e oxc_ast::ast::CallExpression<'a>,
     after: Arc<[(Arc<str>, bool)]>,
+    /// Each `after` link's member-name span, in `after` order.
+    after_spans: Vec<oxc_span::Span>,
 }
 
 /// [`OptionalCallChainParts`] of `element`; `None` for any other chain
@@ -461,12 +465,14 @@ fn optional_call_chain_parts<'e, 'a>(
     element: &'e oxc_ast::ast::ChainElement<'a>,
 ) -> Option<OptionalCallChainParts<'e, 'a>> {
     let mut after: Vec<(Arc<str>, bool)> = Vec::new();
+    let mut after_spans: Vec<oxc_span::Span> = Vec::new();
     let mut current = match element {
         oxc_ast::ast::ChainElement::CallExpression(call) => {
-            return optional_call_chain_callee(call, Arc::from([]));
+            return optional_call_chain_callee(call, Arc::from([]), Vec::new());
         }
         oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
             after.push((Arc::from(member.property.name.as_str()), member.optional));
+            after_spans.push(member.property.span);
             &member.object
         }
         _ => return None,
@@ -476,11 +482,13 @@ fn optional_call_chain_parts<'e, 'a>(
         match current {
             Expression::StaticMemberExpression(member) => {
                 after.push((Arc::from(member.property.name.as_str()), member.optional));
+                after_spans.push(member.property.span);
                 current = &member.object;
             }
             Expression::CallExpression(call) => {
                 after.reverse();
-                return optional_call_chain_callee(call, Arc::from(after));
+                after_spans.reverse();
+                return optional_call_chain_callee(call, Arc::from(after), after_spans);
             }
             _ => return None,
         }
@@ -493,11 +501,13 @@ fn optional_call_chain_parts<'e, 'a>(
 fn optional_call_chain_callee<'e, 'a>(
     call: &'e oxc_ast::ast::CallExpression<'a>,
     after: Arc<[(Arc<str>, bool)]>,
+    after_spans: Vec<oxc_span::Span>,
 ) -> Option<OptionalCallChainParts<'e, 'a>> {
     if call.type_arguments.is_some() {
         return None;
     }
     let mut links: Vec<(Arc<str>, bool)> = Vec::new();
+    let mut link_spans: Vec<oxc_span::Span> = Vec::new();
     let mut current = &call.callee;
     // bounded-loop: one step per authored link of the callee path.
     let root = loop {
@@ -505,6 +515,7 @@ fn optional_call_chain_callee<'e, 'a>(
             Expression::Identifier(root) => break root,
             Expression::StaticMemberExpression(member) => {
                 links.push((Arc::from(member.property.name.as_str()), member.optional));
+                link_spans.push(member.property.span);
                 current = &member.object;
             }
             _ => return None,
@@ -518,11 +529,14 @@ fn optional_call_chain_callee<'e, 'a>(
         return None;
     }
     links.reverse();
+    link_spans.reverse();
     Some(OptionalCallChainParts {
         root,
         links: Arc::from(links),
+        link_spans,
         call,
         after,
+        after_spans,
     })
 }
 
@@ -1064,6 +1078,7 @@ pub(crate) fn build_flow_slice_content(
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
+                receiver_reads: None,
                 declared_this: None,
                 bindings,
                 declared_return,
@@ -1422,11 +1437,13 @@ pub(crate) fn build_flow_slice_content(
     } else {
         region
     };
+    let receiver_reads = lowerer.receiver_reads(body);
     let budget_failure = lowerer.budget_failure;
     let inert_write_spans = lowerer.inert_write_spans;
     let decided_above_call_spans = lowerer.decided_above_call_spans;
     let call_arguments = lowerer.call_arguments;
     Some(SliceContent {
+        receiver_reads,
         declared_this,
         bindings,
         declared_return,
@@ -11728,6 +11745,7 @@ impl<'a> Lowerer<'a> {
                 self.frame_gate.symbolic_call(
                     answer,
                     root,
+                    self.member_name_spans(&call.callee),
                     call_site(call),
                     SliceCallArguments::none(),
                 )
@@ -12088,15 +12106,25 @@ impl<'a> Lowerer<'a> {
                     let OptionalCallChainParts {
                         root,
                         links,
+                        link_spans,
                         call,
                         after,
+                        after_spans,
                     } = *parts;
                     let lowered = SliceExpr::Call(
                         SliceCall::OptionalChain {
                             root: Box::new(self.lower_identifier_read(root, mode)),
                             links,
+                            name_spans: link_spans
+                                .into_iter()
+                                .map(|span| self.rebase(span))
+                                .collect(),
                             optional_call: call.optional,
                             after,
+                            after_spans: after_spans
+                                .into_iter()
+                                .map(|span| self.rebase(span))
+                                .collect(),
                         },
                         call_site(call),
                         SliceCallArguments::none(),
@@ -12497,7 +12525,8 @@ impl<'a> Lowerer<'a> {
                     && this_member_path(member).is_some() =>
             {
                 let path = this_member_path(member).expect("guarded");
-                self.lower_object_this_read(&path, member.span, mode)
+                let name_spans = self.member_name_spans(expr);
+                self.lower_object_this_read(&path, name_spans, member.span, mode)
             }
             // A member read off the receiver (`this.v`, `this.a.b`) projects
             // through the same member-path walk an optional chain takes.
@@ -12510,6 +12539,8 @@ impl<'a> Lowerer<'a> {
                 SliceExpr::OptionalMember {
                     root: Box::new(SliceExpr::This(self.keyword_this().expect("guarded"))),
                     links: path.into_iter().map(|name| (name, false)).collect(),
+                    name_spans: self.member_name_spans(expr),
+                    first_link_undeclared: false,
                 }
             }
             // A private name read off the receiver (`this.#p`) reads the
@@ -12527,6 +12558,8 @@ impl<'a> Lowerer<'a> {
                         Arc::from(format!("#{}", member.field.name).as_str()),
                         false,
                     )]),
+                    name_spans: Arc::from([]),
+                    first_link_undeclared: false,
                 }
             }
             // An element read at an integer literal position off a
@@ -12545,6 +12578,8 @@ impl<'a> Lowerer<'a> {
                 SliceExpr::OptionalMember {
                     root: Box::new(self.lower_identifier_read(root, mode)),
                     links: links.into_iter().map(|name| (name, false)).collect(),
+                    name_spans: Arc::from([]),
+                    first_link_undeclared: false,
                 }
             }
             Expression::FunctionExpression(func) => {
@@ -12832,7 +12867,10 @@ impl<'a> Lowerer<'a> {
                 // its value through the shared path walk, as an optional
                 // member chain reads its links.
                 if let Some((call, links)) = call_rooted_member_path(unwrapped) {
+                    let name_spans = self.member_name_spans(unwrapped);
                     return SliceExpr::OptionalMember {
+                        name_spans,
+                        first_link_undeclared: false,
                         root: Box::new(self.lower_expr(call, mode)),
                         links: Arc::from(
                             links
@@ -13146,7 +13184,10 @@ impl<'a> Lowerer<'a> {
         if answer.is_free() {
             return None;
         }
-        Some(self.frame_gate.leaf(answer, self.leaf_root(expr)))
+        Some(
+            self.frame_gate
+                .leaf(answer, self.leaf_root(expr), self.member_name_spans(expr)),
+        )
     }
 
     /// An operator form whose value the checker computes from its
@@ -13322,7 +13363,7 @@ impl<'a> Lowerer<'a> {
                 .map(|answer| self.namespace_scoped_leaf(answer))
             {
                 Some(LeafLowering::Answer(answer)) if answer.is_free() => {
-                    self.frame_gate.leaf(answer, None)
+                    self.frame_gate.leaf(answer, None, Arc::from([]))
                 }
                 _ => SliceExpr::UnmodeledBinding,
             },
@@ -13559,6 +13600,12 @@ impl<'a> Lowerer<'a> {
         Some(SliceExpr::OptionalMember {
             root: Box::new(root_expr),
             links: Arc::from(links.into_boxed_slice()),
+            name_spans: chain
+                .expression
+                .as_member_expression()
+                .map(|member| self.member_chain_name_spans(member))
+                .unwrap_or_else(|| Arc::from([])),
+            first_link_undeclared: false,
         })
     }
 
@@ -14196,17 +14243,41 @@ impl<'a> Lowerer<'a> {
     /// the literal declares it; `None` when the literal does not declare
     /// it (or a later spread may replace it).
     fn object_this_member(&self, name: &str) -> Option<ObjectThisMember<'a>> {
-        let (contributor, declarator) = match &self.this {
-            Some(SliceThis::Value {
-                contributor,
-                declarator,
-                ..
-            }) => (contributor, declarator),
-            Some(SliceThis::Static {
-                contributor: Some(contributor),
-                ..
-            }) => return self.static_this_member(*contributor, name),
-            _ => return None,
+        if let Some(SliceThis::Static {
+            contributor: Some(contributor),
+            ..
+        }) = &self.this
+        {
+            return self.static_this_member(*contributor, name);
+        }
+        let object = self.declared_this_literal()?;
+        self.literal_this_member(object, name)
+    }
+
+    /// Whether the declared literal `this` is has only statically named
+    /// properties, none of them `name`.
+    fn object_this_lacks_member(&self, name: &str) -> bool {
+        self.declared_this_literal().is_some_and(|object| {
+            object.properties.iter().all(|property| {
+                let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return false;
+                };
+                !property.computed
+                    && verter_semantic::analysis::flow::static_property_key_text(&property.key)
+                        .is_some_and(|key| key != name)
+            })
+        })
+    }
+
+    /// The object literal the declared value `this` reads initializes.
+    fn declared_this_literal(&self) -> Option<&'a oxc_ast::ast::ObjectExpression<'a>> {
+        let Some(SliceThis::Value {
+            contributor,
+            declarator,
+            ..
+        }) = &self.this
+        else {
+            return None;
         };
         let program: &'a Program<'a> = self.program;
         let declaration = match program.body.get(*contributor as usize)? {
@@ -14217,14 +14288,23 @@ impl<'a> Lowerer<'a> {
             },
             _ => return None,
         };
-        let Expression::ObjectExpression(object) = declaration
+        match declaration
             .declarations
             .get(*declarator as usize)?
             .init
             .as_ref()?
-        else {
-            return None;
-        };
+        {
+            Expression::ObjectExpression(object) => Some(object),
+            _ => None,
+        }
+    }
+
+    /// Member `name` of the literal `object`.
+    fn literal_this_member(
+        &self,
+        object: &'a oxc_ast::ast::ObjectExpression<'a>,
+        name: &str,
+    ) -> Option<ObjectThisMember<'a>> {
         let mut found = None;
         for (ordinal, property) in object.properties.iter().enumerate() {
             let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
@@ -14337,6 +14417,7 @@ impl<'a> Lowerer<'a> {
     fn lower_object_this_read(
         &mut self,
         path: &[Arc<str>],
+        name_spans: Arc<[FrameSpan]>,
         span: oxc_span::Span,
         _mode: ExprMode,
     ) -> SliceExpr {
@@ -14366,10 +14447,24 @@ impl<'a> Lowerer<'a> {
             // Any other member of a static `this` — an annotated or
             // inherited static, a method read as a value — reads off the
             // class's constructor, where the class declares that member.
+            // A name a declared literal proves it does not have reads off
+            // the literal's own `this`.
+            None if matches!(self.this, Some(SliceThis::Value { .. }))
+                && self.object_this_lacks_member(first) =>
+            {
+                return SliceExpr::OptionalMember {
+                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    links: path.iter().map(|name| (Arc::clone(name), false)).collect(),
+                    name_spans,
+                    first_link_undeclared: true,
+                };
+            }
             _ if matches!(self.this, Some(SliceThis::Static { .. })) => {
                 return SliceExpr::OptionalMember {
                     root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
                     links: path.iter().map(|name| (Arc::clone(name), false)).collect(),
+                    name_spans,
+                    first_link_undeclared: false,
                 };
             }
             _ => return gap,
@@ -14380,6 +14475,11 @@ impl<'a> Lowerer<'a> {
             SliceExpr::OptionalMember {
                 root: Box::new(root),
                 links: rest.iter().map(|name| (Arc::clone(name), false)).collect(),
+                name_spans: name_spans
+                    .get(1..)
+                    .map(Arc::from)
+                    .unwrap_or_else(|| Arc::from([])),
+                first_link_undeclared: false,
             }
         }
     }
@@ -14885,9 +14985,108 @@ impl<'a> Lowerer<'a> {
             LeafLowering::Answer(answer) => {
                 self.record_decided_above_calls(expr);
                 let root = self.leaf_root(expr);
-                self.frame_gate.leaf(answer, root)
+                self.frame_gate
+                    .leaf(answer, root, self.member_name_spans(expr))
             }
         }
+    }
+
+    /// The `this.name` reads of an object literal method `body`, outside the functions that own their
+    /// `this`. Of a declared literal's `this`, only the names it proves it
+    /// does not have: reading the literal's own value is not an option from
+    /// inside one of its methods.
+    fn receiver_reads(
+        &self,
+        body: verter_semantic::analysis::function_program::FunctionBodyRef<'_>,
+    ) -> Option<verter_session_query::flow::slice::SliceReceiverReads> {
+        struct Reads(Vec<(Arc<str>, oxc_span::Span)>);
+        impl<'a> Visit<'a> for Reads {
+            fn visit_static_member_expression(
+                &mut self,
+                member: &oxc_ast::ast::StaticMemberExpression<'a>,
+            ) {
+                if matches!(
+                    unwrap_parenthesized(&member.object),
+                    Expression::ThisExpression(_)
+                ) {
+                    self.0.push((
+                        Arc::from(member.property.name.as_str()),
+                        member.property.span,
+                    ));
+                }
+                walk::walk_static_member_expression(self, member);
+            }
+            // Ordinary nested functions own their `this`; arrows inherit it.
+            fn visit_function(
+                &mut self,
+                _: &oxc_ast::ast::Function<'a>,
+                _: oxc_syntax::scope::ScopeFlags,
+            ) {
+            }
+            fn visit_class(&mut self, _: &oxc_ast::ast::Class<'a>) {}
+        }
+        let this = self.keyword_this()?;
+        if !matches!(this, SliceThis::Receiver | SliceThis::Value { .. }) {
+            return None;
+        }
+        let mut reads = Reads(Vec::new());
+        match body.expression() {
+            Some(expression) => {
+                self.walks
+                    .with_node_stack(expression.span(), || reads.visit_expression(expression));
+            }
+            None => {
+                for statement in body.statements() {
+                    self.walks
+                        .with_node_stack(statement.span(), || reads.visit_statement(statement));
+                }
+            }
+        }
+        let value_literal = matches!(this, SliceThis::Value { .. });
+        let reads: Vec<(Arc<str>, FrameSpan)> = reads
+            .0
+            .into_iter()
+            .filter(|(name, _)| !value_literal || self.object_this_lacks_member(name))
+            .map(|(name, span)| (name, self.rebase(span)))
+            .collect();
+        (!reads.is_empty()).then(|| verter_session_query::flow::slice::SliceReceiverReads {
+            this,
+            reads: Arc::from(reads.into_boxed_slice()),
+        })
+    }
+
+    /// The member-name position of each link of the static member chain
+    /// `expr` is, root first; empty for any other expression.
+    fn member_name_spans(&self, expr: &Expression<'_>) -> Arc<[FrameSpan]> {
+        let member = match unwrap_parenthesized(expr) {
+            Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+            unwrapped => unwrapped.as_member_expression(),
+        };
+        member.map_or_else(
+            || Arc::from([]),
+            |member| self.member_chain_name_spans(member),
+        )
+    }
+
+    /// [`Self::member_name_spans`] from the outermost member of a chain.
+    fn member_chain_name_spans(
+        &self,
+        member: &oxc_ast::ast::MemberExpression<'_>,
+    ) -> Arc<[FrameSpan]> {
+        let mut spans = Vec::new();
+        let mut current = Some(member);
+        while let Some(member) = current {
+            let oxc_ast::ast::MemberExpression::StaticMemberExpression(link) = member else {
+                return Arc::from([]);
+            };
+            spans.push(self.rebase(link.property.span));
+            current = match unwrap_parenthesized(&link.object) {
+                Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+                object => object.as_member_expression(),
+            };
+        }
+        spans.reverse();
+        Arc::from(spans.into_boxed_slice())
     }
 
     /// Record the authored call / construct spans of one DECIDED-ABOVE

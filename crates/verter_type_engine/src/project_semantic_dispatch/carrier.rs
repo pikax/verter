@@ -1267,6 +1267,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(recovery) = ctx.env().get(&out_of_scope_infer_env_key(name.as_ref())) {
                 return HeadPlan::complete(*recovery);
             }
+            // A name no scope binds, in a project whose program is every
+            // declaration there is, is the checker's TS2304.
+            if self.names_nothing_in_program(scope, name) {
+                return HeadPlan::complete(
+                    crate::semantic_query::checker_policy::undeclared_name_recovery(
+                        self.graph(),
+                        Arc::clone(name),
+                        scope.clone(),
+                    ),
+                );
+            }
             // Currently-unresolved authored reference. Under the carrier
             // modes the head STAYS a scoped `BareRef` carrier — the authored
             // name / args / scope are semantic content the demand points
@@ -1479,6 +1490,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 !state.has_type_symbol_in(*owner, name)
                     && state.import_target_in(*owner, name).is_some()
             })
+    }
+
+    /// Whether the bare `name` an unresolved head reads is proven to name
+    /// nothing: no scope binds it, the program declares no such global, and
+    /// the project loads no library that could (`noLib`). An ambient
+    /// registry is partial by design ([`Self::lib_global_is_available`]), so
+    /// a project with a library proves nothing by not listing a name.
+    pub(super) fn names_nothing_in_program(&self, scope: &NodeScopeId, name: &str) -> bool {
+        let NodeScopeId::File { canonical_id, .. } = scope else {
+            return false;
+        };
+        !name.contains('.')
+            && self
+                .ctx
+                .semantic_compiler_options_for(canonical_id.as_ref())
+                .no_lib
+            && self
+                .project_stable_key_for_canonical(canonical_id.as_ref())
+                .is_some()
+            && !self.unresolved_head_is_authored_import(scope, name)
+            && self
+                .first_global_declaration(canonical_id.as_ref(), name)
+                .is_none()
     }
 
     /// Resolve an `ImportType` head (`import("specifier").qualifier<args>` /

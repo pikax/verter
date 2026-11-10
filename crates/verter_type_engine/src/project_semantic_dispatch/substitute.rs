@@ -1511,7 +1511,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     true,
                 )
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess {
+                object,
+                index,
+                origin,
+            } => {
                 let (sub_object, oc) =
                     self.substitute_with_change_tracking(*object, parameter_node, arg);
                 let (sub_index, ic) =
@@ -1542,6 +1546,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         SemanticNodeData::IndexedAccess {
                             object: sub_object,
                             index: sub_index,
+                            origin: self.instantiated_access_origin(*origin, *object, index),
                         },
                     ),
                     true,
@@ -2274,7 +2279,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);
@@ -2410,7 +2415,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::KeyOf { base } => {
                     stack.push(*base);
                 }
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);

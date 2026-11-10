@@ -5426,7 +5426,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stack.extend(expressions.iter().copied());
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let IndexKey::Computed(index) = index {
                         stack.push(*index);
@@ -6575,6 +6575,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
             object: spec.base_infer,
             index: IndexKey::Computed(spec.mapper_parameter),
+            origin: crate::semantic_query::IndexedAccessOrigin::Composed,
         });
         let projection_probe =
             self.substitute_semantic_type_param(projection_probe, spec.mapper_parameter, key);
@@ -6726,7 +6727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             match data.as_ref() {
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     if !shadowed
                         && index == expected_index
                         && self.reverse_projection_object_matches(
@@ -12867,7 +12868,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_active_query_build_node(self);
             if matches!(
                 graph.node_data(value).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             ) {
                 return None;
             }
@@ -12954,7 +12955,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if read.iter().any(|&arm| {
             matches!(
                 self.graph().node_data(arm).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             )
         }) {
             return None;
@@ -13056,7 +13057,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_active_query_build_node(self);
             (!matches!(
                 graph.node_data(value).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             ))
             .then_some(value)
         };
@@ -16538,7 +16539,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     /// operand, and for a computed index of a constrained parameter, whose
     /// constraint reads the index's own first.
     fn rigid_indexed_access_constraint(&self, data: &SemanticNodeData) -> Option<SemanticNodeId> {
-        let SemanticNodeData::IndexedAccess { object, index } = data else {
+        let SemanticNodeData::IndexedAccess { object, index, .. } = data else {
             return None;
         };
         let graph = self.graph();
@@ -16561,6 +16562,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             (Some(constraint), index) => graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: constraint,
                 index: index.clone(),
+                origin: crate::semantic_query::IndexedAccessOrigin::Composed,
             }),
         })
     }
@@ -18437,6 +18439,24 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             }
             results.push(self.relate_to_union_target(source, &members, bindings));
             return;
+        }
+        // A written intersection holding the checker's error type IS that
+        // error type (`getIntersectionType`): no other arm is compared, and
+        // none of its type variables is inferred.
+        if let SemanticNodeData::Intersection(members) = &*target_data {
+            let error_arm = members.iter().copied().find(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Opaque(error))
+                        if super::build::is_certified_recovery(error)
+                )
+            });
+            if let Some(error_arm) = error_arm {
+                drop(source_data);
+                drop(target_data);
+                work.push(same_pair(source, error_arm));
+                return;
+            }
         }
         // A weak target — every property optional — takes no source that
         // has members but shares none of its properties, checked on the

@@ -298,7 +298,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         });
                     }
                 }
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                         base: *object,
                         index: index.clone(),

@@ -1,4 +1,4 @@
-error[E0451]: fields `ty` and `frame_root` of struct `GatedLeaf` are private
+error[E0451]: fields `ty`, `frame_root` and `member_spans` of struct `GatedLeaf` are private
   --> tests/compile-fail/flow_gated_leaf_struct_literal_not_forgeable.rs:9:9
    |
  8 |     GatedLeaf {
@@ -7,3 +7,5 @@ error[E0451]: fields `ty` and `frame_root` of struct `GatedLeaf` are private
    |         ^^ private field
 10 |         frame_root: None,
    |         ^^^^^^^^^^ private field
+11 |         member_spans: std::sync::Arc::from([]),
+   |         ^^^^^^^^^^^^ private field

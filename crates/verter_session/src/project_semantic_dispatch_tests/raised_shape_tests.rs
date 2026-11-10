@@ -1157,6 +1157,7 @@ fn parity_deferred_operator_shells() {
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tp,
         index: IndexKey::Computed(k),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert_classifier_parity(&host, indexed, "indexed-access-T-K");
     assert!(
@@ -2874,6 +2875,7 @@ fn publication_score_corpus(
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: foo,
                 index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             }),
         ),
         // Mapped, `source == key_space == Foo` — the former double-count fixture.

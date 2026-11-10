@@ -529,7 +529,7 @@ fn cycle_gate_body_contains_recursive_ref(
                     stack.push(element.value);
                 }
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 stack.push(*object);
                 if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                     stack.push(*idx_node);
@@ -677,7 +677,7 @@ fn cycle_gate_collect_ref_identities(
                     stack.push(element.value);
                 }
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 stack.push(*object);
                 if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                     stack.push(*idx_node);

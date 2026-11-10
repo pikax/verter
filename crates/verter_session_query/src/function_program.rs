@@ -926,6 +926,10 @@ pub struct FunctionProgramDiscovery {
     pub span: verter_span::Span,
     /// The body environment, excluding the separate parameter-default environment.
     pub body_span: verter_span::Span,
+    /// The name the checker reports the function by, with its position: the
+    /// declaration's, the variable's it initializes, or the property's it is
+    /// the value of. `None` for an anonymous function.
+    pub report_name: Option<(verter_span::Span, Arc<str>)>,
     /// Arena-free body locator into the retained snapshot.
     pub locator: FunctionBodyLocator,
     /// Formal parameter facts (source order).
@@ -1069,6 +1073,7 @@ pub struct FunctionProgramEntry {
     key: FunctionProgramKey,
     span: verter_span::Span,
     body_span: verter_span::Span,
+    report_name: Option<(verter_span::Span, Arc<str>)>,
     locator: FunctionBodyLocator,
     params: Arc<[FunctionParamRecord]>,
     bindings: Arc<[FunctionBindingRecord]>,
@@ -1108,6 +1113,7 @@ impl FunctionProgramEntry {
             key: entry.key,
             span: entry.span,
             body_span: entry.body_span,
+            report_name: entry.report_name,
             locator: entry.locator,
             params: entry.params,
             bindings: entry.bindings,
@@ -1143,6 +1149,7 @@ impl FunctionProgramEntry {
             key,
             span,
             body_span,
+            report_name,
             locator,
             params,
             bindings,
@@ -1173,6 +1180,7 @@ impl FunctionProgramEntry {
             key,
             span,
             body_span,
+            report_name,
             locator,
             params,
             bindings,
@@ -1217,6 +1225,12 @@ impl FunctionProgramEntry {
     #[must_use]
     pub fn body_span(&self) -> verter_span::Span {
         self.body_span
+    }
+
+    /// See [`FunctionProgramDiscovery::report_name`].
+    #[must_use]
+    pub fn report_name(&self) -> Option<&(verter_span::Span, Arc<str>)> {
+        self.report_name.as_ref()
     }
 
     /// See [`FunctionProgramDiscovery::locator`].

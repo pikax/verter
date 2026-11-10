@@ -907,14 +907,42 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
     scope: &verter_type_engine::semantic_query::NodeScopeId,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     let mut read_access = false;
-    let node = materialize_alias_chain(host, dispatch, start, mode, &mut read_access)?;
-    // Projected after the chain's reader scope closes, so the request's
-    // own builder owns what the projection constructs.
+    let mut kept_access = None;
+    let node = materialize_alias_chain(
+        host,
+        dispatch,
+        start,
+        mode,
+        &mut read_access,
+        &mut kept_access,
+    )?;
+    // Answered and projected after the chain's reader scope closes, so the
+    // request's own builder owns what they construct.
+    let node = kept_access
+        .and_then(|access: KeptAccess| {
+            dispatch.published_absent_read_answer(
+                access.origin,
+                access.value,
+                access.object,
+                &access.index,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
+            )
+        })
+        .unwrap_or(node);
     Ok(if read_access && mode == ProjectionMode::Expanded {
         dispatch.published_answer_read(node, scope)
     } else {
         node
     })
+}
+
+/// An access whose read gave no value to continue with: the chain stops at the
+/// shell, and what its origin answers is decided once the chain is done.
+struct KeptAccess {
+    origin: verter_type_engine::semantic_query::IndexedAccessOrigin,
+    value: SemanticNodeId,
+    object: SemanticNodeId,
+    index: verter_type_engine::semantic_query::IndexKey,
 }
 
 /// The alias / placeholder / operator chain [`materialize_through_aliases`]
@@ -926,6 +954,7 @@ fn materialize_alias_chain<M: verter_audit::observe::ObserveExec>(
     start: SemanticNodeId,
     mode: ProjectionMode,
     read_access: &mut bool,
+    kept_access: &mut Option<KeptAccess>,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
@@ -990,19 +1019,24 @@ fn materialize_alias_chain<M: verter_audit::observe::ObserveExec>(
             // satisfied — so the mode `matches!` IS the whole gate; there is no
             // second carrier-stop conjunct to consult on this always-published
             // path.
-            Some(SemanticNodeData::IndexedAccess { object, index })
-                if matches!(
-                    mode,
-                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
-                ) =>
+            Some(SemanticNodeData::IndexedAccess {
+                object,
+                index,
+                origin,
+            }) if matches!(
+                mode,
+                ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+            ) =>
             {
                 let key = SemanticQueryKey::IndexedAccess {
                     base: *object,
                     index: index.clone(),
                     mode,
                 };
+                let mut read_value = None;
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        read_value = Some(node);
                         QueryResult::Value(node)
                     }
                     QueryResult::Recursive(node) => QueryResult::Recursive(node),
@@ -1014,7 +1048,17 @@ fn materialize_alias_chain<M: verter_audit::observe::ObserveExec>(
                         *read_access = true;
                         continue;
                     }
-                    MaterializationStep::Stop(node) => return Ok(node),
+                    MaterializationStep::Stop(node) => {
+                        if node == current {
+                            *kept_access = read_value.map(|value| KeptAccess {
+                                origin: *origin,
+                                value,
+                                object: *object,
+                                index: index.clone(),
+                            });
+                        }
+                        return Ok(node);
+                    }
                 }
             }
             Some(SemanticNodeData::KeyOf { base })

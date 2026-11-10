@@ -297,7 +297,11 @@ fn lower_node<M: verter_audit::observe::ObserveExec>(
                 _ => IndexKey::Computed(lower_node(graph, index, scope, ctx)?),
             };
             Ok(graph.intern_node_with_scope(
-                SemanticNodeData::IndexedAccess { object, index },
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index,
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
+                },
                 scope.clone(),
             ))
         }
