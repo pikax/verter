@@ -395,6 +395,19 @@ impl VerterHost {
                 // adapter normalizes an EMPTY resolved set (the established
                 // query-returner miss → every supported kind decodes
                 // supported-empty).
+                //
+                // Resolution and normalization run under ONE native fact
+                // trace; once the response is encoded, every exported member
+                // whose source replays exactly is issued a reference under the
+                // basis that trace committed. Issuance never changes the
+                // answer.
+                //
+                // The owner is materialised BEFORE the view is captured: the
+                // trace observes the owner's source, and only a view captured
+                // after the owner is materialised can vouch for that
+                // observation. Materialising inside the request instead would
+                // leave a cold request's basis uncommittable.
+                let _ = self.ensure_indexed_ready_serve(resolved_selector.canonical.as_ref());
                 match crate::typeinfo::current_store_view_for_query(self) {
                     Some(current_view) => {
                         let overlay =
@@ -412,9 +425,48 @@ impl VerterHost {
                             let resolve_ctx = ExecutorResolveCtx {
                                 ctx: &host_ctx,
                                 dispatch: &dispatch,
+                                members: std::cell::RefCell::new(Vec::new()),
                             };
-                            let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
-                            adapter.normalize(&ctx, resolved)
+                            let (normalized, trace) = crate::typeinfo::native_basis::trace_native_fact(
+                                &host_ctx,
+                                &[resolved_selector.canonical.as_ref()],
+                                || {
+                                    let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
+                                    adapter.normalize(&ctx, resolved)
+                                },
+                            );
+                            let encoded = encode_framework_surfaces(
+                                &normalized,
+                                requested,
+                                registration.descriptor.supported_surfaces,
+                            );
+                            let members = exported_framework_members(
+                                &dispatch,
+                                &resolved_selector,
+                                resolve_ctx.members.into_inner(),
+                                &encoded.exported_members,
+                            );
+                            // The schema-12 cutover publishes the issued keys on
+                            // the exported member nodes; until then they stay
+                            // host-internal.
+                            let _issued = crate::typeinfo::node_refs::issue_component_facets(
+                                self,
+                                current_view.view(),
+                                &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&host_ctx),
+                                trace,
+                                &resolved_selector,
+                                requested,
+                                members,
+                            );
+                            let payload = framework_payload(&encoded.surfaces);
+                            let response = framework_surface_response(
+                                framework_request.schema_version,
+                                selector,
+                                framework_tag,
+                                encoded.graph,
+                                encoded.surfaces,
+                            );
+                            return (response, payload);
                         })
                     }
                     None => NormalizedSurfaces::default(),
@@ -502,6 +554,80 @@ struct ExecutorResolveCtx<
         'a,
         crate::resolver_core::HostCapabilities<M>,
     >,
+    /// Every replayable member source a resolved macro contributed, with its
+    /// producing macro: the candidates the response's exported members are
+    /// addressed by.
+    members: std::cell::RefCell<Vec<MemberSource>>,
+}
+
+/// A replayable member source one producing macro contributed.
+struct MemberSource {
+    surface: FrameworkSurfaceKind,
+    role: crate::typeinfo::node_refs::MemberRole,
+    name: String,
+    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+    macro_index: u32,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
+    source: verter_type_expr::facts::SemanticTypeSource,
+}
+
+/// The exported members a response can address: each exported props or
+/// expose member whose name exactly one producing macro contributed a
+/// replayable source for. A name contributed twice, or exported twice, is
+/// ambiguous and addressed by nothing.
+fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities<M>,
+    >,
+    selector: &ResolvedComponentSelector,
+    sources: Vec<MemberSource>,
+    exported: &[crate::typeinfo::framework_surface::graph_export::ExportedMemberNode],
+) -> Vec<crate::typeinfo::node_refs::ExportedFrameworkMember> {
+    let exported_count = |kind: FrameworkSurfaceKind, name: &str| {
+        exported
+            .iter()
+            .filter(|node| node.kind == kind && node.name == name)
+            .count()
+    };
+    let contributed_count = |kind: FrameworkSurfaceKind, name: &str| {
+        sources
+            .iter()
+            .filter(|source| source.surface == kind && source.name == name)
+            .count()
+    };
+    let export_name: Arc<str> = match &selector.export {
+        ComponentExport::Default => Arc::from("default"),
+        ComponentExport::Named(name) => Arc::clone(name),
+    };
+    sources
+        .iter()
+        .filter(|source| {
+            exported_count(source.surface, &source.name) == 1
+                && contributed_count(source.surface, &source.name) == 1
+        })
+        .map(
+            |source| crate::typeinfo::node_refs::ExportedFrameworkMember {
+                anchor: dispatch.type_slot_for(
+                    Arc::clone(&selector.canonical),
+                    source.scope_owner,
+                    Arc::clone(&export_name),
+                ),
+                locator: crate::typeinfo::node_refs::FrameworkMemberLocator {
+                    component_canonical: Arc::clone(&selector.canonical),
+                    component_export: selector.export.clone(),
+                    framework_profile: selector.framework_profile.clone(),
+                    scope_owner: source.scope_owner,
+                    surface: source.surface,
+                    macro_kind: source.macro_kind,
+                    macro_index: source.macro_index,
+                    role: source.role,
+                    member_name: Arc::from(source.name.as_str()),
+                    source: source.source.clone(),
+                },
+            },
+        )
+        .collect()
 }
 
 impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
@@ -657,6 +783,13 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                 crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read,
             );
             any_partial |= dtos_read.is_partial();
+            self.collect_member_sources(
+                requested_kind,
+                mac.kind,
+                macro_index,
+                mac.owner,
+                &dtos_read.dtos,
+            );
             fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
         }
         if !any {
@@ -677,6 +810,72 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
             };
         }
         ResolvedOutcome::Resolved(Arc::new(aggregate))
+    }
+
+    /// Record every replayable member source `dtos` (one macro's bundle)
+    /// contributes to `requested_kind`: a props row's value authority, an
+    /// exposed row's value source. Closed, synthesized, failed and absent
+    /// positions are not addresses and are skipped.
+    fn collect_member_sources(
+        &self,
+        requested_kind: FrameworkSurfaceKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+        macro_index: usize,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
+        dtos: &MacroSurfaceDtos,
+    ) {
+        use crate::typeinfo::node_refs::{is_replayable_source, MemberRole};
+        type Row<'r> = (
+            MemberRole,
+            &'r str,
+            Option<&'r verter_type_expr::facts::SemanticTypeSource>,
+        );
+        let Ok(macro_index) = u32::try_from(macro_index) else {
+            return;
+        };
+        let rows: Vec<Row<'_>> = match requested_kind {
+            FrameworkSurfaceKind::Props => dtos
+                .prop_fields()
+                .iter()
+                .map(|row| {
+                    (
+                        MemberRole::PropValue,
+                        row.analysis.name.as_str(),
+                        row.authority.source(),
+                    )
+                })
+                .collect(),
+            FrameworkSurfaceKind::Expose => dtos
+                .exposed_fields
+                .iter()
+                .map(|row| {
+                    (
+                        MemberRole::ExposeValue,
+                        row.analysis.name.as_str(),
+                        row.type_source.present(),
+                    )
+                })
+                .collect(),
+            FrameworkSurfaceKind::Emits
+            | FrameworkSurfaceKind::Slots
+            | FrameworkSurfaceKind::Options
+            | FrameworkSurfaceKind::Model => return,
+        };
+        let mut members = self.members.borrow_mut();
+        for (role, name, source) in rows {
+            let Some(source) = source.filter(|source| is_replayable_source(source)) else {
+                continue;
+            };
+            members.push(MemberSource {
+                surface: requested_kind,
+                role,
+                name: name.to_string(),
+                macro_kind,
+                macro_index,
+                scope_owner,
+                source: source.clone(),
+            });
+        }
     }
 
     /// Resolve a path projection off a base node handle through the shared

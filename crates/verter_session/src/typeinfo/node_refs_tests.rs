@@ -437,3 +437,210 @@ fn whole_tuple_lookup_and_fifo_bounds() {
         "the byte bound evicts the oldest heavy record to admit the newest"
     );
 }
+
+const SFC: &str = "/comp.vue";
+const SFC_SOURCE: &str = r#"<script setup lang="ts">
+interface Item { id: number }
+defineProps<{ item: Item; count: number }>();
+</script>
+<template><div></div></template>
+"#;
+
+fn upsert_standalone(host: &VerterHost, canonical: &str, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+fn vue_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, SFC, SFC_SOURCE);
+    host
+}
+
+/// A framework-surface envelope for `SFC` under the advertised Vue profile,
+/// demanding `kinds`.
+fn framework_envelope(
+    host: &VerterHost,
+    kinds: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+) -> TypeInfoGraphRequest {
+    let profile = host
+        .typeinfo_capabilities(&wire::TypeInfoCapabilityHandshakeRequest {
+            client_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        })
+        .framework_profiles
+        .into_iter()
+        .find(|advertised| advertised.family == "vue")
+        .and_then(|advertised| advertised.profile)
+        .expect("the host advertises a vue profile");
+    TypeInfoGraphRequest {
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        operation: Operation::FrameworkSurfaces as i32,
+        payload: Some(type_info_graph_request::Payload::FrameworkSurface(
+            wire::FrameworkSurfaceRequest {
+                selector: Some(wire::ComponentSelector {
+                    canonical_id: SFC.to_string(),
+                    export_name: String::new(),
+                    has_export_name: false,
+                    framework_profile: Some(profile),
+                }),
+                context: Some(wire::ProjectionReductionContext {
+                    mode: wire::ProjectionMode::Expanded as i32,
+                    demand: wire::ReductionDemand::Published as i32,
+                }),
+                closure: Some(wire::ClosurePolicy {
+                    kind: Some(graph_closure_policy::Kind::OneLevel(
+                        wire::ClosureOneLevel {},
+                    )),
+                }),
+                display_policy: Some(wire::DisplayPolicy {
+                    qualification: wire::DisplayQualification::Qualified as i32,
+                    branding: wire::DisplayBranding::On as i32,
+                    budgets: Some(wire::DisplayBudgets {
+                        max_string_length: 4096,
+                        max_depth: 16,
+                    }),
+                }),
+                include_provenance: false,
+                include_diagnostics: false,
+                include_projection: vec![],
+                schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+                requested_kinds: kinds.iter().map(|kind| *kind as i32).collect(),
+            },
+        )),
+    }
+}
+
+/// The framework-member locator an issued key names.
+fn member_locator(issued: &IssuedRef) -> &FrameworkMemberLocator {
+    match issued.locator() {
+        NativeReplayLocator::FrameworkMember(locator) => locator,
+        other => panic!("expected a framework member, got {other:?}"),
+    }
+}
+
+/// A framework-surface request addresses exactly its exported members whose
+/// source replays: the reference-typed prop is issued under its producing
+/// macro with the very source the props row published, and replays to the
+/// member type the surface exported; the closed-leaf prop is an answer, not
+/// an address, and receives none. An edit of the component stales it.
+#[test]
+fn framework_props_issue_replayable_member_references() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+    let host = vue_host();
+    let (response, _) = host
+        .resolve_framework_surface_with_audit(framework_envelope(
+            &host,
+            &[FrameworkSurfaceKind::Props],
+        ))
+        .into_parts();
+    assert!(matches!(
+        response.expect("the framework arm").kind,
+        Some(type_info_graph_response::Kind::FrameworkSurface(_))
+    ));
+    let keys = issued_keys_for_tests(&host);
+    assert_eq!(
+        keys.len(),
+        1,
+        "only the replayable prop is addressed: {keys:?}; {:?}",
+        issuance_counters_for_tests(&host)
+    );
+    assert!(keys[0].role.is_some(), "a member carries its role");
+    let issued = lookup_issued(&host, &keys[0]).expect("the issued member is found");
+    let locator = member_locator(&issued).clone();
+    assert_eq!(&*locator.member_name, "item");
+    assert_eq!(locator.macro_kind, AnalyzedMacroKind::DefineProps);
+
+    // The row the surface published, read through the macro's own bundle.
+    let indexed = host.ensure_indexed_ready(SFC).expect("indexed");
+    let macro_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|mac| mac.kind == AnalyzedMacroKind::DefineProps)
+        .expect("a defineProps macro");
+    assert_eq!(locator.macro_index as usize, macro_index);
+    let dtos = host
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: Arc::from(SFC),
+            macro_index,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: indexed.whole_hash,
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("vue admits the component");
+    let row = dtos
+        .prop_fields()
+        .iter()
+        .find(|row| row.analysis.name == "item")
+        .expect("the item prop row");
+    assert_eq!(row.authority.source(), Some(&locator.source));
+
+    in_request(&host, |view, ctx, dispatch| {
+        assert_eq!(
+            admit_issued_in_view(view.view(), &FactValidationView::new(ctx), &issued),
+            Ok(())
+        );
+        let node = replay_issued_in_view(&host, ctx, dispatch, &issued)
+            .expect("the admitted member replays")
+            .expect("to its value");
+        let replayed =
+            verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                dispatch, node,
+            )
+            .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow);
+        assert_eq!(
+            replayed, row.member_type,
+            "the replay reaches the exported member type"
+        );
+    });
+
+    upsert_standalone(&host, SFC, &SFC_SOURCE.replace("id: number", "id: string"));
+    in_request(&host, |view, ctx, _| {
+        assert!(
+            admit_issued_in_view(view.view(), &FactValidationView::new(ctx), &issued).is_err(),
+            "an edit of the component stales its member references"
+        );
+    });
+}
+
+/// Two requests for different facets of one component are different
+/// questions: each issues under its own query identity, and the member keeps
+/// the same basis, anchor slot and role whatever sibling facets were
+/// demanded alongside it.
+#[test]
+fn framework_member_role_is_independent_of_sibling_facets() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let host = vue_host();
+    let _ = host.resolve_framework_surface_with_audit(framework_envelope(
+        &host,
+        &[FrameworkSurfaceKind::Props],
+    ));
+    let _ = host.resolve_framework_surface_with_audit(framework_envelope(
+        &host,
+        &[FrameworkSurfaceKind::Props, FrameworkSurfaceKind::Emits],
+    ));
+    let keys = issued_keys_for_tests(&host);
+    assert_eq!(
+        keys.len(),
+        2,
+        "{keys:?}; {:?}",
+        issuance_counters_for_tests(&host)
+    );
+    assert_ne!(
+        keys[0].query, keys[1].query,
+        "different demands are different questions"
+    );
+    assert_eq!(
+        (keys[0].basis, keys[0].slot, keys[0].role),
+        (keys[1].basis, keys[1].slot, keys[1].role),
+        "the same member under the same basis has the same address components"
+    );
+}

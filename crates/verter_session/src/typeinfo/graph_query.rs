@@ -339,6 +339,10 @@ impl VerterHost {
         budgets: &GraphExportBudgets,
         include_diagnostics: bool,
     ) -> SymbolGraphAnswer {
+        // The entry owner is materialised BEFORE the view is captured, so the
+        // view vouches for the owner source the trace observes; a cold owner
+        // materialised inside the request could not commit a basis.
+        let _ = self.ensure_indexed_ready_serve(canonical_id);
         let Some(current) = crate::typeinfo::current_store_view_for_query(self) else {
             return SymbolGraphAnswer::Miss;
         };
