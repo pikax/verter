@@ -169,6 +169,9 @@ pub(super) enum FrameBuild {
     /// waiting on that load, to answer the port next over the load's
     /// terminal outcome.
     FamilyPort(Box<FamilyBuild>, Arc<str>, LoadEnded),
+    /// A family build waiting on a pending contributor's index, which it
+    /// does not read: it resumes as from a load that served nothing.
+    FamilyIndex(Box<FamilyBuild>, Arc<str>, LoadEnded),
 }
 
 /// Where a load's terminal outcome is kept for the frame that waited on it:
@@ -2615,12 +2618,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// retained outcome answers every read of the file by this build, and
     /// is never loaded again — or on the synchronous entry's drive.
     fn family_file_load(&self, canonical: &str, suspends_loads: bool) -> Option<LoadWait<'a>> {
+        self.family_file_wait(canonical, suspends_loads, || {
+            self.ctx.begin_indexed_load(canonical)
+        })
+    }
+
+    /// [`Self::family_file_load`] for a pending contributor the family only
+    /// indexes ([`FamilyStep::Index`]): the owned index observes no content
+    /// version of the file.
+    fn family_file_index(&self, canonical: &str, suspends_loads: bool) -> Option<LoadWait<'a>> {
+        self.family_file_wait(canonical, suspends_loads, || {
+            self.ctx.begin_pending_contributor_index(canonical)
+        })
+    }
+
+    fn family_file_wait(
+        &self,
+        canonical: &str,
+        suspends_loads: bool,
+        begin: impl FnOnce() -> IndexedReadiness<'a>,
+    ) -> Option<LoadWait<'a>> {
         if !suspends_loads
             || crate::resolver_core::request_ports::consumed_load_known(|file| file == canonical)
         {
             return None;
         }
-        match self.ctx.begin_indexed_load(canonical) {
+        match begin() {
             IndexedReadiness::Loading(load) => Some(LoadWait {
                 load,
                 ended: LoadEnded::default(),
@@ -2659,6 +2682,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*family, serve);
+                }
+                FamilyStep::Index(canonical, family) => {
+                    if let Some(wait) = self.family_file_index(&canonical, suspends_loads) {
+                        *build = Some(FrameBuild::FamilyIndex(
+                            family,
+                            canonical,
+                            Arc::clone(&wait.ended),
+                        ));
+                        return FramePoll::Await(wait);
+                    }
+                    self.ctx.materialize_pending_contributor(&canonical);
+                    step = self.resume_family_source(*family, None);
                 }
                 FamilyStep::Port(family) => {
                     let file = family.port_read().reads_file().map(Arc::<str>::from);
@@ -2955,6 +2990,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Self::consume_family_load(&canonical, &ended);
                         let answer = self.answer_port_in_place(&family.port_read());
                         let step = self.resume_family_port(*family, answer);
+                        self.advance_family_frame(
+                            &frame.key,
+                            &mut frame.build,
+                            step,
+                            suspends_loads,
+                        )
+                    }
+                    // A pending contributor's index ended: the build goes on
+                    // without reading it, the outcome retained so no later
+                    // read of this build begins the load again.
+                    Some(FrameBuild::FamilyIndex(..)) => {
+                        let Some(FrameBuild::FamilyIndex(family, canonical, ended)) =
+                            frame.build.take()
+                        else {
+                            unreachable!("the build was just matched")
+                        };
+                        Self::consume_family_load(&canonical, &ended);
+                        let step = self.resume_family_source(*family, None);
                         self.advance_family_frame(
                             &frame.key,
                             &mut frame.build,

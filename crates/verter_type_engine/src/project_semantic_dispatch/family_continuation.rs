@@ -337,6 +337,13 @@ pub(super) enum FamilyStep {
     /// The build reads this file's indexed input next, holding everything
     /// it computed.
     Load(Arc<str>, Box<FamilyBuild>),
+    /// The build makes this file IndexedReady next without reading it — a
+    /// contributor pending ingestion, indexed ahead of the population read
+    /// that would otherwise index it in place — holding everything it
+    /// computed. The file's content version is not observed: the build
+    /// depends on what it reads afterwards, not on the file. The build
+    /// resumes as from a `Load` that served nothing.
+    Index(Arc<str>, Box<FamilyBuild>),
     /// The build reads a resolver port next — a declaration, route or
     /// global lookup over files it loaded ([`FamilyBuild::port_read`]) —
     /// holding everything it computed. Its driver answers the port in
@@ -703,6 +710,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 FamilyStep::Load(canonical, build) => {
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*build, serve);
+                }
+                FamilyStep::Index(canonical, build) => {
+                    self.ctx.materialize_pending_contributor(&canonical);
+                    step = self.resume_family_source(*build, None);
                 }
                 FamilyStep::Port(build) => {
                     let answer = self.answer_port_in_place(&build.port_read());

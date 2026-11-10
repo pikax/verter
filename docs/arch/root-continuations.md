@@ -1106,7 +1106,7 @@ construct lists choosing a `strictBindCallApply` interface, the global
 interface lookup with its `Function` fallback — itself a continuation,
 `GlobalLookup`: the library's symbol index as a port, the declaring
 library file as a load, the contributors still pending ingestion as a port
-and each as a load (what the population read would otherwise make
+and each indexed, unobserved, as its own transition (what the population read would otherwise make
 IndexedReady in place), the program's contributor population as a port
 and a `declare global` contributor's module as a load — then the interface's
 `Instantiate`) and class instance surfaces (`ResolveClassSurface` on its

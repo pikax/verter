@@ -419,6 +419,28 @@ impl VerterHost {
         canonical_id: &str,
         leases: &'h crate::resolver_core::request_inputs::InputArtifactLeases,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'h> {
+        self.begin_indexed_ready_load_with(canonical_id, leases, true)
+    }
+
+    /// [`Self::begin_indexed_ready_load_for`] for a file the reader only
+    /// materializes — a contributor pending ingestion, indexed ahead of the
+    /// population read that would otherwise index it in place — without
+    /// observing its content version: the reader depends on the population,
+    /// not on the file.
+    pub(crate) fn begin_pending_contributor_index_for<'h>(
+        &'h self,
+        canonical_id: &str,
+        leases: &'h crate::resolver_core::request_inputs::InputArtifactLeases,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'h> {
+        self.begin_indexed_ready_load_with(canonical_id, leases, false)
+    }
+
+    fn begin_indexed_ready_load_with<'h>(
+        &'h self,
+        canonical_id: &str,
+        leases: &'h crate::resolver_core::request_inputs::InputArtifactLeases,
+        observe: bool,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'h> {
         use verter_type_engine::resolver_core::request_ports::IndexedReadiness;
         if !self.scheduler.has_driver_thread() {
             return IndexedReadiness::Settled;
@@ -458,7 +480,13 @@ impl VerterHost {
             indexing: Some(Box::pin(async move {
                 self.ensure_indexed_ready_serve_owning_loads(&canonical, owned_load)
                     .await
-                    .map(|serve| leases.retain(serve))
+                    .map(|serve| {
+                        if observe {
+                            leases.retain(serve)
+                        } else {
+                            leases.retain_unobserved(serve)
+                        }
+                    })
             })),
             indexed: None,
             task: scope.task().clone(),

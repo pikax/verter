@@ -383,6 +383,23 @@ pub trait IndexedInputs {
     /// remains responsible for driving the serve in place.
     fn begin_indexed_load(&self, canonical_id: &str) -> IndexedReadiness<'_>;
 
+    /// [`Self::begin_indexed_load`] for a contributor pending ingestion
+    /// ([`OwnedLowering::pending_global_contributors`]), which the reader
+    /// only materializes ahead of the population read: the load observes
+    /// no content version of the file, as the population read's own
+    /// in-place materialization observes none.
+    fn begin_pending_contributor_index(&self, canonical_id: &str) -> IndexedReadiness<'_> {
+        self.begin_indexed_load(canonical_id)
+    }
+
+    /// Make the contributor `canonical_id`, pending ingestion, IndexedReady
+    /// in place, exactly as the population read would — loading its source
+    /// and indexing it without observing its content version. The
+    /// synchronous entry's driver of a pending-contributor transition.
+    fn materialize_pending_contributor(&self, canonical_id: &str) {
+        let _ = self.ensure_indexed_ready_serve(canonical_id);
+    }
+
     /// Begin the loads [`Self::prepared_decl_bundle`] of `canonical_id`
     /// would perform while materializing the bundle — the files it routes
     /// an import to that have no current content — instead of performing

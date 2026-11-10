@@ -274,6 +274,17 @@ impl InputArtifactLeases {
             &serve.indexed.shallow_state.source_identity.canonical,
             serve.indexed.whole_hash,
         );
+        self.retain_unobserved(serve)
+    }
+
+    /// [`Self::retain`] without observing the artifact's content version:
+    /// for a serve made only to materialize a file — a pending contributor
+    /// indexed ahead of a population read — whose content the reader does
+    /// not depend on.
+    pub(crate) fn retain_unobserved(
+        &self,
+        serve: crate::host_manage::prepared_decl::IndexedReadyServe,
+    ) -> IndexedInputServe {
         let input = serve.indexed.input_record();
         let observation = input.shallow_state.observation_id();
         // A request serves one artifact many times: a repeat serve finds it

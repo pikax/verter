@@ -250,6 +250,21 @@ impl IndexedInputs for crate::VerterHost {
         crate::VerterHost::begin_indexed_ready_load(self, canonical_id)
     }
 
+    fn begin_pending_contributor_index(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        crate::VerterHost::begin_pending_contributor_index_for(
+            self,
+            canonical_id,
+            &self.source_input_leases,
+        )
+    }
+
+    fn materialize_pending_contributor(&self, canonical_id: &str) {
+        materialize_pending_contributor(self, canonical_id);
+    }
+
     fn begin_prepared_bundle_load(
         &self,
         canonical_id: &str,
@@ -1088,6 +1103,27 @@ where
         self.0.begin_load(canonical_id)
     }
 
+    fn begin_pending_contributor_index(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::begin_pending_contributor_index"
+        );
+        crate::VerterHost::begin_pending_contributor_index_for(
+            self.0.host(),
+            canonical_id,
+            &self.0.request_view().overlay().input_artifacts,
+        )
+    }
+
+    fn materialize_pending_contributor(&self, canonical_id: &str) {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::materialize_pending_contributor"
+        );
+        materialize_pending_contributor(self.0.host(), canonical_id);
+    }
+
     fn begin_prepared_bundle_load(
         &self,
         canonical_id: &str,
@@ -1459,6 +1495,15 @@ where
 /// refused route never becomes a cacheable "not found". Every context
 /// answers through this, whichever resolution snapshot produced the
 /// publication.
+/// Make the pending contributor `canonical` IndexedReady in place, as the
+/// population read's ingestion does: its source loaded, its index built
+/// through the host's own serve, which observes no content version onto the
+/// request's tracer.
+fn materialize_pending_contributor(host: &crate::VerterHost, canonical: &str) {
+    let _ = host.ensure_loaded(canonical);
+    let _ = crate::VerterHost::ensure_indexed_ready_serve(host, canonical);
+}
+
 /// Resolve one route edge under a resolution witness scope and observe the
 /// facts the resolution read onto the active tracer, as the host's route
 /// walk does for each edge it traverses.

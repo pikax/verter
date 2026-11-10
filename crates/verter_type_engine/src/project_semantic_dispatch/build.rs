@@ -9209,6 +9209,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 GlobalStep::Load(file) => {
                     lookup.resume_source(self.ctx.ensure_indexed_ready_serve(&file))
                 }
+                GlobalStep::Index(file) => {
+                    self.ctx.materialize_pending_contributor(&file);
+                    lookup.resume_source(None)
+                }
             };
         }
     }

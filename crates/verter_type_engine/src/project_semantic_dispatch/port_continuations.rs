@@ -153,6 +153,10 @@ pub(super) enum GlobalStep {
     Port,
     /// The lookup reads this file's indexed input next.
     Load(Arc<str>),
+    /// The lookup makes this pending contributor IndexedReady next, without
+    /// reading it: the population read that follows then indexes nothing
+    /// in place, and the lookup depends on the population, not the file.
+    Index(Arc<str>),
     /// The declaration found, or none.
     Found(Option<ResolvedRootIdentity>),
 }
@@ -239,12 +243,13 @@ impl GlobalLookup {
         }
     }
 
-    /// Read the next pending contributor, or — none left — the population.
+    /// Index the next pending contributor, or — none left — read the
+    /// population.
     fn load_pending(&mut self, mut remaining: Vec<Arc<str>>) -> GlobalStep {
         match remaining.pop() {
             Some(file) => {
                 self.stage = GlobalStage::PendingLoads { remaining };
-                GlobalStep::Load(file)
+                GlobalStep::Index(file)
             }
             None => {
                 self.stage = GlobalStage::Population;
@@ -276,8 +281,8 @@ impl GlobalLookup {
                 self.stage = GlobalStage::Pending;
                 GlobalStep::Port
             }
-            // A pending contributor is read only so the population read
-            // finds it indexed; what it served is the population's to use.
+            // A pending contributor is indexed only so the population read
+            // finds it so; nothing of it is read here.
             GlobalStage::PendingLoads { remaining } => {
                 drop(serve);
                 self.load_pending(remaining)

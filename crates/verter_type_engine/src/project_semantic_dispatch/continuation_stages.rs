@@ -1120,6 +1120,9 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             GlobalStep::Load(file) => {
                 FamilyStep::Load(file, Box::new(FamilyBuild::ApparentType(build)))
             }
+            GlobalStep::Index(file) => {
+                FamilyStep::Index(file, Box::new(FamilyBuild::ApparentType(build)))
+            }
             GlobalStep::Found(found) => self.resume_apparent_global(build, found),
         }
     }
