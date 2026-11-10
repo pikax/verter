@@ -1018,6 +1018,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
+                requested_kinds: vec![],
                 schema_version: 3,
             },
         )),

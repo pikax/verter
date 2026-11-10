@@ -337,7 +337,15 @@ pub use wire::UniqueSymbolKeyExpr;
 /// and an inverted or file-less `GraphSpanRef` on a request is a typed
 /// `MalformedPayload` before execution. v8 stays accepted: the unit was
 /// already UTF-8 bytes where a producer existed.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 9;
+///
+/// v10 adds the facet demand `FrameworkSurfaceRequest.requested_kinds`
+/// (field 9): a v10 framework-surface request names the surface kinds it
+/// asks for (non-empty, no duplicate, no UNSPECIFIED value) and its response
+/// carries exactly one entry per requested kind, in enum-tag order; an
+/// undemanded kind is neither resolved nor filled. A request below v10 must
+/// leave the field empty and keeps the one-entry-per-known-kind response.
+/// v9 stays accepted under that older contract.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 10;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

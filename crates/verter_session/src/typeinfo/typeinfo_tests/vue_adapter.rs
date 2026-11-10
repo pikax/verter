@@ -1473,6 +1473,7 @@ fn vue_surface_members_via_audited_entry(
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
+                requested_kinds: vec![],
                 schema_version: 3,
             },
         )),

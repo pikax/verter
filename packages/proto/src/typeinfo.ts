@@ -175,7 +175,12 @@ export type {
  * Schema 9 states the coordinate contract: every span is a 0-based half-open
  * range of UTF-8 byte offsets into the file its `canonicalId` names; no field
  * is added or removed.
+ * Schema 10 adds the facet demand `FrameworkSurfaceRequest.requestedKinds`:
+ * a v10 framework-surface request names the kinds it asks for (non-empty, no
+ * duplicate, no UNSPECIFIED) and its response carries exactly one entry per
+ * requested kind in enum-tag order; below v10 the field stays empty and the
+ * response carries every known kind.
  * Schema 2 stays accepted for the legacy
  * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 9;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 10;

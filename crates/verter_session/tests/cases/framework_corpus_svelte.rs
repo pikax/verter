@@ -270,6 +270,7 @@ fn envelope(canonical: &str) -> wire::TypeInfoGraphRequest {
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
+                requested_kinds: vec![],
                 schema_version: 3,
             },
         )),
@@ -537,14 +538,14 @@ fn svelte_prop_default_and_origin_are_on_the_public_framework_surface_wire() {
     let strings = string_table(payload);
     let resolve = |id: u32| strings.get(id as usize).cloned().unwrap_or_default();
 
-    // The response graph carries schema 9 (the current wire schema: typed
-    // property keys landed at schema 6, the canonical object-spread program
-    // node at schema 7, the applied compiler intrinsic at schema 8, and the
-    // stated UTF-8 byte unit of every span at schema 9).
+    // The response graph carries the current wire schema (typed property keys
+    // landed at schema 6, the canonical object-spread program node at schema
+    // 7, the applied compiler intrinsic at schema 8, the stated UTF-8 byte unit
+    // of every span at schema 9, the framework-surface facet demand at 10).
     assert_eq!(
         payload.graph.as_ref().unwrap().schema_version,
-        9,
-        "the framework-surface graph is schema 9"
+        verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        "the framework-surface graph is the current wire schema"
     );
 
     // `size = 'md'` — the runtime DEFAULT VALUE source text rides the wire

@@ -22,10 +22,10 @@ use verter_protocol::verter::v1::{
 /// Build a well-formed framework-surface request envelope for a default
 /// export component at `canonical`, selected by `adapter_id`.
 ///
-/// The framework-surface operation rides the existing graph envelope; the
-/// executor's requested set is always the full kind set (the request
-/// carries no requested-kind field), so the envelope only names the
-/// component selector.
+/// The framework-surface operation rides the existing graph envelope. The
+/// tool projects the whole component surface, so its facet demand
+/// (`requested_kinds`, schema 10) names every known kind explicitly; the
+/// executor resolves exactly the demanded kinds.
 pub fn build_request(canonical: &str, adapter_id: &str) -> TypeInfoGraphRequest {
     TypeInfoGraphRequest {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -59,6 +59,14 @@ pub fn build_request(canonical: &str, adapter_id: &str) -> TypeInfoGraphRequest 
                 include_diagnostics: true,
                 include_projection: vec![],
                 schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
+                requested_kinds: vec![
+                    FrameworkSurfaceKind::Props as i32,
+                    FrameworkSurfaceKind::Emits as i32,
+                    FrameworkSurfaceKind::Slots as i32,
+                    FrameworkSurfaceKind::Options as i32,
+                    FrameworkSurfaceKind::Expose as i32,
+                    FrameworkSurfaceKind::Model as i32,
+                ],
             },
         )),
     }

@@ -14,9 +14,13 @@
 //!    a typed `MalformedPayload` (NO new error variant).
 //! 2. Resolve the selector to a [`ResolvedComponentSelector`] (default export
 //!    via the synthesized `default`; named export via the shallow inventory).
-//! 3. The requested set is ALWAYS [`ALL_FRAMEWORK_SURFACE_KINDS`] (the wire
-//!    request carries no requested-kind field). The response carries EXACTLY ONE
-//!    entry per known kind.
+//! 3. The requested set is the request's facet demand
+//!    (`FrameworkSurfaceRequest.requested_kinds`, schema 10, validated
+//!    non-empty and duplicate-free), taken in enum-tag order; a request below
+//!    schema 10 carries no demand and keeps [`ALL_FRAMEWORK_SURFACE_KINDS`].
+//!    Only requested kinds are planned, resolved and encoded: the response
+//!    carries EXACTLY ONE entry per requested kind and none for an undemanded
+//!    kind.
 //! 4. A [`SurfaceRegistration::Deferred`] adapter answers every kind
 //!    structurally UNSUPPORTED (a structural response, NOT an error).
 //! 5. A [`SurfaceRegistration::Adapter`] adapter PLANS its demands against the
@@ -252,6 +256,10 @@ impl VerterHost {
             .clone()
             .expect("validator proves selector present");
         let adapter_id = FrameworkAdapterId::new(&selector.framework_adapter_id);
+        // The facet demand the validator proved well-formed: every planned,
+        // resolved and encoded kind below comes from this slice.
+        let requested = requested_surface_kinds(&framework_request);
+        let requested: &[FrameworkSurfaceKind] = &requested;
 
         let Some(registration) = self.framework_registry().get(&adapter_id) else {
             // An unknown adapter id is a malformed payload (NO new error
@@ -337,7 +345,7 @@ impl VerterHost {
             if !is_component_carrier {
                 let encoded = encode_framework_surfaces_with_unsupported_message(
                     &NormalizedSurfaces::default(),
-                    ALL_FRAMEWORK_SURFACE_KINDS,
+                    requested,
                     &[] as &[FrameworkSurfaceKind],
                     "canonical is not a component carrier for this adapter \
                      (no component surface to resolve)",
@@ -360,8 +368,7 @@ impl VerterHost {
             SurfaceRegistration::Deferred => NormalizedSurfaces::default(),
             SurfaceRegistration::Adapter(adapter) => {
                 let ctx = FrameworkAdapterCtx::new(registration, self);
-                let plan =
-                    adapter.plan_surfaces(&ctx, &resolved_selector, ALL_FRAMEWORK_SURFACE_KINDS);
+                let plan = adapter.plan_surfaces(&ctx, &resolved_selector, requested);
                 // Capture ONE proven-current request view AFTER validation and
                 // thread it through EVERY demand resolver — so all of a single
                 // response's props / emits / slots / model resolve against ONE
@@ -414,12 +421,12 @@ impl VerterHost {
         let encoded = match &registration.surface {
             SurfaceRegistration::Deferred => encode_framework_surfaces_with_unsupported_message(
                 &normalized,
-                ALL_FRAMEWORK_SURFACE_KINDS,
+                requested,
                 supported,
                 "framework surfaces are not yet registered for this adapter",
             ),
             SurfaceRegistration::Adapter(_) => {
-                encode_framework_surfaces(&normalized, ALL_FRAMEWORK_SURFACE_KINDS, supported)
+                encode_framework_surfaces(&normalized, requested, supported)
             }
         };
 
@@ -863,6 +870,28 @@ fn framework_selector_target(
 }
 
 /// Build the audit payload from the encoded per-kind entries.
+/// The request's facet demand in enum-tag (canonical) order.
+///
+/// From [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`] the validator
+/// has proved `requested_kinds` non-empty, known and duplicate-free, so this
+/// is a pure filter of [`ALL_FRAMEWORK_SURFACE_KINDS`] that keeps the canonical
+/// order whatever order the client wrote. An older request carries no demand
+/// and keeps every known kind — its response contract.
+///
+/// [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`]: crate::typeinfo::request_validation::FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION
+fn requested_surface_kinds(request: &wire::FrameworkSurfaceRequest) -> Vec<FrameworkSurfaceKind> {
+    use crate::typeinfo::request_validation::FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION;
+
+    if request.schema_version < FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION {
+        return ALL_FRAMEWORK_SURFACE_KINDS.to_vec();
+    }
+    ALL_FRAMEWORK_SURFACE_KINDS
+        .iter()
+        .copied()
+        .filter(|kind| request.requested_kinds.contains(&(*kind as i32)))
+        .collect()
+}
+
 fn framework_payload(surfaces: &[wire::FrameworkSurfaceKindEntry]) -> TypeInfoGraphPayload {
     let mut support_counts = std::collections::BTreeMap::new();
     for entry in surfaces {

@@ -47,6 +47,16 @@ defineSlots<{ default(props: { item: string }): unknown }>();
 <template><div></div></template>
 `;
 
+/** The full facet demand: every known surface kind (schema 10 `requestedKinds`). */
+const EVERY_KIND: FrameworkSurfaceKind[] = [
+  FrameworkSurfaceKind.PROPS,
+  FrameworkSurfaceKind.EMITS,
+  FrameworkSurfaceKind.SLOTS,
+  FrameworkSurfaceKind.OPTIONS,
+  FrameworkSurfaceKind.EXPOSE,
+  FrameworkSurfaceKind.MODEL,
+];
+
 /** Encode the wire `TypeInfoGraphRequest` envelope for a registered adapter id. */
 function encodeRequest(canonicalId: string, frameworkAdapterId: string): Buffer {
   const request = create(TypeInfoGraphRequestSchema, {
@@ -70,6 +80,7 @@ function encodeRequest(canonicalId: string, frameworkAdapterId: string): Buffer 
         includeDiagnostics: true,
         includeProjection: [],
         schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+        requestedKinds: EVERY_KIND,
       },
     },
   });
@@ -168,6 +179,7 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
           includeDiagnostics: true,
           includeProjection: [],
           schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+          requestedKinds: EVERY_KIND,
         },
       },
     });

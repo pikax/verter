@@ -99,9 +99,24 @@ fn framework_envelope_versioned(
                 include_diagnostics: false,
                 include_projection: vec![],
                 schema_version: payload_version,
+                requested_kinds: vec![],
             },
         )),
     }
+}
+
+/// A current-schema envelope carrying an explicit facet demand.
+fn framework_envelope_demanding(
+    canonical: &str,
+    adapter_id: &str,
+    requested_kinds: &[FrameworkSurfaceKind],
+) -> wire::TypeInfoGraphRequest {
+    let version = verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION;
+    let mut envelope = framework_envelope_versioned(canonical, adapter_id, version, version);
+    if let Some(wire_request::Payload::FrameworkSurface(request)) = envelope.payload.as_mut() {
+        request.requested_kinds = requested_kinds.iter().map(|kind| *kind as i32).collect();
+    }
+    envelope
 }
 
 fn build_host() -> Arc<VerterHost> {
@@ -374,6 +389,52 @@ fn response_carries_exactly_one_entry_per_known_kind() {
         assert!(
             by_kind.contains_key(&(kind as i32)),
             "missing entry for {kind:?}"
+        );
+    }
+}
+
+/// The facet demand selects the response: a current-schema request naming
+/// `[Slots, Props]` answers exactly those two kinds, in enum-tag order, each
+/// resolved (the SFC declares both macros), and carries NO entry for an
+/// undemanded kind — not an UNSUPPORTED or supported-empty filler.
+/// Discriminating: an executor that kept planning and encoding every known
+/// kind would answer six entries.
+#[test]
+fn a_facet_demand_answers_exactly_the_requested_kinds_in_canonical_order() {
+    let host = build_host();
+    let envelope = framework_envelope_demanding(
+        "/Parity.vue",
+        "vue",
+        &[FrameworkSurfaceKind::Slots, FrameworkSurfaceKind::Props],
+    );
+    let result = host.resolve_framework_surface_with_audit(envelope);
+    let response = result
+        .into_result()
+        .expect("a well-formed demanding request resolves");
+    let payload = expect_payload(&response);
+    let kinds: Vec<i32> = payload.surfaces.iter().map(|entry| entry.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            FrameworkSurfaceKind::Props as i32,
+            FrameworkSurfaceKind::Slots as i32
+        ],
+        "exactly the demanded kinds, in enum-tag order regardless of request order"
+    );
+    for entry in &payload.surfaces {
+        let support = entry
+            .status
+            .as_ref()
+            .map(|status| status.support)
+            .unwrap_or_default();
+        assert_eq!(
+            support,
+            FrameworkSurfaceKindSupport::Supported as i32,
+            "a demanded kind the SFC declares resolves SUPPORTED"
+        );
+        assert!(
+            !entry.members.is_empty(),
+            "a demanded kind the SFC declares carries its members"
         );
     }
 }

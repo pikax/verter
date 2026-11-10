@@ -24,8 +24,9 @@ use verter_session::typeinfo::request_validation::{
     validate_framework_surface_request, validate_project_path_graph_request,
     validate_resolve_symbol_graph_request, validate_schema_version_for_operation,
     validate_type_info_graph_request, FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
-    MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET, MAX_STRUCTURED_EXPRESSION_DEPTH,
-    MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
+    FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION, MAX_EXPANSION_DEPTH_BUDGET,
+    MAX_EXPANSION_NODE_BUDGET, MAX_STRUCTURED_EXPRESSION_DEPTH, MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
 };
 
 fn prim_string_expr() -> wire::StructuredTypeExpression {
@@ -534,6 +535,45 @@ fn framework_surface_request_with(
         include_diagnostics: false,
         include_projection: vec![],
         schema_version,
+        // The facet demand exists from schema 10; an older request names none.
+        requested_kinds: if schema_version >= FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION {
+            vec![wire::FrameworkSurfaceKind::Props as i32]
+        } else {
+            vec![]
+        },
+    }
+}
+
+/// The v10 facet demand is validated before execution: an empty, unknown or
+/// duplicated demand is a typed `MalformedPayload`, and a pre-v10 request may
+/// not carry one. Discriminating: an executor that silently widened an empty
+/// demand to every kind, or dropped a duplicate, would pass these requests.
+#[test]
+fn framework_surface_requested_kinds_demand_is_validated_per_schema() {
+    let v10 = FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION;
+    let with_kinds = |schema_version: u32, kinds: Vec<i32>| {
+        let mut request = framework_surface_request_with("vue", schema_version);
+        request.requested_kinds = kinds;
+        request
+    };
+    let props = wire::FrameworkSurfaceKind::Props as i32;
+    let emits = wire::FrameworkSurfaceKind::Emits as i32;
+
+    validate_framework_surface_request(&with_kinds(v10, vec![emits, props]))
+        .expect("a v10 request naming known distinct kinds validates in any order");
+    validate_framework_surface_request(&with_kinds(v10 - 1, vec![]))
+        .expect("a pre-v10 request without a demand validates");
+
+    let rejected = [
+        (v10, vec![], "empty v10 demand"),
+        (v10, vec![props, props], "duplicate kind"),
+        (v10, vec![99], "unknown kind"),
+        (v10 - 1, vec![props], "demand below the v10 floor"),
+    ];
+    for (schema_version, kinds, why) in rejected {
+        let err =
+            validate_framework_surface_request(&with_kinds(schema_version, kinds)).expect_err(why);
+        assert_eq!(err_variant_label(&err), "MalformedPayload", "{why}");
     }
 }
 
@@ -662,10 +702,10 @@ fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
 }
 
 #[test]
-fn schema_versions_one_and_ten_are_rejected_with_typed_errors() {
-    // 1 is below the floor; 10 is the first version ABOVE the current supported
-    // set ([2, 3, 4, 5, 6, 7, 8, 9]). Both are outside the closed set and rejected.
-    for version in [1u32, 10u32] {
+fn schema_versions_one_and_eleven_are_rejected_with_typed_errors() {
+    // 1 is below the floor; 11 is the first version ABOVE the current supported
+    // set ([2, 3, 4, 5, 6, 7, 8, 9, 10]). Both are outside the closed set and rejected.
+    for version in [1u32, 11u32] {
         let err = validate_type_info_graph_request(&legacy_envelope(
             wire::Operation::ResolveSymbol,
             version,
@@ -763,7 +803,7 @@ fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
 }
 
 #[test]
-fn supported_schema_version_set_is_exactly_two_through_nine() {
+fn supported_schema_version_set_is_exactly_two_through_ten() {
     assert_eq!(
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
         &[
@@ -774,6 +814,7 @@ fn supported_schema_version_set_is_exactly_two_through_nine() {
             6,
             7,
             8,
+            9,
             TYPEINFO_GRAPH_SCHEMA_VERSION
         ],
         "the supported set holds every version some operation still accepts: \
@@ -781,25 +822,27 @@ fn supported_schema_version_set_is_exactly_two_through_nine() {
          floor), schema 4 (member default/origin fields), schema 5 \
          (payload-side relation_proofs table), schema 6 (typed property keys), \
          schema 7 (the canonical object-spread-program node), schema 8 (the \
-         compiler-intrinsic application node) and schema 9 (current — the \
-         stated UTF-8 byte unit of every span)",
+         compiler-intrinsic application node), schema 9 (the stated UTF-8 byte \
+         unit of every span) and schema 10 (current — the framework-surface \
+         facet demand `requested_kinds`)",
     );
     assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
-    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 9);
+    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 10);
     assert_eq!(FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, 3);
+    assert_eq!(FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION, 10);
 }
 
 /// The supported-set advertisement surface: the `UnknownSchemaVersion`
 /// error payload's `server_supported_versions`, populated from
 /// `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` via
 /// `wire_error_unknown_schema_version` — the single advertisement
-/// source. It reports `[2, 3, 4, 5, 6, 7, 8, 9]`.
+/// source. It reports `[2, 3, 4, 5, 6, 7, 8, 9, 10]`.
 #[test]
-fn unknown_schema_version_error_advertises_two_through_nine() {
-    // Version 10 is the first version OUTSIDE the supported set — it triggers
-    // the UnknownSchemaVersion rejection (9 is now supported).
+fn unknown_schema_version_error_advertises_two_through_ten() {
+    // Version 11 is the first version OUTSIDE the supported set — it triggers
+    // the UnknownSchemaVersion rejection (10 is now supported).
     let err =
-        validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 10))
+        validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 11))
             .unwrap_err();
     let payload = match err.kind.as_ref().expect("error kind") {
         type_info_request_error::Kind::UnknownSchemaVersion(p) => p,
@@ -807,8 +850,8 @@ fn unknown_schema_version_error_advertises_two_through_nine() {
     };
     assert_eq!(
         payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9],
-        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8, 9]",
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8, 9, 10]",
     );
     assert_eq!(
         payload.server_supported_versions,
@@ -818,13 +861,13 @@ fn unknown_schema_version_error_advertises_two_through_nine() {
 
     // The constructor itself is the single advertisement source.
     let wire_payload = wire::wire_error_unknown_schema_version(
-        10,
+        11,
         TYPEINFO_GRAPH_SCHEMA_VERSION,
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
     );
     assert_eq!(
         wire_payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
 }
 
@@ -896,8 +939,8 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
 
         // Outside the global set: UnknownSchemaVersion regardless of
         // the operation (global membership runs first). 1 is below the
-        // floor; 10 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8, 9]).
-        for version in [1u32, 10u32] {
+        // floor; 11 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8, 9, 10]).
+        for version in [1u32, 11u32] {
             let err = validate_schema_version_for_operation(operation, version).unwrap_err();
             assert_eq!(
                 err_variant_label(&err),
