@@ -289,7 +289,7 @@ pub struct ContributionKey {
 }
 
 impl CanonicalEncode for ContributionKey {
-    const DOMAIN_TAG: &'static str = "verter.session.workspace_index.contribution_id.v1";
+    const DOMAIN_TAG: &'static str = "verter.session.workspace_index.contribution_id.v2";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_bytes(1, self.producer.digest().as_bytes());
@@ -311,7 +311,7 @@ impl CanonicalEncode for ContributionKey {
             }
         }
         encoder.field_enum_discriminant(10, self.partition.encoding());
-        encoder.field_u32(11, self.facet);
+        encoder.field_u32(12, self.facet);
     }
 }
 
