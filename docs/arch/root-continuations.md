@@ -1578,14 +1578,23 @@ An ignored acceptance test in the session's `semantic_poll_contract` group
 states the polled entry's contract for the flow gap and fails today:
 `a_flow_suspended_at_a_held_read_evaluates_its_body_once` (after the held
 read is delivered the flow evaluates its body again: one evaluation and its
-logical work more than the synchronous entry). Retaining that evaluation is blocked on the
-flow product execution authority, which is asserted `!Send`
-(`FlowProductStore`, `FlowProductExecution`, `FlowProductKey`,
-`SelectedFlowSite` in `flow_products.rs`), on the evaluator's borrowed
-explicit stacks (`ExprRun`, `RegionEvalFrame`, call frames, `NestedStore`),
-and on the dispatch read helpers the body calls (signature discovery, the
-contextual call executor, type-leaf lowering, the relation entry) being
-continuations themselves.
+logical work more than the synchronous entry). The flow product authority
+no longer stands in the way: a product execution's immutable identity
+(inputs, selection, subjects, storage representatives, captures) is shared
+by its snapshots, keys, sites and evidence, which are `Send + Sync`, while
+its mutable authority — the execution-lifetime declaration bank, budget,
+evidence and failure/sealing state — is owned by exactly one `Send`,
+non-`Clone` `FlowProductExecution` and advanced only through `&mut`.
+Snapshots (`FlowProductStore`, and the evaluator's `FlowFrameProducts`)
+carry no execution handle; a declaration-bearing read pairs a snapshot with
+its own execution (`FlowProductRead`), and a transfer bundle is validated
+whole before it commits. Retaining the evaluation is still blocked on the
+evaluator's borrowed explicit stacks (`ExprRun`, `RegionEvalFrame`, call
+frames, `NestedStore`) and its shared `Rc` state (the frame execution a
+nested evaluator reaches its enclosing frame's bank through, and the
+evaluation memos), and on the dispatch read helpers the body calls
+(signature discovery, the contextual call executor, type-leaf lowering, the
+relation entry) being continuations themselves.
 
 These are the production waits a component-meta or compile root can reach
 in the current tree, with the `WaitFamily` each announces. A synchronous

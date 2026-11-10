@@ -458,6 +458,8 @@ pub(super) struct NestedChildParts {
     pub(super) type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
     pub(super) binder_env: FlowBinderEnv,
     pub(super) captured_products: FlowProductStore,
+    /// The product authority `captured_products` advances under.
+    pub(super) captured_execution: super::super::flow_return_products::FlowFrameExecution,
     pub(super) declared_capture_types: rustc_hash::FxHashMap<
         verter_session_query::function_program::FlowBindingIdentity,
         SemanticNodeId,
@@ -822,6 +824,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_param_decls,
             binder_env,
             captured_products,
+            captured_execution,
             declared_capture_types,
             extended_capture_identities,
             execution_selection,
@@ -836,6 +839,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.bindings.function().clone(),
             self.binder_env,
             self.products.clone(),
+            std::rc::Rc::clone(&self.frame_execution),
         );
         let owned = store.keep(NestedOwned {
             content,
@@ -880,6 +884,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             plan,
             anchor,
             products: captured_products,
+            frame_execution: std::rc::Rc::new(std::cell::RefCell::new(captured_execution)),
             narrowing_writes: Vec::new(),
             observations: BodyCompletionObservations::none(),
             // A nested function value always evaluates its WHOLE
@@ -1043,7 +1048,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     })
                     .filter(|_| source_complete);
                 let finished = nested_evaluator
-                .products
+                .frame_execution
+                .borrow_mut()
                 .finish(nested_evaluator.plan.as_deref())
                 .and_then(|evidence| {
                     #[cfg(any(test, feature = "test-support"))]
@@ -1110,7 +1116,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let finished_ok = finished.is_ok();
                 if let Err(failure) = finished {
                     if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
-                        self.products.execution.borrow_mut().failure = Some(failure);
+                        self.frame_execution.borrow_mut().failure = Some(failure);
                         nested_evaluator.executed_walk.aborted = true;
                     }
                     nested_evaluator.record_degradation(

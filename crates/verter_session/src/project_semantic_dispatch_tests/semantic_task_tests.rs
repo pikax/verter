@@ -2471,6 +2471,8 @@ mod semantic_poll_contract {
     /// The frame's run that met the producer is run again once the producer
     /// answers, and each entry that run makes again is charged again, so the
     /// work is compared on its own: never below the synchronous entry's.
+    /// (Exact equality is asserted by the body-once control until the flow
+    /// frame retains its evaluation.)
     fn joined_evidence(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
@@ -2761,7 +2763,7 @@ mod semantic_poll_contract {
     /// the body is evaluated once in all, and the root delivers exactly the
     /// synchronous entry's evidence, logical work included.
     #[test]
-    #[ignore = "a flow frame drops its evaluation at an unanswered read and evaluates the body again after the delivery: its evaluator positions are not yet retained across a suspension"]
+    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery (5 evaluations and 71 work against 4 and 68): the retained owned evaluator lands in the later SKR-ROOT-DISPATCH-FLOW conversions"]
     fn a_flow_suspended_at_a_held_read_evaluates_its_body_once() {
         use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
         let (synchronous, synchronous_evaluations) = {
@@ -2808,6 +2810,221 @@ mod semantic_poll_contract {
         );
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         drop(tasks);
+    }
+
+    /// Hold every producer of the callee signature reads `f`'s body makes,
+    /// in both capture modes.
+    fn hold_callee_signatures<'g>(
+        host: &crate::VerterHost,
+        graph: &'g verter_type_engine::semantic_query_memo::SemanticGraphStore,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (
+        Vec<verter_execution::tasks::ExecutionTask>,
+        Vec<verter_type_engine::semantic_query_memo::ProducerLease<'g>>,
+    ) {
+        let mut keys = callee_signature_reads(dispatch);
+        keys.dedup();
+        keys.into_iter()
+            .flat_map(|key| {
+                [
+                    hold_producer(host, graph, key.clone()),
+                    hold_producer_with(host, graph, key, ReadCapture::expression_for_tests()),
+                ]
+            })
+            .unzip()
+    }
+
+    /// A flow frame held at its body's own read is owned `Send` state: its
+    /// task stays pending on another thread while the producer holds, and
+    /// once the producer goes away it is advanced to readiness on that
+    /// thread, the body continuing where it stopped. The entry then delivers
+    /// exactly the synchronous entry's evidence, logical work included, the
+    /// body evaluated once across both threads.
+    #[test]
+    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery: the retained owned evaluator lands in the later SKR-ROOT-DISPATCH-FLOW conversions"]
+    fn a_flow_held_at_its_bodys_read_resumes_on_another_thread_to_the_synchronous_read() {
+        use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+        let (synchronous, synchronous_evaluations) = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let before = flow_evaluations_for_tests();
+            let read = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+            (
+                joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+                flow_evaluations_for_tests() - before,
+            )
+        };
+        let host = contextual_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (tasks, leases) = hold_callee_signatures(&host, graph, &dispatch);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = flow_evaluations_for_tests();
+        let mut entry = dispatch.poll_query(contextual_return_key(&dispatch));
+        let (first, elsewhere) = while_held(leases, || {
+            let first = entry.poll(&waker).is_pending();
+            let elsewhere = entry.task().map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let before = flow_evaluations_for_tests();
+                            let pending = task.poll(&waker).is_pending();
+                            (pending, flow_evaluations_for_tests() - before)
+                        })
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, elsewhere)
+        });
+        assert!(first, "the flow yields while its body's read is held");
+        let Some((still_pending, held_evaluations)) = elsewhere else {
+            panic!("the held flow runs as a task");
+        };
+        assert!(
+            still_pending,
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let (ready, resumed_evaluations) = {
+            let task = entry.task().expect("the woken flow still runs as a task");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let before = flow_evaluations_for_tests();
+                        let ready = task.poll(&waker).is_ready();
+                        (ready, flow_evaluations_for_tests() - before)
+                    })
+                    .join()
+                    .expect("the resumed poll returns")
+            })
+        };
+        assert!(ready, "the woken flow completes on the other thread");
+        let here = flow_evaluations_for_tests() - before;
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the entry delivers what its task completed"),
+        };
+        drop(entry);
+        assert_eq!(
+            (
+                joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+                here + held_evaluations + resumed_evaluations,
+            ),
+            (synchronous, synchronous_evaluations),
+            "the flow resumed elsewhere evaluates its body once and reads exactly what the synchronous entry reads"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(tasks);
+    }
+
+    /// A flow frame held at its body's own read and released — dropped by
+    /// its consumer, or stopped by its request's cancellation, which wakes it
+    /// with the producer still held — drops the evaluation it retained: no
+    /// contextual call stays held, nothing is left open but the holders'
+    /// flights, and the dispatcher then reads the flow as the synchronous
+    /// entry does.
+    #[test]
+    fn a_flow_released_or_cancelled_while_its_bodys_read_is_held_leaves_nothing_open() {
+        use verter_type_engine::project_semantic_dispatch::ContextualRouteEventForTests as Event;
+        // What a read answers, apart from its receipt: a read after the
+        // release finds what the released flow already produced warm.
+        let answered =
+            |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+             host: &crate::VerterHost| {
+                let read = dispatch.execute_via_cold_build_helper(contextual_return_key(dispatch));
+                let ((answer, facts, suppress, partial, diagnostics, _), _) =
+                    joined_evidence(dispatch, &read, |answer| display_return(host, answer));
+                (answer, facts, suppress, partial, diagnostics)
+            };
+        let synchronous = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            answered(&dispatch, &host)
+        };
+        for cancelled in [false, true] {
+            let host = contextual_host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let (tasks, leases) = hold_callee_signatures(&host, graph, &dispatch);
+            let holders = graph.resident_flight_keys_for_tests().len();
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let _ = contextual_routes(&host);
+            let (pending, stopped, flights) = while_held(leases, || {
+                if cancelled {
+                    let request = budgeted_request(1);
+                    let _request =
+                        verter_type_engine::request_context::RequestContextGuard::install(
+                            Arc::clone(&request),
+                        );
+                    dispatch
+                        .with_semantic_task_for_tests(contextual_return_key(&dispatch), |slot| {
+                            let task = slot.as_mut().expect("the task is lent");
+                            let pending = task.poll_for_tests(&waker).is_pending();
+                            let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+                            request.cancel();
+                            let woken =
+                                counter.0.load(std::sync::atomic::Ordering::SeqCst) > before;
+                            let stopped = woken
+                                && matches!(
+                                    task.poll_for_tests(&waker),
+                                    Poll::Ready(TaskOutcomeForTests::Stopped)
+                                )
+                                && task.live_frames_for_tests() == 0;
+                            (
+                                pending,
+                                stopped,
+                                graph.resident_flight_keys_for_tests().len(),
+                            )
+                        })
+                        .expect("the flow root runs as a task")
+                } else {
+                    let mut entry = dispatch.poll_query(contextual_return_key(&dispatch));
+                    let pending = entry.poll(&waker).is_pending();
+                    drop(entry);
+                    (pending, true, graph.resident_flight_keys_for_tests().len())
+                }
+            });
+            let label = format!("cancelled={cancelled}");
+            assert!(pending, "{label}: the flow yields at its body's read");
+            assert!(
+                stopped,
+                "{label}: the cancellation wakes the waiting flow, which stops"
+            );
+            assert_eq!(
+                flights, holders,
+                "{label}: only the holders' flights of the held reads remain"
+            );
+            let routes = contextual_routes(&host);
+            let held_routes = routes
+                .iter()
+                .filter(|event| matches!(event, Event::Held { .. }))
+                .count();
+            let ended_routes = routes
+                .iter()
+                .filter(|event| matches!(event, Event::Released { .. } | Event::Resumed { .. }))
+                .count();
+            assert_eq!(
+                held_routes, ended_routes,
+                "{label}: every contextual call the flow held is released: {routes:?}"
+            );
+            assert_eq!(
+                dispatch.open_request_state_for_tests(),
+                NOTHING_OPEN,
+                "{label}"
+            );
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
+            drop(tasks);
+            assert_eq!(answered(&dispatch, &host), synchronous, "{label}");
+        }
     }
 
     /// The overload set of `both`'s call signatures — a family built in one

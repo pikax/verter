@@ -38,6 +38,7 @@ fn fixture(
     nested: bool,
 ) -> (
     FlowFrameProducts,
+    FlowFrameExecution,
     verter_session_query::flow::bundle::BoundFlowGraph,
     verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandPlan,
 ) {
@@ -50,6 +51,7 @@ fn fixture_with_resources(
     resources: FlowResourcePolicy,
 ) -> (
     FlowFrameProducts,
+    FlowFrameExecution,
     verter_session_query::flow::bundle::BoundFlowGraph,
     verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandPlan,
 ) {
@@ -128,13 +130,13 @@ fn fixture_with_resources(
         FlowProductBudget::for_demand_plan(&plan),
     )
     .unwrap();
-    let products = FlowFrameProducts::new(execution, &bound).unwrap();
-    (products, bound, plan)
+    let (products, frame) = FlowFrameProducts::new(execution, &bound).unwrap();
+    (products, frame, bound, plan)
 }
 
 #[test]
 fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
-    let (mut products, bound, plan) = fixture(
+    let (mut products, mut frame, bound, plan) = fixture(
         "function products(flag: boolean) { let x = 0; if (flag) { x = 1; x = 2; } else { x = 3; } return x; }",
         false,
     );
@@ -167,27 +169,30 @@ fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
     let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     products.bind_at(
+        &mut frame,
         &subject,
         DefiniteAssignmentProduct::assigned(),
         ReachingTypeProduct::of(number),
         Some(initializer),
     );
     let entry = products.clone();
-    let entry_writes = products.observe_writes();
+    let entry_writes = products.observe_writes(&frame);
     products.bind_at(
+        &mut frame,
         &subject,
         DefiniteAssignmentProduct::assigned(),
         ReachingTypeProduct::of(number),
         Some(writes[0]),
     );
     products.bind_at(
+        &mut frame,
         &subject,
         DefiniteAssignmentProduct::assigned(),
         ReachingTypeProduct::of(number),
         Some(writes[1]),
     );
     let consequent = products.clone();
-    products.restore_reaching_from(&subject, &entry, None, false);
+    products.restore_reaching_from(&mut frame, &subject, &entry, None, false);
     let definitions = |products: &FlowFrameProducts| {
         let Some(FlowProductValue::ReachingValue(value)) =
             products.get(FlowDomain::ReachingValue, &subject)
@@ -202,12 +207,14 @@ fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
         "arm rewind restores definition provenance with its type"
     );
     products.bind_at(
+        &mut frame,
         &subject,
         DefiniteAssignmentProduct::assigned(),
         ReachingTypeProduct::of(number),
         Some(writes[2]),
     );
     let joined = FlowFrameProducts::join(
+        &mut frame,
         &[&consequent, &products],
         &entry_writes,
         &GraphSemanticAlgebra(&graph),
@@ -215,7 +222,7 @@ fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
     let mut expected = vec![writes[1], writes[2]];
     expected.sort_unstable_by_key(|node| node.index());
     assert_eq!(definitions(&joined), expected, "the stale overwritten arm and entry definition are absent from the actual predecessor join");
-    assert!(joined.finish(Some(&plan)).unwrap().is_some());
+    assert!(frame.finish(Some(&plan)).unwrap().is_some());
 }
 #[test]
 fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuations() {
@@ -228,7 +235,7 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
             .collect::<Vec<_>>()
             .join(",");
         let source = format!("function products(){{{declarations}return {{{members}}};}}");
-        let (mut products, bound, _) = fixture_with_resources(
+        let (mut products, mut frame, bound, _) = fixture_with_resources(
             &source,
             false,
             FlowResourcePolicy {
@@ -250,6 +257,7 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
         assert_eq!(bindings.len(), count);
         for binding in &bindings {
             products.bind_at(
+                &mut frame,
                 &FlowBindingRef::Local(*binding),
                 DefiniteAssignmentProduct::assigned(),
                 ReachingTypeProduct::of(number),
@@ -265,13 +273,13 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
                 ),
             );
             assert!(
-                products.execution.borrow().failure.is_none(),
+                frame.failure.is_none(),
                 "input binding {binding:?}: {:?}",
-                products.execution.borrow().failure
+                frame.failure
             );
         }
         let before = products.clone();
-        let observation = products.observe_writes();
+        let observation = products.observe_writes(&frame);
         assert!(
             before.writes.ptr_eq(&products.writes),
             "snapshots share receipt storage"
@@ -290,15 +298,16 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
                 .unwrap(),
         );
         products.bind_at(
+            &mut frame,
             &subject,
             DefiniteAssignmentProduct::assigned(),
             ReachingTypeProduct::of(number),
             Some(definition),
         );
         assert!(
-            products.execution.borrow().failure.is_none(),
+            frame.failure.is_none(),
             "repeated write: {:?}",
-            products.execution.borrow().failure
+            frame.failure
         );
         let write_subject = products.write_subject(&subject).unwrap();
         assert!(
@@ -319,7 +328,7 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
         }
         WRITE_KEY_COMPARISONS.with(|work| work.set(0));
         assert_eq!(
-            products.writes_since(&observation),
+            products.writes_since(&mut frame, &observation),
             std::slice::from_ref(&subject)
         );
         let comparisons = WRITE_KEY_COMPARISONS.with(|work| work.get());
@@ -333,14 +342,19 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
             count,
             "replacement removes the earlier sequence entry"
         );
-        let surviving =
-            FlowFrameProducts::join(&[&before], &observation, &GraphSemanticAlgebra(&graph));
+        let surviving = FlowFrameProducts::join(
+            &mut frame,
+            &[&before],
+            &observation,
+            &GraphSemanticAlgebra(&graph),
+        );
         assert!(
-            surviving.writes_since(&observation).is_empty(),
+            surviving.writes_since(&mut frame, &observation).is_empty(),
             "a terminated arm contributes no receipt"
         );
         WRITE_KEY_COMPARISONS.with(|work| work.set(0));
         let continuing = FlowFrameProducts::join(
+            &mut frame,
             &[&before, &products],
             &observation,
             &GraphSemanticAlgebra(&graph),
@@ -348,18 +362,21 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
         let merge_comparisons = WRITE_KEY_COMPARISONS.with(|work| work.get());
         assert!(merge_comparisons <= 256, "one changed receipt after {count} prior bindings compared {merge_comparisons} keys during merge");
         assert_eq!(
-            continuing.writes_since(&observation),
+            continuing.writes_since(&mut frame, &observation),
             std::slice::from_ref(&subject),
             "an untouched predecessor cannot hide an executed write"
         );
-        let after_other_arm = before.observe_writes();
+        let after_other_arm = before.observe_writes(&frame);
         assert!(
-            products.writes_since(&after_other_arm).is_empty(),
+            products
+                .writes_since(&mut frame, &after_other_arm)
+                .is_empty(),
             "entry observations use the shared execution clock, including work on other snapshots"
         );
         // bounded-loop: fixed repeated-write fixture verifies receipt replacement.
         for _ in 0..16 {
             products.bind_at(
+                &mut frame,
                 &subject,
                 DefiniteAssignmentProduct::assigned(),
                 ReachingTypeProduct::of(number),
@@ -367,14 +384,14 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
             );
         }
         assert_eq!(
-            products.writes_since(&after_other_arm),
+            products.writes_since(&mut frame, &after_other_arm),
             std::slice::from_ref(&subject)
         );
         assert_eq!(products.writes.len(), count);
         assert_eq!(products.writes_by_sequence.len(), count);
-        products.restore_reaching_from(&subject, &before, None, true);
+        products.restore_reaching_from(&mut frame, &subject, &before, None, true);
         assert!(
-            products.writes_since(&observation).is_empty(),
+            products.writes_since(&mut frame, &observation).is_empty(),
             "rewind restores matching control receipts"
         );
     }
@@ -383,26 +400,32 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
 #[test]
 fn clause_write_observations_reject_foreign_executions() {
     let source = "function products(x:number){return x;}";
-    let (products, _, _) = fixture(source, false);
-    let (foreign, _, _) = fixture(source, false);
-    let observation = foreign.observe_writes();
-    assert!(products.writes_since(&observation).is_empty());
-    assert_eq!(
-        products.execution.borrow().failure,
-        Some(FlowProductFailure::ScopeMismatch)
-    );
-    let (other, _, _) = fixture(source, false);
+    let (products, mut frame, _, _) = fixture(source, false);
+    let (foreign, foreign_frame, _, _) = fixture(source, false);
+    let observation = foreign.observe_writes(&foreign_frame);
+    assert!(products.writes_since(&mut frame, &observation).is_empty());
+    assert_eq!(frame.failure, Some(FlowProductFailure::ScopeMismatch));
+    let (other, mut other_frame, _, _) = fixture(source, false);
     let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
-    let joined = FlowFrameProducts::join(&[&other], &observation, &GraphSemanticAlgebra(&graph));
-    assert_eq!(
-        joined.execution.borrow().failure,
-        Some(FlowProductFailure::ScopeMismatch)
+    let _joined = FlowFrameProducts::join(
+        &mut other_frame,
+        &[&other],
+        &observation,
+        &GraphSemanticAlgebra(&graph),
+    );
+    assert_eq!(other_frame.failure, Some(FlowProductFailure::ScopeMismatch));
+    // A snapshot of one execution never reads another's declarations.
+    let (stray, _, _, _) = fixture(source, false);
+    let (_, unrelated, _, _) = fixture(source, false);
+    assert!(
+        stray.read(&unrelated).is_none(),
+        "a snapshot reads declarations only with its own execution"
     );
 }
 
 #[test]
 fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
-    let (mut entering, bound, _) =
+    let (mut entering, mut frame, bound, _) =
         fixture("function products(x:string|number){x=1;return x;}", false);
     let binding = bound
         .bundle()
@@ -423,12 +446,14 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     entering.bind(
+        &mut frame,
         &subject,
         DefiniteAssignmentProduct::default(),
         ReachingTypeProduct::of(string),
     );
-    entering.set_declared_type(&subject, Some(string));
+    entering.set_declared_type(&mut frame, &subject, Some(string));
     entering.set_narrowing(
+        &mut frame,
         &subject,
         NarrowingProduct::new([
             verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowingFact {
@@ -439,23 +464,24 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
             },
         ]),
     );
-    let observation = entering.observe_writes();
+    let observation = entering.observe_writes(&frame);
     let mut end = entering.clone();
     let definition = bound
         .bundle()
         .graph()
         .expr_site_node(bound.bundle().skeleton().writes[0].value.unwrap());
     end.bind_at(
+        &mut frame,
         &subject,
         DefiniteAssignmentProduct::assigned(),
         ReachingTypeProduct::of(number),
         Some(definition),
     );
     assert_eq!(
-        end.writes_since(&observation),
+        end.writes_since(&mut frame, &observation),
         std::slice::from_ref(&subject)
     );
-    entering.apply_executed_write_from(&subject, &end);
+    entering.apply_executed_write_from(&mut frame, &subject, &end);
     for domain in [
         FlowDomain::ReachingValue,
         FlowDomain::ReachingType,
@@ -465,7 +491,7 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
     }
     assert!(entering.narrowing(&subject).is_none());
     assert_eq!(
-        entering.declared_type(&subject),
+        entering.declared_type(&frame, &subject),
         Some(string),
         "source authority is independent of continuation writes"
     );
@@ -473,7 +499,7 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
 
 #[test]
 fn declared_capture_input_records_its_hub_and_preserves_unassigned_state() {
-    let (mut products, bound, plan) = fixture(
+    let (mut products, mut frame, bound, plan) = fixture(
         "function products() { const read = () => x; let x: 'a' | 'b' = 'a'; return read; }",
         true,
     );
@@ -497,6 +523,7 @@ fn declared_capture_input_records_its_hub_and_preserves_unassigned_state() {
     let unassigned = DefiniteAssignmentProduct::default();
     let subject = FlowBindingRef::Captured(identity);
     products.import_capture_input(
+        &mut frame,
         &subject,
         unassigned,
         Some(ReachingTypeProduct::of(string)),
@@ -518,6 +545,6 @@ fn declared_capture_input_records_its_hub_and_preserves_unassigned_state() {
         "only the child's actual input hub defines the imported value"
     );
     let key = products.key(FlowDomain::ReachingValue, &subject).unwrap();
-    let evidence = products.finish(Some(&plan)).unwrap().unwrap();
+    let evidence = frame.finish(Some(&plan)).unwrap().unwrap();
     assert!(evidence.executed(&key));
 }

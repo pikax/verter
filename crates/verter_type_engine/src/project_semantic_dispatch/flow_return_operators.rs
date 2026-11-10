@@ -1153,7 +1153,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 // test), on its FALSE reading for `||`.
                 let right_positive = operator != SliceLogical::Or;
                 let entry_products = self.products.clone();
-                let entry_writes = self.products.observe_writes();
+                let entry_writes = self.products.observe_writes(&self.frame_execution.borrow());
                 let narrow_mark = self.narrowing_snapshot();
                 self.apply_guard_scoped(guard, right_positive);
                 let outcome = self.eval_operand_value(right);
@@ -1203,7 +1203,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         guard: &SliceGuard,
     ) -> Positional<SemanticNodeId> {
         let entry_products = self.products.clone();
-        let entry_writes = self.products.observe_writes();
+        let entry_writes = self.products.observe_writes(&self.frame_execution.borrow());
         let narrow_mark = self.narrowing_snapshot();
         let mut applied = 0;
         let steps = spine
