@@ -1202,10 +1202,32 @@ are.
   it suspends the frame with the build owned by the frame
   (`FrameBuild::Family`), and the delivery resumes it. A family read from an
   entry outside every open checker obligation drives on the runtime from its
-  synchronous entry as well, so both entries price their reads alike. A
-  query whose entry first normalizes its subject (a carrier, an apparent
-  wrapper or apparent signatures) keeps the prelude that entry records and is
-  read in place by the frame.
+  synchronous entry as well, so both entries price their reads alike.
+- **Retained entry admission.** A projection whose entry canonicalizes its
+  sugar (`ProjectMember`, `IndexedAccess`) or normalizes its subject (a
+  `BareRef`, `ImportType` or `typeof` carrier; a scope-less subject read
+  through its apparent wrapper or apparent signatures) is admitted before
+  it is claimed by an owned computation (`query_entry::QueryEntryBuild`):
+  sugar, then the carrier's resolution (`carrier::CarrierRead`), then the
+  wrapper's global lookup and instantiation, then the prelude. Each stage
+  names the query, port or file it reads next and retains the admission's
+  tracer, the carrier's held observation (`ObservedRead<()>`, reopened for
+  the next stage) and what it settled; the carrier stays on the
+  dispatcher's normalization record (the pre-memo cycle guard) until it
+  settles or its holder abandons it. One computation, three drivers: the
+  synchronous entry admits in place; a polled root
+  (`RootPollState::Admitting`) polls each admission read as a nested root,
+  and each file its lookup waits on as a frame polls it,
+  and enters the admitted key, with the connected demand and isolated-root
+  identity it kept, only once the admission settles; a frame whose family
+  needs such a projection admits it in the frame (`FrameBuild::Admitting`),
+  each admission read a need of that frame, and then needs the admitted key
+  (`FrameBuild::FamilyAdmitted`). The prelude travels with the admitted key
+  to the frame that produces it, whose publication merges its facts and
+  verdict, and the reader attributes the delivered read with it, as the
+  synchronous entry does. Admission is no query of its own and records no
+  receipt. Work is counted per stage
+  (`SemanticGraphStats::admission_stages_walked`).
 - **File loads.** `IndexedInputs::begin_indexed_load` answers whether a file
   is servable without loading it, or returns an owned `IndexedLoad` over the
   host's `begin_load` handoff, which integrates the file when Analysis is
@@ -1545,15 +1567,26 @@ made in place inside a stage:
 - the member and index reads of object, spread-program, heritage
   intersection, mapped, tuple and array surfaces;
 - apparent-member, apparent-wrapper and apparent-type reads;
-- carrier resolution;
+- carrier resolution inside a hop (the walker's own `resolve_carrier_subject_fact`
+  read of a nested carrier);
 - a `ReturnType` flow member hop;
 - the reads inside composite joins;
 - terminal expansion and shallow synthesis;
 - the deferred evaluator it drives.
 
-A path whose subject is a carrier or reads an apparent wrapper is still read
-in place where it is needed, as is one spelled as `ProjectMember` or
-`IndexedAccess` sugar. Their entry preludes are not yet retained.
+A projection read through sugar or over a carrier or apparent-wrapper subject
+is admitted by its retained entry admission (above), from a polled root and
+from a frame's family need alike. What that admission still answers in place
+is, as for families, confined to its ports and in-place resolver lookups: the
+carrier head's bare-name and import resolution over prepared declarations
+(`plan_bare_ref_head_steps`, `plan_import_type_head_steps`), the finish of a
+builtin, external-module or `typeof` head over its arguments
+(`plan_carrier_finish`), and the wrapper's global lookup ports. The lookup's
+files are waited on as a frame waits on them, from a polled root too. An
+admission read whose own entry would admit it again — an import type's
+qualified tail over a carrier — is read in place. `keyof`, mapped-type and
+signature-list roots over such subjects still enter the synchronous cold
+admission, since those families do not build as continuations yet.
 
 Every other family a frame or cold build reaches still builds in one
 synchronous step: mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates

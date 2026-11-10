@@ -146,6 +146,7 @@ mod module_object;
 pub mod output_materialization;
 mod owning_dispatch;
 pub use owning_dispatch::OwningDispatch;
+mod query_entry;
 pub mod query_error_disposition;
 mod query_frames;
 pub(crate) mod request_completions;
@@ -4040,74 +4041,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     // arch test parses `crates/verter_session/src/**/*.rs` (excluding
     // tests, stripping cfg(test) regions) and asserts exactly one
     // match.
-    /// Run carrier-subject normalization INSIDE its own fact tracer when (and
-    /// only when) the key's subject is a `BareRef` / `ImportType` carrier;
-    /// capture the facts its head resolution observed so they can be merged into
-    /// the build admission's read-set signature.
-    ///
-    /// The non-carrier common case (the overwhelming majority of keys) takes the
-    /// cheap probe and returns `(key, CarrierNormalizationPrelude::none())` with
-    /// NO tracer allocation. The carrier case installs a tracer around
-    /// [`Self::normalize_carrier_subject_key`], finalises it, and records the
-    /// traced facts plus whether the prelude was mutation-unstable / observed
-    /// a fenced serve (either ⇒ `cache_suppress`).
-    ///
-    /// Re-entrancy is sound: nested dispatch inside the normalization installs
-    /// its OWN tracer (a TLS stack), and tracer fan-out records into every
-    /// active level; the carrier-normalization cycle guard (`carrier_normalizing`)
-    /// already bounds a carrier → carrier loop.
-    fn trace_carrier_subject_normalization_if_needed(
+    /// The prelude an entry's admission records once it settled its key
+    /// (`query_entry`): the facts its tracer observed — the dependencies the
+    /// carrier head resolution and the apparent-wrapper lookup read at the
+    /// query entry, BEFORE the build's own tracer — with whether the
+    /// admission was mutation-unstable or observed a fenced serve (either ⇒
+    /// `cache_suppress`), its typed incompleteness and the carrier it
+    /// resolved. The non-carrier common case runs no admission and records
+    /// [`CarrierNormalizationPrelude::none`].
+    fn carrier_prelude(
         &self,
-        key: SemanticQueryKey,
-    ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
-        // Cheap subject-shape probe — a key with neither a carrier subject,
-        // nor a first step through a shared subject's apparent wrapper, nor a
-        // subject taking its signatures from a global wrapper skips the
-        // tracer.
-        if !self.key_subject_is_carrier(&key)
-            && !self.key_reads_apparent_wrapper(&key)
-            && !self.key_reads_apparent_signatures(&key)
-        {
-            return (key, CarrierNormalizationPrelude::none());
-        }
-        let ((normalized, partial_reasons, normalized_source), finalise) =
-            crate::fact_signature_helpers::install_fact_tracer(
-                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
-                || {
-                    let (normalized, normalized_source) =
-                        self.normalize_carrier_subject_key_with_fact(key);
-                    let mut partial_reasons =
-                        self.carrier_normalization_partial_reasons(&normalized);
-                    if let Some(source) = normalized_source {
-                        partial_reasons =
-                            partial_reasons.union(source.status.completeness().reasons());
-                    }
-                    // The wrapper read is scoped to the demand's project here,
-                    // so its lookup's facts root the admitted entry too: a
-                    // member path through an apparent wrapper, or a
-                    // signature read of a subject taking its signatures from
-                    // one.
-                    let normalized = self.scope_apparent_wrapper_subject(normalized);
-                    let normalized = self.scope_apparent_signature_subject(normalized);
-                    // Test-only: force a fenced (ReturnOnly) serve observation onto
-                    // the prelude tracer so the suppress wiring is exercisable
-                    // without a superseded-artifact fixture. Zero-cost when unset.
-                    #[cfg(any(test, feature = "test-support"))]
-                    if self
-                        .binding
-                        .observers
-                        .forcing
-                        .carrier_normalization_force_fence_for_tests
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        crate::fact_tracing::note_non_cacheable_read_fan_out(
-                            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
-                        );
-                    }
-                    (normalized, partial_reasons, normalized_source)
-                },
-            );
-        let prelude = match finalise {
+        finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+        partial_reasons: crate::semantic_query::PartialReasonSet,
+        normalized_source: Option<carrier::CarrierResolution>,
+    ) -> CarrierNormalizationPrelude {
+        match finalise {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
                 CarrierNormalizationPrelude {
                     facts: Some(facts),
@@ -4141,8 +4089,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     normalized_source,
                 }
             }
-        };
-        (normalized, prelude)
+        }
     }
 
     /// A node-domain family build's output in its key's value domain: an
@@ -5025,64 +4972,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //     relation callers before the family memo or wait graph sees them.
         // Other variants key off [`SemanticNodeId`]s that are already hashed
         // verbatim.
-        let key = match key {
-            SemanticQueryKey::Relate {
-                mut source,
-                mut target,
-                relation,
-                policy,
-                source_freshness,
-                inference_context,
-                context,
-            } => {
-                relation.canonicalize_operands(&mut source, &mut target);
-                SemanticQueryKey::Relate {
-                    source,
-                    target,
-                    relation,
-                    policy,
-                    source_freshness,
-                    inference_context,
-                    context,
-                }
-            }
-            SemanticQueryKey::ProjectMember { base, member, mode } => {
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path: verter_type_expr::OwnedSlice::from(
-                        vec![PathSegment::Member(PropertyKey::identifier(member))]
-                            .into_boxed_slice(),
-                    ),
-                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
-                }
-            }
-            SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path: verter_type_expr::OwnedSlice::from(
-                        vec![PathSegment::Index(index)].into_boxed_slice(),
-                    ),
-                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
-                }
-            }
-            SemanticQueryKey::ReduceUnion {
-                members,
-                nullability,
-            } => SemanticQueryKey::ReduceUnion {
-                members: canonicalize_node_list(self.graph().store(), &members),
-                nullability,
-            },
-            SemanticQueryKey::ReduceIntersection {
-                input,
-                purpose,
-                context,
-            } => SemanticQueryKey::ReduceIntersection {
-                input,
-                purpose,
-                context,
-            },
-            other => other,
-        };
+        let key = self.canonicalize_entry_key(key);
 
         // An isolated root whose refusal is sealed answers from it: the
         // failed evaluation is never run again under the same allowances.
@@ -5117,7 +5007,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // common case allocates NO tracer. The captured facts merge into the
         // build admission's signature; a mutation-unstable / fenced-serve prelude
         // suppresses caching (the value still flows, the memo refuses).
-        let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
+        let (key, carrier_prelude) = self.admit_entry_in_place(key);
 
         let query_depth = match self.charge_query_entry(&key, preexisting_trip, true) {
             Ok(guard) => guard,

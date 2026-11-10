@@ -6598,6 +6598,11 @@ pub struct SemanticGraphStats {
     /// computed again — a walk resumed from its root, or a helper re-entered
     /// with its answers cached — counts again.
     pub projection_hops_walked: u64,
+    /// Stages query entries computed admitting their keys, wherever they
+    /// ran: one per stage of an entry's sugar, carrier, apparent-wrapper and
+    /// signature-subject normalization, counted where the stage runs,
+    /// outside every charge and its rollback.
+    pub admission_stages_walked: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,
@@ -12953,7 +12958,8 @@ mod tests {
     ///   mapped_per_k_materializations, substitute_memo_hits,
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
-    ///   continuation_stages_resumed, projection_hops_walked.
+    ///   continuation_stages_resumed, projection_hops_walked,
+    ///   admission_stages_walked.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -12991,6 +12997,7 @@ mod tests {
             "continuation_builds_begun",
             "continuation_stages_resumed",
             "projection_hops_walked",
+            "admission_stages_walked",
         ];
         for field in expected_to_fire {
             assert!(

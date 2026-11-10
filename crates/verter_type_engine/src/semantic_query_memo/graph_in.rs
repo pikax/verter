@@ -292,6 +292,13 @@ impl<M: ObserveExec> GraphIn<'_, M> {
             self.store.record_projection_hop();
         }
     }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_admission_stage(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_admission_stage();
+        }
+    }
     /// Record a path sample only for captured execution or test work accounting.
     #[inline(always)]
     pub fn record_path_length(self, length: u32) {

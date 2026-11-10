@@ -464,7 +464,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// CHEAP probe: is `key` a path whose first step reads a scope-less
     /// subject's apparent wrapper, or a reducing `keyof` of a scope-less
-    /// array ([`Self::scope_apparent_wrapper_subject`])?
+    /// array (the wrapper stage of its entry's admission, `query_entry`)?
     pub(super) fn key_reads_apparent_wrapper(&self, key: &SemanticQueryKey) -> bool {
         let scope_less = |base: SemanticNodeId| {
             self.graph()
@@ -487,62 +487,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// Rewrite a path whose first step reads the apparent wrapper of a
-    /// scope-less subject (`string`, `1`, `T[]`, `[1, 2]` — nodes every
-    /// project shares) to the path over the wrapper the demand's project
-    /// declares, BEFORE memo admission: `string.length` read for a file of a
-    /// project whose `String` declares it is `String.length` over THAT
-    /// surface, so the admitted entry is that project's and a warm repeat is
-    /// served from it. A reducing `keyof` of a scope-less array is the
-    /// `keyof` of that wrapper likewise: `keyof T[]` IS `keyof Array<T>`. A
-    /// project that declares no such wrapper reads the path over the `Miss`
-    /// subject, the answer every such project shares. With no demand site
-    /// and no request the key stays as it is, and the path walker and the
-    /// `keyof` builder keep that read out of the shared memo.
-    pub(super) fn scope_apparent_wrapper_subject(&self, key: SemanticQueryKey) -> SemanticQueryKey {
-        if !self.key_reads_apparent_wrapper(&key) {
-            return key;
-        }
-        let scoped = |base: SemanticNodeId, context: ProjectionReductionContext| {
-            self.apparent_wrapper_of(base)
-                .zip(self.wrapper_demand_canonical())
-                .and_then(|((name, args), canonical)| {
-                    match self.global_wrapper_surface_in(name, &args, canonical.as_ref(), context) {
-                        GlobalWrapper::Surface(surface) => Some(surface),
-                        GlobalWrapper::Absent => Some(self.opaque(QueryError::Miss)),
-                        GlobalWrapper::Unsettled => None,
-                    }
-                })
-                .unwrap_or(base)
-        };
-        match key {
-            SemanticQueryKey::ProjectPath {
-                base,
-                path,
-                context,
-            } => SemanticQueryKey::ProjectPath {
-                // The surface `Self::global_wrapper_surface` reads.
-                base: scoped(
-                    base,
-                    ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Shallow,
-                    ),
-                ),
-                path,
-                context,
-            },
-            SemanticQueryKey::KeyOf { base, context } => SemanticQueryKey::KeyOf {
-                base: scoped(base, ProjectionReductionContext::structural_transit()),
-                context,
-            },
-            _ => unreachable!("only a ProjectPath or a KeyOf reads an apparent wrapper"),
-        }
-    }
-
     /// `keyof` of an array or readonly array that kept its own key — one
     /// declared in a file, whose project its scope names, or a scope-less
     /// one read with no demand site
-    /// ([`Self::scope_apparent_wrapper_subject`] rewrites every other):
+    /// (the wrapper stage of its entry's admission, `query_entry`, rewrites every other):
     /// the keys of its apparent wrapper (`keyof T[]` IS `keyof Array<T>`),
     /// the `number` the wrapper's index signature contributes beside its
     /// member names, so a numeric-string literal is no key of it. A
@@ -763,46 +711,5 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             SemanticQueryKey::SignaturesOfType { subject, .. }
                 if self.apparent_wrapper_of(*subject).is_some()
         )
-    }
-
-    /// Rewrite a `SignaturesOfType` read of a subject every project shares
-    /// (`string`, `1`, `T[]`) to the same read over the wrapper the
-    /// demanding project declares, BEFORE memo admission, so the admitted
-    /// entry's key names that project's wrapper and a warm repeat is served
-    /// from it. A project declaring no such wrapper gives the subject no
-    /// apparent signature — the answer `never` has, which every project
-    /// shares — and the lookup facts of the miss root that entry, so a
-    /// declaration appearing later misses it. With no demand site the key
-    /// stays as it is: its build reads the wrapper for the demand and stays
-    /// out of the shared memo.
-    pub(super) fn scope_apparent_signature_subject(
-        &self,
-        key: SemanticQueryKey,
-    ) -> SemanticQueryKey {
-        let SemanticQueryKey::SignaturesOfType {
-            subject,
-            kind,
-            context,
-        } = key
-        else {
-            return key;
-        };
-        let scoped = self
-            .apparent_wrapper_of(subject)
-            .zip(self.wrapper_demand_canonical())
-            .and_then(|((name, args), canonical)| {
-                match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
-                    GlobalWrapper::Surface(surface) => Some(surface),
-                    GlobalWrapper::Absent => Some(self.graph().intern_node(
-                        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Never),
-                    )),
-                    GlobalWrapper::Unsettled => None,
-                }
-            });
-        SemanticQueryKey::SignaturesOfType {
-            subject: scoped.unwrap_or(subject),
-            kind,
-            context,
-        }
     }
 }

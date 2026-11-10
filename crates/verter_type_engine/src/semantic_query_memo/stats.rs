@@ -207,6 +207,8 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) continuation_stages_resumed: Tally,
     /// Hops path projections computed, once per hop.
     pub(super) projection_hops_walked: Tally,
+    /// Admission stages query entries computed, once per stage.
+    pub(super) admission_stages_walked: Tally,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) path_length_samples: Mutex<SampleCollector>,
     pub(super) decl_subexpression_lowering_count: Tally,
@@ -283,6 +285,7 @@ impl Default for AtomicSemanticGraphStats {
             continuation_builds_begun: Tally::default(),
             continuation_stages_resumed: Tally::default(),
             projection_hops_walked: Tally::default(),
+            admission_stages_walked: Tally::default(),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             decl_subexpression_lowering_count: Tally::default(),
             relation_check_count: Tally::default(),
@@ -491,6 +494,7 @@ impl SemanticGraphStore {
             continuation_builds_begun: stats.continuation_builds_begun.load(Ordering::Relaxed),
             continuation_stages_resumed: stats.continuation_stages_resumed.load(Ordering::Relaxed),
             projection_hops_walked: stats.projection_hops_walked.load(Ordering::Relaxed),
+            admission_stages_walked: stats.admission_stages_walked.load(Ordering::Relaxed),
             path_length_p50,
             path_length_p95,
             decl_subexpression_lowering_count: stats
