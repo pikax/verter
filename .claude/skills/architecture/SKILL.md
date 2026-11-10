@@ -84,14 +84,14 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 | `CssVarManipulation` | `types.rs` | Script-side CSS variable manipulation via DOM APIs |
 | `DynamicStyleVar` | `template.rs` | CSS variable set via `:style` binding in template |
 | `StaticStyleVar` | `template.rs` | CSS variable set via static `style` attribute in template |
-| `CssVarFlow` | `project_index.rs` | Cross-component CSS variable flow (definitions + usages + manipulations) |
+| `CssVarFlow` | `style.rs` | Cross-component CSS variable flow (definitions + usages + manipulations), filled by the host from workspace-index candidates |
 
 **CSS Variable Analysis (three-block tracking):**
 
 - **Style**: the balanced component-value IR projects `AnalyzedCustomProperty` (definitions with values/spans) and `AnalyzedVarUsage` (var() references). `extract_var_references()` handles nested var() fallbacks without evaluating values.
 - **Template**: `extract_dynamic_style_vars()` extracts CSS vars from `:style="{ '--color': val }"`. `extract_static_style_vars()` extracts from `style="--color: red"`.
 - **Script**: `try_extract_css_var_manipulation()` detects `el.style.setProperty('--x', val)`, `getPropertyValue('--x')`, `removeProperty('--x')`.
-- **Cross-component**: `ProjectIndex.css_var_flow(name)` and `VerterHost.css_var_flow(name)` return `CssVarFlow` with all files defining/referencing/manipulating a variable.
+- **Cross-component**: `VerterHost.css_var_flow(name)` answers from the workspace index and returns `CssVarFlow` beside the answer's `page.status`, listing the files defining/referencing/manipulating a variable.
 
 **Selector matching algorithm** (`match_selector()`):
 
@@ -119,7 +119,7 @@ New fact families add a producer-local schema row and partition; they do not edi
 
 ## Analysis MCP Server (`verter_mcp`)
 
-`verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP for AI agents. `VerterMcpServer` wraps `VerterHost` (with `AnalysisScope::LSP`), `Linter`, and `ActionEngine`. Tools auto-load via `ensure_loaded()`; template analysis triggers `ensure_template_analysis()` transparently. Cross-file tools iterate all loaded files (no `ProjectIndex` exposed from host). Scoring engine computes composite 0-100 quality scores from a11y, lint, template complexity, API surface, CSS health, and reactivity dimensions.
+`verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP for AI agents. `VerterMcpServer` wraps `VerterHost` (with `AnalysisScope::LSP`), `Linter`, and `ActionEngine`. Tools auto-load via `ensure_loaded()`; template analysis triggers `ensure_template_analysis()` transparently. Cross-file tools iterate all loaded files; their move to workspace-index candidates is listed in the inventory of the atomic semantic contributions decision. Scoring engine computes composite 0-100 quality scores from a11y, lint, template complexity, API surface, CSS health, and reactivity dimensions.
 
 Both binaries (`verter-mcp`, and the LSP-decoupling twin `verter-mcp-server`) run the one shared entry body `verter_mcp::run::run`. The HTTP transport binds before its initial scan and announces the real bound port as a one-line stdout readiness record (`verter_mcp::readiness`, mirrored by `packages/vue-vscode/src/mcpServer.ts`); `--client-pid` arms the same `ClientProcessGuard` containment as the LSP. The VS Code extension spawns this standalone binary per LSP start attempt (`createMcpServerLifecycle`: awaited replacement, bounded crash respawn, provider-registration teardown on death) — see `docs/contributing/lsp-mcp-decoupling.md`.
 
@@ -214,17 +214,9 @@ Populated after compilation by converting `RawTemplateData` from `verter_compile
 | `emit_definitions` | `Vec<AnalyzedEmitDefinition>` | Emits from defineEmits |
 | `comment_directives` | `Vec<CommentDirective>` | `@verter:disable`, `@verter:todo`, etc. |
 
-### ProjectIndex
+### Cross-file candidates
 
-Aggregates file-level usage into project-wide indexes:
-
-- **provide_index**: provide key → files that call `provide(key)`
-- **inject_index**: inject key → files that call `inject(key)`
-- **component_graph**: file → components it uses (forward edges)
-- **component_reverse_index**: component name → files that use it
-- **class_index**: CSS class name → files that define it
-- **v_bind_css_index**: v-bind CSS expression → files that use it
-- **custom_property_index**: CSS custom property → files that define it
+`verter_semantic` keeps no cross-file candidate storage. Component uses, stylesheet symbols, names and import links are posted by the host producer to the workspace index (`verter_session::workspace_index`, above) and read back as bounded, snapshot-qualified candidates; provide/inject, event, store and route registrations reach the index's Registrations table from their producing vertical through the same contribution interface. Lint rules receive cross-file verdicts through `verter_diagnostics::CrossFileSnapshot`, which the owning operation fills.
 
 ### Data Flow
 
@@ -242,10 +234,10 @@ verter_session (conversion layer)
     |-- RawTemplateData --> TemplateAnalysisSnapshot
     |-- CssParsed*      --> StyleBlockAnalysis
     |-- Resolves import paths, populates resolved_canonical_id
-    |-- Updates ProjectIndex with file usage
+    |-- Projects demanded per-file facts into the workspace index
     |
     v
-Consumers (LSP, build, linter) query snapshots + ProjectIndex
+Consumers (LSP, build, linter) query snapshots + workspace-index candidates
 ```
 
 ## Document rendering substrate
