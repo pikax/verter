@@ -33,7 +33,8 @@ pub use facts::{
     DemandItem, FactCoverage, FactReceipt, IndexDemand, IndexDemandPartition, IndexSurface,
 };
 pub use host_projection::{
-    CssVarCandidates, IndexReconcileWork, PartitionShortfall, ReconcileStatus,
+    registration_domain, registration_domain_lookup, registration_posting_key, CssVarCandidates,
+    IndexReconcileWork, PartitionShortfall, ReconcileStatus,
 };
 pub use identity::{
     CatalogRevisionId, ContributionId, ContributionKey, DemandEpoch, ExtensionId,

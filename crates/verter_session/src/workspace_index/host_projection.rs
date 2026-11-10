@@ -62,10 +62,10 @@ use super::query::{
     Lookup, QueryBudgets, QueryWork, UnitPage,
 };
 use super::records::{
-    ComponentRow, Endpoint, FactCause, FactQuality, IndexRecord, IndexRow, LinkRelation, LinkRole,
-    LinkRow, NameRole, NameRow, OriginUnavailable, PostingKey, Provenance, RecordOrigin,
-    RecordSlot, SlotKind, SourceAnchor, StyleRole, StyleScope, StyleSurface, StyleSymbolKind,
-    StylesheetRow, TypedSubject,
+    ComponentRow, Endpoint, FactCause, FactQuality, IndexRecord, IndexRow, KeyFamily, LinkRelation,
+    LinkRole, LinkRow, NameRole, NameRow, OriginUnavailable, PostingKey, Provenance, RecordOrigin,
+    RecordSlot, RegistrationKey, RegistrationRow, SlotKind, SourceAnchor, StyleRole, StyleScope,
+    StyleSurface, StyleSymbolKind, StylesheetRow, TypedSubject,
 };
 use super::snapshot::{Contribution, CoverageRecord, IndexSnapshot};
 use crate::host_executor::HostSourceData;
@@ -86,7 +86,11 @@ impl IndexSurface {
             Self::ComponentInventory | Self::ComponentUses | Self::MarkupClassReferences => {
                 language.is_framework_carrier()
             }
-            Self::StyleDefinitions | Self::CssVariables | Self::Bindings | Self::Imports => true,
+            Self::StyleDefinitions
+            | Self::CssVariables
+            | Self::Bindings
+            | Self::Imports
+            | Self::Registrations => true,
         }
     }
 
@@ -100,7 +104,8 @@ impl IndexSurface {
             | Self::ComponentUses
             | Self::MarkupClassReferences
             | Self::Bindings
-            | Self::Imports => true,
+            | Self::Imports
+            | Self::Registrations => true,
         }
     }
 }
@@ -170,6 +175,39 @@ fn result_contract() -> &'static ResultContractId {
     CONTRACT.get_or_init(|| ResultContractId::from_canonical(&Named("host-file-facts-rows")))
 }
 
+/// The registration operations this producer delivers: each names the owner
+/// fact a registration row copies.
+const REGISTRATION_OPERATIONS: [&str; 6] = ["provide", "inject", "define", "use", "emit", "listen"];
+
+/// Registration domains the host posts. Each names the owner analysis fact a
+/// row copies; the owning operation still validates every candidate.
+pub mod registration_domain {
+    /// `provide`/`inject` calls with a literal key.
+    pub const PROVIDE_INJECT: &str = "provide-inject";
+    /// Store definitions and store uses, keyed by the exported or called name.
+    pub const STORE: &str = "store";
+    /// Declared emits and template listeners, keyed by event name.
+    pub const EVENT: &str = "event";
+}
+
+/// The posting key of one registration: its domain, a colon, then its key,
+/// so one domain is one prefix walk.
+#[must_use]
+pub fn registration_posting_key(domain: &str, key: &str) -> PostingKey {
+    PostingKey::exact(PartitionFamily::Registrations, &format!("{domain}:{key}"))
+}
+
+/// A walk of every registration of one domain.
+#[must_use]
+pub fn registration_domain_lookup(domain: &str) -> Lookup {
+    Lookup::Prefix {
+        partition: PartitionFamily::Registrations,
+        family: KeyFamily::Exact,
+        version: 0,
+        prefix: Arc::from(format!("{domain}:")),
+    }
+}
+
 /// This producer's own table layouts. No catalog owner covers them, which the
 /// admission and every basis under it record as absent.
 fn admission() -> &'static SchemaAdmission {
@@ -182,6 +220,10 @@ fn admission() -> &'static SchemaAdmission {
                 table: surface.family().table(),
                 version: SCHEMA_VERSION,
             })
+            .collect(),
+        delivered_operations: REGISTRATION_OPERATIONS
+            .iter()
+            .map(|operation| Arc::from(*operation))
             .collect(),
         ..SchemaAdmission::default()
     })
@@ -621,6 +663,46 @@ impl RowBuilder<'_> {
             }
         }
     }
+
+    /// One owner-qualified registration under its domain.
+    fn push_registration(
+        &mut self,
+        domain: &'static str,
+        key: RegistrationKey,
+        is_usage: bool,
+        operation: &'static str,
+        origin: RecordOrigin,
+    ) {
+        let text = match &key {
+            RegistrationKey::String(text) | RegistrationKey::Symbol(text) => Arc::clone(text),
+        };
+        let qualified: Arc<str> = Arc::from(format!("{domain}:{text}"));
+        let subject_key = match &key {
+            RegistrationKey::String(_) => RegistrationKey::String(qualified),
+            RegistrationKey::Symbol(_) => RegistrationKey::Symbol(qualified),
+        };
+        let kind = if is_usage {
+            SlotKind::Occurrence
+        } else {
+            SlotKind::Declaration
+        };
+        self.push(
+            kind,
+            TypedSubject::Registration {
+                owner: producer().clone(),
+                key: subject_key,
+            },
+            vec![registration_posting_key(domain, &text)],
+            IndexRow::Registration(RegistrationRow {
+                domain: Arc::from(domain),
+                key,
+                is_usage,
+                operation: Arc::from(operation),
+            }),
+            origin,
+            FactQuality::Exact,
+        );
+    }
 }
 
 impl VerterHost {
@@ -698,6 +780,7 @@ impl VerterHost {
             IndexSurface::CssVariables => Self::project_css_variables(rows),
             IndexSurface::Bindings => Self::project_bindings(rows),
             IndexSurface::Imports => Self::project_imports(rows),
+            IndexSurface::Registrations => Self::project_registrations(rows),
         }
     }
 
@@ -1004,6 +1087,80 @@ impl VerterHost {
             );
         }
         analysis.coverage.clone()
+    }
+
+    /// Provide/inject keys and store facts from the script analysis, and
+    /// declared emits and listeners from the template facts. Each row is the
+    /// owner's fact as recorded; validating it stays with the owner. The
+    /// coverage is the weaker of the two facts it read.
+    fn project_registrations(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        use verter_session_query::analysis::types::VueApiClassification;
+
+        let analysis = rows.file.analysis();
+        if let Some(analysis) = analysis.value.as_ref() {
+            for call in analysis.vue_api_calls.iter() {
+                let (operation, is_usage) = match call.api {
+                    VueApiClassification::Provide => ("provide", false),
+                    VueApiClassification::Inject => ("inject", true),
+                    _ => continue,
+                };
+                let Some(key) = call.arg_value.as_deref() else {
+                    continue;
+                };
+                let origin = rows.origin(call.span);
+                rows.push_registration(
+                    registration_domain::PROVIDE_INJECT,
+                    RegistrationKey::String(Arc::from(key)),
+                    is_usage,
+                    operation,
+                    origin,
+                );
+            }
+            for definition in analysis.store_definitions.iter() {
+                let origin = rows.origin(definition.span);
+                rows.push_registration(
+                    registration_domain::STORE,
+                    RegistrationKey::Symbol(Arc::from(definition.export_name.as_str())),
+                    false,
+                    "define",
+                    origin,
+                );
+            }
+            for usage in analysis.store_usages.iter() {
+                let origin = rows.origin(usage.span);
+                rows.push_registration(
+                    registration_domain::STORE,
+                    RegistrationKey::Symbol(Arc::from(usage.callee.as_str())),
+                    true,
+                    "use",
+                    origin,
+                );
+            }
+        }
+        let template = rows.file.template();
+        if let Some(template) = template.value.as_ref() {
+            for emit in &template.emit_definitions {
+                let origin = rows.origin(emit.span);
+                rows.push_registration(
+                    registration_domain::EVENT,
+                    RegistrationKey::String(Arc::from(emit.event_name.as_str())),
+                    false,
+                    "emit",
+                    origin,
+                );
+            }
+            for handler in &template.event_handlers {
+                let origin = rows.origin(handler.span);
+                rows.push_registration(
+                    registration_domain::EVENT,
+                    RegistrationKey::String(Arc::from(handler.event_name.as_str())),
+                    true,
+                    "listen",
+                    origin,
+                );
+            }
+        }
+        analysis.coverage.clone().join(template.coverage.clone())
     }
 
     /// What the scheduler holds for `canonical` now, as a population entry.

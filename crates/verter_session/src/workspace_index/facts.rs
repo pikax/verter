@@ -37,11 +37,14 @@ pub enum IndexSurface {
     Bindings,
     /// Authored import relations.
     Imports,
+    /// Owner-qualified domain registrations: provide/inject keys, store
+    /// definitions and uses, and declared or listened events.
+    Registrations,
 }
 
 impl IndexSurface {
     /// Every surface, in certification order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ComponentInventory,
         Self::ComponentUses,
         Self::StyleDefinitions,
@@ -49,6 +52,7 @@ impl IndexSurface {
         Self::CssVariables,
         Self::Bindings,
         Self::Imports,
+        Self::Registrations,
     ];
 
     /// The partition whose postings this surface's rows answer under.
@@ -62,6 +66,7 @@ impl IndexSurface {
             Self::CssVariables => IndexDemandPartition::CssVariables,
             Self::Bindings => IndexDemandPartition::Bindings,
             Self::Imports => IndexDemandPartition::Imports,
+            Self::Registrations => IndexDemandPartition::Registrations,
         }
     }
 
@@ -82,6 +87,7 @@ impl IndexSurface {
             Self::CssVariables => 5,
             Self::Bindings => 6,
             Self::Imports => 7,
+            Self::Registrations => 8,
         }
     }
 
@@ -111,6 +117,8 @@ pub enum IndexDemandPartition {
     Components,
     /// Authored import relations.
     Imports,
+    /// Domain registrations.
+    Registrations,
 }
 
 impl IndexDemandPartition {
@@ -123,6 +131,7 @@ impl IndexDemandPartition {
             Self::Bindings => PartitionFamily::Bindings,
             Self::Components => PartitionFamily::Components,
             Self::Imports => PartitionFamily::Imports,
+            Self::Registrations => PartitionFamily::Registrations,
         }
     }
 
@@ -141,6 +150,7 @@ impl IndexDemandPartition {
                 IndexSurface::ComponentUses,
             ],
             Self::Imports => &[IndexSurface::Imports],
+            Self::Registrations => &[IndexSurface::Registrations],
         }
     }
 }
