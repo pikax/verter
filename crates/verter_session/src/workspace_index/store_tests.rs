@@ -18,6 +18,7 @@ use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount,
 use verter_span::{SourceByteOffset, SourceByteRange};
 
 use super::delta::*;
+use super::facts::*;
 use super::host_projection::*;
 use super::identity::*;
 use super::membership::*;
@@ -156,6 +157,7 @@ fn key(unit: &SourceUnitId) -> ContributionKey {
         claim: claim(),
         project: None,
         partition: PartitionFamily::StyleSelectors,
+        facet: 0,
     }
 }
 
@@ -984,7 +986,6 @@ fn invalidation_retires_dependents_and_their_population_and_keeps_unrelated_slot
             key: witness_key,
             fingerprint: digest("population-1"),
         },
-        contributions: [first.id(), second.id()].into_iter().collect(),
     });
     change.changes = vec![
         upsert(first, ExpectedPrior::Absent),
@@ -1038,7 +1039,6 @@ fn a_changed_population_witness_decertifies_a_complete_empty_answer() {
             key: witness_key,
             fingerprint: digest("one-file"),
         },
-        contributions: [partition.id()].into_iter().collect(),
     });
     change.changes = vec![upsert(partition, ExpectedPrior::Absent)];
     let published = index.publish(change, &owners, &never());
@@ -1459,7 +1459,6 @@ fn a_record_certifies_only_its_own_partitions_and_another_producers_rows_stay_ou
             key: witness_key,
             fingerprint: digest("population"),
         },
-        contributions: [ours.id()].into_iter().collect(),
     });
     change.changes = vec![
         upsert(ours, ExpectedPrior::Absent),
@@ -1544,7 +1543,6 @@ fn a_decertified_population_leaves_with_the_delta_even_when_no_slot_changed() {
             key: witness_key,
             fingerprint: digest("population"),
         },
-        contributions: BTreeSet::new(),
     });
     assert!(matches!(
         index.publish(change, &owners, &never()),
@@ -1645,7 +1643,7 @@ fn an_unavailable_surface_is_named_and_leaves_its_other_rows_and_other_partition
     let store = host.project_type_store().workspace_index().snapshot();
     assert!(!store.is_return_only());
     let held: Vec<Arc<str>> = store
-        .contributions_in_partition(&IndexDemandPartition::CssVariables.id())
+        .contributions_in_partition(&IndexSurface::CssVariables.id())
         .map(|slot| Arc::clone(&slot.basis.locator))
         .collect();
     assert_eq!(held, vec![Arc::<str>::from("/src/B.vue")]);
@@ -1704,8 +1702,10 @@ fn a_unit_blocking_one_partition_leaves_the_rest_of_the_demand_certified() {
         .expect("a partial certificate");
     assert_eq!(
         record.partitions,
-        [IndexDemandPartition::Components.id()]
-            .into_iter()
+        IndexDemandPartition::Components
+            .surfaces()
+            .iter()
+            .map(|surface| surface.id())
             .collect()
     );
 }

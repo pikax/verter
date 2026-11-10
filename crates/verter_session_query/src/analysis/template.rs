@@ -789,6 +789,27 @@ pub struct MarkupClassToken {
     pub from_directive: bool,
 }
 
+/// A CSS custom property set from carrier markup — the inline-style fact for
+/// carriers WITHOUT a template element IR (Svelte). One per authored
+/// occurrence: a `--x: v` declaration inside a static `style="…"` value, a
+/// `style:--x` directive, or a `--x` attribute (a component style prop).
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkupStyleVar {
+    /// The custom property name, with its `--` prefix.
+    pub name: String,
+    /// Carrier-absolute byte span of the authored name.
+    pub span: Span,
+}
+
 /// A v-if/v-else-if chain for duplicate condition detection.
 #[derive(
     Debug,

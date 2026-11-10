@@ -197,17 +197,39 @@ impl PartitionFamily {
     }
 }
 
-/// One producer's fact family. Two producers declaring the same family hold
-/// distinct partitions.
+/// One producer's fact family, or one declared facet of it. Two producers
+/// declaring the same family hold distinct partitions, and so do two facets
+/// of one family: a producer that certifies the surfaces of a family one by
+/// one declares each as a facet, and a lookup reading the family is certified
+/// only when every demanded facet of it is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PartitionId {
     owner: ProducerDescriptorId,
     family: PartitionFamily,
+    /// The producer's own facet discriminant; zero when it declares none.
+    facet: u32,
 }
 
 impl PartitionId {
+    /// The undivided family of one producer.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "every host producer declares its facets")
+    )]
     pub(crate) fn new(owner: ProducerDescriptorId, family: PartitionFamily) -> Self {
-        Self { owner, family }
+        Self::faceted(owner, family, 0)
+    }
+
+    pub(crate) fn faceted(
+        owner: ProducerDescriptorId,
+        family: PartitionFamily,
+        facet: u32,
+    ) -> Self {
+        Self {
+            owner,
+            family,
+            facet,
+        }
     }
 
     /// The producer that owns this partition.
@@ -220,6 +242,12 @@ impl PartitionId {
     #[must_use]
     pub fn family(&self) -> PartitionFamily {
         self.family
+    }
+
+    /// The producer's facet of the family; zero for the whole family.
+    #[must_use]
+    pub fn facet(&self) -> u32 {
+        self.facet
     }
 }
 
@@ -255,10 +283,13 @@ pub struct ContributionKey {
     pub claim: ProfileClaim,
     pub project: Option<PmProjectId>,
     pub partition: PartitionFamily,
+    /// The producer's facet of the family this slot belongs to; zero when the
+    /// producer declares none. See [`PartitionId`].
+    pub facet: u32,
 }
 
 impl CanonicalEncode for ContributionKey {
-    const DOMAIN_TAG: &'static str = "verter.session.workspace_index.contribution_id.v1";
+    const DOMAIN_TAG: &'static str = "verter.session.workspace_index.contribution_id.v2";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_bytes(1, self.producer.digest().as_bytes());
@@ -280,6 +311,7 @@ impl CanonicalEncode for ContributionKey {
             }
         }
         encoder.field_enum_discriminant(10, self.partition.encoding());
+        encoder.field_u32(12, self.facet);
     }
 }
 
@@ -318,7 +350,7 @@ impl ContributionKey {
     /// The partition this slot belongs to.
     #[must_use]
     pub fn partition_id(&self) -> PartitionId {
-        PartitionId::new(self.producer.clone(), self.partition)
+        PartitionId::faceted(self.producer.clone(), self.partition, self.facet)
     }
 
     /// The slot with its schema version removed. Two current contributions

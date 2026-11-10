@@ -997,7 +997,14 @@ impl VerterHost {
             // clear here so a superseded push does not leak into the next
             // resolver run.
             derived.import_routes.clear();
-            derived.evicted = false;
+            if derived.evicted {
+                derived.evicted = false;
+                // The scheduler published the source transition; the host
+                // publishes the membership flag it owns.
+                self.project_type_store
+                    .workspace_index()
+                    .note_membership_change(&canonical_id);
+            }
             if drained_derived {
                 verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
                     &observation,

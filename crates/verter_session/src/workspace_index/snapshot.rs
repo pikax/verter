@@ -12,7 +12,6 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use imbl::{OrdMap, OrdSet};
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
 use verter_session_query::retention::{RetentionCharge, StoreAccount};
 
 use super::delta::{
@@ -23,6 +22,7 @@ use super::identity::{
     ContributionId, ContributionKey, ObservationKey, PartitionId, ReadSet, ReadWitness, ScopeId,
     SourceBasis,
 };
+use super::population::{HostPopulation, MembershipJournal};
 use super::records::{IndexRecord, PostingKey, Provenance, RecordSlot, TypedSubject};
 
 /// One published or request-local contribution.
@@ -67,17 +67,19 @@ impl Contribution {
 }
 
 /// Proof that one declared population was fully enumerated on a valid basis.
+///
+/// The slots it certifies are the live slots of its partitions: the snapshot
+/// holds them, so the record names none, and any change to a slot of one of
+/// its partitions retires it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageRecord {
     pub scope: ScopeId,
-    /// The fact families this record certifies. A lookup reading any other
-    /// family is not certified by it, even under the same scope.
+    /// The partitions this record certifies. A lookup reading any other
+    /// partition is not certified by it, even under the same scope.
     pub partitions: BTreeSet<PartitionId>,
     /// The owner's enumeration witness. A list of previously seen files would
     /// miss additions; this changes when the population does.
     pub witness: ReadWitness,
-    /// Every slot the certified partitions hold.
-    pub contributions: BTreeSet<ContributionId>,
 }
 
 /// Canonical posting order: profile claim, typed subject, slot id, then record.
@@ -118,8 +120,7 @@ pub struct IndexSnapshot {
     /// Which slots consumed each observation.
     dependents: OrdMap<ObservationKey, OrdSet<ContributionId>>,
     coverage: OrdMap<ScopeId, Arc<CoverageRecord>>,
-    /// Which coverage records hold each slot or witness observation.
-    coverage_by_contribution: OrdMap<ContributionId, OrdSet<ScopeId>>,
+    /// Which coverage records consumed each witness observation.
     coverage_by_witness: OrdMap<ObservationKey, OrdSet<ScopeId>>,
     /// Slots written only for one request's answer. They exist only in
     /// private snapshots and are never reachable from the store.
@@ -138,7 +139,6 @@ impl IndexSnapshot {
             by_partition: OrdMap::default(),
             dependents: OrdMap::default(),
             coverage: OrdMap::default(),
-            coverage_by_contribution: OrdMap::default(),
             coverage_by_witness: OrdMap::default(),
             return_only: false,
         }
@@ -178,6 +178,19 @@ impl IndexSnapshot {
             .into_iter()
             .flatten()
             .filter_map(|id| self.contributions.get(id).cloned())
+    }
+
+    /// The live slots of one partition, in canonical slot order. A counted
+    /// unit enumeration reads this.
+    pub(super) fn partition_slots(
+        &self,
+        partition: &PartitionId,
+    ) -> impl Iterator<Item = &Arc<Contribution>> + '_ {
+        self.by_partition
+            .get(partition)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.contributions.get(id))
     }
 
     /// Live slots.
@@ -221,7 +234,7 @@ impl IndexSnapshot {
             next.remove_contribution(id);
         }
         for contribution in contributions {
-            next.retire_coverage_holding(&contribution.id);
+            next.retire_coverage_of(&contribution.key.partition_id());
             next.remove_contribution(&contribution.id);
             next.insert_contribution(Arc::new(contribution));
         }
@@ -233,7 +246,6 @@ impl IndexSnapshot {
     /// This snapshot with no population certified.
     pub(super) fn without_coverage(mut self) -> Self {
         self.coverage = OrdMap::default();
-        self.coverage_by_contribution = OrdMap::default();
         self.coverage_by_witness = OrdMap::default();
         self
     }
@@ -296,12 +308,6 @@ impl IndexSnapshot {
 
     fn insert_coverage(&mut self, record: CoverageRecord) {
         self.remove_coverage(&record.scope);
-        for id in &record.contributions {
-            self.coverage_by_contribution
-                .entry(id.clone())
-                .or_default()
-                .insert(record.scope.clone());
-        }
         self.coverage_by_witness
             .entry(record.witness.key)
             .or_default()
@@ -313,17 +319,33 @@ impl IndexSnapshot {
         let Some(record) = self.coverage.remove(scope) else {
             return;
         };
-        for id in &record.contributions {
-            remove_from_set(&mut self.coverage_by_contribution, id, scope);
-        }
         remove_from_set(&mut self.coverage_by_witness, &record.witness.key, scope);
     }
 
-    /// Coverage cannot survive any change to a slot it holds.
-    fn retire_coverage_holding(&mut self, id: &ContributionId) {
-        let scopes = self.coverage_by_contribution.get(id).cloned();
-        for scope in scopes.iter().flatten() {
+    /// Coverage cannot survive any change to a slot of a partition it
+    /// certifies. Records are few (one per distinct demand), so this reads
+    /// them rather than keeping a per-slot index the size of the store.
+    fn retire_coverage_of(&mut self, partition: &PartitionId) {
+        let scopes: Vec<ScopeId> = self
+            .coverage
+            .iter()
+            .filter(|(_, record)| record.partitions.contains(partition))
+            .map(|(scope, _)| scope.clone())
+            .collect();
+        for scope in &scopes {
             self.remove_coverage(scope);
+        }
+    }
+
+    /// [`Self::retire_coverage_of`] for a held slot; a slot not held changes
+    /// no partition.
+    fn retire_coverage_holding(&mut self, id: &ContributionId) {
+        if let Some(partition) = self
+            .contributions
+            .get(id)
+            .map(|held| held.key.partition_id())
+        {
+            self.retire_coverage_of(&partition);
         }
     }
 }
@@ -357,10 +379,11 @@ pub struct WorkspaceIndex {
     current: ArcSwap<IndexSnapshot>,
     writer: Mutex<()>,
     account: StoreAccount,
-    /// The workspace change counters a population was last proved current at.
-    /// One small entry per distinct demand; a validity shortcut, never a
-    /// substitute for coverage.
-    population_stamps: Mutex<FxHashMap<ScopeId, (u64, u64)>>,
+    /// The host's population as its walks last reconciled it. Maintained from
+    /// committed mutations, never a substitute for coverage.
+    population: Mutex<HostPopulation>,
+    /// Host-side membership transitions the scheduler does not publish.
+    membership: MembershipJournal,
 }
 
 impl std::fmt::Debug for WorkspaceIndex {
@@ -380,7 +403,8 @@ impl WorkspaceIndex {
             current: ArcSwap::from_pointee(IndexSnapshot::empty(store, 0)),
             writer: Mutex::new(()),
             account,
-            population_stamps: Mutex::default(),
+            population: Mutex::default(),
+            membership: MembershipJournal::default(),
         }
     }
 
@@ -390,12 +414,21 @@ impl WorkspaceIndex {
         &self.account
     }
 
-    pub(super) fn population_stamp(&self, scope: &ScopeId) -> Option<(u64, u64)> {
-        self.population_stamps.lock().get(scope).copied()
+    /// The host population the walks maintain. Held briefly, never across a
+    /// fact read or a caller predicate.
+    pub(super) fn population(&self) -> &Mutex<HostPopulation> {
+        &self.population
     }
 
-    pub(super) fn record_population_stamp(&self, scope: ScopeId, stamp: (u64, u64)) {
-        self.population_stamps.lock().insert(scope, stamp);
+    /// The host-side membership journal.
+    pub(super) fn membership(&self) -> &MembershipJournal {
+        &self.membership
+    }
+
+    /// Record that `canonical`'s host-side membership flag moved, so the next
+    /// walk re-reads that one file.
+    pub(crate) fn note_membership_change(&self, canonical: &str) {
+        self.membership.record(canonical);
     }
 
     /// Drop every slot and population. Readers keep what they captured.
@@ -405,7 +438,7 @@ impl WorkspaceIndex {
         let (store, generation) = (current.store, current.generation + 1);
         self.current
             .store(Arc::new(IndexSnapshot::empty(store, generation)));
-        self.population_stamps.lock().clear();
+        self.population.lock().reset();
     }
 
     /// Capture the current snapshot.
@@ -590,13 +623,19 @@ impl PublicationPlan {
             if !witness_current(&record.witness, oracle) {
                 return Err(PublishRefusal::Stale);
             }
-            plan.check_coverage_slots(current, &record)?;
-            // A change to a held slot retires the old record, so an identical
-            // record must be written again in that case.
-            let slot_changes = record.contributions.iter().any(|id| {
-                plan.retirements.contains(id)
-                    || plan.upserts.iter().any(|partition| partition.id() == *id)
-            });
+            // A change to a slot of a certified partition retires the old
+            // record, so an identical record must be written again then.
+            let slot_changes = plan
+                .retirements
+                .iter()
+                .filter_map(|id| current.contributions.get(id))
+                .map(|held| held.key.partition_id())
+                .chain(
+                    plan.upserts
+                        .iter()
+                        .map(|partition| partition.draft.key.partition_id()),
+                )
+                .any(|partition| record.partitions.contains(&partition));
             let unchanged = current
                 .coverage
                 .get(&record.scope)
@@ -650,21 +689,6 @@ impl PublicationPlan {
         Ok(true)
     }
 
-    fn check_coverage_slots(
-        &self,
-        current: &IndexSnapshot,
-        record: &CoverageRecord,
-    ) -> Result<(), PublishRefusal> {
-        for id in &record.contributions {
-            let written = self.upserts.iter().any(|partition| partition.id() == *id);
-            let retained = current.contributions.contains_key(id) && !self.retirements.contains(id);
-            if !written && !retained {
-                return Err(PublishRefusal::CoverageWithoutPartition(id.clone()));
-            }
-        }
-        Ok(())
-    }
-
     fn is_noop(&self) -> bool {
         self.upserts.is_empty()
             && self.retirements.is_empty()
@@ -687,7 +711,7 @@ impl PublicationPlan {
                 .try_adopt_retained()
                 .map_err(|_| PublishRefusal::RetentionPressure)?;
             let id = draft.key.id();
-            next.retire_coverage_holding(&id);
+            next.retire_coverage_of(&draft.key.partition_id());
             next.remove_contribution(&id);
             next.insert_contribution(Arc::new(Contribution {
                 id,
