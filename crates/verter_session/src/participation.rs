@@ -212,6 +212,14 @@ impl ParticipationService {
         mask: CapabilityOwnershipMask,
     ) -> Transition {
         if mask.identity() == previous.mask.identity() {
+            // Same semantic identity: the epoch and fence stay, so every held
+            // permit stays current, but the explanation-only facts (ownership
+            // evidence) are the newest observation's.
+            self.current.store(Arc::new(ParticipationState {
+                host_inputs,
+                mask,
+                epoch: previous.epoch.clone(),
+            }));
             return Transition::Unchanged(previous.epoch.clone());
         }
         let epoch = DemandEpoch {
@@ -323,7 +331,8 @@ where
 }
 
 /// Every file language this host can qualify a carrier capability by: its
-/// registered carriers and the script dialects.
+/// registered carriers, the script dialects and the adapter modules of its
+/// admitted adapters (a Svelte rune module is its own carrier profile).
 fn carrier_languages(host: &crate::VerterHost) -> impl Iterator<Item = FileLanguage> + '_ {
     use verter_language::{JsModuleKind, ScriptSourceType};
     let scripts = [
@@ -343,11 +352,19 @@ fn carrier_languages(host: &crate::VerterHost) -> impl Iterator<Item = FileLangu
         .flat_map(|kind| [ScriptSourceType::Js(kind), ScriptSourceType::Jsx(kind)]),
     )
     .map(FileLanguage::script);
-    host.language_classifier()
+    let classifier = host.language_classifier();
+    // Classification is the authority for an adapter module's language, as
+    // the classifier's own admission check reads it.
+    let adapter_modules = classifier
+        .adapter_module_extensions()
+        .into_iter()
+        .map(move |extension| classifier.classify(&format!("probe.{extension}")));
+    classifier
         .carrier_rows()
         .into_iter()
         .map(|(_, language)| language)
         .chain(scripts)
+        .chain(adapter_modules)
 }
 
 /// Every profile this host serves: its admitted semantic profiles in

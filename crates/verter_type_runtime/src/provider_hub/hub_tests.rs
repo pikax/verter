@@ -2765,6 +2765,8 @@ async fn an_exhausted_hub_reports_exhaustion_not_eternal_restarting() {
         usize::MAX >> 1,
     )
     .await;
+    let exhaustion = provider.exhaustion().expect("a hub owns one lifecycle");
+    assert!(!*exhaustion.borrow());
 
     crash_notify.notify_one();
     assert!(
@@ -2773,6 +2775,10 @@ async fn an_exhausted_hub_reports_exhaustion_not_eternal_restarting() {
     );
     // Run the monitor through its whole (failing) budget under the paused clock.
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    assert!(
+        *exhaustion.borrow(),
+        "the give-up is observable to the provider's consumers"
+    );
 
     let error = provider
         .get_hover(

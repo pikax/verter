@@ -372,6 +372,63 @@ pub(crate) fn invalid_params(message: String) -> jsonrpc::Error {
     }
 }
 
+/// Feed this scope the selected TypeScript authority's availability from
+/// its owner (COX0 `ProviderUnavailable`). Verter-only mode selects no
+/// authority; an editor-owned one is the editor's to report. A provider whose
+/// one lifecycle gives up for the session withdraws it then, and every open
+/// document republishes: its TypeScript facet refuses as
+/// `providerUnavailable` while its Verter facets keep publishing.
+pub(crate) fn observe_provider_availability(
+    documents: &std::sync::Arc<DocumentRegistry>,
+    kind: crate::TypeProviderKind,
+    provider: Option<&dyn crate::TypeProvider>,
+    coordinator: &crate::sync_coordinator::SyncCoordinatorHandle,
+) {
+    use verter_language::participation::ProviderAvailability;
+    let Some(provider) = provider else {
+        if kind != crate::TypeProviderKind::EditorTsserver {
+            let _ = documents
+                .participation()
+                .publish_provider(ProviderAvailability::Unavailable);
+        }
+        return;
+    };
+    let Some(mut exhaustion) = provider.exhaustion() else {
+        return;
+    };
+    // Weak on both sides: the observer must not keep the session (or, through
+    // the coordinator, the provider and this watch's sender) alive.
+    let documents = std::sync::Arc::downgrade(documents);
+    let coordinator = coordinator.downgrade();
+    tokio::spawn(async move {
+        // A dropped lifecycle owner reports nothing more.
+        if exhaustion.wait_for(|exhausted| *exhausted).await.is_err() {
+            return;
+        }
+        let (Some(documents), Some(coordinator)) = (documents.upgrade(), coordinator.upgrade())
+        else {
+            return;
+        };
+        let transition = documents
+            .participation()
+            .publish_provider(ProviderAvailability::Unavailable);
+        if !transition.advanced() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        for uri in documents.open_uris() {
+            let Ok(parsed) = uri.parse::<Uri>() else {
+                continue;
+            };
+            if documents.get_virtual_source_uri(&parsed).is_some() {
+                continue;
+            }
+            let canonical = crate::documents::uri_to_canonical_id(&parsed);
+            coordinator.signal_diagnostics_only(canonical, uri, now);
+        }
+    });
+}
+
 /// The diagnostic facets one document's publication may carry (DEM0
 /// `DEM-D01`): each producer runs only when its own cell admits
 /// `DiagnosticsPublication`, so a withdrawn facet costs no producer work
@@ -387,6 +444,7 @@ pub(crate) struct DiagnosticFacets {
 }
 
 impl DiagnosticFacets {
+    #[cfg(test)]
     pub(crate) const ALL: Self = Self {
         compiler: true,
         component_usage: true,
@@ -397,28 +455,41 @@ impl DiagnosticFacets {
     pub(crate) fn admitted(documents: &DocumentRegistry, canonical: &str) -> Self {
         let site = DocumentSite::of_canonical(documents, canonical);
         let service = documents.participation();
-        let admits = |operation| {
+        let admits = |operation, provider| {
             service
                 .admit(&AdmissionRequest {
                     capability: &site.capability(operation),
                     site: site.request_site(),
                     purpose: DemandPurpose::DiagnosticsPublication,
-                    provider: ProviderRequirement::NotRequired,
+                    provider,
                     catalog: CatalogSupport::Supported,
                 })
                 .is_ok()
         };
+        let verter = ProviderRequirement::NotRequired;
         Self {
-            compiler: admits(CapabilityOperation::CompilerDiagnostics),
-            component_usage: admits(CapabilityOperation::ComponentUsageDiagnostics),
-            lint: admits(CapabilityOperation::LintDiagnostics),
-            typescript: admits(CapabilityOperation::TypeScriptDiagnostics),
+            compiler: admits(CapabilityOperation::CompilerDiagnostics, verter),
+            component_usage: admits(CapabilityOperation::ComponentUsageDiagnostics, verter),
+            lint: admits(CapabilityOperation::LintDiagnostics, verter),
+            // Only this facet needs the selected TypeScript authority: its
+            // absence refuses it as `providerUnavailable` and never touches
+            // the Verter facets.
+            typescript: admits(
+                CapabilityOperation::TypeScriptDiagnostics,
+                ProviderRequirement::TypeScript,
+            ),
         }
     }
 
     /// Whether any Verter-owned producer may run.
     pub(crate) fn any_verter(self) -> bool {
         self.compiler || self.component_usage || self.lint
+    }
+
+    /// Whether every Verter-owned producer may run: the complete Verter set,
+    /// whatever the TypeScript facet admits.
+    pub(crate) fn all_verter(self) -> bool {
+        self.compiler && self.component_usage && self.lint
     }
 }
 

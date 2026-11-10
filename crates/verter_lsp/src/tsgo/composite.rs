@@ -2531,6 +2531,16 @@ impl TypeProvider for TsgoCompositeProvider {
         self.managed.child_pid()
     }
 
+    /// With no shared overlay, the managed engine is the one lifecycle every
+    /// answer comes from. A shared overlay serves independently of it, so the
+    /// managed engine giving up does not make this provider unavailable.
+    fn exhaustion(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        if self.shared.is_some() {
+            return None;
+        }
+        self.managed.exhaustion()
+    }
+
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         Box::pin(async move {
             if let Some(shared) = &self.shared {

@@ -180,6 +180,55 @@ fn only_effective_changes_mint_demand_epochs() {
     assert_eq!(service.epoch(), before, "a refused mask publishes nothing");
 }
 
+/// An equivalent re-observation whose ownership evidence changed keeps the
+/// epoch (held work stays current) and explains the cell with the newest
+/// evidence, never the evidence of a declaration that is gone.
+#[test]
+fn equivalent_reobservation_refreshes_cell_evidence() {
+    use verter_identity::encoding::CanonicalEncoder;
+    use verter_language::participation::{OwnershipDeclaration, OwnershipEvidence};
+
+    let evidence = |row: &str| {
+        let mut encoder = CanonicalEncoder::new("cox0-test.evidence");
+        encoder.field_str(1, row);
+        OwnershipEvidence(encoder.digest())
+    };
+    let observed = |row: &str| ParticipationInputs {
+        ownership: vec![OwnershipDeclaration {
+            capability: hover(),
+            selector: SelectorScope::AllSources,
+            evidence: evidence(row),
+        }],
+        ..ParticipationInputs::default()
+    };
+    let service = ParticipationService::new();
+    assert!(service
+        .publish_host_inputs(observed("tool-a"))
+        .expect("valid")
+        .advanced());
+    let epoch = service.epoch();
+    let held = service
+        .admit(&AdmissionRequest {
+            purpose: DemandPurpose::IndexContribution,
+            ..interactive(&hover(), ProviderRequirement::NotRequired)
+        })
+        .expect("an overlapped cell keeps workspace semantics");
+
+    assert_eq!(
+        service.publish_host_inputs(observed("tool-c")),
+        Ok(Transition::Unchanged(epoch))
+    );
+    assert!(service.is_current(&held));
+    assert_eq!(
+        service
+            .state()
+            .mask()
+            .cell(&hover(), RequestSite::default())
+            .evidence,
+        vec![evidence("tool-c")]
+    );
+}
+
 /// The host qualifies a capability by the semantic profile its registry
 /// admits for a framework carrier and by the carrier profile otherwise, and
 /// resolves a host's wire references only against those identities.
@@ -234,4 +283,16 @@ fn host_profiles_qualify_cells_and_resolve_wire_references() {
         Some(file_unit("/src/App.vue"))
     );
     assert_eq!(resolver.unit("untitled:1"), None);
+
+    // An admitted adapter's module (a Svelte rune module) is its own carrier
+    // profile: a host can name it and a workspace demand is qualified by it.
+    let rune_module = file_profile(&host, "/src/store.svelte.ts");
+    assert!(matches!(rune_module, ProfileRef::Carrier(_)));
+    assert_ne!(rune_module, script);
+    assert_eq!(
+        resolver.profile(ProfileKind::Carrier, &rune_module.digest().to_hex()),
+        Some(rune_module.clone())
+    );
+    let served = verter_session::participation::served_profiles(&host);
+    assert!(served.contains(&rune_module));
 }

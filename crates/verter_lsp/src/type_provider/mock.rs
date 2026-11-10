@@ -440,6 +440,8 @@ mod inner {
         /// The serving engine incarnation, shared with `state` and readable
         /// without its lock.
         incarnation: Arc<std::sync::atomic::AtomicU64>,
+        /// Whether the mocked lifecycle gave up for the session.
+        exhausted: Arc<tokio::sync::watch::Sender<bool>>,
     }
 
     impl Default for MockTypeProvider {
@@ -458,7 +460,14 @@ mod inner {
                 request_barriers: Arc::new(Mutex::new(None)),
                 failed_deliveries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 incarnation,
+                exhausted: Arc::new(tokio::sync::watch::channel(false).0),
             }
+        }
+
+        /// Give up for the session, as a lifecycle whose recovery exhausted
+        /// its restart budget.
+        pub fn exhaust(&self) {
+            self.exhausted.send_replace(true);
         }
 
         /// Make every interactive query reach `barriers` at provider dispatch
@@ -1343,6 +1352,10 @@ mod inner {
 
         fn provider_restart_pulse(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
             self.state.lock().unwrap().restart_pulse.clone()
+        }
+
+        fn exhaustion(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+            Some(self.exhausted.subscribe())
         }
 
         fn supports_completion_resolve(&self) -> bool {

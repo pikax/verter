@@ -698,6 +698,10 @@ where
             .and_then(|serving| serving.provider.child_pid())
     }
 
+    fn exhaustion(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        Some(self.state.shared.exhausted.subscribe())
+    }
+
     // ── Background-priority forwarding ──────────────────────────────
 
     fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
