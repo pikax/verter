@@ -418,7 +418,6 @@ impl ProjectEnvRoot {
     /// [`Self::resolve_env_hash_for`], with the same project selection and
     /// the same captured published root, so a native fact basis commits
     /// exactly the environment its validators read.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
         let array = self.published.as_ref().and_then(|root| {
             let project = self.project_for_canonical(canonical, root)?;

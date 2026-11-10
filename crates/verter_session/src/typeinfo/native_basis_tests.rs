@@ -126,6 +126,7 @@ fn traced_resolution(host: &VerterHost, ctx: &Ctx<'_>) -> NativeTrace {
     let ((outcome, _), trace) = trace_native_fact(ctx, &[ENTRY], || {
         crate::typeinfo::resolve_named_symbol::resolve_named_symbol_in_current_view(
             host,
+            ctx,
             &dispatch,
             ENTRY,
             "A",

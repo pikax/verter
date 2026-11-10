@@ -127,7 +127,7 @@ impl VerterHost {
     /// declaration resolves under its authored Instance owner instead of
     /// missing at the ordinary-file view.
     pub(crate) fn unique_local_type_declaration_owner_in(
-        state: &crate::resolver_core::shallow_file_state::ShallowFileState,
+        state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
         resolved_name: &str,
     ) -> Option<verter_type_expr::TopLevelOwnerId> {
         let mut owner = None;
