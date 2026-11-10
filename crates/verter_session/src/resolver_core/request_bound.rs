@@ -262,7 +262,7 @@ impl IndexedInputs for crate::VerterHost {
     }
 
     fn materialize_pending_contributor(&self, canonical_id: &str) {
-        materialize_pending_contributor(self, canonical_id);
+        materialize_pending_contributor_on_host(self, canonical_id);
     }
 
     fn begin_prepared_bundle_load(
@@ -1121,7 +1121,7 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::materialize_pending_contributor"
         );
-        materialize_pending_contributor(self.0.host(), canonical_id);
+        materialize_pending_contributor_on_host(self.0.host(), canonical_id);
     }
 
     fn begin_prepared_bundle_load(
@@ -1499,7 +1499,7 @@ where
 /// population read's ingestion does: its source loaded, its index built
 /// through the host's own serve, which observes no content version onto the
 /// request's tracer.
-fn materialize_pending_contributor(host: &crate::VerterHost, canonical: &str) {
+fn materialize_pending_contributor_on_host(host: &crate::VerterHost, canonical: &str) {
     let _ = host.ensure_loaded(canonical);
     let _ = crate::VerterHost::ensure_indexed_ready_serve(host, canonical);
 }
