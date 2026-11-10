@@ -92,9 +92,16 @@ struct DiscoveryCtx<'source, 'ast> {
     served: rustc_hash::FxHashSet<(u32, u32)>,
     /// The classes the discovery walks meet.
     classes: crate::analysis::class_index::ClassCollector,
+    /// The authored name the next function built is reported by.
+    report_name: Option<verter_span::Span>,
 }
 
 impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
+    /// The next function built is reported by the name at `span`.
+    fn reported_by(&mut self, span: oxc_span::Span) {
+        self.report_name = Some(verter_span::Span::new(span.start, span.end));
+    }
+
     fn anchor(&self, contributor_index: usize) -> Option<DeclContributorAnchor> {
         let owner = self.owners.statements().get(contributor_index)?;
         Some(DeclContributorAnchor {
@@ -211,6 +218,7 @@ fn build_function_program_index_impl<'ast>(
         hashed_nodes: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
+        report_name: None,
         served: rustc_hash::FxHashSet::default(),
         classes: crate::analysis::class_index::ClassCollector::default(),
     };
@@ -1736,6 +1744,12 @@ fn discover_variable_declaration<'ast>(
             ctx,
         );
         let descent = |extra: FunctionDescentStep| base_descent.then(extra);
+        if matches!(
+            init,
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+        ) {
+            ctx.reported_by(declarator.id.span());
+        }
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(
@@ -1774,6 +1788,7 @@ fn discover_variable_declaration<'ast>(
                     );
                     match &p.value {
                         Expression::FunctionExpression(func) => {
+                            ctx.reported_by(p.key.span());
                             let previous_this =
                                 ctx.enclosing_this.replace(EnclosingThis::ObjectLiteral);
                             discover_function_inner(
@@ -2046,6 +2061,12 @@ fn discover_variable_declaration_ns<'ast>(
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
         let base = descent.then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
         discover_variable_initializer(init, &name, var_decl.kind, contributor_index, &base, ctx);
+        if matches!(
+            init,
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+        ) {
+            ctx.reported_by(declarator.id.span());
+        }
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(
@@ -2187,6 +2208,7 @@ fn discover_class_members<'ast>(
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
                 let descent =
                     base_descent.then(FunctionDescentStep::ClassMember { member_ordinal });
+                ctx.reported_by(method.key.span());
                 discover_function_inner(
                     &method.value,
                     name,
@@ -2338,6 +2360,9 @@ fn discover_function_inner<'ast>(
     let Some(body) = func.body.as_ref() else {
         return;
     };
+    if let (None, Some(id)) = (ctx.report_name, func.id.as_ref()) {
+        ctx.reported_by(id.span);
+    }
     let params = formal_params(&func.params);
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
@@ -2621,6 +2646,13 @@ fn discover_nested_callable<'ast>(
         contributor: parent_locator.contributor,
         descent,
     };
+    if let FunctionNode::Function(function) = node {
+        if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
+            if let Some(id) = &function.id {
+                ctx.reported_by(id.span);
+            }
+        }
+    }
     let mut entry = ctx.build_entry(key.clone(), locator.clone(), params, body, span.start, node);
     entry.lexical_parent = Some(Box::new(parent_key.clone()));
     entry.class_member = class_member;
@@ -2831,6 +2863,229 @@ impl<'a> Visit<'a> for ReferencedTypeNames {
     }
 }
 
+/// The span of each name that reads the type `name` in `program`, where no
+/// type parameter, mapped key, `infer` declaration or local type declaration
+/// binds it, in source order.
+#[must_use]
+pub fn type_reference_name_spans(
+    program: &oxc_ast::ast::Program<'_>,
+    name: &str,
+) -> Vec<verter_span::Span> {
+    let mut references = NameReferences {
+        name,
+        found: Vec::new(),
+    };
+    verter_parser::oxc_parse::with_program_stack(program, || {
+        references.visit_program(program);
+    });
+    references
+        .found
+        .sort_by_key(|span: &verter_span::Span| span.start);
+    references.found
+}
+
+/// [`type_reference_name_spans`]: a subtree a binder of `name` scopes is not
+/// entered.
+struct NameReferences<'n> {
+    name: &'n str,
+    found: Vec<verter_span::Span>,
+}
+
+impl NameReferences<'_> {
+    fn clause_binds(
+        &self,
+        declaration: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+    ) -> bool {
+        declaration.is_some_and(|declaration| {
+            declaration
+                .params
+                .iter()
+                .any(|param| param.name.name.as_str() == self.name)
+        })
+    }
+
+    fn statements_declare(&self, statements: &[oxc_ast::ast::Statement<'_>]) -> bool {
+        use oxc_ast::ast::{Declaration, Statement};
+        statements.iter().any(|statement| {
+            let declared = match statement {
+                Statement::TSTypeAliasDeclaration(alias) => alias.id.name.as_str(),
+                Statement::TSInterfaceDeclaration(interface) => interface.id.name.as_str(),
+                Statement::TSEnumDeclaration(declaration) => declaration.id.name.as_str(),
+                Statement::ClassDeclaration(class) => {
+                    class.id.as_ref().map_or("", |id| id.name.as_str())
+                }
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSTypeAliasDeclaration(alias) => alias.id.name.as_str(),
+                    Declaration::TSInterfaceDeclaration(interface) => interface.id.name.as_str(),
+                    Declaration::TSEnumDeclaration(declaration) => declaration.id.name.as_str(),
+                    Declaration::ClassDeclaration(class) => {
+                        class.id.as_ref().map_or("", |id| id.name.as_str())
+                    }
+                    _ => "",
+                },
+                _ => "",
+            };
+            declared == self.name
+        })
+    }
+
+    fn infers_name(&self, extends: &oxc_ast::ast::TSType<'_>) -> bool {
+        struct Infers<'n> {
+            name: &'n str,
+            found: bool,
+        }
+        impl<'a> Visit<'a> for Infers<'_> {
+            fn visit_ts_infer_type(&mut self, infer: &oxc_ast::ast::TSInferType<'a>) {
+                self.found |= infer.type_parameter.name.name.as_str() == self.name;
+            }
+        }
+        let mut infers = Infers {
+            name: self.name,
+            found: false,
+        };
+        infers.visit_ts_type(extends);
+        infers.found
+    }
+
+    fn record(&mut self, type_name: &oxc_ast::ast::TSTypeName<'_>) {
+        if let oxc_ast::ast::TSTypeName::IdentifierReference(id) = type_name {
+            if id.name.as_str() == self.name {
+                self.found
+                    .push(verter_span::Span::new(id.span.start, id.span.end));
+            }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for NameReferences<'_> {
+    fn visit_ts_type_reference(&mut self, reference: &oxc_ast::ast::TSTypeReference<'a>) {
+        self.record(&reference.type_name);
+        walk::walk_ts_type_reference(self, reference);
+    }
+
+    fn visit_ts_interface_heritage(&mut self, heritage: &oxc_ast::ast::TSInterfaceHeritage<'a>) {
+        self.record(&heritage.type_name);
+        walk::walk_ts_interface_heritage(self, heritage);
+    }
+
+    fn visit_ts_class_implements(&mut self, implements: &oxc_ast::ast::TSClassImplements<'a>) {
+        self.record(&implements.expression);
+        walk::walk_ts_class_implements(self, implements);
+    }
+
+    fn visit_ts_interface_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::TSInterfaceDeclaration<'a>,
+    ) {
+        if !self.clause_binds(declaration.type_parameters.as_deref()) {
+            walk::walk_ts_interface_declaration(self, declaration);
+        }
+    }
+
+    fn visit_ts_type_alias_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::TSTypeAliasDeclaration<'a>,
+    ) {
+        if !self.clause_binds(declaration.type_parameters.as_deref()) {
+            walk::walk_ts_type_alias_declaration(self, declaration);
+        }
+    }
+
+    fn visit_class(&mut self, class: &oxc_ast::ast::Class<'a>) {
+        if !self.clause_binds(class.type_parameters.as_deref()) {
+            walk::walk_class(self, class);
+        }
+    }
+
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        if !self.clause_binds(function.type_parameters.as_deref()) {
+            walk::walk_function(self, function, flags);
+        }
+    }
+
+    fn visit_arrow_function_expression(
+        &mut self,
+        function: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+    ) {
+        if !self.clause_binds(function.type_parameters.as_deref()) {
+            walk::walk_arrow_function_expression(self, function);
+        }
+    }
+
+    fn visit_ts_function_type(&mut self, function: &oxc_ast::ast::TSFunctionType<'a>) {
+        if !self.clause_binds(function.type_parameters.as_deref()) {
+            walk::walk_ts_function_type(self, function);
+        }
+    }
+
+    fn visit_ts_constructor_type(&mut self, constructor: &oxc_ast::ast::TSConstructorType<'a>) {
+        if !self.clause_binds(constructor.type_parameters.as_deref()) {
+            walk::walk_ts_constructor_type(self, constructor);
+        }
+    }
+
+    fn visit_ts_method_signature(&mut self, signature: &oxc_ast::ast::TSMethodSignature<'a>) {
+        if !self.clause_binds(signature.type_parameters.as_deref()) {
+            walk::walk_ts_method_signature(self, signature);
+        }
+    }
+
+    fn visit_ts_call_signature_declaration(
+        &mut self,
+        signature: &oxc_ast::ast::TSCallSignatureDeclaration<'a>,
+    ) {
+        if !self.clause_binds(signature.type_parameters.as_deref()) {
+            walk::walk_ts_call_signature_declaration(self, signature);
+        }
+    }
+
+    fn visit_ts_construct_signature_declaration(
+        &mut self,
+        signature: &oxc_ast::ast::TSConstructSignatureDeclaration<'a>,
+    ) {
+        if !self.clause_binds(signature.type_parameters.as_deref()) {
+            walk::walk_ts_construct_signature_declaration(self, signature);
+        }
+    }
+
+    fn visit_ts_mapped_type(&mut self, mapped: &oxc_ast::ast::TSMappedType<'a>) {
+        if mapped.key.name.as_str() != self.name {
+            walk::walk_ts_mapped_type(self, mapped);
+        }
+    }
+
+    fn visit_ts_conditional_type(&mut self, conditional: &oxc_ast::ast::TSConditionalType<'a>) {
+        if self.infers_name(&conditional.extends_type) {
+            self.visit_ts_type(&conditional.check_type);
+            self.visit_ts_type(&conditional.false_type);
+        } else {
+            walk::walk_ts_conditional_type(self, conditional);
+        }
+    }
+
+    fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
+        if !self.statements_declare(&block.body) {
+            walk::walk_block_statement(self, block);
+        }
+    }
+
+    fn visit_function_body(&mut self, body: &oxc_ast::ast::FunctionBody<'a>) {
+        if !self.statements_declare(&body.statements) {
+            walk::walk_function_body(self, body);
+        }
+    }
+
+    fn visit_ts_module_block(&mut self, block: &oxc_ast::ast::TSModuleBlock<'a>) {
+        if !self.statements_declare(&block.body) {
+            walk::walk_ts_module_block(self, block);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry build: inventory + stable hash
 // ---------------------------------------------------------------------------
@@ -2847,6 +3102,13 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
     ) -> FunctionProgramDiscovery {
         let function_end = node.span().end;
         let frame_span = verter_span::Span::new(function_start, function_end);
+        let report_name = self.report_name.take().map(|span| {
+            let text = self
+                .source
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_default();
+            (span, Arc::from(text))
+        });
         let mut inventory = InventoryVisitor {
             call_addresses: self.nodes.as_mut().map(|nodes| &mut nodes.call_sites),
             frame_span,
@@ -2960,6 +3222,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                 let span = node.body().expect("indexed functions have a body").span();
                 verter_span::Span::new(span.start, span.end)
             },
+            report_name,
             locator,
             params,
             bindings: Arc::from(bindings.into_boxed_slice()),

@@ -1727,6 +1727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: *base,
                     index: index.clone(),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                 })
             }
             SemanticQueryKey::ProjectMember { base, member, .. } => {
@@ -1735,6 +1736,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     index: crate::semantic_query::IndexKey::String(
                         verter_type_expr::OwnedStr::from(member),
                     ),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                 })
             }
             SemanticQueryKey::ProjectPath { base, path, .. } => {
@@ -1755,7 +1757,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         },
                         crate::semantic_query::PathSegment::Index(index) => index.clone(),
                     };
-                    graph.intern_node(SemanticNodeData::IndexedAccess { object, index })
+                    graph.intern_node(SemanticNodeData::IndexedAccess {
+                        object,
+                        index,
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
+                    })
                 })
             }
             SemanticQueryKey::MappedType { source, mapper, .. } => {

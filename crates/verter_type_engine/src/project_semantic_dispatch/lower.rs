@@ -1713,12 +1713,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => None,
                 };
                 match folded_key {
-                    Some(key) => LowerStep::Value(self.finish_indexed_access_lowering(
-                        value,
-                        key,
-                        context,
-                        lowering.scope,
-                    )),
+                    Some(key) => LowerStep::Value(
+                        self.finish_indexed_access_lowering(value, key, context, lowering),
+                    ),
                     None => {
                         frames.push(LowerFrame::IndexedIndex {
                             object: value,
@@ -1733,7 +1730,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     object,
                     crate::semantic_query::IndexKey::Computed(value),
                     context,
-                    lowering.scope,
+                    lowering,
                 ))
             }
             LowerFrame::Object {
@@ -2109,9 +2106,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         obj_id: SemanticNodeId,
         index_key: crate::semantic_query::IndexKey,
         reduction_context: ProjectionReductionContext,
-        scope: &NodeScopeId,
+        lowering: &TypeExprLowering<'_>,
     ) -> SemanticNodeId {
         let graph = self.graph();
+        let scope = lowering.scope;
+        // A binding the lowering holds may have gone into the operands, so
+        // only an access with none is known to be the one written.
+        let origin = if lowering.env.is_empty() {
+            crate::semantic_query::IndexedAccessOrigin::Written
+        } else {
+            crate::semantic_query::IndexedAccessOrigin::Composed
+        };
         // Operand lowering preserves the operator. Only its value demand may
         // select the member; a transit read must retain both path segments.
         let should_defer = !crate::semantic_query::may_reduce_operator(reduction_context)
@@ -2126,6 +2131,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::IndexedAccess {
                     object: obj_id,
                     index: index_key,
+                    origin,
                 },
                 scope.clone(),
             )
@@ -2139,10 +2145,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // its own `reduction_context.mode`.
             match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                 base: obj_id,
-                index: index_key,
+                index: index_key.clone(),
                 mode: reduction_context.mode,
             }) {
-                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => self
+                    .absent_read_answer(origin, id, obj_id, &index_key, reduction_context)
+                    .unwrap_or(id),
                 _ => self.opaque(QueryError::Miss),
             }
         }

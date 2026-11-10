@@ -464,7 +464,7 @@ fn hash_node_rec<H: std::hash::Hasher, M: verter_audit::observe::ObserveExec>(
         SemanticNodeData::KeyOf { base } => {
             hash_node_rec(dispatch, *base, hasher, seen, depth + 1);
         }
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             hash_node_rec(dispatch, *object, hasher, seen, depth + 1);
             match index {
                 IndexKey::String(key) => {

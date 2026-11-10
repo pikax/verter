@@ -327,6 +327,7 @@ pub(super) struct NestedActivation<'d, 'a, D: FlowDemandDriver> {
 pub(super) struct NestedFinish<'d> {
     circular: bool,
     declared_return_none: bool,
+    report_name: Option<(verter_span::Span, Arc<str>)>,
     signature_params: Vec<crate::semantic_query::FunctionParam>,
     type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
     contextual: Option<ContextualSignature>,
@@ -810,11 +811,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let parts = match step {
             NestedSignatureStep::Done(signature) => {
                 self.end_nested_signature_recording(recording);
-                return NestedPrepared::Value(self.nested_function_postlude(
+                let (value, occurrence) = self.nested_function_postlude(
                     circular,
                     declared_return_none,
+                    false,
                     signature,
-                ));
+                    matched.entry().report_name(),
+                );
+                if let Some(occurrence) = occurrence {
+                    self.record_checker_diagnostic(occurrence);
+                }
+                return NestedPrepared::Value(value);
             }
             NestedSignatureStep::Child(parts) => *parts,
         };
@@ -922,6 +929,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
             call_diagnostic_sites: rustc_hash::FxHashMap::default(),
+            circular_return: std::cell::Cell::new(false),
+            frame_declares_return: !declared_return_none,
+            bare_self_return: None,
             declared_reads: false,
             dead_writes: false,
             dead_written: rustc_hash::FxHashSet::default(),
@@ -952,6 +962,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             finish: NestedFinish {
                 circular,
                 declared_return_none,
+                report_name: matched.entry().report_name().cloned(),
                 signature_params,
                 type_param_decls,
                 contextual,
@@ -977,6 +988,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let NestedFinish {
             circular,
             declared_return_none,
+            report_name,
             signature_params,
             type_param_decls,
             contextual,
@@ -1291,12 +1303,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 is_abstract: false,
             })
         };
+        nested_evaluator.report_receiver_reads(owned.content.receiver_reads.as_ref());
+        for diagnostic in nested_evaluator.checker_diagnostics.drain(..) {
+            self.record_checker_diagnostic(diagnostic);
+        }
+        let found_in_body = nested_evaluator.circular_return.get();
         drop(nested_evaluator);
-        let value = self.nested_function_postlude(circular, declared_return_none, signature);
+        let (value, occurrence) = self.nested_function_postlude(
+            circular,
+            declared_return_none,
+            found_in_body,
+            signature,
+            report_name.as_ref(),
+        );
+        if let Some(occurrence) = occurrence {
+            if let Some(effects) = recorded_effects.as_mut() {
+                effects.checker_diagnostics.push(occurrence.clone());
+            }
+            self.record_checker_diagnostic(occurrence);
+        }
         if let Some(recording) = recording {
             self.admit_nested_signature(
                 *recording,
-                (body_complete && value == signature).then_some(signature),
+                (body_complete && (value == signature || found_in_body)).then_some(value),
                 recorded_effects.map(|effects| NestedBodyEffects {
                     constructive_signature,
                     ..effects
@@ -1326,14 +1355,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         circular: bool,
         declared_return_none: bool,
+        found_in_body: bool,
         signature: SemanticNodeId,
-    ) -> SemanticNodeId {
-        let found_circular =
-            !circular && self.resolving_functions.borrow_mut().pop().unwrap_or(false);
+        report_name: Option<&(verter_span::Span, Arc<str>)>,
+    ) -> (
+        SemanticNodeId,
+        Option<crate::semantic_query::CheckerDiagnosticOccurrence>,
+    ) {
+        let found_circular = !circular
+            && self.resolving_functions.borrow_mut().pop().unwrap_or(false)
+            || found_in_body;
         if found_circular && declared_return_none {
-            return self.signature_returning_any(signature);
+            return (
+                self.signature_returning_any(signature),
+                report_name.and_then(|name| self.circular_return_occurrence(name)),
+            );
         }
-        signature
+        (signature, None)
     }
 
     /// The signature the root evaluation composed for `function` on

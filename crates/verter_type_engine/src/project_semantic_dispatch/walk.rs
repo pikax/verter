@@ -1229,6 +1229,56 @@ struct CompositeJoin {
     index: usize,
 }
 
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
+    /// Whether the program declares the global wrapper the primitive `node`
+    /// reads its members from.
+    pub(super) fn apparent_wrapper_settles(&self, node: SemanticNodeId, origin: &str) -> bool {
+        use super::apparent_type::GlobalWrapper;
+        let wrapper = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => "String",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => "Number",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "Boolean",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => "BigInt",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => "Symbol",
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                verter_type_expr::LiteralValue::String(_) => "String",
+                verter_type_expr::LiteralValue::Number(_) => "Number",
+                verter_type_expr::LiteralValue::Boolean(_) => "Boolean",
+                verter_type_expr::LiteralValue::BigInt(_) => "BigInt",
+            },
+            _ => return false,
+        };
+        matches!(
+            self.global_wrapper_surface(wrapper, &[], origin),
+            GlobalWrapper::Surface(_)
+        )
+    }
+
+    /// Whether the global `Object` type every object reads declares `name`,
+    /// or does not settle.
+    pub(super) fn global_object_declares(&self, name: &str, origin: &str) -> bool {
+        use super::apparent_type::GlobalWrapper;
+        match self.global_wrapper_surface("Object", &[], origin) {
+            GlobalWrapper::Absent => false,
+            GlobalWrapper::Unsettled => true,
+            GlobalWrapper::Surface(object) => {
+                let Some(SemanticNodeData::Object(view)) = self
+                    .graph()
+                    .node_data(object)
+                    .as_deref()
+                    .map(SemanticNodeData::clone)
+                else {
+                    return true;
+                };
+                !matches!(
+                    view.project_known_key(&PropertyKey::identifier(Arc::from(name))),
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                )
+            }
+        }
+    }
+}
+
 /// Whether an apparent type declares a member
 /// ([`PathWalker::apparent_member_surface`]).
 enum ApparentMember {
@@ -1319,8 +1369,13 @@ enum HopSite {
     Declaration,
     /// A deferred `keyof` reduced.
     KeyOf,
-    /// A deferred indexed access reduced.
-    IndexedAccess,
+    /// A deferred indexed access reduced: its origin, operand and index
+    /// answer a read the operand proves absent.
+    IndexedAccess {
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        object: SemanticNodeId,
+        index: IndexKey,
+    },
     /// An open conditional's true branch projected over the rest of the
     /// path; its false branch is projected next.
     ConditionalTrue {
@@ -2369,8 +2424,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                 },
             };
-            self.graph()
-                .intern_preserving_scope(base, SemanticNodeData::IndexedAccess { object, index })
+            self.graph().intern_preserving_scope(
+                base,
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index,
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
+                },
+            )
         })
     }
 
@@ -2686,6 +2747,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .any(|member| member.key.as_known().is_none())
             && absent(name)
             && name.element_access_equivalent().as_ref().is_none_or(absent)
+            && !matches!(name, PropertyKey::String(text) if view.withholds_key(text.as_ref()))
     }
 
     /// Record the step an indexed access takes through an index signature
@@ -3768,6 +3830,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             SemanticNodeData::IndexedAccess {
                 object,
                 index: IndexKey::Computed(index),
+                origin: crate::semantic_query::IndexedAccessOrigin::Composed,
             },
         );
         let mut output = QueryBuildOutput::from((QueryResult::Value(carrier), self.fence.clone()))
@@ -4834,7 +4897,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         },
                     });
                 }
-                SemanticNodeData::IndexedAccess { object, index: ix } => {
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index: ix,
+                    origin,
+                } => {
+                    let origin = *origin;
                     // Path-precision rule (mirrors the `InstantiationRef`
                     // intermediate-hop demotion above and `evaluate.rs`):
                     // this arm only runs inside `while index < path.len()`,
@@ -4867,7 +4935,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     return Some(HopRead {
                         key: SemanticQueryKey::IndexedAccess {
                             base: object,
-                            index: ix,
+                            index: ix.clone(),
                             mode: ProjectionMode::Navigate,
                         },
                         resume: HopResume {
@@ -4875,7 +4943,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             path: path.clone(),
                             index,
                             arm_read,
-                            site: HopSite::IndexedAccess,
+                            site: HopSite::IndexedAccess {
+                                origin,
+                                object,
+                                index: ix,
+                            },
                         },
                     });
                 }
@@ -6362,11 +6434,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 current = resolved;
             }
-            HopSite::IndexedAccess => {
+            HopSite::IndexedAccess {
+                origin,
+                object,
+                index: ix,
+            } => {
                 let QueryResult::Value(resolved) = value else {
                     results.push(self.opaque_miss());
                     return None;
                 };
+                let resolved = self
+                    .dispatch
+                    .absent_read_answer(origin, resolved, object, &ix, self.context)
+                    .unwrap_or(resolved);
                 if resolved == current {
                     results.push(self.preserve_deferred_path(current, &path[index..]));
                     self.record_intermediate(None);
@@ -9244,7 +9324,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // arm) — and the RESOLVED value contributes its surface. An
             // access the query cannot close contributes nothing (the honest
             // unresolvable fallback).
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let object = *object;
                 let index = index.clone();
                 drop(data);
@@ -9725,6 +9805,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
                         object: source,
                         index: IndexKey::Computed(key_arg),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }),
                 }
             } else {
@@ -10214,6 +10295,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
                             object: source,
                             index: IndexKey::from_known(key.key.clone()),
+                            origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                         }),
                     }
                 } else if value_expr_is_k_independent {
@@ -11986,14 +12068,67 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// A literal index absent from an exact closed domain, including the
-    /// apparent members the ordinary path reader adds. This proves absence
-    /// without asking the unavailable member for a value.
+    /// A literal index `base` proves absent, through the aliases and
+    /// declarations `base` names: every constituent of a composite lacks it
+    /// (`getPropertyOfType`), so the read is the checker's TS2339. A
+    /// constituent that does not settle to an object, a deferred operator or
+    /// an open type parameter among them, proves nothing.
     pub(super) fn indexed_access_proves_absence(
         &self,
         base: SemanticNodeId,
         index: &IndexKey,
         context: crate::semantic_query::ProjectionReductionContext,
+    ) -> bool {
+        let origin = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
+        let mut pending = vec![base];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let concrete = match self.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+            };
+            let data = self.graph().node_data(concrete);
+            match data.as_deref() {
+                Some(SemanticNodeData::Union(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Object(_)) => {
+                    if !self.object_proves_index_absent(concrete, index, context, origin.clone()) {
+                        return false;
+                    }
+                }
+                // `unknown` has no property at all.
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => {}
+                _ => match self
+                    .normalize_node_for_structural_fact_demand(concrete, context)
+                    .into_complete_node()
+                {
+                    Some(resolved) if resolved != concrete => pending.push(resolved),
+                    _ => return false,
+                },
+            }
+        }
+        true
+    }
+
+    /// A literal index absent from an exact closed domain, including the
+    /// apparent members the ordinary path reader adds. This proves absence
+    /// without asking the unavailable member for a value.
+    fn object_proves_index_absent(
+        &self,
+        base: SemanticNodeId,
+        index: &IndexKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+        origin: Option<verter_type_expr::OwnedStr>,
     ) -> bool {
         let key = match index {
             IndexKey::String(name) => PropertyKey::String(verter_type_expr::OwnedStr::from(name)),
@@ -12018,7 +12153,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         walker.origin_file = self
             .graph()
             .node_scope(base)
-            .and_then(|scope| scope.canonical_file());
+            .and_then(|scope| scope.canonical_file())
+            .or(origin);
         self.probe_optional(|| {
             matches!(
                 walker.apparent_member_surface(base, view, &key),

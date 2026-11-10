@@ -259,7 +259,7 @@ impl SemanticNodeData {
             Self::TemplateLiteral { expressions, .. } => {
                 expressions.iter().copied().for_each(visit);
             }
-            Self::IndexedAccess { object, index } => {
+            Self::IndexedAccess { object, index, .. } => {
                 visit(*object);
                 authored_property_key_child(index)
                     .into_iter()

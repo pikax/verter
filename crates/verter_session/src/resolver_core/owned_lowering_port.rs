@@ -1210,6 +1210,19 @@ macro_rules! owned_lowering_from_source_inputs {
                 observe_source_content(&source);
                 source.decl_bodies().transient_type_parts_in(owner, name)
             }
+            fn type_reference_name_spans(
+                &self,
+                source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+                name: &str,
+            ) -> verter_session_query::source::demand::DemandOutcome<Vec<verter_span::Span>> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::type_reference_name_spans");
+                let Some(source) = SourceInputProvider::source(self, source) else {
+                    missing_source();
+                    return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
+                };
+                observe_source_content(&source);
+                source.decl_bodies().type_reference_name_spans(name)
+            }
             fn transient_value_parts(
                 &self,
                 source: &verter_session_query::inputs::shallow::ShallowInputRecord,

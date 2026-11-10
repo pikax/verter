@@ -173,6 +173,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: dummy,
         index: IndexKey::String(verter_type_expr::OwnedStr::from(StdArc::from("x"))),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
@@ -707,6 +708,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: dangling,
                 index: IndexKey::String(verter_type_expr::OwnedStr::from(StdArc::from("x"))),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             }),
         ),
         (
@@ -714,6 +716,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: present,
                 index: IndexKey::Computed(dangling),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             }),
         ),
         (

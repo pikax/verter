@@ -7315,6 +7315,7 @@ mod semantic_poll_contract {
             .intern_node(SemanticNodeData::IndexedAccess {
                 object,
                 index: verter_type_engine::semantic_query::IndexKey::from("inner"),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
             })
     }
 

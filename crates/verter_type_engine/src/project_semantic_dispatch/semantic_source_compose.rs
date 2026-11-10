@@ -987,6 +987,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 SemanticNodeData::IndexedAccess {
                     object: node,
                     index: IndexKey::String(verter_type_expr::OwnedStr::from(key.as_str())),
+                    origin: crate::semantic_query::IndexedAccessOrigin::Written,
                 },
                 scope.clone(),
             );

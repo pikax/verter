@@ -713,6 +713,7 @@ fn value_shape(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
         SemanticNodeData::IndexedAccess {
             object,
             index: IndexKey::String(name),
+            ..
         } => {
             let object = *object;
             let name = name.clone();

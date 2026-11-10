@@ -1205,8 +1205,10 @@ fn flow_return_base_plus_recursion_admits_widened_number() {
     });
 }
 
+/// A function whose every return is the bare call of itself: the checker
+/// skips those returns and the return is `never`, a value.
 #[test]
-fn flow_return_empty_cycle_is_return_only_and_never_never() {
+fn a_function_returning_only_itself_has_a_value() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
@@ -1215,21 +1217,7 @@ fn flow_return_empty_cycle_is_return_only_and_never_never() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        assert!(
-            flow_is_miss(dispatch, key.clone()),
-            "an empty recursive cycle is ReturnOnly"
-        );
-        // Never admitted: the warm read misses, and nothing in the result is
-        // `never`.
-        assert!(
-            dispatch
-                .graph()
-                .get_flow_return_result(dispatch.ctx, &key)
-                .map(|served| served.value().clone())
-                .is_none(),
-            "an empty recursive cycle admits no family value"
-        );
-        assert!(flow_is_miss(dispatch, key), "still cold on the next demand");
+        assert!(!flow_is_miss(dispatch, key), "the answer has a value");
     });
 }
 
@@ -2375,8 +2363,7 @@ fn flow_return_direct_call_reads_the_shadowing_nested_function_declaration() {
 /// inside `f` shadows the self-recursion hold, so the call is the nested
 /// declaration's declared return, never a self edge. TypeScript 7.0.2 (all
 /// four settings): `ReturnType<typeof f>` is `number`. Mutation recipe:
-/// treating the call as a DirectSelfCall degrades this with EmptyCycle
-/// instead.
+/// treating the call as a DirectSelfCall answers the self-recursion instead.
 #[test]
 fn flow_return_self_call_shadowed_by_nested_function_declaration_reads_it() {
     let host = make_host();
@@ -2598,11 +2585,11 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
 
 /// The same authority covers a nested value's OWN name: an inner hoisted
 /// declaration of the nested function's name shadows it — the call is
-/// NEVER a DirectSelfCall (no self edge, no EmptyCycle); it calls the inner
+/// NEVER a DirectSelfCall (no self edge); it calls the inner
 /// declaration. TypeScript 7.0.2 (all four `strictNullChecks` ×
 /// `noImplicitAny` settings): `ReturnType<typeof outer>` is `number`.
 /// Mutation recipe: an empty nested shadow set fires the DirectSelfCall arm
-/// and degrades with EmptyCycle instead.
+/// and answers the self-recursion instead.
 #[test]
 fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
     let host = make_host();
@@ -5144,31 +5131,18 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
             "{second} must leave no claimed/uncompleted flight: {second_retained:?}"
         );
 
-        // Each member publishes ITS OWN return sites in source order
-        // (own literal first, the component contribution second) — and
-        // the SAME value whichever member was demanded first, which is
-        // the order-independence half of the contract.
+        // The SAME value whichever member was demanded first, which is the
+        // order-independence half of the contract.
         for name in ["scCleanA", "scCleanB"] {
             let (result, _, _) = scc_expect_value(&host, name);
             let projected = host
                 .project_node_to_type_expr_for_test(result.return_type())
                 .expect("a component member projects");
-            let verter_type_expr::TypeExpr::Union(arms) = &projected else {
-                panic!("{name} publishes the component union, got {projected:?}");
-            };
-            // Every member of a mutual component shares the component's
-            // fixed point, so both publish the SAME arm set in either
-            // demand order. Arm ORDER follows the root's accumulation
-            // order and is not part of this contract.
-            let mut arms: Vec<String> = arms.iter().map(|arm| format!("{arm:?}")).collect();
-            arms.sort();
+            // tsgo: TS7023 on both members, each `any`.
             assert_eq!(
-                arms,
-                vec![
-                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(1.0)),
-                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(2.0)),
-                ],
-                "{name} publishes the component's exact fixed point (demand order {first} → {second})"
+                projected,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+                "{name} is the checker's circular return"
             );
         }
     }
@@ -5277,14 +5251,10 @@ fn flow_return_drained_member_retires_from_the_table_it_claimed() {
 
 /// Every member of a resurrected flow SCC must publish a READABLE entry.
 ///
-/// A member whose own evaluation failed `EmptyCycle` has no seed of its
-/// own, so its evaluation records `MaterializedSet::empty()`. The
-/// component discharge then RESURRECTS it to `Complete` from its hold
-/// targets — but the resurrection copies only the outcome, so the
-/// published entry keeps the empty materialised set. `cached_satisfies`
-/// is an `.any(...)` over that set, so `∅` satisfies NOTHING: the
-/// candidate occupies a slot, a reverse-index registration and a FIFO
-/// budget admission while being permanently unreadable.
+/// `cached_satisfies` is an `.any(...)` over a candidate's recorded
+/// materialised set, so an entry published with `∅` satisfies NOTHING: it
+/// occupies a slot, a reverse-index registration and a FIFO budget admission
+/// while being permanently unreadable.
 ///
 /// Candidate count alone does NOT discriminate — a zombie satisfies it.
 /// The discriminating assertions are the recorded materialised set and
@@ -5292,7 +5262,7 @@ fn flow_return_drained_member_retires_from_the_table_it_claimed() {
 #[test]
 fn flow_return_resurrected_member_publishes_a_readable_entry() {
     // The two-cycle: whichever member is demanded first, the other one
-    // is the seedless `EmptyCycle` member the discharge resurrects.
+    // closes with it.
     for (first, rest) in [
         ("scResA", ["scResB"].as_slice()),
         ("scResB", ["scResA"].as_slice()),
@@ -6544,6 +6514,12 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
 
     expect_refused_flow_as(
         "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); return { v: x } }",
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
+    // An absent member beside the unmodelled effect recovers nothing: the
+    // answer it would read as is not the function's, and nothing is admitted.
+    expect_refused_flow_as(
+        "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); const o = { a: 1 }; return { v: x, w: o.bb } }",
         verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
@@ -10474,25 +10450,11 @@ function f(x: string | number) {
     });
 }
 
-/// A FLOW-rooted component's carrier — the self-root union the root and
-/// its batched members publish on — covers every file any drained member
-/// observed, the CALL members included. Here `seed`'s initializer in a
-/// THIRD file calls back into the pending root, so its call drains as a
-/// call member whose self-roots name that file (its program point and
-/// its argument node), while no flow or relation member of the component
-/// does: a carrier composed from the flow and relation members alone
-/// omits it. The component degrades (a program-expression hold has no
-/// value to resurrect the read with) and publishes nothing, so the
-/// composed carrier is read through the observation probe.
-///
-/// The explicit-type-argument spelling of the same omission
-/// (`bb<Arg>(n - 1)` with `Arg` imported from a third file) composes the
-/// same incomplete carrier, but its edit is already caught by the fact
-/// rail — the import's resolution facts — so it warms and invalidates
-/// correctly before and after the union; the third-file program point is
-/// the observation that only the union covers.
+/// A return that requires itself through another file's initializer has no
+/// value here, and an edit of that file that breaks the cycle answers: what
+/// did not complete was kept for no one.
 #[test]
-fn flow_root_component_carrier_covers_call_member_roots() {
+fn a_cycle_through_another_file_follows_an_edit_of_that_file() {
     const A: &str = "/ws/scc-call-roots/a.ts";
     const A_SRC: &str = r#"
 import { seed } from "/ws/scc-call-roots/c";
@@ -10512,32 +10474,35 @@ export const seed = a(0);
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, A, A_SRC);
     upsert_ts(&host, C, C_SRC);
-    *host
-        .flow_fault_injection
-        .flow_root_carrier_probe
-        .lock()
-        .expect("the flow-root carrier probe is never poisoned") = Some(Vec::new());
-    with_dispatch(&host, |dispatch| {
-        let key = whole_return_key(dispatch, A, "a");
-        let _ = execute_flow(dispatch, key);
-    });
-    let roots = host
-        .flow_fault_injection
-        .flow_root_carrier_probe
-        .lock()
-        .expect("the flow-root carrier probe is never poisoned")
-        .take()
-        .expect("the probe stays armed");
-    assert!(
-        !roots.is_empty(),
-        "the flow-root close composed and recorded a carrier"
+    let answer = |host: &Arc<VerterHost>| {
+        let (result, _) = host
+            .get_flow_return_type_with_audit(
+                &verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(A),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from("a"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            )
+            .into_parts();
+        result.ok().map(|result| {
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the return projects")
+        })
+    };
+    assert_eq!(answer(&host), None, "the cycle has no value");
+    upsert_ts(&host, C, "export const seed = \"s\";\n");
+    let edited = answer(&host).expect("the edit broke the cycle");
+    assert_ne!(
+        edited,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+        "the edit broke the cycle"
     );
-    for file in [A, C] {
-        assert!(
-            roots.iter().any(|root| root.as_ref() == file),
-            "the component carrier covers {file}: {roots:?}"
-        );
-    }
 }
 
 /// A mixed component's UNPROVEN deferred flow members poison the
