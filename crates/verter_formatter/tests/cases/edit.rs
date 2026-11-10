@@ -748,7 +748,7 @@ fn malformed_rendered_segments_and_bindings_are_refused() {
 }
 
 /// FMT1B-AC2 at the construction boundary: a malformed set cannot be built,
-/// and a set applied to a text it was not derived for is refused.
+/// and a set applied to a text where one of its edits does not fit is refused.
 #[test]
 fn construction_and_application_refuse_malformed_edit_sets() {
     let authored = "abcdef";

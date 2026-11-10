@@ -315,7 +315,9 @@ the ratified `4*(A_in+B_emit)+64` ceiling.
 `FormatEditSet::new(source, edits)`, so a set is always sorted, non-overlapping,
 addressable at scalar boundaries, never bounded inside a CRLF pair and free of
 no-op edits; a byte-identical result derives zero edits; `apply(source)`
-re-checks against the exact text it is applied to and refuses a foreign one.
+re-checks every edit against the text it is applied to and refuses a text where
+an edit does not fit. The set carries no source witness, so a different text on
+which every edit still fits is not detected.
 Edits are the private authored-domain geometry; position maps, range expansion,
 cursor projection and public DTO conversion are later owners. Focused proof:
 `cargo nextest run -p verter_formatter -E 'test(/cases::edit::/)'`.
@@ -324,5 +326,5 @@ cursor projection and public DTO conversion are later owners. Focused proof:
 | -------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | Anchor verification before trust             | correctness | A binding whose bytes moved or changed would otherwise be treated as retained and yield edits that do not reproduce the rendered bytes.                 | The renderer proves segments carry bindings, not that a printer's binding still equals the authored bytes.             |
 | Per-gap edge stripping with CRLF back-off    | correctness | A whole-gap replacement would churn unchanged prefixes and suffixes; a boundary between `\r` and `\n` would violate the `maps.crlf` law.                 | Application-only oracles accept any set that reproduces the bytes, including the maximal one.                          |
-| Sealed set with checked construction/apply   | correctness | A hand-built unsorted, overlapping, out-of-bounds or no-op set, or a set applied to a text it was not derived for, would corrupt or panic at application. | Coordinate checks validate one range against one text, not the ordering of a set or its binding to the applied source. |
+| Sealed set with checked construction/apply   | correctness | A hand-built unsorted, overlapping, out-of-bounds or no-op set, or a set whose edits do not fit the applied text, would corrupt or panic at application.  | Coordinate checks validate one range against one text, not the ordering of a set or its fit to the applied source.     |
 | Linear anchor pass without interior search   | performance | Repeated near-equal content invites a quadratic alignment search; the lock forbids any global diff fallback.                                             | Text-output assertions cannot observe comparison growth; the work counter and scale adversaries do.                    |

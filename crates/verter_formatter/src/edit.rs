@@ -53,8 +53,8 @@ pub struct EditWork {
 /// edits, in application order.
 ///
 /// Sets exist only through [`derive_edits`] or the checked [`Self::new`], so
-/// a malformed set cannot be built; [`Self::apply`] re-checks against the
-/// exact source it is applied to.
+/// a malformed set cannot be built; [`Self::apply`] re-checks every edit
+/// against the text it is applied to.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FormatEditSet {
     edits: Vec<FormatEdit>,
@@ -95,9 +95,11 @@ impl FormatEditSet {
         self.edits.is_empty()
     }
 
-    /// Apply the edits to the exact authored `source` and return the rendered
-    /// bytes. A set is bound to the source it was derived for: applying it to
-    /// a different text is refused at the first edit that does not fit.
+    /// Apply the edits to the authored `source` and return the rendered
+    /// bytes. Every edit is re-checked against `source`, and the first one
+    /// that is not addressable there, splits a CRLF pair or is a no-op is
+    /// refused. The set carries no source witness: a different text on which
+    /// every edit still fits is not detected.
     pub fn apply(&self, source: &str) -> Result<String, EditError> {
         validate(source, &self.edits)?;
         let replaced: usize = self.edits.iter().map(|edit| edit.text.len()).sum();
