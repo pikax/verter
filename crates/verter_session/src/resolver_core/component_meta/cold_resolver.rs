@@ -8,9 +8,10 @@ use crate::resolver_core::resolve_local_type_declaration;
 
 use super::direct_macro::{
     imported_declaration_surface_is_authoritative, is_direct_local_macro_type_reference,
-    is_direct_macro_type_reference, keep_direct_imported_vue_macro, macro_dep_exported_type_name,
-    macro_has_authoritative_owner_surface, macro_has_direct_local_type_root,
-    should_ignore_external_macro_type, should_seed_direct_macro_registry_entry,
+    is_direct_macro_type_reference, keep_direct_imported_carrier_macro,
+    macro_dep_exported_type_name, macro_has_authoritative_owner_surface,
+    macro_has_direct_local_type_root, should_ignore_external_macro_type,
+    should_seed_direct_macro_registry_entry,
 };
 use super::{
     macro_kind_needed_for_fallthrough, placeholder_type_declaration,
@@ -286,7 +287,7 @@ where
                 .unwrap_or(false);
             let imported_surface_is_authoritative =
                 imported_declaration_surface_is_authoritative(&declaration);
-            let keep_direct_imported_vue_macro = keep_direct_imported_vue_macro(
+            let keep_direct_imported_carrier_macro = keep_direct_imported_carrier_macro(
                 host,
                 owner_canonical,
                 projectable_owner_local,
@@ -295,7 +296,7 @@ where
                 dep,
                 &declaration,
             );
-            if !projectable_owner_local || keep_direct_imported_vue_macro {
+            if !projectable_owner_local || keep_direct_imported_carrier_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
                     macro_kind: dep.macro_kind,
@@ -317,7 +318,7 @@ where
                 .get(dep.macro_index)
                 .copied()
                 .unwrap_or(false);
-            let keep_direct_imported_vue_macro = keep_direct_imported_vue_macro(
+            let keep_direct_imported_carrier_macro = keep_direct_imported_carrier_macro(
                 host,
                 owner_canonical,
                 projectable_owner_local,
@@ -352,7 +353,7 @@ where
                     declaration: declaration.clone(),
                 });
             }
-            if !projectable_owner_local || keep_direct_imported_vue_macro {
+            if !projectable_owner_local || keep_direct_imported_carrier_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
                     macro_kind: dep.macro_kind,

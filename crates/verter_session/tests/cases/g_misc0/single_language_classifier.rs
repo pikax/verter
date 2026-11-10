@@ -56,7 +56,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // their framework choices route through the host's language
     // classifier, never a carrier-extension literal.
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
-    "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
     // Workspace resolver `.vue`-aware routing (resolution data, not
     // classification).
     // LSP / MCP / tooling feature files (frozen here so no NEW file grows

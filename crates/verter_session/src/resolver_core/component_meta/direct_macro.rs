@@ -8,6 +8,9 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 use super::ComponentMetaResolutionPurpose;
 
+// Spelling-based role recognition (`DEM-D04`): EAK2 replaces this comparison
+// with canonical role evidence produced by EAK1. Until then it is the one
+// needle-level allowlist entry of the `carrier_routing_no_vue_gate` guard.
 pub(super) fn should_ignore_external_macro_type(dep: &MacroTypeDep) -> bool {
     dep.macro_kind == AnalyzedMacroKind::DefineSlots
         && dep.import_source == "vue"
@@ -52,10 +55,14 @@ where
 /// Whether to keep a resolved imported macro entry for the `Full` path even
 /// when the owner already has a projectable local surface.
 ///
-/// This carves out the `defineProps<ImportedVueProps>()` case: the imported
-/// component's surface is the authoritative one and must be kept in
-/// `resolved_macros`, otherwise the owner's local projection would replace it.
-pub(super) fn keep_direct_imported_vue_macro<H>(
+/// This carves out the `defineProps<ImportedComponentProps>()` case: when the
+/// props type is imported from a component carrier of the owner's own
+/// framework, that component's surface is the authoritative one and must be
+/// kept in `resolved_macros`, otherwise the owner's local projection would
+/// replace it. The carrier question is answered by the host's language
+/// classifier ([`super::ComponentMetaResolverHost::declaration_source_is_owner_carrier`]),
+/// never by the declaration path's suffix.
+pub(super) fn keep_direct_imported_carrier_macro<H>(
     host: &H,
     owner_canonical: &str,
     projectable_owner_local: bool,
@@ -71,7 +78,10 @@ where
         && purpose == ComponentMetaResolutionPurpose::Full
         && is_direct_macro_type_reference(host, owner_canonical, macros, dep)
         && dep.macro_kind == AnalyzedMacroKind::DefineProps
-        && declaration.canonical_source.ends_with(".vue")
+        && host.declaration_source_is_owner_carrier(
+            owner_canonical,
+            declaration.canonical_source.as_str(),
+        )
 }
 
 // / clippy cleanup — `direct_macro_type_reference_expr`,

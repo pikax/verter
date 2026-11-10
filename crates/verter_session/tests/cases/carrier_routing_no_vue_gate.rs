@@ -26,16 +26,10 @@
 //! and a whole-`src` scan would drown the parity signal in Vue-intrinsic
 //! noise.
 //!
-//! ## Allowlist (needle-NARROW, Vue-intrinsic / HARD-BOUNDARY only)
+//! ## Allowlist (needle-NARROW, HARD-BOUNDARY only)
 //!
-//! Within the scan scope, two files are allowlisted as FILES:
+//! Within the scan scope, one file is allowlisted as a FILE:
 //!
-//!   - `component_meta/direct_macro.rs` — the Vue-MACRO resolution helper. Its
-//!     gates are genuinely Vue-runtime / Vue-macro intrinsic:
-//!     `dep.import_source == "vue"` detects the Vue runtime npm package's own
-//!     `Slot` type, and `keep_direct_imported_vue_macro`'s `.ends_with(".vue")`
-//!     carves out the `defineProps<ImportedVueProps>()` Vue-component-surface
-//!     case. Neither is a carrier classification of an arbitrary component file.
 //!   - `host_resolve/virtual_file_pipeline.rs` — a HARD-BOUNDARY file (owns
 //!     `compile_entry`, the carrier compile path the Svelte-first-class change
 //!     must NOT touch). Its only `.vue` literal is in `render_vue_public_api_legacy`
@@ -44,6 +38,17 @@
 //!     Svelte component-name derivation belongs in the Svelte adapter's own
 //!     renderer, NOT a predicate swap here, so this is documented + allowlisted
 //!     rather than forced (tracked as an F4 carry-forward).
+//!
+//! The component-meta macro resolver (`component_meta/direct_macro.rs`) is
+//! IN scope. Its former `.ends_with(".vue")` carve-out now asks the host
+//! language classifier whether the imported declaration lives in a component
+//! carrier of the owner's own adapter
+//! (`ComponentMetaResolverHost::declaration_source_is_owner_carrier`). Its
+//! remaining `dep.import_source == "vue"` comparison is the displaced route
+//! `DEM-D04` (spelling-based role recognition), whose deletion owner is EAK2
+//! (`EAK2-AC1`, canonical role evidence from EAK1): that ONE line is
+//! allowlisted by exact text in `LINE_EXCLUSIONS` and the entry leaves with
+//! EAK2.
 //!
 //! Test code (`#[cfg(test)]` blocks + `*_tests.rs` files, stripped), comments
 //! (stripped), and explicit `is_svelte()` checks (a DIFFERENT carrier) are
@@ -64,19 +69,23 @@ use std::path::{Path, PathBuf};
 /// live-host resolver chain.
 const SCAN_DIRS: &[&str] = &["resolver_core", "host_resolve"];
 
-/// Files excluded from the scan as FILES — either Vue-runtime / Vue-macro
-/// intrinsic or HARD-BOUNDARY:
-///   - `direct_macro.rs` resolves Vue `defineProps`/`defineSlots` macro types:
-///     it detects the Vue runtime package's own `Slot` type
-///     (`import_source == "vue"`) and carves out the imported-Vue-component-
-///     surface case — both Vue-specific by definition, neither a cross-carrier
-///     gate.
+/// Files excluded from the scan as FILES — HARD-BOUNDARY only:
 ///   - `virtual_file_pipeline.rs` is a HARD-BOUNDARY file (owns `compile_entry`).
 ///     Its only `.vue` literal lives in the LEGACY Vue public-API renderer
 ///     (`render_vue_public_api_legacy`, a `.trim_end_matches(".vue")`
 ///     component-name derivation) — Vue-intrinsic and on the boundary, so it is
 ///     documented + allowlisted (an F4 carry-forward), not force-fixed.
-const FILE_EXCLUSIONS: &[&str] = &["direct_macro.rs", "virtual_file_pipeline.rs"];
+const FILE_EXCLUSIONS: &[&str] = &["virtual_file_pipeline.rs"];
+
+/// Single LINES excluded from the scan by `(file name, exact trimmed code)`:
+/// displaced routes another node owns, allowlisted by text so that any other
+/// gate shape in the same file is still a violation.
+///   - `direct_macro.rs`: `should_ignore_external_macro_type` detects the Vue
+///     runtime package's own `Slot` type by its import spelling. This is
+///     `DEM-D04` (demand-activation decision), deletion owner EAK2
+///     (`EAK2-AC1`), replaced by canonical role evidence from EAK1. The entry
+///     is removed with that route.
+const LINE_EXCLUSIONS: &[(&str, &str)] = &[("direct_macro.rs", "&& dep.import_source == \"vue\"")];
 
 fn crate_src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -237,7 +246,15 @@ fn file_violations(path: &Path) -> Vec<Violation> {
 
         let inside_cfg_test = cfg_test_depth.is_some();
 
-        if !inside_cfg_test && !trimmed.is_empty() && line_gate_kind(&code).is_some() {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let excluded_line = LINE_EXCLUSIONS
+            .iter()
+            .any(|(file, text)| *file == file_name && *text == trimmed);
+        if !inside_cfg_test
+            && !trimmed.is_empty()
+            && !excluded_line
+            && line_gate_kind(&code).is_some()
+        {
             violations.push((rel.clone(), lineno, trimmed.to_string()));
         }
 
@@ -381,10 +398,13 @@ fn session_resolution_routing_has_no_hardcoded_vue_gate() {
            - `verter_language::LanguageRegistry::global().classify_static(path)\n\
                 .static_resolution().is_framework_carrier()` for a path string,\n\
            - `verter_semantic::resolver_core::path_is_carrier(path)` for a bare path helper.\n\
-         Allowlisted ONLY: the Vue-MACRO resolution helper `direct_macro.rs`\n\
-         (Vue-runtime/Vue-macro intrinsic) and the HARD-BOUNDARY\n\
-         `virtual_file_pipeline.rs` (legacy Vue public-API renderer), plus test\n\
-         code, comments, and explicit `is_svelte()` checks.\n\n\
+         A component-meta resolver that needs to know whether an imported declaration\n\
+         lives in a component carrier asks the host classifier through\n\
+         `ComponentMetaResolverHost::declaration_source_is_owner_carrier`.\n\
+         Allowlisted ONLY: the HARD-BOUNDARY `virtual_file_pipeline.rs` (legacy Vue\n\
+         public-API renderer), the single `DEM-D04` line in `direct_macro.rs` owned by\n\
+         EAK2 (`LINE_EXCLUSIONS`), plus test code, comments, and explicit `is_svelte()`\n\
+         checks.\n\n\
          Violations:\n  {}",
         violations
             .iter()

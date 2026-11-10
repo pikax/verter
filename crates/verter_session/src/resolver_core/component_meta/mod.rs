@@ -612,6 +612,20 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         None
     }
 
+    /// Whether the resolved declaration at `canonical_source` lives in a
+    /// component carrier of the OWNER's own framework adapter, under the
+    /// host's single language-classification authority — the
+    /// `defineProps<ImportedComponentProps>()` case whose imported component
+    /// surface is authoritative. Never a path-suffix check. The default is
+    /// `false`: a host without a classifier admits no carrier.
+    fn declaration_source_is_owner_carrier(
+        &self,
+        _owner_canonical: &str,
+        _canonical_source: &str,
+    ) -> bool {
+        false
+    }
+
     fn has_projectable_owner_local_macro_surface(
         &self,
         owner_canonical: &str,
