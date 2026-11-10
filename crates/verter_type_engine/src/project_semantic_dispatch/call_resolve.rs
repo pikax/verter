@@ -3815,7 +3815,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key.policy.excess_property_check =
             excess_property_check && key.source_freshness == FreshnessKey::Fresh;
         let step = if binding_enabled {
-            self.execute_relate(key)
+            // The member relation a non-blocking consumer advances, driven
+            // in place under the candidate's open session.
+            self.drive_relation_in_place(super::helper_continuation::RelationRead::member(
+                key,
+                super::dispatch_txn::InferenceOccurrence::ARGUMENT_COVARIANT,
+            ))
         } else {
             self.dispatch_txn.borrow_mut().begin_binding_disabled();
             let step = self.execute_relate(key);

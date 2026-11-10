@@ -1910,6 +1910,19 @@ impl SemanticGraphStore {
             .projection_hops_walked
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per machinery relation root whose root obligation frame
+    /// opens.
+    pub fn record_relation_root_opened(&self) {
+        self.stats
+            .relation_roots_opened
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per structural relation reduction.
+    pub fn record_relation_reduction(&self) {
+        self.stats
+            .relation_reductions
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped by a query entry's admission once per stage it computes.
     pub fn record_admission_stage(&self) {
         self.stats

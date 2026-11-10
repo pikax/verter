@@ -203,6 +203,20 @@ impl<M: ObserveExec> crate::semantic_query::NodeRead for GraphIn<'_, M> {
 impl<M: ObserveExec> GraphIn<'_, M> {
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_relation_root_opened(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_relation_root_opened();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_relation_reduction(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_relation_reduction();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_instantiate(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_instantiate();

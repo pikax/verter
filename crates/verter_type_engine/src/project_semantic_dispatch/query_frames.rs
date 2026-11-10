@@ -55,6 +55,13 @@
 //! as the frames do, and the charges a needed demand's entry takes between
 //! two steps accrue to the frame that needed it, as they do on the native
 //! stack.
+//!
+//! A relation evaluated as a machinery root outside any drive is a frame
+//! too. Its root obligation frame opens at its first step and stays open,
+//! owned by the frame, while the first instantiations its operands' carrier
+//! walks read are needed; once each is delivered the pair relates with those
+//! reads answered by the deliveries, and the relation's completed members
+//! publish against its own publication.
 
 use crate::semantic_query::checker_policy::TupleSplicePosition;
 use std::sync::Arc;
@@ -64,6 +71,9 @@ use rustc_hash::FxHashMap;
 use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart, TypeofBuild, TypeofStart};
 use super::cost_receipt::Nesting;
 use super::family_continuation::{FamilyBuild, FamilyStep};
+use super::helper_continuation::{
+    HelperAwait, HelperDelivery, HelperDrive, HelperRequest, HelperStep, RelationRead,
+};
 use super::query_entry::EntryBegin;
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
@@ -176,6 +186,9 @@ pub(super) enum FrameBuild {
     /// A family build waiting on a pending contributor's index, which it
     /// does not read: it resumes as from a load that served nothing.
     FamilyIndex(Box<FamilyBuild>, Arc<str>, LoadEnded),
+    /// A machinery relation root: its root obligation frame open, its
+    /// operands' carrier walks demanded before the pair relates.
+    Relation(Box<RelationFrameBuild>),
     /// A family build whose need the frame is admitting
     /// ([`super::query_entry`]): the admission stands at a read, the family
     /// retained for the admitted need.
@@ -203,6 +216,45 @@ pub(super) struct AdmissionBuild {
 pub(super) struct AdmittedNeed {
     key: SemanticQueryKey,
     prelude: CarrierNormalizationPrelude,
+}
+
+/// A machinery relation root's frame between its steps: the relation
+/// computation its first step began — which owns the open root obligation
+/// frame and the operand demands the pair waits on before it reduces — and
+/// the read it waits on.
+#[derive(Default)]
+pub(super) struct RelationFrameBuild {
+    read: Option<RelationRead>,
+    awaiting: Option<HelperAwait>,
+    /// The claim the awaited operand read entered with, until the runtime
+    /// takes it.
+    claim: Option<ClaimAttempt>,
+}
+
+/// A relation's demands of the instantiations its operands' carrier walks
+/// read first — as the checker instantiates an argument's and its
+/// parameter's types before relating them — on a frame of the continuation
+/// runtime: the deliveries answered so far, and the demands still to be
+/// read. Each key is the walk's own first read, computed without reading
+/// anything ([`ProjectSemanticDispatch::relation_operand_first_instantiation`]),
+/// and entered once; the walk itself runs once, in the dispatch, with these
+/// reads answered.
+pub(super) struct OperandDemand {
+    operands: Option<[SemanticNodeId; 2]>,
+    answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    awaiting: Option<SemanticQueryKey>,
+    pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
+}
+
+impl OperandDemand {
+    pub(super) fn new(operands: [SemanticNodeId; 2]) -> Self {
+        Self {
+            operands: Some(operands),
+            answers: FxHashMap::default(),
+            awaiting: None,
+            pending: std::collections::VecDeque::new(),
+        }
+    }
 }
 
 /// Where a load's terminal outcome is kept for the frame that waited on it:
@@ -2083,6 +2135,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     // when the runtime starts it.
                     let claim = match frame.build.as_mut() {
                         Some(FrameBuild::Conditional(build)) => build.claim.take(),
+                        Some(FrameBuild::Relation(build)) => build.claim.take(),
                         Some(FrameBuild::Call(build)) => {
                             let claim = build.claim.take();
                             if let Some(claim) = &claim {
@@ -2302,6 +2355,14 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     .abandon_resolve_call_build(idx, build.suspension.take());
             }
         }
+        // A relation root stopped while its operands are demanded closes its
+        // root obligation frame undecided and aborts the members no
+        // publication of it will drain.
+        if let Some(FrameBuild::Relation(build)) = frame.build.as_mut() {
+            if let Some(read) = build.read.take() {
+                self.dispatch.release_relation_read(read);
+            }
+        }
         // A flow return stopped between its runs releases the contextual
         // calls it held, each collector abandoned, and aborts the members
         // its runs completed, which no publication of it will drain.
@@ -2420,6 +2481,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_ok_and(|txn| txn.obligations.decides_root()),
             SemanticQueryKey::Conditional { .. } | SemanticQueryKey::ResolveCall(_) => {
                 self.dispatch_txn.borrow().obligations.decides_root()
+            }
+            // A relation evaluated as a machinery root, outside every open
+            // obligation, holds its root frame across its operand demands.
+            // A binding root (one that opens an inference session), a raw
+            // key whose inference context is not its pattern's and a raw
+            // symmetric key whose operands admission would reorder keep the
+            // synchronous path, which canonicalizes the key before claiming.
+            SemanticQueryKey::Relate { source, target, .. } => {
+                // The memo key lifts canonical operands: a raw key in the
+                // other order is not that key.
+                let relate = crate::semantic_query::RelateMemoKey::from_query_key(key);
+                (relate.source, relate.target) == (*source, *target)
+                    && relate.inference_context.is_none()
+                    && !self.relation_redischarge_active()
+                    && self.relation_raw_key_has_exact_inference_context(&relate)
+                    && self.dispatch_txn.borrow().obligations.decides_root()
             }
             // A function's return evaluated as a machinery root, outside
             // every open obligation, whose body types callbacks under a held
@@ -3558,6 +3635,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(FrameBuild::Call(build)) => {
                         self.drain_call(&frame.key, build, delivery, frame.depth + 1)
                     }
+                    // A relation root delivers each to the operand demand its
+                    // pair waits on.
+                    Some(FrameBuild::Relation(build)) => {
+                        self.drain_relation(&frame.key, build, delivery, frame.depth + 1)
+                    }
                     // A flow return keeps its deliveries as answers to the reads its
                     // contextual callbacks made.
                     Some(FrameBuild::Flow(build)) => {
@@ -3789,6 +3871,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 self.drain_flow(frame_key, build, None, depth + 1)
             }
+            // A relation driven as its drive's root holds its root
+            // obligation across its operand demands; a relation a seam
+            // joined deeper builds in one step, as before.
+            SemanticQueryKey::Relate { .. } if depth == ROOT_FRAME_DEPTH => {
+                let FrameBuild::Relation(build) =
+                    frame_build.insert(FrameBuild::Relation(Box::default()))
+                else {
+                    unreachable!("the build was just inserted")
+                };
+                self.drain_relation(frame_key, build, None, depth + 1)
+            }
             // A family built as a continuation needs each query its
             // stages read; any other dependency of a family without
             // frames of its own — a read a decision or flow
@@ -3933,6 +4026,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 None => self.relation_abort_completed_members(),
             }
         }
+        // So is a relation root's, for the members its reduction completed.
+        if matches!(frame.build, Some(FrameBuild::Relation(_))) {
+            match &publication {
+                Some(publication) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.graph().wait_relation_root_pre_member_drain_gate();
+                    self.relation_drain_completed_members(
+                        &crate::semantic_query::RelateMemoKey::from_query_key(&frame.key),
+                        publication,
+                    )
+                }
+                None => self.relation_abort_completed_members(),
+            }
+        }
         // So is a flow return's, for the members its evaluation completed.
         if let SemanticQueryKey::FlowReturn(flow) = &frame.key {
             match &publication {
@@ -4054,7 +4161,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// demand observed is the relation's to observe, so it is dropped.
     /// Whether the walk must stop for any.
     pub(super) fn call_operands_wait(&self, operands: [SemanticNodeId; 2]) -> bool {
-        let (answers, resumes, depth) = {
+        let (mut answers, mut resumes, depth) = {
             let mut seam = self.call_seam.borrow_mut();
             let seam = seam
                 .as_mut()
@@ -4065,9 +4172,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 seam.depth,
             )
         };
+        let needs = self.demand_operands_at_seam(operands, &mut answers, &mut resumes, depth);
+        let waits = !needs.is_empty();
+        let mut seam = self.call_seam.borrow_mut();
+        let seam = seam
+            .as_mut()
+            .expect("an operand demand runs inside its frame's walk");
+        seam.answers = answers;
+        seam.resumes = resumes;
+        seam.needs = needs;
+        waits
+    }
+
+    /// Demand what a relation over `operands` unwraps at a seam of its own
+    /// over `answers`, each operand's walk resuming where `resumes` says it
+    /// stopped: the reads it reached that no answer holds, in order, each
+    /// with the claim it entered with. What the demand observed is the
+    /// relation's to observe, so it is dropped.
+    fn demand_operands_at_seam(
+        &self,
+        operands: [SemanticNodeId; 2],
+        answers: &mut FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+        resumes: &mut OperandResumes,
+        depth: u32,
+    ) -> SeamNeeds {
         let outer = self.decision_seam.replace(Some(DecisionSeam {
-            answers,
-            resumes,
+            answers: std::mem::take(answers),
+            resumes: std::mem::take(resumes),
             needs: SeamNeeds::default(),
             depth,
             nested: 0,
@@ -4078,23 +4209,147 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         });
         let _ = demanded.discard();
         let DecisionSeam {
-            answers,
-            resumes,
+            answers: answered,
+            resumes: resumed,
             needs,
             ..
         } = self
             .decision_seam
             .replace(outer)
             .expect("the operand demand's seam stays installed for its run");
-        let waits = !needs.is_empty();
-        let mut seam = self.call_seam.borrow_mut();
-        let seam = seam
-            .as_mut()
-            .expect("an operand demand runs inside its frame's walk");
-        seam.answers = answers;
-        seam.resumes = resumes;
-        seam.needs = needs;
-        waits
+        *answers = answered;
+        *resumes = resumed;
+        needs
+    }
+
+    /// Carry a relation's operand demand on with the delivery of the read it
+    /// waited on: the next operand instantiation that must be computed, as
+    /// the request the relation stands at, or `None` once each is answered.
+    /// The first advance enters each operand's first instantiation once,
+    /// exactly as the walk's own read would enter it: a result the memo
+    /// serves warm answers at once, one that must be computed is a request
+    /// with the claim it entered with.
+    pub(super) fn advance_operand_demand(
+        &self,
+        demand: &mut OperandDemand,
+        delivered: Option<(SemanticQueryKey, QueryDelivery)>,
+        depth: u32,
+    ) -> Option<HelperRequest> {
+        if let Some((key, delivery)) = delivered {
+            let awaited = demand
+                .awaiting
+                .take()
+                .expect("a delivery answers the operand read the relation waited on");
+            verter_debug_assert!(awaited == key, "a delivery answers the read it was asked");
+            demand.answers.insert((awaited, delivery.site), delivery);
+        }
+        if let Some(operands) = demand.operands.take() {
+            let mut keys = operands
+                .into_iter()
+                .filter_map(|operand| self.relation_operand_first_instantiation(operand))
+                .collect::<Vec<_>>();
+            keys.dedup();
+            for key in keys {
+                match self.enter_query_frame(&key, depth) {
+                    Err(delivery) => {
+                        demand.answers.insert((key, delivery.site), *delivery);
+                    }
+                    Ok(claim) => demand.pending.push_back((key, claim)),
+                }
+            }
+        }
+        let (need, claim) = demand.pending.pop_front()?;
+        demand.awaiting = Some(need.clone());
+        Some(HelperRequest::query(need, Some(claim)))
+    }
+
+    /// Run `body` — a relation computing where its driver stands — with its
+    /// operand reads answered by the deliveries its operand demand
+    /// received; every other read it makes evaluates in place.
+    pub(super) fn with_operand_answers<R>(
+        &self,
+        demand: &mut OperandDemand,
+        depth: u32,
+        body: impl FnOnce() -> R,
+    ) -> R {
+        let outer = self.decision_seam.replace(Some(DecisionSeam {
+            answers: std::mem::take(&mut demand.answers),
+            resumes: OperandResumes::default(),
+            needs: SeamNeeds::default(),
+            depth,
+            // The relation evaluates in place: its reads the answers hold
+            // read them, any other evaluates as it would anywhere.
+            nested: 1,
+            materialized_children: false,
+        }));
+        let out = body();
+        let seam = self
+            .decision_seam
+            .replace(outer)
+            .expect("the relation's answers stay installed while it computes");
+        verter_debug_assert!(
+            seam.needs.is_empty(),
+            "a relation computing in place reaches no read it waits on"
+        );
+        demand.answers = seam.answers;
+        out
+    }
+
+    /// The frame's next poll for the request a helper computation it
+    /// advances stands at: the request's query as the frame's need, its
+    /// entered claim kept in `claim` for the runtime, and in `awaiting` what
+    /// the delivery answers ([`Self::helper_delivery`]).
+    fn helper_request_poll(
+        &self,
+        request: HelperRequest,
+        awaiting: &mut Option<HelperAwait>,
+        claim: &mut Option<ClaimAttempt>,
+    ) -> FramePoll<'a> {
+        let (key, entered) = request.into_query();
+        *awaiting = Some(HelperAwait::query(key.clone()));
+        *claim = entered;
+        FramePoll::Need(key)
+    }
+
+    /// The delivery a helper computation resumes with: what the frame's need
+    /// for the request it stood at delivered.
+    fn helper_delivery(&self, awaiting: HelperAwait, delivery: QueryDelivery) -> HelperDelivery {
+        HelperDelivery::query(awaiting.into_key(), delivery)
+    }
+
+    /// Carry a relation root's frame on. Its first step validates the key
+    /// and opens the root obligation frame; then the pair's operands' carrier
+    /// walks are demanded, each read they reach that must be computed being
+    /// the frame's need, the walks resuming where they stopped with each
+    /// delivery; with every operand answered the pair is reduced under the
+    /// root frame, its operand reads answered by the deliveries, and the
+    /// frame closes.
+    fn drain_relation(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut RelationFrameBuild,
+        delivery: Option<QueryDelivery>,
+        depth: u32,
+    ) -> FramePoll<'a> {
+        let read = build.read.get_or_insert_with(|| {
+            RelationRead::root(crate::semantic_query::RelateMemoKey::from_query_key(key))
+        });
+        let delivery = delivery.map(|delivery| {
+            let awaiting = build
+                .awaiting
+                .take()
+                .expect("a delivery answers the operand read the root waited on");
+            self.helper_delivery(awaiting, delivery)
+        });
+        match self.advance_relation_root(read, delivery, HelperDrive::Frame { depth }) {
+            HelperStep::Request(request) => {
+                self.helper_request_poll(request, &mut build.awaiting, &mut build.claim)
+            }
+            HelperStep::Done(output) => {
+                build.read = None;
+                FramePoll::Done(output)
+            }
+        }
     }
 
     /// Demand what a relation over `operands` unwraps at the running

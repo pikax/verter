@@ -6598,6 +6598,16 @@ pub struct SemanticGraphStats {
     /// computed again — a walk resumed from its root, or a helper re-entered
     /// with its answers cached — counts again.
     pub projection_hops_walked: u64,
+    /// Machinery relation roots whose root obligation frame opened,
+    /// wherever they ran: one per root whose first stage opened its frame.
+    /// Counted where the frame opens, outside every charge and
+    /// its rollback, so a root entered again counts again.
+    pub relation_roots_opened: u64,
+    /// Structural relation reductions performed, root and nested alike:
+    /// one per pair the reducer ran over. Counted where the reduction
+    /// starts, outside every charge and its rollback, so a reduction run
+    /// again counts again.
+    pub relation_reductions: u64,
     /// Stages query entries computed admitting their keys, wherever they
     /// ran: one per stage of an entry's sugar, carrier, apparent-wrapper and
     /// signature-subject normalization, counted where the stage runs,
@@ -12997,6 +13007,8 @@ mod tests {
             "continuation_builds_begun",
             "continuation_stages_resumed",
             "projection_hops_walked",
+            "relation_roots_opened",
+            "relation_reductions",
             "admission_stages_walked",
         ];
         for field in expected_to_fire {
