@@ -351,8 +351,6 @@ pub(crate) enum PublishRefusal {
     Stale,
     /// Old and new schema layouts of one slot would both be current.
     ParallelSchemaLayout(ContributionId),
-    /// Coverage names a partition this snapshot would not contain.
-    CoverageWithoutPartition(ContributionId),
     /// Publication was cancelled before the swap.
     Cancelled,
     /// Another writer replaced the current snapshot after this delta was

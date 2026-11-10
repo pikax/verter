@@ -1,23 +1,28 @@
-//! Projects the host's cached per-file facts into the index on demand.
+//! Projects the host's per-file facts into the index on demand.
 //!
-//! Only demanded partitions are projected, and only for files whose source or
-//! project generation changed since the slot was written. A warm request
-//! touches no file. A request after any workspace change compares each tracked
-//! file's content hash once, which [`IndexReconcileWork::population_checks`]
-//! counts, because the host's population witness is read-side authoritative
-//! rather than fed by mutation hooks. All facts come through the same shared
-//! cached accessors every other consumer uses: nothing here parses a file or
-//! branches on a framework.
+//! A request demands fact surfaces ([`IndexSurface`]). For every file a
+//! demanded surface applies to, the producers of that surface run once through
+//! the shared cached accessors every other consumer uses, and each returns its
+//! facts together with their coverage ([`FactCoverage`]). The projector
+//! consumes exactly the value it certifies: a surface whose facts were produced
+//! for the current source revision is certified, one that is unavailable or
+//! unsupported blocks its unit and is answered privately, and nothing here
+//! parses a file, branches on a framework or reads the analysis scope as a
+//! proof of what was produced.
 //!
-//! Each partition is certified on its own. One the host's analysis scope does
-//! not compute, or one with a unit whose facts cannot be read, answers `Partial`
-//! naming why; the others stay certified.
+//! The population is maintained from committed mutations. The scheduler's
+//! source directory journals every source transition and the host journals
+//! the eviction flag it owns, so a request after a change reads the changed
+//! files only ([`IndexReconcileWork::population_checks`] counts them) and a
+//! warm request reads none. The directory is enumerated once, when the index
+//! has no population or a journal no longer reaches its cursor.
 //!
-//! This producer has no catalog, selection or demand-plan owner to read, so its
-//! bases record those as absent. Its table layouts are its own declaration, and
-//! a project-generation change reaches the fence through each slot's activation
-//! witness and the population witness.
+//! Each surface is certified on its own. One the host cannot produce at all,
+//! or one with a unit whose facts could not be read, answers `Partial` naming
+//! why; the others stay certified. This producer has no catalog, selection or
+//! demand-plan owner to read, so its bases record those as absent.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
@@ -29,7 +34,15 @@ use verter_identity::identity::{
 };
 use verter_identity::successor::{CarrierProfileId, ProfileSchemaEpoch};
 use verter_language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
+use verter_scheduler::node::SourceSnapshot;
+use verter_scheduler::source_root::SourceChanges;
 use verter_semantic::analysis::AnalysisScope;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::style::{
+    BlockContentAvailability, StyleAnalysisLang, StyleBlockAnalysis,
+};
+use verter_session_query::analysis::template::{MarkupStyleVar, TemplateAnalysisSnapshot};
+use verter_session_query::retention::heap_size::OwnedValue;
 use verter_span::{SourceByteOffset, SourceByteRange, Span};
 
 use super::delta::{
@@ -37,14 +50,16 @@ use super::delta::{
     PartitionDraft, PublishOutcome, PublishRefusal, RetirementEvidence, SchemaAdmission,
     SlotChange,
 };
+use super::facts::{FactCoverage, FactReceipt, IndexDemand, IndexDemandPartition, IndexSurface};
 use super::identity::{
     ContributionId, ContributionKey, DemandEpoch, ObservationKey, ObservationOwner,
-    OwnerSnapshotId, PartitionFamily, PartitionId, ProducerDescriptorId, ProfileClaim, ReadSet,
-    ReadWitness, ScopeId, SelectionEpoch, SourceBasis, TableSchema,
+    OwnerSnapshotId, PartitionFamily, ProducerDescriptorId, ProfileClaim, ReadSet, ReadWitness,
+    ScopeId, SelectionEpoch, SourceBasis, TableSchema,
 };
+use super::population::{HostPopulation, PendingSurfaces, PopulationCursor, PopulationEntry};
 use super::query::{
-    query_candidates, CandidatePage, DeclaredScope, EnumerationStatus, IndexContinuation,
-    IndexQuery, Lookup, QueryBudgets,
+    query_candidates, query_units, CandidatePage, EnumerationStatus, IndexContinuation, IndexQuery,
+    Lookup, QueryBudgets, QueryWork, UnitPage,
 };
 use super::records::{
     ComponentRow, Endpoint, FactCause, FactQuality, IndexRecord, IndexRow, LinkRelation, LinkRole,
@@ -52,7 +67,8 @@ use super::records::{
     RecordSlot, SlotKind, SourceAnchor, StyleRole, StyleScope, StyleSurface, StyleSymbolKind,
     StylesheetRow, TypedSubject,
 };
-use super::snapshot::{CoverageRecord, IndexSnapshot};
+use super::snapshot::{Contribution, CoverageRecord, IndexSnapshot};
+use crate::host_executor::HostSourceData;
 use crate::VerterHost;
 
 /// A publication attempt that lost to a concurrent change replans on a fresh
@@ -61,106 +77,30 @@ const MAX_PUBLISH_ATTEMPTS: u32 = 3;
 
 const SCHEMA_VERSION: u32 = 1;
 
-/// A fact family the host can project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum IndexDemandPartition {
-    /// CSS custom property definitions, `var()` references, template style
-    /// bindings and script manipulations.
-    CssVariables,
-    /// Stylesheet classes and IDs with their scope.
-    StyleSelectors,
-    /// Script declarations and imported local names.
-    Bindings,
-    /// Component views and template component uses.
-    Components,
-    /// Authored import relations.
-    Imports,
-}
-
-impl IndexDemandPartition {
-    /// The fact family this demand reads.
-    #[must_use]
-    pub fn family(self) -> PartitionFamily {
-        match self {
-            Self::CssVariables => PartitionFamily::CssVariables,
-            Self::StyleSelectors => PartitionFamily::StyleSelectors,
-            Self::Bindings => PartitionFamily::Bindings,
-            Self::Components => PartitionFamily::Components,
-            Self::Imports => PartitionFamily::Imports,
-        }
-    }
-
-    /// The host's partition of this family.
-    #[must_use]
-    pub fn id(self) -> PartitionId {
-        PartitionId::new(producer().clone(), self.family())
-    }
-
-    /// Whether `scope` computes every owner fact this partition's rows read.
-    /// Empty owner facts under any other scope say nothing about the source.
-    fn computed_under(self, scope: AnalysisScope) -> bool {
-        match self {
-            Self::CssVariables => {
-                scope.needs_style_analysis()
-                    && scope.needs_template_analysis()
-                    && scope.needs_script_analysis()
-            }
-            Self::StyleSelectors => scope.needs_style_analysis(),
-            Self::Bindings => scope.contains(AnalysisScope::BINDINGS | AnalysisScope::IMPORTS),
-            Self::Components => scope.contains(AnalysisScope::TPL_COMPONENTS),
-            Self::Imports => scope.contains(AnalysisScope::IMPORTS),
-        }
-    }
-
-    /// A component view exists only for a component carrier. Other files have
-    /// no such slot: they are outside this partition, not empty in it.
+impl IndexSurface {
+    /// A component surface exists only for a component carrier, and markup
+    /// only in a carrier. Other files have no such slot: they are outside the
+    /// surface, not empty in it.
     fn applies_to(self, language: &FileLanguage) -> bool {
-        self != Self::Components || language.is_framework_carrier()
-    }
-}
-
-/// One explicit request for index facts. Undemanded partitions run nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexDemand {
-    pub partitions: BTreeSet<IndexDemandPartition>,
-}
-
-impl IndexDemand {
-    #[must_use]
-    pub fn of(partitions: impl IntoIterator<Item = IndexDemandPartition>) -> Self {
-        Self {
-            partitions: partitions.into_iter().collect(),
+        match self {
+            Self::ComponentInventory | Self::ComponentUses | Self::MarkupClassReferences => {
+                language.is_framework_carrier()
+            }
+            Self::StyleDefinitions | Self::CssVariables | Self::Bindings | Self::Imports => true,
         }
     }
 
-    /// The population a complete walk of this demand certifies.
-    #[must_use]
-    pub fn scope(&self) -> ScopeId {
-        ScopeId::of_population(self)
-    }
-
-    /// The declared population a query of this demand reads. A key of any
-    /// other partition is outside it.
-    #[must_use]
-    pub fn declared_scope(&self) -> DeclaredScope {
-        DeclaredScope::new(self.scope(), self.partition_ids())
-    }
-
-    fn partition_ids(&self) -> BTreeSet<PartitionId> {
-        self.partitions
-            .iter()
-            .map(|partition| partition.id())
-            .collect()
-    }
-}
-
-impl CanonicalEncode for IndexDemand {
-    const DOMAIN_TAG: &'static str = "verter.session.workspace_index.host_scope.v1";
-
-    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-        encoder.field_u32(1, SCHEMA_VERSION);
-        for partition in &self.partitions {
-            encoder.field_enum_discriminant(2, partition.family().encoding());
+    /// Whether this host has a producer for the surface at all. Style facts
+    /// come from the eager style analysis the host's scope configures; every
+    /// other surface is produced on demand.
+    fn host_supported(self, scope: AnalysisScope) -> bool {
+        match self {
+            Self::StyleDefinitions | Self::CssVariables => scope.needs_style_analysis(),
+            Self::ComponentInventory
+            | Self::ComponentUses
+            | Self::MarkupClassReferences
+            | Self::Bindings
+            | Self::Imports => true,
         }
     }
 }
@@ -169,7 +109,9 @@ impl CanonicalEncode for IndexDemand {
 /// exactly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexReconcileWork {
-    /// Tracked-file content comparisons. Zero on a warm request.
+    /// Tracked files whose source identity was read to maintain the
+    /// population: the changed files after a change, every file on the one
+    /// whole read, none on a warm request.
     pub population_checks: u32,
     /// Slots whose facts were read and projected.
     pub projections: u32,
@@ -181,22 +123,30 @@ pub struct IndexReconcileWork {
     pub publish_attempts: u32,
 }
 
-/// Why one demanded partition is not certified.
+/// Why one demanded surface is not certified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionShortfall {
-    pub partition: IndexDemandPartition,
+    pub surface: IndexSurface,
     pub cause: PartialCause,
-    /// Locators of the units this partition could not read.
+    /// Locators of the units this surface could not read.
     pub unavailable_units: Vec<Arc<str>>,
+}
+
+impl PartitionShortfall {
+    /// The partition the uncertified surface posts under.
+    #[must_use]
+    pub fn partition(&self) -> IndexDemandPartition {
+        self.surface.partition()
+    }
 }
 
 /// How far the returned snapshot answers a demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileStatus {
-    /// Coverage for every demanded partition is published and current.
+    /// Coverage for every demanded surface is published and current.
     Current,
-    /// These partitions are not certified. Any other demanded partition is,
-    /// and rows only private to this request warm nothing.
+    /// These surfaces are not certified. Any other demanded surface is, and
+    /// rows only private to this request warm nothing.
     Uncertified(Vec<PartitionShortfall>),
     /// Nothing is answered or kept.
     Cancelled,
@@ -210,7 +160,7 @@ pub struct CssVarCandidates {
     pub work: IndexReconcileWork,
 }
 
-fn producer() -> &'static ProducerDescriptorId {
+pub(super) fn producer() -> &'static ProducerDescriptorId {
     static PRODUCER: OnceLock<ProducerDescriptorId> = OnceLock::new();
     PRODUCER.get_or_init(|| ProducerDescriptorId::of_descriptor(&Named("host-file-facts")))
 }
@@ -226,19 +176,13 @@ fn admission() -> &'static SchemaAdmission {
     static ADMISSION: OnceLock<SchemaAdmission> = OnceLock::new();
     ADMISSION.get_or_init(|| SchemaAdmission {
         catalog: None,
-        table_schemas: [
-            IndexDemandPartition::CssVariables,
-            IndexDemandPartition::StyleSelectors,
-            IndexDemandPartition::Bindings,
-            IndexDemandPartition::Components,
-            IndexDemandPartition::Imports,
-        ]
-        .into_iter()
-        .map(|partition| TableSchema {
-            table: partition.family().table(),
-            version: SCHEMA_VERSION,
-        })
-        .collect(),
+        table_schemas: IndexSurface::ALL
+            .into_iter()
+            .map(|surface| TableSchema {
+                table: surface.family().table(),
+                version: SCHEMA_VERSION,
+            })
+            .collect(),
         ..SchemaAdmission::default()
     })
 }
@@ -314,6 +258,18 @@ fn population_key(scope: &ScopeId) -> ObservationKey {
     }
 }
 
+/// The population witness: where the committed-mutation feeds stood when the
+/// population was read. Any source transition, membership change or project
+/// generation moves it, so a walk whose population moved under it cannot be
+/// certified, and reading it costs no file.
+fn population_fingerprint(cursor: PopulationCursor) -> CanonicalDigest {
+    let mut encoder = CanonicalEncoder::new("verter.session.workspace_index.population.v2");
+    encoder.field_u64(1, cursor.source_epoch);
+    encoder.field_u64(2, cursor.membership_seq);
+    encoder.field_u64(3, cursor.project_generation);
+    encoder.digest()
+}
+
 /// The typed fields of a language row that change how its bytes parse. An
 /// owner path never enters a carrier's identity.
 struct CarrierFamily<'a>(&'a FileLanguage);
@@ -375,123 +331,199 @@ pub(super) fn carrier_claim(language: &FileLanguage) -> ProfileClaim {
     ProfileClaim::Carrier(CarrierProfileId::from_carrier(&family, &schema))
 }
 
-/// A file with a source the host cannot read: its locator and content hash.
-type UnreadableFile = (Arc<str>, [u8; 16]);
+/// What the scheduler holds for one tracked canonical.
+enum Tracked {
+    /// A readable source the host parsed.
+    Readable(Box<PopulationEntry>),
+    /// A source without host data, with its content hash.
+    Unreadable([u8; 16]),
+    /// No source: never loaded, failed to load, removed or evicted.
+    Gone,
+}
 
-/// One tracked file as captured for a walk.
-struct TrackedFile {
+/// A unit whose slots of every surface leave: its file is gone, unreadable or
+/// now claims another carrier. The population owes it until a publication
+/// carrying the retirement commits.
+struct RetiredUnit {
     canonical: Arc<str>,
     unit: SourceUnitId,
-    language: FileLanguage,
     claim: ProfileClaim,
-    whole_hash: [u8; 16],
-    generation: u64,
-    source: Arc<str>,
-    revision: SourceRevision,
 }
 
-/// The owners' live answers for one walk's fence.
-struct HostObservations<'host> {
-    host: &'host VerterHost,
-    canonical_by_unit: BTreeMap<CanonicalDigest, Arc<str>>,
-    scope: ScopeId,
+/// What one walk visits, as the population planned it under its lock.
+struct WalkPlan {
+    cursor: PopulationCursor,
+    /// Readable files to visit, in canonical order.
+    visit: Vec<(Arc<str>, PopulationEntry)>,
+    retire: Vec<RetiredUnit>,
+    /// Tracked files whose source the host cannot read.
+    unreadable: Vec<Arc<str>>,
+    /// Whether this walk visits every file of the population for its scope.
+    full_visit: bool,
 }
 
-impl HostObservations<'_> {
-    fn live_population(&self) -> CanonicalDigest {
-        let mut files: Vec<(String, [u8; 16])> = tracked_ids(self.host)
-            .into_iter()
-            .filter_map(|canonical| {
-                let whole_hash = self.host.scheduler.try_get_source(&canonical)?.whole_hash;
-                Some((canonical, whole_hash))
-            })
-            .collect();
-        files.sort();
-        population_fingerprint(
-            self.host.project_type_store().project_generation(),
-            files
-                .iter()
-                .map(|(canonical, hash)| (canonical.as_str(), hash)),
-        )
-    }
+/// The facts of one file as one walk reads them. Each producer runs at most
+/// once per file however many surfaces consume it.
+struct FileFacts<'a> {
+    host: &'a VerterHost,
+    canonical: &'a Arc<str>,
+    /// The file as read: the population's entry, or a fresh one when the
+    /// file moved past it.
+    entry: PopulationEntry,
+    snapshot: Arc<SourceSnapshot>,
+    content: ContentId,
+    analysis: OnceCell<FactReceipt<FileAnalysisSnapshot>>,
+    template: OnceCell<FactReceipt<OwnedValue<TemplateAnalysisSnapshot>>>,
+    styles: OnceCell<FactReceipt<Vec<StyleBlockAnalysis>>>,
 }
 
-/// The population witness: the project generation, then every file with a
-/// source and its content, in canonical order. Adding, removing or editing any
-/// file changes it. A scheduler node with no source, such as a failed load, is
-/// not a file of the workspace.
-fn population_fingerprint<'a>(
-    project_generation: u64,
-    files: impl Iterator<Item = (&'a str, &'a [u8; 16])>,
-) -> CanonicalDigest {
-    let mut encoder = CanonicalEncoder::new("verter.session.workspace_index.population.v1");
-    encoder.field_u64(3, project_generation);
-    for (canonical, whole_hash) in files {
-        encoder.field_str(1, canonical);
-        encoder.field_bytes(2, whole_hash);
-    }
-    encoder.digest()
-}
-
-impl ObservationOracle for HostObservations<'_> {
-    fn current(&self, key: &ObservationKey) -> Option<CanonicalDigest> {
-        match key.owner {
-            ObservationOwner::Source => {
-                let canonical = self.canonical_by_unit.get(&key.subject)?;
-                if self.host.is_canonical_evicted(canonical) {
-                    return Some(absent_source_fingerprint());
-                }
-                Some(
-                    self.host
-                        .scheduler
-                        .try_get_source(canonical)
-                        .map_or_else(absent_source_fingerprint, |source| {
-                            CanonicalDigest::of_bytes(&source.whole_hash)
-                        }),
-                )
-            }
-            ObservationOwner::Activation => Some(generation_fingerprint(
-                self.host.project_type_store().project_generation(),
-            )),
-            ObservationOwner::Population if key.subject == self.scope.digest() => {
-                Some(self.live_population())
-            }
-            _ => None,
+impl<'a> FileFacts<'a> {
+    /// Read the file's current source. `None` when the host has no readable
+    /// source for it any more; otherwise the facts and whether the file moved
+    /// past the population's view, in which case `entry` describes the file
+    /// as read and a publishing walk replans on the feeds' next cursor.
+    fn read(
+        host: &'a VerterHost,
+        canonical: &'a Arc<str>,
+        entry: &PopulationEntry,
+        project_generation: u64,
+    ) -> Option<(Self, bool)> {
+        let Tracked::Readable(read) = host.read_tracked(canonical, project_generation) else {
+            return None;
+        };
+        let snapshot = host.scheduler.try_get_source(canonical)?;
+        if snapshot.whole_hash != read.whole_hash || snapshot.generation != read.generation {
+            return None;
         }
+        let moved = read.whole_hash != entry.whole_hash || read.generation != entry.generation;
+        let facts = Self {
+            host,
+            canonical,
+            entry: *read,
+            content: ContentId::from_content_bytes(snapshot.source.as_bytes()),
+            snapshot,
+            analysis: OnceCell::new(),
+            template: OnceCell::new(),
+            styles: OnceCell::new(),
+        };
+        Some((facts, moved))
     }
 
-    fn current_epochs(&self) -> (Option<SelectionEpoch>, Option<DemandEpoch>) {
-        (None, None)
+    /// Script-side custom property manipulations. A parse fact of the source
+    /// itself, there whenever the source is.
+    fn script_manipulations(&self) -> &[verter_session_query::analysis::types::CssVarManipulation] {
+        self.snapshot
+            .downcast_data::<HostSourceData>()
+            .map_or(&[], |data| {
+                data.parse.script_analysis.css_var_manipulations.as_slice()
+            })
     }
-}
 
-fn tracked_ids(host: &VerterHost) -> Vec<String> {
-    host.scheduler
-        .node_ids()
-        .into_iter()
-        .filter(|id| !host.is_canonical_evicted(id))
-        .collect()
+    fn source(&self) -> &Arc<str> {
+        &self.snapshot.source
+    }
+
+    /// The file's analysis snapshot: script facts under every scope, the
+    /// template when the host already holds it.
+    fn analysis(&self) -> &FactReceipt<FileAnalysisSnapshot> {
+        self.analysis.get_or_init(|| {
+            self.host.get_analysis(self.canonical).map_or_else(
+                || {
+                    FactReceipt::without_value(FactCoverage::unavailable(
+                        "the file's analysis snapshot is not available",
+                    ))
+                },
+                FactReceipt::complete,
+            )
+        })
+    }
+
+    /// The file's template facts. A template the IDE already produced
+    /// satisfies the demand; a cold carrier produces one here, through the
+    /// same retained parse artifact and shared cache every reader uses.
+    fn template(&self) -> &FactReceipt<OwnedValue<TemplateAnalysisSnapshot>> {
+        self.template.get_or_init(|| {
+            let held = || {
+                self.analysis()
+                    .value
+                    .as_ref()
+                    .and_then(|analysis| analysis.template.clone())
+            };
+            self.host
+                .template_receipt(self.canonical, &self.entry.language, held)
+        })
+    }
+
+    /// The file's style blocks. Every block answers; a block without native
+    /// style facts lowers the coverage, never silently.
+    fn styles(&self) -> &FactReceipt<Vec<StyleBlockAnalysis>> {
+        self.styles.get_or_init(|| {
+            let Some(blocks) = self.host.effective_style_analyses(self.canonical, None) else {
+                return FactReceipt::without_value(FactCoverage::unavailable(
+                    "style analysis is not available",
+                ));
+            };
+            let mut coverage = if blocks.is_empty() {
+                FactCoverage::Absent
+            } else {
+                FactCoverage::Complete
+            };
+            for block in &blocks {
+                if block.css.is_some() {
+                    continue;
+                }
+                let block_coverage = if !matches!(
+                    block.content_availability,
+                    BlockContentAvailability::NativeAvailable
+                ) {
+                    FactCoverage::unavailable(
+                        "a style block's content is external or awaits processing",
+                    )
+                } else if block.lang != StyleAnalysisLang::Css {
+                    FactCoverage::unsupported("a style block's language needs preprocessing")
+                } else {
+                    FactCoverage::unavailable("a style block produced no native style IR")
+                };
+                coverage = coverage.join(block_coverage);
+            }
+            FactReceipt {
+                value: Some(blocks),
+                coverage,
+            }
+        })
+    }
+
+    /// Inline-style custom properties of carrier markup without a template
+    /// element tree. A parse fact: it is there whenever the source is.
+    fn markup_style_vars(&self) -> &[MarkupStyleVar] {
+        self.snapshot
+            .downcast_data::<HostSourceData>()
+            .map_or(&[], |data| data.parse.markup_style_vars.as_slice())
+    }
 }
 
 /// Rows and origins under one file's basis.
 struct RowBuilder<'a> {
-    file: &'a TrackedFile,
-    content: ContentId,
+    file: &'a FileFacts<'a>,
     records: Vec<IndexRecord>,
 }
 
 impl RowBuilder<'_> {
+    fn unit(&self) -> &SourceUnitId {
+        &self.file.entry.unit
+    }
+
     fn origin(&self, span: Span) -> RecordOrigin {
         let range = SourceByteRange::checked_new(
             SourceByteOffset::new(span.start),
             SourceByteOffset::new(span.end),
         )
-        .and_then(|range| range.validate(&self.file.source));
+        .and_then(|range| range.validate(self.file.source()));
         match range {
             Ok(range) => RecordOrigin::Authored(SourceAnchor {
-                unit: self.file.unit.clone(),
-                revision: self.file.revision.clone(),
-                content: self.content.clone(),
+                unit: self.file.entry.unit.clone(),
+                revision: self.file.entry.revision.clone(),
+                content: self.file.content.clone(),
                 range,
             }),
             Err(_) => RecordOrigin::Unavailable(OriginUnavailable::InvalidOwnerSpan),
@@ -554,138 +586,189 @@ impl RowBuilder<'_> {
             FactQuality::Exact,
         );
     }
-}
 
-/// Whether a projection read every owner surface its partition needs. Rows of
-/// the surfaces it could read still answer the request, privately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Projection {
-    Complete,
-    /// An owner surface this file should have was not available.
-    MissingFacts,
+    /// A class token of carrier markup. It is reached only by its reverse
+    /// key, so a stylesheet lookup never meets it. A token of a bound
+    /// attribute is an approximate reading of an expression.
+    fn push_markup_class(&mut self, name: &str, origin: RecordOrigin, bound: bool) {
+        let partition = PartitionFamily::StyleSelectors;
+        let name: Arc<str> = Arc::from(name);
+        let quality = if bound {
+            FactQuality::Approximate
+        } else {
+            FactQuality::Exact
+        };
+        self.push(
+            SlotKind::Occurrence,
+            TypedSubject::StyleSymbol {
+                kind: StyleSymbolKind::Class,
+                name: Arc::clone(&name),
+            },
+            vec![PostingKey::reverse(partition, &name)],
+            IndexRow::Stylesheet(StylesheetRow {
+                kind: StyleSymbolKind::Class,
+                name,
+                role: StyleRole::Reference,
+                surface: StyleSurface::Template,
+                scope: StyleScope::NotApplicable,
+            }),
+            origin,
+            quality,
+        );
+        if bound {
+            if let Some(record) = self.records.last_mut() {
+                record.causes.push(FactCause::DynamicValue);
+            }
+        }
+    }
 }
 
 impl VerterHost {
-    /// Read `partition`'s owner facts for one file.
-    ///
-    /// Reads are the shared cached accessors, so a demanded carrier is parsed
-    /// and analyzed once however many partitions read it.
-    fn project_partition(
-        &self,
-        partition: IndexDemandPartition,
-        rows: &mut RowBuilder<'_>,
-    ) -> Projection {
-        match partition {
-            IndexDemandPartition::CssVariables => self.project_css_variables(rows),
-            IndexDemandPartition::StyleSelectors => self.project_style_selectors(rows),
-            IndexDemandPartition::Bindings => self.project_bindings(rows),
-            IndexDemandPartition::Components => self.project_components(rows),
-            IndexDemandPartition::Imports => self.project_imports(rows),
-        }
-    }
-
-    /// A file's template facts, and whether any it should have are missing.
-    fn template_facts(
+    /// The template facts of `canonical` with their coverage: a template the
+    /// host already holds (an editor compiled the file) satisfies the demand
+    /// at once; a cold carrier produces one through the same retained parse
+    /// artifact and shared cache every reader uses; a file that is not a
+    /// carrier has none; a carrier whose template cannot be produced, such as
+    /// one with an external template source, answers `Unavailable`, and one
+    /// whose carrier registers no template producer `Unsupported`. Consumers
+    /// that need a carrier's full component uses (props, import source, slots)
+    /// under a template-free host scope read this instead of
+    /// [`Self::get_analysis`]'s template.
+    pub fn template_facts(
         &self,
         canonical: &str,
-    ) -> (
-        Option<
-            verter_session_query::retention::heap_size::OwnedValue<
-                verter_session_query::analysis::template::TemplateAnalysisSnapshot,
-            >,
-        >,
-        Projection,
-    ) {
-        let template = self.raw_template_analysis_for_file(canonical);
-        let expected = self
-            .effective_file_state(canonical, None)
-            .is_none_or(|state| state.meta.has_template);
-        let projection = if template.is_none() && expected {
-            Projection::MissingFacts
-        } else {
-            Projection::Complete
+    ) -> FactReceipt<OwnedValue<TemplateAnalysisSnapshot>> {
+        let canonical = self.resolve_alias_or_canonical(canonical);
+        let language = match self.read_tracked(&canonical, 0) {
+            Tracked::Readable(entry) => entry.language,
+            Tracked::Unreadable(_) => {
+                return FactReceipt::without_value(FactCoverage::unavailable(
+                    "the source has no host data",
+                ));
+            }
+            Tracked::Gone => {
+                return FactReceipt::without_value(FactCoverage::unavailable(
+                    "the file is not tracked",
+                ));
+            }
         };
-        (template, projection)
+        let held = || {
+            self.get_analysis(&canonical)
+                .and_then(|analysis| analysis.template)
+        };
+        self.template_receipt(&canonical, &language, held)
     }
 
-    /// Each surface is read on its own, so one that is not available does not
-    /// hide what the others report.
-    fn project_css_variables(&self, rows: &mut RowBuilder<'_>) -> Projection {
-        let canonical = rows.file.canonical.clone();
-        let mut projection = Projection::Complete;
-        let styles = self.effective_style_analyses(&canonical, None);
-        if styles.is_none() {
-            projection = Projection::MissingFacts;
+    /// One template receipt. `held` yields a template the host already has.
+    fn template_receipt(
+        &self,
+        canonical: &str,
+        language: &FileLanguage,
+        held: impl FnOnce() -> Option<OwnedValue<TemplateAnalysisSnapshot>>,
+    ) -> FactReceipt<OwnedValue<TemplateAnalysisSnapshot>> {
+        if !language.is_framework_carrier() {
+            return FactReceipt::absent();
         }
-        for (block, style) in styles.iter().flatten().enumerate() {
-            let Some(css) = style.css.as_ref() else {
-                continue;
+        if !crate::parse::file_language_has_template_data_compiler(language) {
+            return FactReceipt::without_value(FactCoverage::unsupported(
+                "the carrier registers no template-data producer",
+            ));
+        }
+        if let Some(template) = held() {
+            return FactReceipt::complete(template);
+        }
+        self.raw_template_analysis_for_file(canonical).map_or_else(
+            || {
+                FactReceipt::without_value(FactCoverage::unavailable(
+                    "template facts were not produced: an external template source, or a failed admission",
+                ))
+            },
+            FactReceipt::complete,
+        )
+    }
+
+    /// Project one surface of one file, consuming the exact facts whose
+    /// coverage it returns.
+    fn project_surface(&self, surface: IndexSurface, rows: &mut RowBuilder<'_>) -> FactCoverage {
+        match surface {
+            IndexSurface::ComponentInventory => Self::project_component_inventory(rows),
+            IndexSurface::ComponentUses => Self::project_component_uses(rows),
+            IndexSurface::StyleDefinitions => Self::project_style_definitions(rows),
+            IndexSurface::MarkupClassReferences => Self::project_markup_class_references(rows),
+            IndexSurface::CssVariables => Self::project_css_variables(rows),
+            IndexSurface::Bindings => Self::project_bindings(rows),
+            IndexSurface::Imports => Self::project_imports(rows),
+        }
+    }
+
+    /// The admitted carrier identity is the inventory: it needs no template.
+    /// The view of a component belongs to its TypeInfo owner, which this host
+    /// does not run, and no name identifies a subject. This row says so where
+    /// the unit is looked up, and no name finds it.
+    fn project_component_inventory(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let unit = rows.unit().clone();
+        rows.push(
+            SlotKind::Declaration,
+            TypedSubject::Component {
+                unit: unit.clone(),
+                export: None,
+            },
+            vec![PostingKey::forward(
+                PartitionFamily::Components,
+                &unit.digest().to_hex(),
+            )],
+            IndexRow::Component(ComponentRow::ViewUnavailable {
+                cause: FactCause::OwnerUnavailable,
+            }),
+            RecordOrigin::Unavailable(OriginUnavailable::OwnerRecordsNoSpan),
+            FactQuality::Unresolved,
+        );
+        FactCoverage::Complete
+    }
+
+    fn project_component_uses(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let template = rows.file.template();
+        let unit = rows.unit().clone();
+        let partition = PartitionFamily::Components;
+        for usage in template
+            .value
+            .iter()
+            .flat_map(|template| &template.components)
+        {
+            let tag: Arc<str> = Arc::from(usage.name.as_str());
+            let target = if usage.is_dynamic {
+                Endpoint::Dynamic {
+                    cause: FactCause::DynamicValue,
+                }
+            } else {
+                Endpoint::Unresolved {
+                    spelling: Arc::from(usage.import_source.as_deref().unwrap_or(&usage.name)),
+                    cause: FactCause::SpecifierUnresolved,
+                }
             };
-            let surface = StyleSurface::Style {
-                block: u32::try_from(block).unwrap_or(u32::MAX),
-            };
-            let scope = block_scope(style.scoped, style.is_module);
-            for property in &css.custom_properties {
-                let origin = rows.origin(property.name_span);
-                rows.push_style(
-                    StyleSymbolKind::CustomProperty,
-                    &property.name,
-                    StyleRole::Definition,
-                    surface,
-                    scope,
-                    origin,
-                );
-            }
-            for usage in &css.var_usages {
-                let origin = rows.origin(usage.reference.name_span);
-                rows.push_style(
-                    StyleSymbolKind::CustomProperty,
-                    &usage.reference.name,
-                    StyleRole::Reference,
-                    surface,
-                    scope,
-                    origin,
-                );
-            }
-        }
-        let (template, template_projection) = self.template_facts(&canonical);
-        if template_projection == Projection::MissingFacts {
-            projection = Projection::MissingFacts;
-        }
-        if let Some(template) = template {
-            for name in &template.css_var_names {
-                rows.push_style(
-                    StyleSymbolKind::CustomProperty,
-                    name,
-                    StyleRole::Definition,
-                    StyleSurface::Template,
-                    StyleScope::NotApplicable,
-                    RecordOrigin::Unavailable(OriginUnavailable::OwnerRecordsNoSpan),
-                );
-            }
-        }
-        let Some(state) = self.effective_file_state(&canonical, None) else {
-            return Projection::MissingFacts;
-        };
-        for manipulation in state.script_analysis.css_var_manipulations.iter() {
-            let origin = rows.origin(manipulation.span);
-            rows.push_style(
-                StyleSymbolKind::CustomProperty,
-                &manipulation.var_name,
-                StyleRole::Manipulation,
-                StyleSurface::Script,
-                StyleScope::NotApplicable,
+            let origin = rows.origin(usage.span);
+            rows.push(
+                SlotKind::Occurrence,
+                TypedSubject::Link {
+                    unit: unit.clone(),
+                    relation: LinkRelation::ComponentUse,
+                    target: Arc::clone(&tag),
+                },
+                vec![
+                    PostingKey::exact(partition, &usage.name),
+                    PostingKey::lexical(partition, &usage.name),
+                ],
+                IndexRow::Component(ComponentRow::Usage { tag, target }),
                 origin,
+                FactQuality::Unresolved,
             );
         }
-        projection
+        template.coverage.clone()
     }
 
-    fn project_style_selectors(&self, rows: &mut RowBuilder<'_>) -> Projection {
-        let Some(styles) = self.effective_style_analyses(&rows.file.canonical, None) else {
-            return Projection::MissingFacts;
-        };
-        for (block, style) in styles.iter().enumerate() {
+    fn project_style_definitions(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let styles = rows.file.styles();
+        for (block, style) in styles.value.iter().flatten().enumerate() {
             let Some(css) = style.css.as_ref() else {
                 continue;
             };
@@ -716,14 +799,134 @@ impl VerterHost {
                 );
             }
         }
-        Projection::Complete
+        styles.coverage.clone()
     }
 
-    fn project_bindings(&self, rows: &mut RowBuilder<'_>) -> Projection {
-        let Some(analysis) = self.get_analysis(&rows.file.canonical) else {
-            return Projection::MissingFacts;
-        };
-        let unit = rows.file.unit.clone();
+    /// Class tokens of carrier markup: the `class` attributes of a template
+    /// element tree, and the markup class tokens of a carrier without one.
+    fn project_markup_class_references(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let template = rows.file.template();
+        for element in template
+            .value
+            .iter()
+            .flat_map(|template| &template.elements)
+        {
+            let mut bound_origin = None;
+            for attribute in element
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.name == "class")
+            {
+                let origin = rows.origin(attribute.value_span.unwrap_or(attribute.span));
+                if attribute.is_dynamic {
+                    bound_origin.get_or_insert(origin);
+                    continue;
+                }
+                for class in attribute.value.as_deref().unwrap_or("").split_whitespace() {
+                    rows.push_markup_class(class, origin.clone(), false);
+                }
+            }
+            // The statically named classes of the element's bound class
+            // expressions, as the shared converter read them; a computed
+            // name is no token.
+            if element.dynamic_classes.is_empty() {
+                continue;
+            }
+            let origin = bound_origin.unwrap_or_else(|| rows.origin(element.span));
+            for class in &element.dynamic_classes {
+                rows.push_markup_class(class, origin.clone(), true);
+            }
+        }
+        let analysis = rows.file.analysis();
+        for token in analysis
+            .value
+            .iter()
+            .flat_map(|analysis| analysis.markup_class_tokens.iter())
+        {
+            let origin = rows.origin(token.span);
+            rows.push_markup_class(&token.name, origin, false);
+        }
+        template.coverage.clone().join(analysis.coverage.clone())
+    }
+
+    /// Each leg is read on its own, so one that is not available does not hide
+    /// what the others report; the coverage is the weakest leg's.
+    fn project_css_variables(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let styles = rows.file.styles();
+        for (block, style) in styles.value.iter().flatten().enumerate() {
+            let Some(css) = style.css.as_ref() else {
+                continue;
+            };
+            let surface = StyleSurface::Style {
+                block: u32::try_from(block).unwrap_or(u32::MAX),
+            };
+            let scope = block_scope(style.scoped, style.is_module);
+            for property in &css.custom_properties {
+                let origin = rows.origin(property.name_span);
+                rows.push_style(
+                    StyleSymbolKind::CustomProperty,
+                    &property.name,
+                    StyleRole::Definition,
+                    surface,
+                    scope,
+                    origin,
+                );
+            }
+            for usage in &css.var_usages {
+                let origin = rows.origin(usage.reference.name_span);
+                rows.push_style(
+                    StyleSymbolKind::CustomProperty,
+                    &usage.reference.name,
+                    StyleRole::Reference,
+                    surface,
+                    scope,
+                    origin,
+                );
+            }
+        }
+        let template = rows.file.template();
+        for name in template
+            .value
+            .iter()
+            .flat_map(|template| &template.css_var_names)
+        {
+            rows.push_style(
+                StyleSymbolKind::CustomProperty,
+                name,
+                StyleRole::Definition,
+                StyleSurface::Template,
+                StyleScope::NotApplicable,
+                RecordOrigin::Unavailable(OriginUnavailable::OwnerRecordsNoSpan),
+            );
+        }
+        for var in rows.file.markup_style_vars() {
+            let origin = rows.origin(var.span);
+            rows.push_style(
+                StyleSymbolKind::CustomProperty,
+                &var.name,
+                StyleRole::Definition,
+                StyleSurface::Template,
+                StyleScope::NotApplicable,
+                origin,
+            );
+        }
+        for manipulation in rows.file.script_manipulations() {
+            let origin = rows.origin(manipulation.span);
+            rows.push_style(
+                StyleSymbolKind::CustomProperty,
+                &manipulation.var_name,
+                StyleRole::Manipulation,
+                StyleSurface::Script,
+                StyleScope::NotApplicable,
+                origin,
+            );
+        }
+        styles.coverage.clone().join(template.coverage.clone())
+    }
+
+    fn project_bindings(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let analysis = rows.file.analysis();
+        let unit = rows.unit().clone();
         let partition = PartitionFamily::Bindings;
         let push_name = |rows: &mut RowBuilder<'_>, name: &str, role, kind, span| {
             let spelling: Arc<str> = Arc::from(name);
@@ -747,90 +950,30 @@ impl VerterHost {
                 FactQuality::Exact,
             );
         };
-        for binding in &analysis.bindings {
-            push_name(
-                rows,
-                &binding.name,
-                NameRole::Declaration,
-                Some(binding.kind),
-                binding.span,
-            );
-        }
-        for import in &analysis.imports {
-            for binding in &import.bindings {
-                push_name(rows, &binding.name, NameRole::Import, None, binding.span);
+        if let Some(analysis) = analysis.value.as_ref() {
+            for binding in &analysis.bindings {
+                push_name(
+                    rows,
+                    &binding.name,
+                    NameRole::Declaration,
+                    Some(binding.kind),
+                    binding.span,
+                );
+            }
+            for import in &analysis.imports {
+                for binding in &import.bindings {
+                    push_name(rows, &binding.name, NameRole::Import, None, binding.span);
+                }
             }
         }
-        Projection::Complete
+        analysis.coverage.clone()
     }
 
-    fn project_components(&self, rows: &mut RowBuilder<'_>) -> Projection {
-        let canonical = rows.file.canonical.clone();
-        let Some(analysis) = self.get_analysis(&canonical) else {
-            return Projection::MissingFacts;
-        };
-        let unit = rows.file.unit.clone();
-        let partition = PartitionFamily::Components;
-
-        // The view of a component belongs to its TypeInfo owner, which this
-        // host does not run, and no name identifies a subject. This row says
-        // so where the unit is looked up, and no name finds it.
-        rows.push(
-            SlotKind::Declaration,
-            TypedSubject::Component {
-                unit: unit.clone(),
-                export: None,
-            },
-            vec![PostingKey::forward(partition, &unit.digest().to_hex())],
-            IndexRow::Component(ComponentRow::ViewUnavailable {
-                cause: FactCause::OwnerUnavailable,
-            }),
-            RecordOrigin::Unavailable(OriginUnavailable::OwnerRecordsNoSpan),
-            FactQuality::Unresolved,
-        );
-
-        let Some(template) = analysis.template.as_ref() else {
-            return self.template_facts(&canonical).1;
-        };
-        for usage in &template.components {
-            let tag: Arc<str> = Arc::from(usage.name.as_str());
-            let target = if usage.is_dynamic {
-                Endpoint::Dynamic {
-                    cause: FactCause::DynamicValue,
-                }
-            } else {
-                Endpoint::Unresolved {
-                    spelling: Arc::from(usage.import_source.as_deref().unwrap_or(&usage.name)),
-                    cause: FactCause::SpecifierUnresolved,
-                }
-            };
-            let origin = rows.origin(usage.span);
-            rows.push(
-                SlotKind::Occurrence,
-                TypedSubject::Link {
-                    unit: unit.clone(),
-                    relation: LinkRelation::ComponentUse,
-                    target: Arc::clone(&tag),
-                },
-                vec![
-                    PostingKey::exact(partition, &usage.name),
-                    PostingKey::lexical(partition, &usage.name),
-                ],
-                IndexRow::Component(ComponentRow::Usage { tag, target }),
-                origin,
-                FactQuality::Unresolved,
-            );
-        }
-        Projection::Complete
-    }
-
-    fn project_imports(&self, rows: &mut RowBuilder<'_>) -> Projection {
-        let Some(analysis) = self.get_analysis(&rows.file.canonical) else {
-            return Projection::MissingFacts;
-        };
-        let unit = rows.file.unit.clone();
+    fn project_imports(rows: &mut RowBuilder<'_>) -> FactCoverage {
+        let analysis = rows.file.analysis();
+        let unit = rows.unit().clone();
         let partition = PartitionFamily::Imports;
-        for import in &analysis.imports {
+        for import in analysis.value.iter().flat_map(|analysis| &analysis.imports) {
             let specifier: Arc<str> = Arc::from(import.source.as_str());
             let origin = rows.origin(import.span);
             rows.push(
@@ -860,89 +1003,271 @@ impl VerterHost {
                 FactQuality::Unresolved,
             );
         }
-        Projection::Complete
+        analysis.coverage.clone()
     }
 
-    /// One read of every tracked file's identity and content hash. A file with
-    /// a source the host cannot read comes back separately, with its hash.
-    fn capture_tracked(&self, project_generation: u64) -> (Vec<TrackedFile>, Vec<UnreadableFile>) {
-        use crate::host_executor::HostSourceData;
-
-        let mut ids = tracked_ids(self);
-        ids.sort();
-        let mut files = Vec::with_capacity(ids.len());
-        let mut unavailable = Vec::new();
-        for id in ids {
-            let canonical: Arc<str> = Arc::from(id.as_str());
-            let Some(snapshot) = self.scheduler.try_get_source(&id) else {
-                continue;
-            };
-            let Some(data) = snapshot.downcast_data::<HostSourceData>() else {
-                unavailable.push((canonical, snapshot.whole_hash));
-                continue;
-            };
-            let language = data.file_language.clone();
-            files.push(TrackedFile {
-                unit: host_unit(&id),
-                claim: carrier_claim(&language),
-                language,
-                whole_hash: snapshot.whole_hash,
-                generation: snapshot.generation,
-                source: Arc::clone(&snapshot.source),
-                revision: SourceRevision::from_canonical(&RevisionDescriptor {
-                    whole_hash: snapshot.whole_hash,
-                    generation: project_generation,
-                }),
-                canonical,
-            });
+    /// What the scheduler holds for `canonical` now, as a population entry.
+    fn read_tracked(&self, canonical: &str, project_generation: u64) -> Tracked {
+        if self.is_canonical_evicted(canonical) {
+            return Tracked::Gone;
         }
-        (files, unavailable)
+        let Some(snapshot) = self.scheduler.try_get_source(canonical) else {
+            return Tracked::Gone;
+        };
+        let Some(data) = snapshot.downcast_data::<HostSourceData>() else {
+            return Tracked::Unreadable(snapshot.whole_hash);
+        };
+        let language = data.file_language.clone();
+        Tracked::Readable(Box::new(PopulationEntry {
+            unit: host_unit(canonical),
+            claim: carrier_claim(&language),
+            language,
+            whole_hash: snapshot.whole_hash,
+            generation: snapshot.generation,
+            revision: SourceRevision::from_canonical(&RevisionDescriptor {
+                whole_hash: snapshot.whole_hash,
+                generation: project_generation,
+            }),
+            pending: PendingSurfaces::all(),
+        }))
     }
 
-    fn slot_key(file: &TrackedFile, partition: IndexDemandPartition) -> ContributionKey {
+    /// The source owner's current fingerprint for `canonical`, as the
+    /// publication fence will read it.
+    fn live_source_fingerprint(&self, canonical: &str) -> CanonicalDigest {
+        if self.is_canonical_evicted(canonical) {
+            return absent_source_fingerprint();
+        }
+        self.scheduler
+            .try_get_source(canonical)
+            .map_or_else(absent_source_fingerprint, |source| {
+                CanonicalDigest::of_bytes(&source.whole_hash)
+            })
+    }
+
+    /// Where the committed-mutation feeds stand now.
+    fn population_cursor(&self) -> PopulationCursor {
+        let store = self.project_type_store();
+        PopulationCursor {
+            source_epoch: self.scheduler.source_directory().current_epoch(),
+            membership_seq: store.workspace_index().membership().current(),
+            project_generation: store.project_generation(),
+        }
+    }
+
+    /// Re-read one changed canonical into the population. A unit whose slots
+    /// must leave, because its file is gone, unreadable or claims another
+    /// carrier, becomes a retirement the population owes until a publication
+    /// carrying it commits.
+    fn refresh_population_entry(
+        &self,
+        population: &mut HostPopulation,
+        canonical: Arc<str>,
+        project_generation: u64,
+    ) {
+        let previous = population.files.remove(&canonical);
+        population.unreadable.remove(&canonical);
+        let owe = |population: &mut HostPopulation, previous: PopulationEntry| {
+            population
+                .retirements
+                .insert((Arc::clone(&canonical), previous.claim), previous.unit);
+        };
+        match self.read_tracked(&canonical, project_generation) {
+            Tracked::Readable(entry) => {
+                // The file is back under this claim: its slots are re-read
+                // against their revision, not retired.
+                population
+                    .retirements
+                    .remove(&(Arc::clone(&canonical), entry.claim.clone()));
+                if let Some(previous) = previous {
+                    if previous.claim != entry.claim {
+                        owe(population, previous);
+                    }
+                }
+                population.files.insert(canonical, *entry);
+            }
+            Tracked::Unreadable(whole_hash) => {
+                if let Some(previous) = previous {
+                    owe(population, previous);
+                }
+                population.unreadable.insert(canonical, whole_hash);
+            }
+            Tracked::Gone => {
+                if let Some(previous) = previous {
+                    owe(population, previous);
+                }
+            }
+        }
+    }
+
+    /// Bring the population to the feeds' current cursor and plan what this
+    /// walk visits. Runs under the population lock and reads no fact.
+    fn plan_walk(
+        &self,
+        population: &mut HostPopulation,
+        scope: &ScopeId,
+        surfaces: &BTreeSet<IndexSurface>,
+        work: &mut IndexReconcileWork,
+    ) -> WalkPlan {
+        let store = self.project_type_store();
+        let project_generation = store.project_generation();
+        let directory = self.scheduler.source_directory();
+        let membership = store.workspace_index().membership();
+
+        let incremental = population
+            .cursor
+            .filter(|cursor| cursor.project_generation == project_generation)
+            .and_then(|previous| {
+                let (source_epoch, sources) = directory.changes_since(previous.source_epoch);
+                let (membership_seq, flags) = membership.changes_since(previous.membership_seq);
+                let SourceChanges::Changed(sources) = sources else {
+                    return None;
+                };
+                let flags = flags?;
+                let cursor = PopulationCursor {
+                    source_epoch,
+                    membership_seq,
+                    project_generation,
+                };
+                Some((cursor, sources, flags))
+            });
+        let cursor = match incremental {
+            Some((cursor, sources, flags)) => {
+                let changed: BTreeSet<Arc<str>> = sources.into_iter().chain(flags).collect();
+                for canonical in changed {
+                    work.population_checks += 1;
+                    self.refresh_population_entry(population, canonical, project_generation);
+                }
+                cursor
+            }
+            None => {
+                // The one whole read. The cursor is taken first, so a
+                // transition landing during the enumeration is read again by
+                // the next request, never missed.
+                let cursor = PopulationCursor {
+                    source_epoch: directory.current_epoch(),
+                    membership_seq: membership.current(),
+                    project_generation,
+                };
+                let mut ids = tracked_ids(self);
+                ids.sort();
+                work.population_checks += count_u32(ids.len());
+                population.files.clear();
+                population.unreadable.clear();
+                population.settled.clear();
+                for id in ids {
+                    let canonical: Arc<str> = Arc::from(id.as_str());
+                    match self.read_tracked(&id, project_generation) {
+                        Tracked::Readable(entry) => {
+                            population.files.insert(canonical, *entry);
+                        }
+                        Tracked::Unreadable(whole_hash) => {
+                            population.unreadable.insert(canonical, whole_hash);
+                        }
+                        Tracked::Gone => {}
+                    }
+                }
+                // Slots of units the population no longer holds are owed as
+                // retirements now, under this lock, so a walk that is
+                // cancelled or refused before paying them leaves the debt to
+                // the next one. Reading them here is the one O(slots) scan,
+                // and it runs with the one whole read.
+                let held = store.workspace_index().snapshot();
+                for surface in IndexSurface::ALL {
+                    for slot in held.contributions_in_partition(&surface.id()) {
+                        let current = population
+                            .files
+                            .get(&slot.basis.locator)
+                            .is_some_and(|entry| entry.claim == slot.key.claim);
+                        if !current {
+                            population.retirements.insert(
+                                (Arc::clone(&slot.basis.locator), slot.key.claim.clone()),
+                                slot.basis.unit.clone(),
+                            );
+                        }
+                    }
+                }
+                cursor
+            }
+        };
+        population.cursor = Some(cursor);
+
+        let full_visit = !population.settled.contains(scope);
+        let visit = population
+            .files
+            .iter()
+            .filter(|(_, entry)| {
+                full_visit
+                    || surfaces
+                        .iter()
+                        .any(|surface| entry.pending.contains(*surface))
+            })
+            .map(|(canonical, entry)| (Arc::clone(canonical), entry.clone()))
+            .collect();
+        let retire = population
+            .retirements
+            .iter()
+            .map(|((canonical, claim), unit)| RetiredUnit {
+                canonical: Arc::clone(canonical),
+                unit: unit.clone(),
+                claim: claim.clone(),
+            })
+            .collect();
+        WalkPlan {
+            cursor,
+            visit,
+            retire,
+            unreadable: population.unreadable.keys().cloned().collect(),
+            full_visit,
+        }
+    }
+
+    fn slot_key(
+        unit: &SourceUnitId,
+        claim: &ProfileClaim,
+        surface: IndexSurface,
+    ) -> ContributionKey {
         ContributionKey {
             producer: producer().clone(),
             schema: TableSchema {
-                table: partition.family().table(),
+                table: surface.family().table(),
                 version: SCHEMA_VERSION,
             },
-            unit: file.unit.clone(),
-            claim: file.claim.clone(),
+            unit: unit.clone(),
+            claim: claim.clone(),
             project: None,
-            partition: partition.family(),
+            partition: surface.family(),
+            facet: surface.facet(),
         }
     }
 
-    /// Project one slot. An incomplete projection still carries the rows of the
-    /// surfaces it could read.
+    /// Project one slot. An uncertified projection still carries the rows of
+    /// the facts it could read.
     fn draft_slot(
         &self,
-        file: &TrackedFile,
-        partition: IndexDemandPartition,
+        file: &FileFacts<'_>,
+        surface: IndexSurface,
         project_generation: u64,
-    ) -> (PartitionDraft, Projection) {
+    ) -> (PartitionDraft, FactCoverage) {
         let mut rows = RowBuilder {
             file,
-            content: ContentId::from_content_bytes(file.source.as_bytes()),
             records: Vec::new(),
         };
-        let projection = self.project_partition(partition, &mut rows);
-        let RowBuilder {
-            content, records, ..
-        } = rows;
+        let coverage = self.project_surface(surface, &mut rows);
+        let entry = &file.entry;
         let draft = PartitionDraft {
-            key: Self::slot_key(file, partition),
+            key: Self::slot_key(&entry.unit, &entry.claim, surface),
             basis: SourceBasis {
-                unit: file.unit.clone(),
-                locator: Arc::clone(&file.canonical),
-                revision: file.revision.clone(),
-                content,
+                unit: entry.unit.clone(),
+                locator: Arc::clone(file.canonical),
+                revision: entry.revision.clone(),
+                content: file.content.clone(),
                 catalog: None,
                 selection_epoch: None,
                 demand_epoch: None,
                 owner_snapshot: OwnerSnapshotId::of_owner_snapshot(&RevisionDescriptor {
-                    whole_hash: file.whole_hash,
-                    generation: file.generation,
+                    whole_hash: entry.whole_hash,
+                    generation: entry.generation,
                 }),
             },
             provenance: Provenance {
@@ -953,29 +1278,29 @@ impl VerterHost {
             },
             read_set: ReadSet::of([
                 ReadWitness {
-                    key: source_key(&file.unit),
-                    fingerprint: CanonicalDigest::of_bytes(&file.whole_hash),
+                    key: source_key(&entry.unit),
+                    fingerprint: CanonicalDigest::of_bytes(&entry.whole_hash),
                 },
                 ReadWitness {
                     key: activation_key(),
                     fingerprint: generation_fingerprint(project_generation),
                 },
             ]),
-            records,
+            records: rows.records,
         };
-        (draft, projection)
+        (draft, coverage)
     }
 
-    /// The demanded partitions this host's analysis scope computes. Every other
-    /// one answers unsupported without visiting a file.
-    fn computed_demand(&self, demand: &IndexDemand) -> IndexDemand {
+    /// The demanded surfaces this host has a producer for. Every other one
+    /// answers unsupported without visiting a file.
+    fn supported_demand(&self, demand: &IndexDemand) -> IndexDemand {
         let scope = self.config.effective_scope();
         IndexDemand::of(
             demand
-                .partitions
+                .surfaces()
                 .iter()
                 .copied()
-                .filter(|partition| partition.computed_under(scope)),
+                .filter(|surface| surface.host_supported(scope)),
         )
     }
 
@@ -991,19 +1316,19 @@ impl VerterHost {
         is_cancelled: &dyn Fn() -> bool,
     ) -> (Arc<IndexSnapshot>, ReconcileStatus, IndexReconcileWork) {
         let index = self.project_type_store().workspace_index();
-        let computed = self.computed_demand(demand);
+        let supported = self.supported_demand(demand);
         let mut work = IndexReconcileWork::default();
         let mut shortfalls: Vec<PartitionShortfall> = demand
-            .partitions
-            .difference(&computed.partitions)
-            .map(|&partition| PartitionShortfall {
-                partition,
+            .surfaces()
+            .difference(supported.surfaces())
+            .map(|&surface| PartitionShortfall {
+                surface,
                 cause: PartialCause::UnsupportedCoverage,
                 unavailable_units: Vec::new(),
             })
             .collect();
         let finished = |snapshot, mut shortfalls: Vec<PartitionShortfall>, work| {
-            shortfalls.sort_by_key(|shortfall| shortfall.partition);
+            shortfalls.sort_by_key(|shortfall| shortfall.surface);
             let status = if shortfalls.is_empty() {
                 ReconcileStatus::Current
             } else {
@@ -1011,32 +1336,26 @@ impl VerterHost {
             };
             (snapshot, status, work)
         };
-        if computed.partitions.is_empty() {
+        if supported.surfaces().is_empty() {
             return finished(index.snapshot(), shortfalls, work);
         }
 
-        // The epochs are bumped after a mutation commits, so reading them
-        // first can only make a later request re-check, never miss a change.
-        let scope = computed.scope();
-        let stamp = (
-            self.current_store_view_epoch(),
-            self.current_load_generation(),
-        );
-        if index.population_stamp(&scope) == Some(stamp) {
-            let snapshot = index.snapshot();
-            let certified = snapshot
-                .coverage(&scope)
-                .is_some_and(|record| record.partitions == computed.partition_ids());
-            if certified {
-                return finished(snapshot, shortfalls, work);
-            }
+        // Warm: every supported surface is certified at the feeds' current
+        // cursor, so no mutation has landed since. No file is touched.
+        let scope = supported.scope();
+        let snapshot = index.snapshot();
+        let certified = snapshot.coverage(&scope).is_some_and(|record| {
+            record.partitions == supported.partition_ids()
+                && record.witness.fingerprint == population_fingerprint(self.population_cursor())
+        });
+        if certified {
+            return finished(snapshot, shortfalls, work);
         }
 
         let mut refusal_cause = PartialCause::Stale;
         for _ in 0..MAX_PUBLISH_ATTEMPTS {
-            match self.reconcile_once(&computed, &scope, is_cancelled, &mut work, true) {
+            match self.reconcile_once(supported.surfaces(), &scope, is_cancelled, &mut work, true) {
                 Attempt::Published(snapshot) => {
-                    index.record_population_stamp(scope, stamp);
                     return finished(snapshot, shortfalls, work);
                 }
                 Attempt::Uncertified(snapshot, blocked) => {
@@ -1055,15 +1374,15 @@ impl VerterHost {
         }
         // Lost every attempt, or the account refused retention: answer from
         // private rows, certifying nothing.
-        match self.reconcile_once(&computed, &scope, is_cancelled, &mut work, false) {
+        match self.reconcile_once(supported.surfaces(), &scope, is_cancelled, &mut work, false) {
             Attempt::Uncertified(snapshot, blocked) => {
-                let has_own_cause = |partition| blocked.iter().any(|b| b.partition == partition);
-                let walk_wide: Vec<PartitionShortfall> = computed
-                    .partitions
+                let has_own_cause = |surface| blocked.iter().any(|b| b.surface == surface);
+                let walk_wide: Vec<PartitionShortfall> = supported
+                    .surfaces()
                     .iter()
-                    .filter(|&&partition| !has_own_cause(partition))
-                    .map(|&partition| PartitionShortfall {
-                        partition,
+                    .filter(|&&surface| !has_own_cause(surface))
+                    .map(|&surface| PartitionShortfall {
+                        surface,
                         cause: refusal_cause.clone(),
                         unavailable_units: Vec::new(),
                     })
@@ -1080,7 +1399,7 @@ impl VerterHost {
 
     fn reconcile_once(
         &self,
-        demand: &IndexDemand,
+        surfaces: &BTreeSet<IndexSurface>,
         scope: &ScopeId,
         is_cancelled: &dyn Fn() -> bool,
         work: &mut IndexReconcileWork,
@@ -1090,68 +1409,84 @@ impl VerterHost {
         let index = store.workspace_index();
         let account = index.account().get();
         let project_generation = store.project_generation();
+        let plan = {
+            let mut population = index.population().lock();
+            self.plan_walk(&mut population, scope, surfaces, work)
+        };
+        // Captured after planning, so every slot a retirement the plan owes
+        // could hold is in view; a slot published later needs witnesses the
+        // owed unit's source no longer gives.
         let captured = index.snapshot();
-        let (files, unavailable) = self.capture_tracked(project_generation);
-        work.population_checks += count_u32(files.len() + unavailable.len());
-        let captured_population = captured_population(project_generation, &files, &unavailable);
 
-        let mut canonical_by_unit: BTreeMap<CanonicalDigest, Arc<str>> = files
-            .iter()
-            .map(|file| (file.unit.digest(), Arc::clone(&file.canonical)))
-            .collect();
-
+        let mut canonical_by_unit: BTreeMap<CanonicalDigest, Arc<str>> = BTreeMap::new();
         let mut changes = Vec::new();
         let mut private_rows = Vec::new();
-        let mut current_slots: BTreeMap<IndexDemandPartition, BTreeSet<ContributionId>> =
-            BTreeMap::new();
-        let mut gone = Vec::new();
-        // A unit the host cannot read may hold rows of any partition.
-        let mut blocked: BTreeMap<IndexDemandPartition, BTreeSet<Arc<str>>> = BTreeMap::new();
-        for (canonical, _) in &unavailable {
-            for &partition in &demand.partitions {
-                blocked
-                    .entry(partition)
-                    .or_default()
-                    .insert(Arc::clone(canonical));
+        let mut gone: BTreeSet<ContributionId> = BTreeSet::new();
+        // Units a surface could not read, with the coverage each answered.
+        let mut blocked: BTreeMap<IndexSurface, BTreeMap<Arc<str>, FactCoverage>> = BTreeMap::new();
+        for canonical in &plan.unreadable {
+            for &surface in surfaces {
+                blocked.entry(surface).or_default().insert(
+                    Arc::clone(canonical),
+                    FactCoverage::unavailable("the source has no host data"),
+                );
             }
         }
         let mut unsupported = BTreeSet::new();
+        // What each visited file was published for, to clear its debt.
+        let mut visited: Vec<(Arc<str>, SourceRevision, PendingSurfaces)> = Vec::new();
 
-        for file in &files {
-            for &partition in &demand.partitions {
-                if !partition.applies_to(&file.language) {
+        for (canonical, entry) in &plan.visit {
+            canonical_by_unit.insert(entry.unit.digest(), Arc::clone(canonical));
+            let mut facts: Option<FileFacts<'_>> = None;
+            let mut cleared = PendingSurfaces::none();
+            for &surface in surfaces {
+                if !surface.applies_to(&entry.language) {
+                    cleared.insert(surface);
                     continue;
                 }
                 if is_cancelled() {
                     return Attempt::Cancelled;
                 }
-                let key = Self::slot_key(file, partition);
+                let key = Self::slot_key(&entry.unit, &entry.claim, surface);
                 let id = key.id();
                 let held = captured.contribution(&id);
-                if held.is_some_and(|held| held.basis.revision == file.revision) {
+                if held.is_some_and(|held| held.basis.revision == entry.revision) {
                     work.unchanged += 1;
-                    current_slots.entry(partition).or_default().insert(id);
+                    cleared.insert(surface);
                     continue;
                 }
+                if facts.is_none() {
+                    // A file that moved past the population's view cannot
+                    // be published from it: a publishing walk replans on the
+                    // feeds' next cursor. A private walk answers from the file
+                    // as it is now.
+                    match FileFacts::read(self, canonical, entry, project_generation) {
+                        Some((read, moved)) if !(publish && moved) => facts = Some(read),
+                        Some(_) => return Attempt::Refused(PublishRefusal::Stale),
+                        None if publish => return Attempt::Refused(PublishRefusal::Stale),
+                        None => break,
+                    }
+                }
+                let Some(file) = facts.as_ref() else {
+                    break;
+                };
                 work.projections += 1;
-                let (draft, projection) = self.draft_slot(file, partition, project_generation);
-                if projection == Projection::MissingFacts {
+                let (draft, coverage) = self.draft_slot(file, surface, project_generation);
+                if !coverage.certifies() {
                     // An old value does not stay current because its
                     // replacement could not be built.
                     blocked
-                        .entry(partition)
+                        .entry(surface)
                         .or_default()
-                        .insert(Arc::clone(&file.canonical));
+                        .insert(Arc::clone(canonical), coverage);
                     if let Some(held) = held {
-                        gone.push(id);
-                        changes.push(retire(held, CanonicalDigest::of_bytes(&file.whole_hash)));
+                        gone.insert(id);
+                        changes.push(retire(held, CanonicalDigest::of_bytes(&entry.whole_hash)));
                         work.retired += 1;
                     }
                     private_rows.push(PartialEnumeration::new(draft, account));
                     continue;
-                }
-                if publish && !self.source_unchanged(file) {
-                    return Attempt::Refused(PublishRefusal::Stale);
                 }
                 if !publish {
                     private_rows.push(PartialEnumeration::new(draft, account));
@@ -1162,7 +1497,7 @@ impl VerterHost {
                 });
                 match draft.seal(admission(), account) {
                     Ok(sealed) => {
-                        current_slots.entry(partition).or_default().insert(id);
+                        cleared.insert(surface);
                         changes.push(SlotChange::Upsert {
                             partition: Box::new(sealed),
                             expected,
@@ -1173,58 +1508,51 @@ impl VerterHost {
                             false,
                             "a host partition failed its own registered schema: {rejection:?}"
                         );
-                        unsupported.insert(partition);
+                        unsupported.insert(surface);
+                    }
+                }
+            }
+            visited.push((Arc::clone(canonical), entry.revision.clone(), cleared));
+        }
+
+        // Slots of units that left the population, of every surface. The
+        // retirement witnesses the source owner's answer as the fence will
+        // read it.
+        for retired in &plan.retire {
+            canonical_by_unit.insert(retired.unit.digest(), Arc::clone(&retired.canonical));
+            let fingerprint = self.live_source_fingerprint(&retired.canonical);
+            for surface in IndexSurface::ALL {
+                let id = Self::slot_key(&retired.unit, &retired.claim, surface).id();
+                if let Some(held) = captured.contribution(&id) {
+                    if gone.insert(id) {
+                        changes.push(retire(held, fingerprint));
+                        work.retired += 1;
                     }
                 }
             }
         }
-
-        // Slots of this demand that no tracked file claims any more.
-        let blocked_slots: BTreeSet<ContributionId> = gone.iter().cloned().collect();
-        for &partition in &demand.partitions {
-            let slots = current_slots.get(&partition);
-            for held in captured.contributions_in_partition(&partition.id()) {
-                if slots.is_some_and(|slots| slots.contains(&held.id))
-                    || blocked_slots.contains(&held.id)
-                {
-                    continue;
-                }
-                let Some(fingerprint_owner) = self.live_slot_owner(&files, &held.basis) else {
-                    canonical_by_unit
-                        .insert(held.basis.unit.digest(), Arc::clone(&held.basis.locator));
-                    gone.push(held.id.clone());
-                    changes.push(retire(&held, absent_source_fingerprint()));
-                    work.retired += 1;
-                    continue;
-                };
-                // The file is tracked but this slot's claim no longer applies.
-                let key_matches_claim = held.key.claim == fingerprint_owner.claim
-                    && partition.applies_to(&fingerprint_owner.language);
-                if !key_matches_claim {
-                    gone.push(held.id.clone());
-                    changes.push(retire(
-                        &held,
-                        CanonicalDigest::of_bytes(&fingerprint_owner.whole_hash),
-                    ));
-                    work.retired += 1;
-                }
-            }
-        }
-
         let shortfalls: Vec<PartitionShortfall> = blocked
             .iter()
-            .map(|(&partition, units)| PartitionShortfall {
-                partition,
-                cause: PartialCause::UnavailableInput,
-                unavailable_units: units.iter().cloned().collect(),
+            .map(|(&surface, units)| PartitionShortfall {
+                surface,
+                cause: if units
+                    .values()
+                    .all(|coverage| matches!(coverage, FactCoverage::Unsupported { .. }))
+                {
+                    PartialCause::UnsupportedCoverage
+                } else {
+                    PartialCause::UnavailableInput
+                },
+                unavailable_units: units.keys().cloned().collect(),
             })
-            .chain(unsupported.iter().map(|&partition| PartitionShortfall {
-                partition,
+            .chain(unsupported.iter().map(|&surface| PartitionShortfall {
+                surface,
                 cause: PartialCause::UnsupportedCoverage,
                 unavailable_units: Vec::new(),
             }))
             .collect();
 
+        let gone: Vec<ContributionId> = gone.into_iter().collect();
         let private_contributions = private_rows
             .into_iter()
             .map(PartialEnumeration::into_return_only);
@@ -1242,32 +1570,23 @@ impl VerterHost {
             scope: scope.clone(),
         };
 
-        // Each partition is certified on its own: a unit that blocks one says
+        // Each surface is certified on its own: a unit that blocks one says
         // nothing about the others.
-        let certified: BTreeSet<IndexDemandPartition> = demand
-            .partitions
+        let certified: BTreeSet<IndexSurface> = surfaces
             .iter()
             .copied()
-            .filter(|partition| {
-                !blocked.contains_key(partition) && !unsupported.contains(partition)
-            })
+            .filter(|surface| !blocked.contains_key(surface) && !unsupported.contains(surface))
             .collect();
         let coverage = if certified.is_empty() {
             Vec::new()
         } else {
             vec![CoverageRecord {
                 scope: scope.clone(),
-                partitions: certified.iter().map(|p| p.id()).collect(),
+                partitions: certified.iter().map(|surface| surface.id()).collect(),
                 witness: ReadWitness {
                     key: population_key(scope),
-                    fingerprint: captured_population,
+                    fingerprint: population_fingerprint(plan.cursor),
                 },
-                contributions: certified
-                    .iter()
-                    .filter_map(|partition| current_slots.get(partition))
-                    .flatten()
-                    .cloned()
-                    .collect(),
             }]
         };
         let decertified = if certified.is_empty() {
@@ -1286,6 +1605,36 @@ impl VerterHost {
         work.publish_attempts += 1;
         match index.publish(delta, &observations, is_cancelled) {
             PublishOutcome::Published | PublishOutcome::AlreadyCurrent => {
+                {
+                    // The walk's debt is paid for what it published; a file
+                    // that moved since keeps its debt.
+                    let mut population = index.population().lock();
+                    for (canonical, revision, cleared) in visited {
+                        if let Some(entry) = population.files.get_mut(&canonical) {
+                            if entry.revision == revision {
+                                entry.pending.remove_all(cleared);
+                            }
+                        }
+                    }
+                    if plan.full_visit {
+                        population.settled.insert(scope.clone());
+                    }
+                    // A retirement is paid once the store holds none of the
+                    // unit's slots. One a concurrent writer committed between
+                    // this walk's capture and its publication stays owed.
+                    let committed = index.snapshot();
+                    for retired in &plan.retire {
+                        let still_held = IndexSurface::ALL.into_iter().any(|surface| {
+                            let id = Self::slot_key(&retired.unit, &retired.claim, surface).id();
+                            committed.contribution(&id).is_some()
+                        });
+                        if !still_held {
+                            population
+                                .retirements
+                                .remove(&(Arc::clone(&retired.canonical), retired.claim.clone()));
+                        }
+                    }
+                }
                 let snapshot = index.snapshot();
                 if shortfalls.is_empty() {
                     Attempt::Published(snapshot)
@@ -1298,29 +1647,10 @@ impl VerterHost {
         }
     }
 
-    fn source_unchanged(&self, file: &TrackedFile) -> bool {
-        self.scheduler
-            .try_get_source(&file.canonical)
-            .is_some_and(|source| {
-                source.whole_hash == file.whole_hash && source.generation == file.generation
-            })
-    }
-
-    fn live_slot_owner<'files>(
-        &self,
-        files: &'files [TrackedFile],
-        basis: &SourceBasis,
-    ) -> Option<&'files TrackedFile> {
-        files
-            .binary_search_by(|file| file.canonical.as_ref().cmp(basis.locator.as_ref()))
-            .ok()
-            .and_then(|position| files.get(position))
-    }
-
     /// Enumerate candidates for `demand` under finite budgets.
     ///
     /// The answer is `Complete` only when the walk exhausted its keys and every
-    /// partition the lookup reads is certified. A key outside the demand returns
+    /// surface the lookup reads is certified. A key outside the demand returns
     /// nothing and answers `Partial`. `continuation` resumes an earlier page of
     /// the same lookup and demand; once the index has moved on it answers
     /// `Partial(Stale)`, and a request-local snapshot issues none, because no
@@ -1357,15 +1687,35 @@ impl VerterHost {
         };
         let relevant: Vec<&PartitionShortfall> = shortfalls
             .iter()
-            .filter(|shortfall| lookup.reads(shortfall.partition.family()))
+            .filter(|shortfall| lookup.reads(shortfall.surface.family()))
             .collect();
+        let key_count = match &lookup {
+            Lookup::Keys(keys) => count_u32(keys.len()),
+            Lookup::Prefix { .. } => 1,
+        };
         let query = IndexQuery {
             lookup,
             budgets,
-            scope: Some(self.computed_demand(demand).declared_scope()),
+            scope: Some(self.supported_demand(demand).declared_scope()),
             continuation,
         };
         let mut page = query_candidates(&snapshot, &query, None, is_cancelled);
+        // A surface the host cannot produce leaves the declared scope, so the
+        // walk can prove its keys exhausted over the produced surfaces of the
+        // family; the family is still not certified for this demand.
+        if page.status == EnumerationStatus::Complete {
+            if let Some(shortfall) = relevant.first() {
+                page.status = EnumerationStatus::Partial {
+                    cause: shortfall.cause.clone(),
+                    covered: super::query::CoveredScope {
+                        keys_exhausted: key_count,
+                        postings_visited: page.work.posting_visits,
+                        unavailable_units: Vec::new(),
+                    },
+                    continuation: None,
+                };
+            }
+        }
         if let EnumerationStatus::Partial {
             cause,
             covered,
@@ -1388,6 +1738,55 @@ impl VerterHost {
         (page, work)
     }
 
+    /// Enumerate the units of one demanded surface under finite budgets:
+    /// every tracked file the surface applies to, as the slot its facts were
+    /// projected into. `IndexSurface::Imports` or `Bindings` reaches every
+    /// file; `ComponentInventory` reaches the component carriers without
+    /// producing a template.
+    ///
+    /// The answer is `Complete` only when the walk exhausted the surface and
+    /// its coverage is certified. A surface the demand does not include, one
+    /// the host cannot produce, a unit whose facts could not be read, or an
+    /// exhausted budget answers `Partial` naming why, and nothing it returns
+    /// is kept.
+    pub fn workspace_index_units(
+        &self,
+        demand: &IndexDemand,
+        surface: IndexSurface,
+        budgets: QueryBudgets,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> (UnitPage, IndexReconcileWork) {
+        let (snapshot, status, work) = self.workspace_index_reconcile(demand, is_cancelled);
+        if status == ReconcileStatus::Cancelled {
+            let page = UnitPage {
+                units: Vec::new(),
+                status: EnumerationStatus::Cancelled,
+                work: QueryWork::default(),
+                generation: snapshot.generation(),
+            };
+            return (page, work);
+        }
+        let shortfall = match &status {
+            ReconcileStatus::Uncertified(shortfalls) => shortfalls
+                .iter()
+                .find(|shortfall| shortfall.surface == surface),
+            ReconcileStatus::Current | ReconcileStatus::Cancelled => None,
+        };
+        let scope = self.supported_demand(demand).declared_scope();
+        let mut page = query_units(&snapshot, &scope, &surface.id(), budgets, is_cancelled);
+        if let (EnumerationStatus::Partial { cause, covered, .. }, Some(shortfall)) =
+            (&mut page.status, shortfall)
+        {
+            if *cause != PartialCause::BudgetExhausted {
+                shortfall.cause.clone_into(cause);
+            }
+            covered
+                .unavailable_units
+                .clone_from(&shortfall.unavailable_units);
+        }
+        (page, work)
+    }
+
     /// Candidates of one custom property under finite budgets.
     pub fn css_var_candidates(
         &self,
@@ -1396,7 +1795,7 @@ impl VerterHost {
         continuation: Option<IndexContinuation>,
         is_cancelled: &dyn Fn() -> bool,
     ) -> CssVarCandidates {
-        let demand = IndexDemand::of([IndexDemandPartition::CssVariables]);
+        let demand = IndexDemand::of([IndexSurface::CssVariables]);
         let key = PostingKey::exact(PartitionFamily::CssVariables, var_name);
         let (page, work) = self.workspace_index_candidates(
             &demand,
@@ -1413,36 +1812,53 @@ impl VerterHost {
     }
 }
 
-/// The population as this walk saw it. The fence compares it with the live
-/// population, so a file edited after capture cannot be certified.
-fn captured_population(
-    project_generation: u64,
-    files: &[TrackedFile],
-    unavailable: &[UnreadableFile],
-) -> CanonicalDigest {
-    let mut entries: Vec<(&str, &[u8; 16])> = files
-        .iter()
-        .map(|file| (file.canonical.as_ref(), &file.whole_hash))
-        .chain(
-            unavailable
-                .iter()
-                .map(|(canonical, hash)| (canonical.as_ref(), hash)),
-        )
-        .collect();
-    entries.sort_by_key(|(canonical, _)| *canonical);
-    population_fingerprint(project_generation, entries.into_iter())
+/// The owners' live answers for one walk's fence.
+struct HostObservations<'host> {
+    host: &'host VerterHost,
+    canonical_by_unit: BTreeMap<CanonicalDigest, Arc<str>>,
+    scope: ScopeId,
+}
+
+impl ObservationOracle for HostObservations<'_> {
+    fn current(&self, key: &ObservationKey) -> Option<CanonicalDigest> {
+        match key.owner {
+            ObservationOwner::Source => {
+                let canonical = self.canonical_by_unit.get(&key.subject)?;
+                Some(self.host.live_source_fingerprint(canonical))
+            }
+            ObservationOwner::Activation => Some(generation_fingerprint(
+                self.host.project_type_store().project_generation(),
+            )),
+            ObservationOwner::Population if key.subject == self.scope.digest() => {
+                Some(population_fingerprint(self.host.population_cursor()))
+            }
+            _ => None,
+        }
+    }
+
+    fn current_epochs(&self) -> (Option<SelectionEpoch>, Option<DemandEpoch>) {
+        (None, None)
+    }
+}
+
+fn tracked_ids(host: &VerterHost) -> Vec<String> {
+    host.scheduler
+        .node_ids()
+        .into_iter()
+        .filter(|id| !host.is_canonical_evicted(id))
+        .collect()
 }
 
 enum Attempt {
-    /// Coverage for every partition of the demand is current.
+    /// Coverage for every surface of the demand is current.
     Published(Arc<IndexSnapshot>),
-    /// The snapshot that answers, and the partitions it could not certify.
+    /// The snapshot that answers, and the surfaces it could not certify.
     Uncertified(Arc<IndexSnapshot>, Vec<PartitionShortfall>),
     Refused(PublishRefusal),
     Cancelled,
 }
 
-fn retire(held: &super::snapshot::Contribution, fingerprint: CanonicalDigest) -> SlotChange {
+fn retire(held: &Contribution, fingerprint: CanonicalDigest) -> SlotChange {
     SlotChange::Retire {
         id: held.id.clone(),
         expected: Box::new(held.basis.clone()),

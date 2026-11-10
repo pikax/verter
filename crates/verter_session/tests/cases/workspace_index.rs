@@ -193,8 +193,11 @@ fn a_warm_request_visits_no_file_and_an_edit_projects_only_that_file() {
     let (_, edited) =
         host.workspace_index_candidates(&demand, css_keys("--brand"), WIDE, None, &never());
     assert_eq!(edited.projections, 1, "only the edited file");
-    assert_eq!(edited.unchanged, 2);
-    assert_eq!(edited.population_checks, 3, "the witness read is counted");
+    assert_eq!(edited.unchanged, 0, "no other slot is visited");
+    assert_eq!(
+        edited.population_checks, 1,
+        "the committed mutation names the one file to re-read"
+    );
 }
 
 #[test]
@@ -232,16 +235,14 @@ fn an_undemanded_partition_is_never_projected() {
     assert_eq!(status, ReconcileStatus::Current);
     assert_eq!(work.projections, 1);
     assert_eq!(snapshot.contribution_count(), 1);
-    for partition in [
-        IndexDemandPartition::Bindings,
-        IndexDemandPartition::Components,
-        IndexDemandPartition::Imports,
-        IndexDemandPartition::StyleSelectors,
-    ] {
+    for surface in IndexSurface::ALL
+        .into_iter()
+        .filter(|surface| *surface != IndexSurface::CssVariables)
+    {
         assert_eq!(
-            snapshot.contributions_in_partition(&partition.id()).count(),
+            snapshot.contributions_in_partition(&surface.id()).count(),
             0,
-            "{partition:?}"
+            "{surface:?}"
         );
     }
 }
@@ -367,7 +368,7 @@ fn component_uses_answer_by_tag_and_no_name_finds_a_view_the_owner_never_produce
     // produced, under its unit, and no exact view row exists.
     let snapshot = host.project_type_store().workspace_index().snapshot();
     let mut markers = BTreeSet::new();
-    for slot in snapshot.contributions_in_partition(&IndexDemandPartition::Components.id()) {
+    for slot in snapshot.contributions_in_partition(&IndexSurface::ComponentInventory.id()) {
         for record in &slot.records {
             assert!(!matches!(
                 record.row,
@@ -670,11 +671,13 @@ fn deleting_a_file_retires_its_slots_and_changing_its_language_retires_the_old_c
         .iter()
         .all(|candidate| candidate.contribution.basis.locator.as_ref() == "/src/A.vue"));
 
+    // The same path now claims another language row: a plain script has no
+    // style or template surface, and the carrier's slot leaves.
     upsert_file(
         &host,
         "/src/A.vue",
-        &vue_source("--brand"),
-        FileLanguage::svelte(),
+        "export const a = 1;\n",
+        FileLanguage::script_ts(),
     );
     let (moved, moved_work) =
         host.workspace_index_candidates(&demand, css_keys("--brand"), WIDE, None, &never());
@@ -857,7 +860,7 @@ fn a_walk_that_never_settles_answers_privately_and_warms_nothing() {
     assert_eq!(
         status,
         ReconcileStatus::Uncertified(vec![PartitionShortfall {
-            partition: IndexDemandPartition::CssVariables,
+            surface: IndexSurface::CssVariables,
             cause: PartialCause::Stale,
             unavailable_units: Vec::new(),
         }])
@@ -919,7 +922,7 @@ fn a_lookup_outside_the_demand_returns_no_row_and_is_never_complete() {
 
     // An empty demand certifies nothing.
     let (page, _) = host.workspace_index_candidates(
-        &IndexDemand::of([]),
+        &IndexDemand::of::<[IndexSurface; 0]>([]),
         css_keys("--brand"),
         WIDE,
         None,
@@ -1008,10 +1011,10 @@ fn a_resumed_page_of_a_lookup_reaching_outside_the_demand_is_never_complete() {
 }
 
 #[test]
-fn a_partition_the_analysis_scope_does_not_compute_is_unsupported_and_uncovered() {
+fn style_surfaces_are_unsupported_without_style_analysis_and_the_rest_produce_on_demand() {
     use verter_semantic::analysis::AnalysisScope;
 
-    let source = "<script setup>\nimport Foo from './Foo.vue';\nconst alpha = 1;\n</script>\n<template><Foo :style=\"{ '--brand': 'x' }\" /></template>\n<style>\n.klass { --brand: blue; }\n</style>";
+    let source = "<script setup>\nimport Foo from './Foo.vue';\nconst alpha = 1;\n</script>\n<template><Foo class=\"klass\" :style=\"{ '--brand': 'x' }\" /></template>\n<style>\n.klass { --brand: blue; }\n</style>";
     let with_scope = |scope: AnalysisScope| {
         let host = VerterHost::new_standalone(HostConfig {
             analysis_scope: Some(scope),
@@ -1020,63 +1023,24 @@ fn a_partition_the_analysis_scope_does_not_compute_is_unsupported_and_uncovered(
         upsert_file(&host, "/src/A.vue", source, FileLanguage::vue());
         host
     };
-    let cases = [
-        (
-            IndexDemandPartition::CssVariables,
-            css_keys("--brand"),
-            [
-                AnalysisScope::ESSENTIAL,
-                AnalysisScope::IMPORTS,
-                AnalysisScope::NONE,
-            ],
-        ),
-        (
-            IndexDemandPartition::StyleSelectors,
-            selector_keys("klass"),
-            [
-                AnalysisScope::ESSENTIAL,
-                AnalysisScope::IMPORTS,
-                AnalysisScope::NONE,
-            ],
-        ),
-        (
-            IndexDemandPartition::Components,
-            Lookup::Keys(vec![PostingKey::exact(PartitionFamily::Components, "Foo")]),
-            [
-                AnalysisScope::ESSENTIAL,
-                AnalysisScope::IMPORTS,
-                AnalysisScope::NONE,
-            ],
-        ),
-        (
-            IndexDemandPartition::Bindings,
-            Lookup::Keys(vec![PostingKey::exact(PartitionFamily::Bindings, "alpha")]),
-            [
-                AnalysisScope::IMPORTS,
-                AnalysisScope::NONE,
-                AnalysisScope::NONE,
-            ],
-        ),
-        (
-            IndexDemandPartition::Imports,
-            Lookup::Keys(vec![PostingKey::reverse(
-                PartitionFamily::Imports,
-                "./Foo.vue",
-            )]),
-            [
-                AnalysisScope::NONE,
-                AnalysisScope::NONE,
-                AnalysisScope::NONE,
-            ],
-        ),
+    let narrowed = [
+        AnalysisScope::ESSENTIAL,
+        AnalysisScope::IMPORTS,
+        AnalysisScope::NONE,
     ];
-    for (partition, lookup, narrowed) in cases {
-        let demand = IndexDemand::of([partition]);
+
+    // Style facts come from the eager style analysis the scope configures:
+    // without it the host has no producer, and says so without reading a file.
+    for (surface, lookup) in [
+        (IndexSurface::CssVariables, css_keys("--brand")),
+        (IndexSurface::StyleDefinitions, selector_keys("klass")),
+    ] {
+        let demand = IndexDemand::of([surface]);
         let full = with_scope(AnalysisScope::LSP);
         let (page, _) =
             full.workspace_index_candidates(&demand, lookup.clone(), WIDE, None, &never());
-        assert_eq!(page.status, EnumerationStatus::Complete, "{partition:?}");
-        assert!(!page.candidates.is_empty(), "{partition:?}");
+        assert_eq!(page.status, EnumerationStatus::Complete, "{surface:?}");
+        assert!(!page.candidates.is_empty(), "{surface:?}");
 
         for scope in narrowed {
             let host = with_scope(scope);
@@ -1084,17 +1048,114 @@ fn a_partition_the_analysis_scope_does_not_compute_is_unsupported_and_uncovered(
                 host.workspace_index_candidates(&demand, lookup.clone(), WIDE, None, &never());
             assert!(
                 is_partial_with(&page, &PartialCause::UnsupportedCoverage),
-                "{partition:?} under {scope:?}: {:?}",
+                "{surface:?} under {scope:?}: {:?}",
                 page.status
             );
-            assert_eq!(work.projections, 0, "no file was read for {partition:?}");
+            assert_eq!(work.projections, 0, "no file was read for {surface:?}");
             let store = host.project_type_store().workspace_index().snapshot();
             assert_eq!(store.contribution_count(), 0);
             assert!(store.coverage(&demand.scope()).is_none());
         }
     }
 
-    // What the scope does compute stays certified under the same demand.
+    // The whole style-selector partition still produces its markup
+    // references on demand, and a stylesheet lookup under it is not certified
+    // because the definitions facet it was demanded with cannot be.
+    let host = with_scope(AnalysisScope::ESSENTIAL);
+    let selectors = IndexDemand::of([IndexDemandPartition::StyleSelectors]);
+    let (page, work) =
+        host.workspace_index_candidates(&selectors, selector_keys("klass"), WIDE, None, &never());
+    assert!(is_partial_with(&page, &PartialCause::UnsupportedCoverage));
+    assert!(page.candidates.is_empty());
+    assert_eq!(
+        work.projections, 1,
+        "the markup references of the one carrier"
+    );
+    let (page, _) =
+        host.workspace_index_candidates(&selectors, markup_class_walk(), WIDE, None, &never());
+    assert_eq!(
+        markup_references(&page)
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect::<Vec<_>>(),
+        ["klass"]
+    );
+
+    // Script and template facts are produced on demand: the scope is the
+    // policy for eager work, not a proof of what a demand can have. A
+    // template needs the carrier's analysis, which a scope that runs no
+    // analysis at all does not keep; that one answers unavailable, naming
+    // the unit, never certified empty.
+    let component_keys =
+        || Lookup::Keys(vec![PostingKey::exact(PartitionFamily::Components, "Foo")]);
+    for (partition, lookup, produced_under) in [
+        (
+            IndexDemandPartition::Components,
+            component_keys(),
+            &[AnalysisScope::ESSENTIAL, AnalysisScope::IMPORTS][..],
+        ),
+        (
+            IndexDemandPartition::Bindings,
+            Lookup::Keys(vec![PostingKey::exact(PartitionFamily::Bindings, "alpha")]),
+            &narrowed[..],
+        ),
+        (
+            IndexDemandPartition::Imports,
+            Lookup::Keys(vec![PostingKey::reverse(
+                PartitionFamily::Imports,
+                "./Foo.vue",
+            )]),
+            &narrowed[..],
+        ),
+    ] {
+        let demand = IndexDemand::of([partition]);
+        let full = with_scope(AnalysisScope::LSP);
+        let (expected, _) =
+            full.workspace_index_candidates(&demand, lookup.clone(), WIDE, None, &never());
+        assert_eq!(
+            expected.status,
+            EnumerationStatus::Complete,
+            "{partition:?}"
+        );
+        assert!(!expected.candidates.is_empty(), "{partition:?}");
+        for &scope in produced_under {
+            let host = with_scope(scope);
+            let (page, _) =
+                host.workspace_index_candidates(&demand, lookup.clone(), WIDE, None, &never());
+            assert_eq!(
+                page.status,
+                EnumerationStatus::Complete,
+                "{partition:?} under {scope:?}"
+            );
+            assert_eq!(
+                fingerprint(&page),
+                fingerprint(&expected),
+                "{partition:?} under {scope:?}"
+            );
+        }
+    }
+
+    let none = with_scope(AnalysisScope::NONE);
+    let components = IndexDemand::of([IndexDemandPartition::Components]);
+    let (page, _) =
+        none.workspace_index_candidates(&components, component_keys(), WIDE, None, &never());
+    assert!(is_partial_with(&page, &PartialCause::UnavailableInput));
+    let EnumerationStatus::Partial { covered, .. } = &page.status else {
+        unreachable!()
+    };
+    assert_eq!(covered.unavailable_units, [Arc::<str>::from("/src/A.vue")]);
+    // The inventory facet needs no template and stays certified; the uses
+    // facet is never certified empty.
+    assert!(none
+        .project_type_store()
+        .workspace_index()
+        .snapshot()
+        .coverage(&components.scope())
+        .is_none_or(|record| !record
+            .partitions
+            .contains(&IndexSurface::ComponentUses.id())));
+
+    // What the host does produce stays certified under the same demand.
     let host = with_scope(AnalysisScope::ESSENTIAL);
     let both = IndexDemand::of([
         IndexDemandPartition::Bindings,
@@ -1166,7 +1227,10 @@ fn a_failed_load_is_not_part_of_the_population_and_keeps_the_warm_path() {
     let (edited, work) =
         host.workspace_index_candidates(&demand, css_keys("--brand"), WIDE, None, &never());
     assert_eq!(edited.status, EnumerationStatus::Complete);
-    assert_eq!(work.population_checks, 2, "only real files are compared");
+    assert_eq!(
+        work.population_checks, 1,
+        "a failed load publishes no source transition: only the edited file is re-read"
+    );
     assert_eq!(work.projections, 1);
 
     let (warm, warm_work) =
@@ -1292,4 +1356,688 @@ fn a_request_local_answer_issues_no_continuation_it_could_never_honor() {
             ..
         }
     ));
+}
+
+/// The production LSP host's scope: template-free. Every template-backed
+/// surface must still certify from cold, unopened files.
+fn build_host() -> VerterHost {
+    VerterHost::new_standalone(HostConfig {
+        analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+        ..HostConfig::default()
+    })
+}
+
+const COLD_VUE: &str = "<script setup>\nconst on = true;\nconst el = document.body;\nel.style.setProperty('--brand', 'red');\n</script>\n<template><Child class=\"card wide\" :class=\"{ 'active': on }\" :style=\"{ '--brand': 'blue' }\" /></template>\n<style>\n.card { --brand: blue; color: var(--brand); }\n</style>";
+
+const COLD_SVELTE: &str = "<script>\nlet a = 1;\n</script>\n<div class=\"card\" style=\"--brand: red; color: blue\" style:--accent={a}><Badge --tone=\"dark\" /></div>\n<style>\n.card { color: var(--brand); }\n</style>";
+
+/// Every markup class reference, keyed by class name.
+fn markup_class_walk() -> Lookup {
+    Lookup::Prefix {
+        partition: PartitionFamily::StyleSelectors,
+        family: KeyFamily::Reverse,
+        version: 0,
+        prefix: Arc::from(""),
+    }
+}
+
+fn component_keys(tag: &str) -> Lookup {
+    Lookup::Keys(vec![PostingKey::exact(PartitionFamily::Components, tag)])
+}
+
+fn sorted_paths(list: &[Arc<std::path::Path>]) -> Vec<String> {
+    let mut paths: Vec<String> = list.iter().map(|p| p.display().to_string()).collect();
+    paths.sort();
+    paths
+}
+
+/// The markup class references of an answer: locator, name and quality.
+fn markup_references(page: &CandidatePage) -> Vec<(String, String, FactQuality)> {
+    let mut tokens: Vec<(String, String, FactQuality)> = page
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let record = candidate.record()?;
+            match &record.row {
+                IndexRow::Stylesheet(row)
+                    if row.role == StyleRole::Reference
+                        && row.surface == StyleSurface::Template =>
+                {
+                    Some((
+                        candidate.contribution.basis.locator.to_string(),
+                        row.name.to_string(),
+                        record.quality,
+                    ))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    tokens.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    tokens
+}
+
+#[test]
+fn a_build_scope_host_certifies_template_backed_surfaces_from_cold_files() {
+    let host = build_host();
+    upsert_file(&host, "/src/A.vue", COLD_VUE, FileLanguage::vue());
+    upsert_file(&host, "/src/B.svelte", COLD_SVELTE, FileLanguage::svelte());
+
+    // Component uses: the lazily produced template is the value certified,
+    // so its rows are there.
+    let components = IndexDemand::of([IndexDemandPartition::Components]);
+    let (uses, work) =
+        host.workspace_index_candidates(&components, component_keys("Child"), WIDE, None, &never());
+    assert_eq!(uses.status, EnumerationStatus::Complete);
+    assert_eq!(
+        uses.candidates.len(),
+        1,
+        "the cold template's component use"
+    );
+    assert_eq!(
+        work.projections, 4,
+        "two surfaces of two carriers, once each"
+    );
+    let (badge, _) =
+        host.workspace_index_candidates(&components, component_keys("Badge"), WIDE, None, &never());
+    assert_eq!(badge.status, EnumerationStatus::Complete);
+    assert_eq!(
+        badge.candidates.len(),
+        1,
+        "svelte uses come from its template facts"
+    );
+
+    // Style selectors: definitions by their exact key, markup references by
+    // the reverse walk, both frameworks.
+    let selectors = IndexDemand::of([IndexDemandPartition::StyleSelectors]);
+    let (definitions, _) =
+        host.workspace_index_candidates(&selectors, selector_keys("card"), WIDE, None, &never());
+    assert_eq!(definitions.status, EnumerationStatus::Complete);
+    assert_eq!(definitions.candidates.len(), 2);
+    let (references, _) =
+        host.workspace_index_candidates(&selectors, markup_class_walk(), WIDE, None, &never());
+    assert_eq!(references.status, EnumerationStatus::Complete);
+    let reference =
+        |locator: &str, name: &str, quality| (locator.to_string(), name.to_string(), quality);
+    assert_eq!(
+        markup_references(&references),
+        [
+            reference("/src/A.vue", "active", FactQuality::Approximate),
+            reference("/src/A.vue", "card", FactQuality::Exact),
+            reference("/src/A.vue", "wide", FactQuality::Exact),
+            reference("/src/B.svelte", "card", FactQuality::Exact),
+        ]
+    );
+
+    // CSS variables: every leg, including svelte inline styles.
+    let flow = host.css_var_flow("--brand", None);
+    assert_eq!(flow.page.status, EnumerationStatus::Complete);
+    assert_eq!(sorted_paths(&flow.flow.style_definitions), ["/src/A.vue"]);
+    assert_eq!(
+        sorted_paths(&flow.flow.style_var_usages),
+        ["/src/A.vue", "/src/B.svelte"]
+    );
+    assert_eq!(
+        sorted_paths(&flow.flow.template_definitions),
+        ["/src/A.vue", "/src/B.svelte"]
+    );
+    assert_eq!(
+        sorted_paths(&flow.flow.script_manipulations),
+        ["/src/A.vue"]
+    );
+
+    // Repeated warm queries read nothing.
+    for demand in [&components, &selectors] {
+        let (_, _, warm) = host.workspace_index_reconcile(demand, &never());
+        assert_eq!(warm, IndexReconcileWork::default(), "{demand:?}");
+    }
+}
+
+#[test]
+fn facts_the_ide_already_produced_answer_exactly_as_cold_production_does() {
+    let cold = build_host();
+    upsert_file(&cold, "/src/A.vue", COLD_VUE, FileLanguage::vue());
+    upsert_file(&cold, "/src/B.svelte", COLD_SVELTE, FileLanguage::svelte());
+
+    // A full-scope host holds the template on its analysis snapshot already,
+    // as an editor that compiled the file does.
+    let warmed = VerterHost::new_standalone(HostConfig::default());
+    upsert_file(&warmed, "/src/A.vue", COLD_VUE, FileLanguage::vue());
+    upsert_file(
+        &warmed,
+        "/src/B.svelte",
+        COLD_SVELTE,
+        FileLanguage::svelte(),
+    );
+    assert!(warmed
+        .get_analysis("/src/A.vue")
+        .is_some_and(|analysis| analysis.template.is_some()));
+
+    let demand = IndexDemand::of([
+        IndexDemandPartition::Components,
+        IndexDemandPartition::StyleSelectors,
+        IndexDemandPartition::CssVariables,
+    ]);
+    for lookup in [
+        component_keys("Child"),
+        component_keys("Badge"),
+        selector_keys("card"),
+        markup_class_walk(),
+        css_keys("--brand"),
+    ] {
+        let (from_cold, cold_work) =
+            cold.workspace_index_candidates(&demand, lookup.clone(), WIDE, None, &never());
+        let (from_warmed, warmed_work) =
+            warmed.workspace_index_candidates(&demand, lookup.clone(), WIDE, None, &never());
+        assert_eq!(from_cold.status, EnumerationStatus::Complete, "{lookup:?}");
+        assert_eq!(
+            fingerprint(&from_cold),
+            fingerprint(&from_warmed),
+            "{lookup:?}"
+        );
+        assert_eq!(cold_work, warmed_work, "{lookup:?}");
+    }
+}
+
+#[test]
+fn surfaces_certify_separately_when_a_template_is_out_of_reach() {
+    let host = build_host();
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        "<script setup>\nconst a = 1;\n</script>\n<template src=\"./a.html\"></template>\n<style>\n.card { --brand: red; }\n</style>",
+        FileLanguage::vue(),
+    );
+
+    // The inventory needs no template.
+    let inventory = IndexDemand::of([IndexSurface::ComponentInventory]);
+    let (snapshot, status, work) = host.workspace_index_reconcile(&inventory, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(
+        snapshot
+            .contributions_in_partition(&IndexSurface::ComponentInventory.id())
+            .count(),
+        1
+    );
+    assert_eq!(work.projections, 1);
+
+    // Uses need the template an external source keeps out of reach: the unit
+    // is named, and nothing is certified empty.
+    let uses = IndexDemand::of([IndexSurface::ComponentUses]);
+    let (snapshot, status, _) = host.workspace_index_reconcile(&uses, &never());
+    let ReconcileStatus::Uncertified(shortfalls) = status else {
+        panic!("an unproduced template must not certify: {status:?}");
+    };
+    assert_eq!(shortfalls.len(), 1);
+    assert_eq!(shortfalls[0].surface, IndexSurface::ComponentUses);
+    assert_eq!(shortfalls[0].cause, PartialCause::UnavailableInput);
+    assert_eq!(
+        shortfalls[0].unavailable_units,
+        [Arc::<str>::from("/src/A.vue")]
+    );
+    assert!(snapshot.coverage(&uses.scope()).is_none());
+
+    // Under the whole partition a definition lookup is not certified, because
+    // the markup references it was demanded with are not; the rows still answer.
+    let selectors = IndexDemand::of([IndexDemandPartition::StyleSelectors]);
+    let (page, _) =
+        host.workspace_index_candidates(&selectors, selector_keys("card"), WIDE, None, &never());
+    assert!(is_partial_with(&page, &PartialCause::UnavailableInput));
+    assert_eq!(page.candidates.len(), 1);
+    let EnumerationStatus::Partial { covered, .. } = &page.status else {
+        unreachable!()
+    };
+    assert_eq!(covered.unavailable_units, [Arc::<str>::from("/src/A.vue")]);
+
+    // Demanded on its own, the definition surface certifies.
+    let definitions = IndexDemand::of([IndexSurface::StyleDefinitions]);
+    let (page, _) =
+        host.workspace_index_candidates(&definitions, selector_keys("card"), WIDE, None, &never());
+    assert_eq!(page.status, EnumerationStatus::Complete);
+    assert_eq!(page.candidates.len(), 1);
+}
+
+#[test]
+fn an_edit_reads_one_file_and_a_removal_or_eviction_retires_every_surface_of_it() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for id in ["/src/A.vue", "/src/B.vue", "/src/C.vue"] {
+        upsert_file(&host, id, &vue_source("--brand"), FileLanguage::vue());
+    }
+    let all = IndexDemand::of(IndexSurface::ALL);
+    let (_, status, cold) = host.workspace_index_reconcile(&all, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(cold.population_checks, 3, "the one whole read");
+    assert_eq!(cold.projections, 21, "seven surfaces of three carriers");
+
+    upsert_file(
+        &host,
+        "/src/B.vue",
+        &vue_source("--other"),
+        FileLanguage::vue(),
+    );
+    let (_, status, edited) = host.workspace_index_reconcile(&all, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(
+        edited,
+        IndexReconcileWork {
+            population_checks: 1,
+            projections: 7,
+            unchanged: 0,
+            retired: 0,
+            publish_attempts: 1,
+        },
+        "one file re-read, its seven slots re-projected, no other slot visited"
+    );
+    let (_, _, warm) = host.workspace_index_reconcile(&all, &never());
+    assert_eq!(warm, IndexReconcileWork::default());
+
+    host.remove("/src/C.vue");
+    let (snapshot, status, removed) = host.workspace_index_reconcile(&all, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(removed.population_checks, 1);
+    assert_eq!(removed.projections, 0);
+    assert_eq!(
+        removed.retired, 7,
+        "every surface's slot of the removed file"
+    );
+    assert_eq!(snapshot.contribution_count(), 14);
+
+    // An eviction is the host's own membership change: the scheduler keeps
+    // the node, the index still learns of it from one file.
+    host.evict("/src/A.vue");
+    let (snapshot, status, evicted) = host.workspace_index_reconcile(&all, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(evicted.population_checks, 1);
+    assert_eq!(evicted.retired, 7);
+    assert_eq!(snapshot.contribution_count(), 7);
+    let (_, _, warm) = host.workspace_index_reconcile(&all, &never());
+    assert_eq!(warm, IndexReconcileWork::default());
+}
+
+#[test]
+fn svelte_inline_style_custom_properties_are_template_definitions_with_exact_spans() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_file(&host, "/src/B.svelte", COLD_SVELTE, FileLanguage::svelte());
+    for name in ["--brand", "--accent", "--tone"] {
+        let answer = host.css_var_candidates(name, WIDE, None, &never());
+        assert_eq!(answer.page.status, EnumerationStatus::Complete, "{name}");
+        assert_eq!(
+            sorted_paths(&answer.flow.template_definitions),
+            ["/src/B.svelte"],
+            "{name}"
+        );
+        let template_origins: Vec<&RecordOrigin> = answer
+            .page
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                let record = candidate.record()?;
+                match &record.row {
+                    IndexRow::Stylesheet(row) if row.surface == StyleSurface::Template => {
+                        Some(&record.origins[0])
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(template_origins.len(), 1, "{name}");
+        let RecordOrigin::Authored(anchor) = template_origins[0] else {
+            panic!("{name}: svelte markup records the authored name: {template_origins:?}");
+        };
+        let start = usize::try_from(anchor.range.start().get()).unwrap();
+        let end = usize::try_from(anchor.range.end().get()).unwrap();
+        assert_eq!(&COLD_SVELTE[start..end], name);
+    }
+}
+
+#[test]
+fn template_facts_answer_a_cold_carrier_under_a_template_free_scope_with_coverage() {
+    let host = build_host();
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        "<script setup>\nimport Child from './Child.vue';\nconst t = 'x';\n</script>\n<template><Child :title=\"t\" class=\"card\">b</Child></template>",
+        FileLanguage::vue(),
+    );
+    upsert_file(
+        &host,
+        "/src/External.vue",
+        "<script setup>\nconst a = 1;\n</script>\n<template src=\"./a.html\"></template>",
+        FileLanguage::vue(),
+    );
+    upsert_file(
+        &host,
+        "/src/util.ts",
+        "export const one = 1;\n",
+        FileLanguage::script_ts(),
+    );
+    assert!(
+        host.get_analysis("/src/A.vue")
+            .is_some_and(|analysis| analysis.template.is_none()),
+        "the template-free scope holds no template for a cold carrier"
+    );
+
+    let cold = host.template_facts("/src/A.vue");
+    assert_eq!(cold.coverage, FactCoverage::Complete);
+    let template = cold.value.expect("a produced template");
+    assert_eq!(
+        template
+            .components
+            .iter()
+            .map(|usage| usage.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Child"]
+    );
+    let usage = &template.components[0];
+    assert_eq!(usage.import_source.as_deref(), Some("./Child.vue"));
+    // Every authored attribute of a component use is a recorded prop: the
+    // bound `:title` and the static `class`, nothing else.
+    let mut props: Vec<(&str, bool)> = usage
+        .props
+        .iter()
+        .map(|prop| (prop.name.as_str(), prop.is_bound))
+        .collect();
+    props.sort_unstable();
+    assert_eq!(props, [("class", false), ("title", true)]);
+
+    // The same value answers again: the production is retained.
+    let again = host.template_facts("/src/A.vue");
+    assert_eq!(again.coverage, FactCoverage::Complete);
+    assert_eq!(
+        again.value.map(|t| t.components.len()),
+        Some(template.components.len())
+    );
+
+    let external = host.template_facts("/src/External.vue");
+    assert!(
+        matches!(external.coverage, FactCoverage::Unavailable { .. }),
+        "{:?}",
+        external.coverage
+    );
+    assert!(external.value.is_none());
+
+    assert_eq!(
+        host.template_facts("/src/util.ts").coverage,
+        FactCoverage::Absent
+    );
+    assert!(matches!(
+        host.template_facts("/src/Missing.vue").coverage,
+        FactCoverage::Unavailable { .. }
+    ));
+}
+
+#[test]
+fn scopes_reconciled_in_turn_each_see_an_edit_an_addition_and_a_removal() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for id in ["/src/A.vue", "/src/B.vue"] {
+        upsert_file(&host, id, &vue_source("--brand"), FileLanguage::vue());
+    }
+    let definitions = IndexDemand::of([IndexSurface::StyleDefinitions]);
+    let imports = IndexDemand::of([IndexSurface::Imports]);
+    let variables = IndexDemand::of([IndexSurface::CssVariables]);
+    let scopes = [&definitions, &imports, &variables];
+    for demand in scopes {
+        let (_, status, _) = host.workspace_index_reconcile(demand, &never());
+        assert_eq!(status, ReconcileStatus::Current, "{demand:?}");
+    }
+    let definers = |host: &VerterHost, class: &str| {
+        let (page, _) = host.workspace_index_candidates(
+            &definitions,
+            selector_keys(class),
+            WIDE,
+            None,
+            &never(),
+        );
+        assert_eq!(page.status, EnumerationStatus::Complete, "{class}");
+        let mut locators: Vec<String> = page
+            .candidates
+            .iter()
+            .map(|candidate| candidate.contribution.basis.locator.to_string())
+            .collect();
+        locators.sort();
+        locators
+    };
+    let tracked = |host: &VerterHost| {
+        let (page, work) =
+            host.workspace_index_units(&imports, IndexSurface::Imports, WIDE, &never());
+        assert_eq!(page.status, EnumerationStatus::Complete);
+        (unit_locators(&page), work)
+    };
+
+    // An edit, seen first by the scope that consumes the journal, then by the
+    // scopes that follow: each re-reads the one file's slot of its surface.
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        &vue_source("--brand").replace(".a {", ".card {"),
+        FileLanguage::vue(),
+    );
+    assert_eq!(definers(&host, "card"), ["/src/A.vue"]);
+    assert_eq!(definers(&host, "a"), ["/src/B.vue"]);
+    let (_, status, later) = host.workspace_index_reconcile(&imports, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(
+        later,
+        IndexReconcileWork {
+            population_checks: 0,
+            projections: 1,
+            unchanged: 0,
+            retired: 0,
+            publish_attempts: 1,
+        },
+        "the journal was consumed by the first scope; the debt remains per surface"
+    );
+    let (page, _) =
+        host.workspace_index_candidates(&variables, css_keys("--brand"), WIDE, None, &never());
+    assert_eq!(page.status, EnumerationStatus::Complete);
+    assert_eq!(
+        page.candidates
+            .iter()
+            .filter(|candidate| candidate.contribution.basis.locator.as_ref() == "/src/A.vue")
+            .count(),
+        4,
+        "the edited file's variable rows come from its new revision"
+    );
+
+    // An addition, seen first by the units walk, then by the other scopes.
+    upsert_file(
+        &host,
+        "/src/C.ts",
+        "export const one = 1;\n",
+        FileLanguage::script_ts(),
+    );
+    let (units, _) = tracked(&host);
+    assert_eq!(units, ["/src/A.vue", "/src/B.vue", "/src/C.ts"]);
+    let (_, status, work) = host.workspace_index_reconcile(&definitions, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(work.projections, 1, "the new file's definitions slot");
+    let (_, status, work) = host.workspace_index_reconcile(&variables, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(work.projections, 1, "the new file's variables slot");
+
+    // A removal, seen first by the variables scope, then by the others.
+    host.remove("/src/B.vue");
+    let (_, status, work) = host.workspace_index_reconcile(&variables, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+    assert_eq!(work.retired, 3, "every surface's slot of the removed file");
+    assert_eq!(definers(&host, "a"), Vec::<String>::new());
+    let (units, work) = tracked(&host);
+    assert_eq!(units, ["/src/A.vue", "/src/C.ts"]);
+    assert_eq!(work.projections, 0);
+
+    // Every scope now answers exactly as a fresh host does.
+    let fresh = VerterHost::new_standalone(HostConfig::default());
+    upsert_file(
+        &fresh,
+        "/src/A.vue",
+        &vue_source("--brand").replace(".a {", ".card {"),
+        FileLanguage::vue(),
+    );
+    upsert_file(
+        &fresh,
+        "/src/C.ts",
+        "export const one = 1;\n",
+        FileLanguage::script_ts(),
+    );
+    for (demand, lookup) in [
+        (&definitions, selector_keys("card")),
+        (&variables, css_keys("--brand")),
+    ] {
+        let (live, _) =
+            host.workspace_index_candidates(demand, lookup.clone(), WIDE, None, &never());
+        let (clean, _) = fresh.workspace_index_candidates(demand, lookup, WIDE, None, &never());
+        assert_eq!(live.status, EnumerationStatus::Complete);
+        assert_eq!(fingerprint(&live), fingerprint(&clean));
+    }
+    assert_eq!(tracked(&host).0, tracked(&fresh).0);
+}
+
+#[test]
+fn a_removal_consumed_by_a_cancelled_walk_is_still_retired_by_the_next() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for id in ["/src/A.vue", "/src/B.vue"] {
+        upsert_file(&host, id, &vue_source("--brand"), FileLanguage::vue());
+    }
+    let demand = css_demand();
+    let (_, status, _) = host.workspace_index_reconcile(&demand, &never());
+    assert_eq!(status, ReconcileStatus::Current);
+
+    // The walk that reads the removal from the journal is cancelled before
+    // its delta commits: the removal is consumed, the retirement is owed.
+    host.remove("/src/A.vue");
+    let (_, status, _) = host.workspace_index_reconcile(&demand, &|| true);
+    assert_eq!(status, ReconcileStatus::Cancelled);
+    let store = host.project_type_store().workspace_index().snapshot();
+    assert_eq!(store.contribution_count(), 2, "nothing was committed");
+
+    let (page, work) =
+        host.workspace_index_candidates(&demand, css_keys("--brand"), WIDE, None, &never());
+    assert_eq!(page.status, EnumerationStatus::Complete);
+    assert!(page
+        .candidates
+        .iter()
+        .all(|candidate| candidate.contribution.basis.locator.as_ref() == "/src/B.vue"));
+    assert_eq!(
+        work.retired, 1,
+        "the owed retirement is paid by the next commit"
+    );
+    assert_eq!(
+        work.population_checks, 0,
+        "the journal was already consumed"
+    );
+    let store = host.project_type_store().workspace_index().snapshot();
+    assert_eq!(store.contribution_count(), 1);
+
+    // Another surface demanded later owes nothing for the removed file.
+    let (units, work) = host.workspace_index_units(
+        &IndexDemand::of([IndexSurface::Imports]),
+        IndexSurface::Imports,
+        WIDE,
+        &never(),
+    );
+    assert_eq!(units.status, EnumerationStatus::Complete);
+    assert_eq!(unit_locators(&units), ["/src/B.vue"]);
+    assert_eq!(work.retired, 0);
+}
+
+fn unit_locators(page: &UnitPage) -> Vec<String> {
+    let mut units: Vec<String> = page
+        .units
+        .iter()
+        .map(|slot| slot.basis.locator.to_string())
+        .collect();
+    units.sort();
+    units
+}
+
+fn units_partial_with(page: &UnitPage, expected: &PartialCause) -> bool {
+    matches!(&page.status, EnumerationStatus::Partial { cause, .. } if cause == expected)
+}
+
+#[test]
+fn a_surface_population_is_counted_certified_and_partial_past_its_budget() {
+    let host = build_host();
+    for id in ["/src/A.vue", "/src/B.vue"] {
+        upsert_file(&host, id, &vue_source("--brand"), FileLanguage::vue());
+    }
+    upsert_file(
+        &host,
+        "/src/util.ts",
+        "export const one = 1;\n",
+        FileLanguage::script_ts(),
+    );
+
+    // The component inventory reaches the carriers without a template walk.
+    let inventory = IndexDemand::of([IndexSurface::ComponentInventory]);
+    let (page, work) =
+        host.workspace_index_units(&inventory, IndexSurface::ComponentInventory, WIDE, &never());
+    assert_eq!(page.status, EnumerationStatus::Complete);
+    assert_eq!(unit_locators(&page), ["/src/A.vue", "/src/B.vue"]);
+    assert_eq!(page.work.posting_visits, 2, "one visit per slot");
+    assert_eq!(work.projections, 2);
+
+    // Imports reach every tracked file, plain scripts included.
+    let imports = IndexDemand::of([IndexSurface::Imports]);
+    let (all, _) = host.workspace_index_units(&imports, IndexSurface::Imports, WIDE, &never());
+    assert_eq!(all.status, EnumerationStatus::Complete);
+    assert_eq!(
+        unit_locators(&all),
+        ["/src/A.vue", "/src/B.vue", "/src/util.ts"]
+    );
+    let (_, warm) = host.workspace_index_units(&imports, IndexSurface::Imports, WIDE, &never());
+    assert_eq!(
+        warm,
+        IndexReconcileWork::default(),
+        "a repeated walk reads no file"
+    );
+
+    let tight = QueryBudgets {
+        postings: 1,
+        records: 1,
+    };
+    let (cut, _) = host.workspace_index_units(
+        &inventory,
+        IndexSurface::ComponentInventory,
+        tight,
+        &never(),
+    );
+    assert!(units_partial_with(&cut, &PartialCause::BudgetExhausted));
+    assert_eq!(cut.units.len(), 1);
+    assert_eq!(cut.work.posting_visits, 1);
+
+    // A surface outside the demand answers nothing and is never complete.
+    let (outside, _) =
+        host.workspace_index_units(&inventory, IndexSurface::Imports, WIDE, &never());
+    assert!(outside.units.is_empty());
+    assert!(units_partial_with(&outside, &PartialCause::OutsideDemand));
+
+    // A removed file leaves the population from one re-read.
+    host.remove("/src/B.vue");
+    let (after, work) = host.workspace_index_units(&imports, IndexSurface::Imports, WIDE, &never());
+    assert_eq!(after.status, EnumerationStatus::Complete);
+    assert_eq!(unit_locators(&after), ["/src/A.vue", "/src/util.ts"]);
+    assert_eq!(work.population_checks, 1);
+}
+
+#[test]
+fn a_surface_the_host_cannot_produce_has_no_population_and_reads_no_file() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_scope: Some(verter_semantic::analysis::AnalysisScope::ESSENTIAL),
+        ..HostConfig::default()
+    });
+    upsert_file(
+        &host,
+        "/src/A.vue",
+        &vue_source("--brand"),
+        FileLanguage::vue(),
+    );
+    let demand = IndexDemand::of([IndexSurface::StyleDefinitions]);
+    let (page, work) =
+        host.workspace_index_units(&demand, IndexSurface::StyleDefinitions, WIDE, &never());
+    assert!(page.units.is_empty());
+    assert!(units_partial_with(
+        &page,
+        &PartialCause::UnsupportedCoverage
+    ));
+    assert_eq!(work.projections, 0);
 }

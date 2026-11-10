@@ -2861,6 +2861,11 @@ pub(crate) struct ParseSnapshot {
     /// template element IR (Svelte `class="x"` entries + `class:x` directives).
     /// Empty for Vue (its template element tree carries class facts).
     pub(crate) markup_class_tokens: Vec<verter_session_query::analysis::template::MarkupClassToken>,
+    /// CSS custom properties set from carrier markup, for carriers WITHOUT a
+    /// template element IR (Svelte static `style` values, `style:--x`
+    /// directives and `--x` attributes). Empty for Vue (its template element
+    /// tree carries inline-style facts).
+    pub(crate) markup_style_vars: Vec<verter_session_query::analysis::template::MarkupStyleVar>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PendingPreprocessorRequest>,
     /// The source's script parse, or the walk-stack lease of its walks, was

@@ -557,3 +557,92 @@ fn walk_prefix(
     }
     Ok(())
 }
+
+/// One page of a declared partition's units: the slots its producer wrote,
+/// one per unit the partition applies to.
+#[derive(Debug, Clone)]
+pub struct UnitPage {
+    pub units: Vec<Arc<Contribution>>,
+    pub status: EnumerationStatus,
+    pub work: QueryWork,
+    /// The snapshot generation that answered.
+    pub generation: u64,
+}
+
+/// Enumerate the units of one partition of `scope` from one captured snapshot.
+///
+/// Each visited slot counts as a posting visit and each returned one as a
+/// record, against `budgets`. The page is `Complete` only when the walk
+/// exhausted the partition and a current coverage record of `scope` certifies
+/// it; an exhausted budget answers `Partial` with no continuation, and a
+/// partition outside `scope` answers nothing.
+#[must_use]
+pub fn query_units(
+    snapshot: &IndexSnapshot,
+    scope: &DeclaredScope,
+    partition: &PartitionId,
+    budgets: QueryBudgets,
+    is_cancelled: &dyn Fn() -> bool,
+) -> UnitPage {
+    let generation = snapshot.generation();
+    let mut work = QueryWork::default();
+    let partial = |cause, work: &QueryWork, keys_exhausted| EnumerationStatus::Partial {
+        cause,
+        covered: CoveredScope {
+            keys_exhausted,
+            postings_visited: work.posting_visits,
+            unavailable_units: Vec::new(),
+        },
+        continuation: None,
+    };
+    let cancelled = |work| UnitPage {
+        units: Vec::new(),
+        status: EnumerationStatus::Cancelled,
+        work,
+        generation,
+    };
+    if is_cancelled() {
+        return cancelled(work);
+    }
+    if !scope.partitions.contains(partition) {
+        return UnitPage {
+            units: Vec::new(),
+            status: partial(PartialCause::OutsideDemand, &work, 0),
+            work,
+            generation,
+        };
+    }
+    work.key_lookups += 1;
+    let mut units = Vec::new();
+    for contribution in snapshot.partition_slots(partition) {
+        if is_cancelled() {
+            return cancelled(work);
+        }
+        if work.posting_visits >= budgets.postings || work.records_returned >= budgets.records {
+            let status = partial(PartialCause::BudgetExhausted, &work, 0);
+            return UnitPage {
+                units,
+                status,
+                work,
+                generation,
+            };
+        }
+        work.posting_visits += 1;
+        work.records_returned += 1;
+        units.push(Arc::clone(contribution));
+    }
+    let certified = snapshot
+        .coverage(&scope.id)
+        .is_some_and(|record| record.partitions.contains(partition));
+    let status = if certified {
+        EnumerationStatus::Complete
+    } else {
+        partial(PartialCause::OpenDiscovery, &work, 1)
+    };
+    UnitPage {
+        units,
+        status,
+        work,
+        generation,
+    }
+}

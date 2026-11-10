@@ -1009,6 +1009,7 @@ fn build_svelte_snapshot_from_eval_source(
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
         markup_class_tokens: Vec::new(),
+        markup_style_vars: Vec::new(),
         preprocessor_requests: Vec::new(),
         refused: None,
     };
@@ -1106,6 +1107,7 @@ fn build_svelte_snapshot_from_eval_source(
     snapshot.style_analyses = style_analyses;
     snapshot.prepared_styles = prepared_styles;
     snapshot.markup_class_tokens = collect_svelte_markup_class_tokens(source, &parsed.template);
+    snapshot.markup_style_vars = collect_svelte_markup_style_vars(source, &parsed.template);
     snapshot.meta = FileMeta {
         has_script: false,
         has_template: false,
@@ -1219,6 +1221,99 @@ pub(crate) fn collect_svelte_markup_class_tokens(
                                         from_directive: true,
                                     });
                                 }
+                            }
+                            _ => {}
+                        }
+                    }
+                    walk(source, &el.children, out);
+                }
+                SvelteNode::Block(block) => {
+                    walk(source, &block.children, out);
+                    for clause in &block.clauses {
+                        walk(source, &clause.children, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(source, nodes, &mut out);
+    out
+}
+
+/// Collect the CSS custom properties Svelte markup sets inline: `--x: v`
+/// declarations of a static `style="…"` value (read by the shared inline-style
+/// declaration parser), the local name of a `style:--x` directive, and a
+/// `--x` attribute (a component style prop). An expression or mixed `style`
+/// value is skipped — fail closed, never a guessed name.
+pub(crate) fn collect_svelte_markup_style_vars(
+    source: &str,
+    nodes: &[verter_compiler::svelte::parser::SvelteNode],
+) -> Vec<verter_session_query::analysis::template::MarkupStyleVar> {
+    use verter_compiler::svelte::parser::{
+        SvelteAttributeKind, SvelteAttributeValue, SvelteDirectiveKind, SvelteNode,
+    };
+    use verter_session_query::analysis::template::MarkupStyleVar;
+
+    fn push_if_authored(source: &str, name: &str, start: u32, out: &mut Vec<MarkupStyleVar>) {
+        let end = start + name.len() as u32;
+        // Verify against the source before trusting the arithmetic.
+        if source.get(start as usize..end as usize) == Some(name) {
+            out.push(MarkupStyleVar {
+                name: name.to_string(),
+                span: verter_span::Span::new(start, end),
+            });
+        }
+    }
+
+    fn walk(source: &str, nodes: &[SvelteNode], out: &mut Vec<MarkupStyleVar>) {
+        for node in nodes {
+            match node {
+                SvelteNode::Element(el) => {
+                    for attr in &el.attributes {
+                        match &attr.kind {
+                            SvelteAttributeKind::Plain {
+                                name,
+                                name_span,
+                                value,
+                                ..
+                            } => {
+                                if name.starts_with("--") {
+                                    push_if_authored(source, name, name_span.start, out);
+                                    continue;
+                                }
+                                if name != "style" {
+                                    continue;
+                                }
+                                let Some(SvelteAttributeValue::Text(value_span)) = value else {
+                                    continue;
+                                };
+                                let Some(text) =
+                                    source.get(value_span.start as usize..value_span.end as usize)
+                                else {
+                                    continue;
+                                };
+                                for var in
+                                    verter_semantic::analysis::template::extract_static_style_vars(
+                                        text,
+                                    )
+                                {
+                                    push_if_authored(
+                                        source,
+                                        &var.name,
+                                        value_span.start + var.name_offset,
+                                        out,
+                                    );
+                                }
+                            }
+                            SvelteAttributeKind::Directive(dir)
+                                if dir.kind == SvelteDirectiveKind::Style
+                                    && dir.local.starts_with("--") =>
+                            {
+                                let start = attr.span.start + "style:".len() as u32;
+                                push_if_authored(source, &dir.local, start, out);
                             }
                             _ => {}
                         }
@@ -1841,6 +1936,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         style_analyses,
         prepared_styles,
         markup_class_tokens: Vec::new(),
+        markup_style_vars: Vec::new(),
         preprocessor_requests,
         refused,
     }
@@ -2699,6 +2795,7 @@ fn fatal_script_snapshot(
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
         markup_class_tokens: Vec::new(),
+        markup_style_vars: Vec::new(),
         preprocessor_requests: Vec::new(),
         refused,
     }
@@ -2780,6 +2877,7 @@ fn build_snapshot_under_lease(
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
         markup_class_tokens: Vec::new(),
+        markup_style_vars: Vec::new(),
         preprocessor_requests: Vec::new(),
         refused: None,
     }

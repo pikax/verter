@@ -16,9 +16,11 @@
 //! Readers hold whichever whole snapshot they captured.
 
 mod delta;
+mod facts;
 mod host_projection;
 mod identity;
 mod membership;
+mod population;
 mod query;
 mod records;
 mod snapshot;
@@ -27,9 +29,11 @@ mod snapshot;
 mod store_tests;
 
 pub use delta::{ObservationOracle, PartialCause};
+pub use facts::{
+    DemandItem, FactCoverage, FactReceipt, IndexDemand, IndexDemandPartition, IndexSurface,
+};
 pub use host_projection::{
-    CssVarCandidates, IndexDemand, IndexDemandPartition, IndexReconcileWork, PartitionShortfall,
-    ReconcileStatus,
+    CssVarCandidates, IndexReconcileWork, PartitionShortfall, ReconcileStatus,
 };
 pub use identity::{
     CatalogRevisionId, ContributionId, ContributionKey, DemandEpoch, ExtensionId,
@@ -42,8 +46,8 @@ pub use membership::{
     ProjectUnitsPage,
 };
 pub use query::{
-    query_candidates, Candidate, CandidatePage, CoveredScope, DeclaredScope, EnumerationStatus,
-    IndexContinuation, IndexQuery, Lookup, QueryBudgets, QueryWork,
+    query_candidates, query_units, Candidate, CandidatePage, CoveredScope, DeclaredScope,
+    EnumerationStatus, IndexContinuation, IndexQuery, Lookup, QueryBudgets, QueryWork, UnitPage,
 };
 pub use records::{
     ComponentRow, ConfigEnvKind, ConfigEnvRow, Endpoint, ExtensionField, ExtensionFieldValue,
