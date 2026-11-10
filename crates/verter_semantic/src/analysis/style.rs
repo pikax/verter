@@ -3,6 +3,9 @@
 //! Projects the shared lossless style syntax authority into selectors, specificity,
 //! classes, IDs, custom properties, and at-rules. Vue-specific
 //! features (v-bind, :deep, :global, :slotted) are passed through from verter_compiler.
+use std::path::Path;
+use std::sync::Arc;
+
 use verter_session_query::analysis::style::{
     AnalyzedSpecialPseudo, AnalyzedVBind, AtRuleKind, BlockContentAvailability, CssAnalysis,
     CssVarReference, SelectorPseudoClass, SpecialPseudoKind, StructuredSelector,
@@ -465,6 +468,30 @@ pub fn extract_var_references(
     content_offset: u32,
 ) -> Vec<CssVarReference> {
     super::style_syntax::extract_var_references_authority(value_text, offset_in_css, content_offset)
+}
+
+// =============================================================================
+// Cross-file CSS Variable Flow
+// =============================================================================
+
+/// Cross-component CSS variable flow information.
+///
+/// Where a CSS variable is defined, referenced, and manipulated across all SFC
+/// blocks (style, template, script) in a workspace. The host fills it from the
+/// workspace index's stylesheet-symbol candidates; each list keeps the index's
+/// canonical order and the producer's style/template/script distinction.
+#[derive(Debug, Clone, Default)]
+pub struct CssVarFlow {
+    /// The CSS variable name (e.g., "--theme-color").
+    pub name: String,
+    /// Files that define this variable in `<style>` blocks (`--name: value`).
+    pub style_definitions: Vec<Arc<Path>>,
+    /// Files that reference this variable via `var(--name)` in `<style>` blocks.
+    pub style_var_usages: Vec<Arc<Path>>,
+    /// Files that set this variable via `:style` bindings in `<template>`.
+    pub template_definitions: Vec<Arc<Path>>,
+    /// Files that manipulate this variable via DOM APIs in `<script>`.
+    pub script_manipulations: Vec<Arc<Path>>,
 }
 
 // =============================================================================

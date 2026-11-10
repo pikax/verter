@@ -1,8 +1,10 @@
 //! Static analysis utilities for Vue Single File Components.
 //!
-//! Provides import/export extraction, Vue API classification, script and style
-//! analysis, and a project-wide component graph. Used by `verter_session` for
-//! smart invalidation and LSP features.
+//! Provides import/export extraction, Vue API classification, and script and
+//! style analysis. Used by `verter_session` for smart invalidation and LSP
+//! features. Cross-file candidate storage is the workspace index owned by
+//! `verter_session`; this crate holds per-file facts and the DTOs the host
+//! fills from that index (such as [`CssVarFlow`]).
 //!
 //! Depends on `verter_compiler` (indirectly via OXC) for AST parsing.
 //!
@@ -14,8 +16,6 @@
 //!   change-detection in dependency files.
 //! - [`classify_vue_api`] — Maps a Vue import name to a
 //!   [`VueApiClassification`] variant.
-//! - [`ProjectIndex`] — Aggregates file-level usage into cross-file indexes
-//!   (provide/inject validation, component graph, CSS class tracking).
 //! - [`build_css_style_analysis`] / [`build_preprocessor_style_analysis`] —
 //!   Analyse five style dialects for selectors, specificity, and Vue-specific
 //!   features (`:deep`, `:global`, `v-bind()`).
@@ -33,8 +33,6 @@ mod class_index;
 #[path = "decl_dependencies_tests.rs"]
 mod decl_dependencies_tests;
 mod exports;
-#[doc(hidden)]
-pub mod file_usage;
 pub mod flow;
 pub mod framework_facts;
 pub mod function_program;
@@ -63,7 +61,6 @@ pub use macros::{
 };
 pub mod macro_usage;
 mod options;
-pub mod project_index;
 pub mod root_binding_index;
 pub mod routes;
 pub mod runtime_survival_erasure;
@@ -116,19 +113,9 @@ pub use build::{
 pub use classify::{classify_store_api, is_store_composable_call};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 pub use exports::extract_export_signatures;
-pub use file_usage::{
-    ComponentUsageOwned, EmitDeclarationOwned, FileUsageFlags, FileUsageInfoOwned, ImportInfoOwned,
-    InjectUsageOwned, ListenedEventOwned, MacroInfoOwned, ProvideUsageOwned, StoreDefinitionOwned,
-    StoreUsageOwned, StyleUsageInfoOwned, TemplateIdOwned,
-};
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;
 
-pub use project_index::{
-    ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
-    InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
-    StoreFlow, StoreUsageSummary,
-};
 pub use routes::{
     analyze_route_health, build_route_analysis, detect_routing_framework,
     detect_routing_framework_from_json, discover_layouts, discover_router_configs,
@@ -145,6 +132,7 @@ pub use style::{
     build_css_style_analysis, build_external_src_style_analysis, build_incomplete_style_analysis,
     build_preprocessor_style_analysis, build_scanned_style_analysis,
     build_scanned_style_analysis_from_ir, compute_structured_specificity, parse_selector,
-    parse_style_ir_for_analysis, SpecialPseudoInput, StyleLangDialect, VBindInput, VueStyleInput,
+    parse_style_ir_for_analysis, CssVarFlow, SpecialPseudoInput, StyleLangDialect, VBindInput,
+    VueStyleInput,
 };
 pub use template::{extract_dynamic_class_names, extract_dynamic_class_names_rich};

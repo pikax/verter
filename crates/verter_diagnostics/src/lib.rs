@@ -40,8 +40,8 @@ pub use config::{
 };
 pub use context::LintContext;
 pub use cross_file::{
-    build_cross_file_snapshot, find_unknown_models, find_unknown_props, kebab_to_camel,
-    ChildComponentInfo, CrossFileSnapshot, UnknownModelEntry, UnknownPropEntry,
+    find_unknown_models, find_unknown_props, kebab_to_camel, ChildComponentInfo, CrossFileSnapshot,
+    UnknownModelEntry, UnknownPropEntry,
 };
 pub use diagnostic::{
     Certainty, DiagnosticSpanKind, DiagnosticTag, EvidenceSnippet, LintDiagnostic, RelatedFile,

@@ -2230,3 +2230,194 @@ fn registrations_are_produced_on_demand_under_a_scope_that_computes_no_template(
         "a cold carrier's template facts are produced for the demand"
     );
 }
+
+/// Locators of the candidates, as a set: canonical order is by unit identity,
+/// not by path.
+fn locator_set(page: &CandidatePage) -> BTreeSet<String> {
+    page.candidates
+        .iter()
+        .map(|candidate| candidate.contribution.basis.locator.to_string())
+        .collect()
+}
+
+fn paths<const N: usize>(items: [&str; N]) -> BTreeSet<String> {
+    items.into_iter().map(String::from).collect()
+}
+
+/// Reverse and forward component adjacency are the one Components partition:
+/// a tag finds every file that uses it, one record per use with its own
+/// authored origin, and the postings follow an edit and a deletion exactly as a
+/// fresh host would answer.
+#[test]
+fn component_uses_answer_per_tag_and_per_file_and_follow_edit_and_delete() {
+    let demand = IndexDemand::of([IndexDemandPartition::Components]);
+    let uses = |host: &VerterHost, tag: &str| {
+        let keys = Lookup::Keys(vec![PostingKey::exact(PartitionFamily::Components, tag)]);
+        let (page, _) = host.workspace_index_candidates(&demand, keys, WIDE, None, &never());
+        assert_eq!(page.status, EnumerationStatus::Complete, "{tag}");
+        page
+    };
+    let template = |tags: &[&str]| {
+        let body: String = tags.iter().map(|tag| format!("<{tag} />")).collect();
+        format!("<template>{body}</template>")
+    };
+    let mut files: BTreeMap<&str, String> = BTreeMap::new();
+    files.insert("/src/App.vue", template(&["Header", "Footer"]));
+    files.insert("/src/Page.vue", template(&["Header"]));
+    files.insert("/src/Other.vue", template(&["Footer"]));
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (id, source) in &files {
+        upsert_file(&host, id, source, FileLanguage::vue());
+    }
+
+    // Reverse adjacency: the files using a tag, and how many there are.
+    assert_eq!(
+        locator_set(&uses(&host, "Header")),
+        paths(["/src/App.vue", "/src/Page.vue"])
+    );
+    assert_eq!(
+        locator_set(&uses(&host, "Footer")),
+        paths(["/src/App.vue", "/src/Other.vue"])
+    );
+    assert!(
+        uses(&host, "Sidebar").candidates.is_empty(),
+        "complete-empty, never semantic absence"
+    );
+
+    // Forward adjacency: one file's uses are its records under each tag it
+    // uses, each with its own authored origin.
+    let app_uses: Vec<(String, Vec<RecordOrigin>)> = ["Header", "Footer"]
+        .into_iter()
+        .flat_map(|tag| uses(&host, tag).candidates)
+        .filter(|candidate| candidate.contribution.basis.locator.as_ref() == "/src/App.vue")
+        .map(|candidate| {
+            let record = candidate.record().expect("record");
+            let IndexRow::Component(ComponentRow::Usage { tag, .. }) = &record.row else {
+                panic!("a usage row, got {:?}", record.row);
+            };
+            (tag.to_string(), record.origins.clone())
+        })
+        .collect();
+    assert_eq!(app_uses.len(), 2, "two uses in App.vue");
+    assert_eq!(app_uses[0].0, "Header");
+    assert_eq!(app_uses[1].0, "Footer");
+    assert_ne!(
+        app_uses[0].1, app_uses[1].1,
+        "each use keeps its own origin"
+    );
+    assert!(app_uses
+        .iter()
+        .all(|(_, origins)| matches!(origins.as_slice(), [RecordOrigin::Authored(_)])));
+
+    // An edit moves the postings: the old tag no longer finds the file, the
+    // new one does, and every answer equals a fresh host's.
+    let edited = template(&["Sidebar"]);
+    files.insert("/src/App.vue", edited.clone());
+    upsert_file(&host, "/src/App.vue", &edited, FileLanguage::vue());
+    assert_eq!(
+        locator_set(&uses(&host, "Header")),
+        paths(["/src/Page.vue"])
+    );
+    assert_eq!(
+        locator_set(&uses(&host, "Sidebar")),
+        paths(["/src/App.vue"])
+    );
+    let fresh = VerterHost::new_standalone(HostConfig::default());
+    for (id, source) in files.iter().rev() {
+        upsert_file(&fresh, id, source, FileLanguage::vue());
+    }
+    for tag in ["Header", "Footer", "Sidebar"] {
+        assert_eq!(
+            fingerprint(&uses(&host, tag)),
+            fingerprint(&uses(&fresh, tag)),
+            "{tag}"
+        );
+    }
+
+    // Deleting a file retires its uses.
+    host.remove("/src/Other.vue");
+    assert_eq!(locator_set(&uses(&host, "Footer")), BTreeSet::new());
+}
+
+/// Class definitions are stylesheet-symbol rows of the StyleSelectors
+/// partition: a class finds every defining file with the producer's role and
+/// scope, and the postings follow an edit and a deletion exactly as a fresh host
+/// would answer.
+#[test]
+fn class_definitions_answer_per_file_and_follow_edit_and_delete() {
+    let demand = IndexDemand::of([IndexDemandPartition::StyleSelectors]);
+    let defines = |host: &VerterHost, class: &str| {
+        let (page, _) =
+            host.workspace_index_candidates(&demand, selector_keys(class), WIDE, None, &never());
+        assert_eq!(page.status, EnumerationStatus::Complete, "{class}");
+        page
+    };
+    let styled = |classes: &[&str]| {
+        let rules: String = classes
+            .iter()
+            .map(|class| format!(".{class} {{ color: red; }}\n"))
+            .collect();
+        format!("<template><div /></template>\n<style>\n{rules}</style>")
+    };
+    let mut files: BTreeMap<&str, String> = BTreeMap::new();
+    files.insert("/src/A.vue", styled(&["btn", "active"]));
+    files.insert("/src/B.vue", styled(&["btn"]));
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (id, source) in &files {
+        upsert_file(&host, id, source, FileLanguage::vue());
+    }
+
+    assert_eq!(
+        locator_set(&defines(&host, "btn")),
+        paths(["/src/A.vue", "/src/B.vue"])
+    );
+    assert_eq!(
+        locator_set(&defines(&host, "active")),
+        paths(["/src/A.vue"])
+    );
+    assert!(
+        defines(&host, "missing").candidates.is_empty(),
+        "complete-empty, never semantic absence"
+    );
+    assert!(defines(&host, "btn").candidates.iter().all(|candidate| {
+        let record = candidate.record().expect("record");
+        matches!(
+            &record.row,
+            IndexRow::Stylesheet(StylesheetRow {
+                kind: StyleSymbolKind::Class,
+                role: StyleRole::Definition,
+                scope: StyleScope::Global,
+                ..
+            })
+        ) && matches!(record.origins.as_slice(), [RecordOrigin::Authored(_)])
+    }));
+
+    // An edit moves the postings and the answers equal a fresh host's.
+    let edited = styled(&["new-class"]);
+    files.insert("/src/A.vue", edited.clone());
+    upsert_file(&host, "/src/A.vue", &edited, FileLanguage::vue());
+    assert_eq!(locator_set(&defines(&host, "btn")), paths(["/src/B.vue"]));
+    assert!(defines(&host, "active").candidates.is_empty());
+    assert_eq!(
+        locator_set(&defines(&host, "new-class")),
+        paths(["/src/A.vue"])
+    );
+    let fresh = VerterHost::new_standalone(HostConfig::default());
+    for (id, source) in files.iter().rev() {
+        upsert_file(&fresh, id, source, FileLanguage::vue());
+    }
+    for class in ["btn", "active", "new-class"] {
+        assert_eq!(
+            fingerprint(&defines(&host, class)),
+            fingerprint(&defines(&fresh, class)),
+            "{class}"
+        );
+    }
+
+    // Deleting a file retires its definitions.
+    host.remove("/src/B.vue");
+    assert!(
+        defines(&host, "btn").candidates.is_empty(),
+        "a removed file's definitions are retired"
+    );
+}
