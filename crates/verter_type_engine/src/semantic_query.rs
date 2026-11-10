@@ -6629,6 +6629,11 @@ pub struct SemanticGraphStats {
     /// signature-subject normalization, counted where the stage runs,
     /// outside every charge and its rollback.
     pub admission_stages_walked: u64,
+    /// Steps deferred evaluations computed, wherever they ran: one per
+    /// evaluator step, counted where the step runs, outside every charge
+    /// and its rollback. A step computed again — an evaluation restarted
+    /// from its root, or re-entered with its answers cached — counts again.
+    pub deferred_steps_evaluated: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,
@@ -13015,7 +13020,7 @@ mod tests {
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
     ///   continuation_stages_resumed, projection_hops_walked,
-    ///   admission_stages_walked.
+    ///   admission_stages_walked, deferred_steps_evaluated.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13056,6 +13061,7 @@ mod tests {
             "relation_roots_opened",
             "relation_reductions",
             "admission_stages_walked",
+            "deferred_steps_evaluated",
         ];
         for field in expected_to_fire {
             assert!(

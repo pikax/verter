@@ -5988,6 +5988,16 @@ impl CarrierNormalizationPrelude {
         }
     }
 
+    /// Observe the prelude's facts in the tracers active now: the reader of
+    /// an admitted key whose admission ran outside its own tracer — a
+    /// deferred evaluation's read admitted by the frame it stands in —
+    /// depends on the admission as the synchronous entry's reader does.
+    pub(super) fn replay_facts(&self) {
+        if let Some(facts) = &self.facts {
+            crate::fact_tracing::tracing::observe_fan_out_canonical(facts);
+        }
+    }
+
     /// Whether the prelude is the no-op one: the subject was not a carrier.
     pub(super) fn is_none(&self) -> bool {
         self.facts.is_none()

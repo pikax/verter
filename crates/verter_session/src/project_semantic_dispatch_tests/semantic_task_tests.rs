@@ -7169,17 +7169,29 @@ mod semantic_poll_contract {
             .admission_stages_walked
     }
 
+    /// The steps deferred evaluations computed on `host`, wherever they
+    /// ran: one per evaluator step, counted where the step runs, outside
+    /// every charge and its rollback.
+    fn deferred_steps(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .deferred_steps_evaluated
+    }
+
     /// The physical work a held read is measured by.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct Work {
         hops: u64,
         admission: u64,
+        deferred: u64,
     }
 
     fn work(host: &crate::VerterHost) -> Work {
         Work {
             hops: projection_hops(host),
             admission: admission_stages(host),
+            deferred: deferred_steps(host),
         }
     }
 
@@ -7188,12 +7200,14 @@ mod semantic_poll_contract {
         Work {
             hops: now.hops - before.hops,
             admission: now.admission - before.admission,
+            deferred: now.deferred - before.deferred,
         }
     }
 
     const NO_WORK: Work = Work {
         hops: 0,
         admission: 0,
+        deferred: 0,
     };
 
     /// What a polled root did while one of its dependencies was held.
@@ -7258,6 +7272,7 @@ mod semantic_poll_contract {
                 let repoll = Work {
                     hops: total.hops - at_hold.hops,
                     admission: total.admission - at_hold.admission,
+                    deferred: total.deferred - at_hold.deferred,
                 };
                 (first, at_hold, repolled_pending, pending_elsewhere, repoll)
             });
@@ -7777,7 +7792,12 @@ mod semantic_poll_contract {
         let waker = Waker::from(Arc::clone(&counter));
         let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
         let mut entry = dispatch.poll_query(path);
-        let first = entry.poll(&waker).is_pending();
+        // Each poll runs under a probe that forbids every wait, so an
+        // in-place wait fails at once instead of waiting the held shards out.
+        let first = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(&waker).is_pending()
+        };
         let before = wakes();
         std::thread::scope(|scope| {
             scope
@@ -7786,9 +7806,12 @@ mod semantic_poll_contract {
                 .expect("the request is cancelled on another thread");
         });
         let woken = wakes() > before;
-        let next = match entry.poll(&waker) {
-            Poll::Ready(read) => Some(read),
-            Poll::Pending => None,
+        let next = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            match entry.poll(&waker) {
+                Poll::Ready(read) => Some(read),
+                Poll::Pending => None,
+            }
         };
         drop(entry);
         held.release();
@@ -8208,6 +8231,214 @@ mod semantic_poll_contract {
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         drop(other);
+    }
+
+    /// `alias<args>` over the aliases' file.
+    fn projection_application(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        alias: &str,
+        arg: verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        use verter_type_engine::semantic_query::{DeclIdentity, PayloadArray};
+        dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: PROJECTION_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: host
+                        .shallow_file_state(PROJECTION_FILE)
+                        .expect("the aliases are indexed")
+                        .whole_hash,
+                    decl_name: alias.into(),
+                },
+                args: PayloadArray::from(vec![arg]),
+            })
+    }
+
+    /// The path `["value"]` over the deferred access
+    /// `Pair<Pair<"deep">>["inner"]["value"]["inner"]`, read in `Navigate`,
+    /// and the instantiations its nested operand's evaluation reads, in the
+    /// order it reads them. The walk stands at the outer access, whose
+    /// object `Pair<Pair<"deep">>["inner"]["value"]` is itself a deferred
+    /// access: the shared deferred evaluator reduces it, reading
+    /// `Pair<Pair<"deep">>["inner"]` (which instantiates
+    /// `Pair<Pair<"deep">>`) and then `Box<Pair<"deep">>["value"]` (which
+    /// instantiates `Box<Pair<"deep">>`), before the hop reads the outer
+    /// access over its answer `Pair<"deep">`.
+    fn deferred_operand_path(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, [SemanticQueryKey; 2]) {
+        use verter_type_engine::semantic_query::{
+            IndexKey, InstantiateKey, LiteralValue, PathSegment, PropertyKey,
+        };
+        let graph = dispatch.graph_arc();
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let deep = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "deep".into(),
+        )));
+        let pair = projection_application(host, dispatch, "Pair", deep);
+        let pair_of_pair = projection_application(host, dispatch, "Pair", pair);
+        let access = |object, index: &str| {
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object,
+                index: IndexKey::from(index),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
+            })
+        };
+        let inner = access(pair_of_pair, "inner");
+        let value = access(inner, "value");
+        let base = access(value, "inner");
+        let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+        let path = SemanticQueryKey::ProjectPath {
+            base,
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Member(PropertyKey::identifier("value"))].into_boxed_slice(),
+            ),
+            context,
+        };
+        let hop = |alias: &str| {
+            SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(PROJECTION_FILE, owner, alias),
+                Arc::from([pair]),
+                dispatch.instantiate_context_for(
+                    PROJECTION_FILE,
+                    context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                ),
+            ))
+        };
+        (path, [hop("Pair"), hop("Box")])
+    }
+
+    /// The steps the nested operand's evaluation computes: the outer
+    /// access pushing its object (1); the object access pushing
+    /// `Pair<Pair<"deep">>`, which evaluates to itself in place (2); the
+    /// object access reading `Pair<Pair<"deep">>["inner"]` (3) and finishing
+    /// on its answer `Box<Pair<"deep">>` (4); the outer access reading
+    /// `Box<Pair<"deep">>["value"]` (5) and finishing on its answer
+    /// `Pair<"deep">` (6).
+    const DEFERRED_OPERAND_STEPS: u64 = 6;
+
+    /// The step at which the evaluation names its second read.
+    const DEFERRED_OPERAND_SECOND_READ_STEP: u64 = 5;
+
+    /// A path whose hop stands at a deferred access whose object is itself
+    /// deferred evaluates that object on the shared deferred evaluator, as
+    /// an owned sub-continuation of the hop. Polled while another task
+    /// instantiates `Pair<Pair<"deep">>` — the evaluation's first read,
+    /// which the evaluator reads through the `IndexedAccess` sugar — the
+    /// path returns `Pending` with the evaluation retained, instead of
+    /// waiting the producer out where the evaluator stands. Repolled while
+    /// held, under a probe that forbids every wait, and on another thread,
+    /// it computes nothing; released, it resumes the evaluation at its held
+    /// read and delivers exactly what the synchronous entry reads, receipt
+    /// tree included, with each step and hop computed once (absolute).
+    #[test]
+    fn a_hop_whose_deferred_operand_reads_a_held_instantiation_yields_and_resumes_to_the_synchronous_read(
+    ) {
+        let (synchronous, synchronous_work) =
+            synchronous_root(|host, dispatch| deferred_operand_path(host, dispatch).0);
+        assert_eq!(synchronous.0, "\"deep\"", "{synchronous:?}");
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(synchronous_work.deferred, DEFERRED_OPERAND_STEPS);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (path, hops) = deferred_operand_path(host, dispatch);
+            (path, hops[0].clone())
+        });
+        assert!(
+            run.yielded,
+            "the path yields while its operand's first read is held"
+        );
+        assert_eq!(
+            run.at_hold.deferred, 3,
+            "the evaluation stands at its first read: both accesses pushed, the inner one read"
+        );
+        assert!(run.repolled_pending, "a repoll while held enters no wait");
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken, "the producer going away wakes the path");
+        assert_eq!(
+            run.total, synchronous_work,
+            "no step or hop is computed again: the evaluation resumes at its held read"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// Sequential reads inside one helper: the nested operand's evaluation
+    /// already read `Pair<Pair<"deep">>["inner"]` and finished its inner
+    /// frame, and now reads `Box<Pair<"deep">>["value"]` while another task
+    /// instantiates `Box<Pair<"deep">>`. The path returns `Pending` holding
+    /// the completed frame's answer; resumed elsewhere, the evaluation
+    /// continues at the second read — its completed steps and first read
+    /// are not computed again, counted as physical steps where they run,
+    /// outside every charge and its rollback — and the path delivers
+    /// exactly what the synchronous entry reads.
+    #[test]
+    fn a_deferred_operand_waiting_on_its_second_read_resumes_without_evaluating_its_completed_steps_again(
+    ) {
+        let (synchronous, synchronous_work) =
+            synchronous_root(|host, dispatch| deferred_operand_path(host, dispatch).0);
+        assert_eq!(synchronous_work.deferred, DEFERRED_OPERAND_STEPS);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (path, hops) = deferred_operand_path(host, dispatch);
+            (path, hops[1].clone())
+        });
+        assert!(
+            run.yielded,
+            "the path yields while its operand's second read is held"
+        );
+        assert_eq!(
+            run.at_hold.deferred, DEFERRED_OPERAND_SECOND_READ_STEP,
+            "the inner frame completed before the wait: the outer access stands at its read"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken);
+        assert_eq!(
+            run.total, synchronous_work,
+            "the completed steps are not evaluated again"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A path released while its nested operand's evaluation waits on a
+    /// held read withdraws its wait and leaves nothing open — no cost
+    /// recording of the evaluation's frames, no wait edge — and the
+    /// dispatcher reads the path afterwards as the synchronous entry does.
+    #[test]
+    fn a_path_released_while_its_deferred_operand_is_held_leaves_nothing_open() {
+        let (synchronous, _) =
+            synchronous_root(|host, dispatch| deferred_operand_path(host, dispatch).0);
+        for held in 0..2 {
+            let host = projection_host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let (path, hops) = deferred_operand_path(&host, &dispatch);
+            let (other, lease) = hold_producer(&host, graph, hops[held].clone());
+            let mut entry = dispatch.poll_query(path.clone());
+            let pending = while_held(lease, || {
+                let pending = entry.poll(Waker::noop()).is_pending();
+                drop(entry);
+                pending
+            });
+            assert!(pending, "the path yields while read {held} is held");
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            drop(other);
+            let read = dispatch.execute_via_cold_build_helper(path);
+            assert_eq!(read_summary(&dispatch, &read).0, synchronous.0);
+        }
     }
 }
 

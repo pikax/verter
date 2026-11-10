@@ -1929,6 +1929,12 @@ impl SemanticGraphStore {
             .admission_stages_walked
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped by a deferred evaluation once per step it computes.
+    pub fn record_deferred_step(&self) {
+        self.stats
+            .deferred_steps_evaluated
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

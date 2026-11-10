@@ -14802,11 +14802,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn resume_project_path(
         &self,
         build: super::walk::ProjectPathBuild,
-        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
     ) -> super::family_continuation::FamilyStep {
         let super::walk::ProjectPathBuild { walk, plan } = build;
         let mut walker = PathWalker::from_state(self, walk);
-        let progress = walker.resume_walk(read);
+        let progress = walker.resume_walk(deliver);
         self.advance_project_path(plan, walker, progress)
     }
 

@@ -272,9 +272,17 @@ impl FamilyBuild {
     /// Whether the queries this build reads are counted as dispatch intents
     /// where a driver reads them in place: an apparent type's reads are
     /// consumer entries, each counted once whichever driver makes it, as a
-    /// frame's need is counted at its entry.
-    fn counts_need_intent(&self) -> bool {
-        matches!(self, Self::ApparentType(_))
+    /// frame's need is counted at its entry. A path walk's carrier
+    /// resolution counts its reads but its `typeof` value's, as the
+    /// carrier's consumers always counted them.
+    fn counts_need_intent(&self, key: &SemanticQueryKey) -> bool {
+        match self {
+            Self::ApparentType(_) => true,
+            Self::ProjectPath(build) => {
+                build.walk.awaits_carrier_read() && !matches!(key, SemanticQueryKey::TypeOf { .. })
+            }
+            _ => false,
+        }
     }
 
     /// Whether the read this build waits on was named from kernel handles a
@@ -318,15 +326,17 @@ impl FamilyBuild {
     pub(super) fn trace_need(&self, _key: &SemanticQueryKey) {}
 
     /// Release what a build stopped between its stages retained on its
-    /// computation's recording: a path walk's open prefix recording puts
-    /// back what the build charged before its first prefix, so the frame
-    /// abandoning that recording leaves those charges its consumer's.
-    pub(super) fn release_retained_accounting(
+    /// computation's recording: a path walk's hop standing in a deferred
+    /// evaluation abandons the recordings that evaluation opened above the
+    /// build's own, and its open prefix recording puts back what the build
+    /// charged before its first prefix, so the frame abandoning that
+    /// recording leaves those charges its consumer's.
+    pub(super) fn release_retained_accounting<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
-        ledger: &super::connected_demand::ConnectedDemandLedger<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
         if let Self::ProjectPath(build) = self {
-            build.walk.release_prefixes(ledger);
+            build.walk.release(dispatch);
         }
     }
 
@@ -499,22 +509,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The next stage of `build`, given the read of the query it named.
+    /// The next stage of `build`, given the read of the query it named:
+    /// `deliver` makes or delivers that read. A build consumes it as its
+    /// stage begins, except a path walk whose hop stands inside a deferred
+    /// evaluation, which has it delivered inside the evaluation's stage.
     #[inline(never)]
     pub(super) fn resume_family_build(
         &self,
         build: FamilyBuild,
-        read: CacheRead<QueryResult<SemanticQueryValue>>,
+        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticQueryValue>>,
     ) -> FamilyStep {
         // A path walk counts its own work, hop by hop, where each hop is
         // computed (`projection_hops_walked`).
-        if !matches!(build, FamilyBuild::ProjectPath(_)) {
-            self.graph().record_continuation_resumed();
-        }
-        match build {
+        let build = match build {
             FamilyBuild::ProjectPath(build) => {
-                self.resume_project_path(*build, super::narrow_value_cache_read(read))
+                let mut deliver = || super::narrow_value_cache_read(deliver());
+                return self.resume_project_path(*build, &mut deliver);
             }
+            build => build,
+        };
+        self.graph().record_continuation_resumed();
+        let read = deliver();
+        match build {
+            FamilyBuild::ProjectPath(_) => unreachable!("a path walk resumed above"),
             FamilyBuild::TemplateUnion(mut output, fallback) => {
                 let read = super::narrow_value_cache_read(read);
                 output.result = QueryResult::Value(match read.value {
@@ -659,22 +676,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Read `key`, the query `build` names next, in place. A read that
-    /// drives on the continuation runtime counts its intent at its root's
-    /// entry; any other read a counting build makes is counted here.
-    pub(super) fn read_family_need_in_place(
+    /// Resume `build` with `key`, the query it names next, read in place
+    /// where the build consumes it. A read that drives on the continuation
+    /// runtime counts its intent at its root's entry; any other read a
+    /// counting build makes is counted here.
+    pub(super) fn resume_family_need_in_place(
         &self,
         key: SemanticQueryKey,
-        build: &FamilyBuild,
-    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
-        if build.awaits_retired_read(&self.continuation_stage()) {
-            return retired_read();
+        build: Box<FamilyBuild>,
+    ) -> FamilyStep {
+        let retired = build.awaits_retired_read(&self.continuation_stage());
+        let counts =
+            !retired && build.counts_need_intent(&key) && !self.drives_on_the_runtime(&key);
+        if !retired {
+            build.trace_need(&key);
         }
-        if build.counts_need_intent() && !self.drives_on_the_runtime(&key) {
-            self.record_dispatch_intent_counters(&key);
-        }
-        build.trace_need(&key);
-        self.execute_via_cold_build_helper(key)
+        let mut key = Some(key);
+        let mut read = || {
+            let key = key.take().expect("a read is made once");
+            if retired {
+                return retired_read();
+            }
+            if counts {
+                self.record_dispatch_intent_counters(&key);
+            }
+            self.execute_via_cold_build_helper(key)
+        };
+        self.resume_family_build(*build, &mut read)
     }
 
     /// Build `key`'s family through the synchronous producer's driver,
@@ -753,8 +781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match step {
                 done @ (FamilyStep::Done(_) | FamilyStep::Value(_)) => return done,
                 FamilyStep::Need(key, build) => {
-                    let read = self.read_family_need_in_place(key, &build);
-                    step = self.resume_family_build(*build, read);
+                    step = self.resume_family_need_in_place(key, build);
                 }
                 FamilyStep::Load(canonical, build) => {
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
