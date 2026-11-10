@@ -1343,6 +1343,10 @@ fn sample_framework_surface_request() -> g::FrameworkSurfaceRequest {
         include_diagnostics: false,
         include_projection: vec![],
         schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        requested_kinds: vec![
+            g::FrameworkSurfaceKind::Props as i32,
+            g::FrameworkSurfaceKind::Emits as i32,
+        ],
     }
 }
 

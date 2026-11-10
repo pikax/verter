@@ -119,6 +119,10 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // Schema 8 remains accepted: v9 adds no field, it states the UTF-8
     // byte unit of every span and validates request span refs.
     8,
+    // Schema 9 remains accepted under its own framework-surface contract:
+    // no requested-kind demand, one response entry per known kind. The v10
+    // `requested_kinds` demand is required only from v10.
+    9,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 
@@ -131,6 +135,13 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
 /// `UnknownSchemaVersion`: v2 stays globally supported for the
 /// legacy operations).
 pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 3;
+
+/// First schema version whose framework-surface request carries the facet
+/// demand (`FrameworkSurfaceRequest.requested_kinds`). From this version
+/// the list is required (non-empty, no duplicate, no UNSPECIFIED value)
+/// and the response answers exactly the requested kinds; below it the
+/// list must be empty and the response carries every known kind.
+pub const FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION: u32 = 10;
 
 /// Maximum recursion depth allowed when walking a
 /// [`StructuredTypeExpression`] tree during shape validation. Trees
@@ -473,6 +484,50 @@ pub fn validate_framework_surface_request(
         WireOperation::FrameworkSurfaces,
         request.schema_version,
     )?;
+    validate_requested_surface_kinds(request)?;
+    Ok(())
+}
+
+/// The facet-demand rule of [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`]:
+/// a v10+ request names at least one kind, each a known
+/// [`FrameworkSurfaceKind`], none twice; an older request names none (its
+/// response contract is every known kind). Any other shape is a typed
+/// `MalformedPayload` before execution — never a silently widened or
+/// narrowed demand.
+fn validate_requested_surface_kinds(
+    request: &FrameworkSurfaceRequest,
+) -> Result<(), TypeInfoRequestError> {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+
+    if request.schema_version < FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION {
+        if !request.requested_kinds.is_empty() {
+            return Err(malformed_payload_error_with_string_detail(format!(
+                "requested_kinds requires schema version >= \
+                 {FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION}, got {}",
+                request.schema_version
+            )));
+        }
+        return Ok(());
+    }
+    if request.requested_kinds.is_empty() {
+        return Err(malformed_payload_error_with_detail(
+            "requested_kinds must name at least one framework surface kind",
+        )());
+    }
+    let mut seen: Vec<FrameworkSurfaceKind> = Vec::with_capacity(request.requested_kinds.len());
+    for &raw in &request.requested_kinds {
+        let kind = FrameworkSurfaceKind::try_from(raw).map_err(|_| {
+            malformed_payload_error_with_string_detail(format!(
+                "requested_kinds carries an unknown framework surface kind {raw}"
+            ))
+        })?;
+        if seen.contains(&kind) {
+            return Err(malformed_payload_error_with_string_detail(format!(
+                "requested_kinds names {kind:?} more than once"
+            )));
+        }
+        seen.push(kind);
+    }
     Ok(())
 }
 

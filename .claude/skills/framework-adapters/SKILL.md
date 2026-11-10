@@ -166,8 +166,11 @@ permanent "no schema change" guarantee. Flow:
    an adapter that does not support per-export surfaces rejects it as a typed
    `MalformedPayload`. Vue resolves the default-export component only, so it
    sets the capability `false`.
-4. Requested set is ALWAYS `ALL_FRAMEWORK_SURFACE_KINDS` (the wire request
-   carries no requested-kind field) — exactly one entry per known kind.
+4. Requested set = the request's facet demand (`FrameworkSurfaceRequest.
+   requested_kinds`, schema 10: non-empty, known, duplicate-free, answered in
+   enum-tag order) — exactly one entry per REQUESTED kind, none for an
+   undemanded kind. A request below schema 10 carries no demand and keeps
+   `ALL_FRAMEWORK_SURFACE_KINDS` (one entry per known kind).
 5. `SurfaceRegistration::Deferred` ⇒ every kind structurally UNSUPPORTED.
    `Adapter` ⇒ `plan_surfaces` over the facts/carrier-only ctx, the
    executor resolves each `PlannedDemand` through the module-private

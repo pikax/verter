@@ -977,6 +977,13 @@ message FrameworkSurfaceRequest {
   bool include_diagnostics = 6;
   repeated GraphProjectionRequest include_projection = 7;
   uint32 schema_version = 8;
+  // The facet demand (schema 10): the surface kinds this request asks for.
+  // From schema 10 the list is REQUIRED — non-empty, no duplicate, no
+  // UNSPECIFIED value — and the response carries exactly one
+  // `FrameworkSurfaceKindEntry` per requested kind, in enum-tag order; an
+  // undemanded kind is omitted, neither resolved nor filled. Below schema 10
+  // the field must be empty and the response keeps carrying every known kind.
+  repeated FrameworkSurfaceKind requested_kinds = 9;
 }
 
 message ComponentSelector {
@@ -1033,9 +1040,10 @@ message TypeInfoCapabilityHandshakeResponse {
 
 // FrameworkSurfacePayload — the framework component-surface response
 // (schema 3+). A framework-surface response carries EXACTLY ONE
-// `FrameworkSurfaceKindEntry` per known `FrameworkSurfaceKind`. Schema 4
-// added the add-only `FrameworkSurfaceMember.default_value_id` +
-// `origin` fields.
+// `FrameworkSurfaceKindEntry` per REQUESTED `FrameworkSurfaceKind`
+// (`FrameworkSurfaceRequest.requested_kinds`, schema 10) — per known kind
+// on a request below schema 10. Schema 4 added the add-only
+// `FrameworkSurfaceMember.default_value_id` + `origin` fields.
 message FrameworkSurfacePayload {
   uint32 schema_version = 1;
   ComponentSelector selector = 2;
