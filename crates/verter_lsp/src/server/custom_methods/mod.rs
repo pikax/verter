@@ -26,6 +26,7 @@ use crate::type_provider::merge;
 use super::protocol_types::*;
 use super::server_utils::*;
 use super::VerterLanguageServer;
+use verter_session::workspace_index::{IndexDemand, IndexSurface};
 
 impl VerterLanguageServer {
     /// Return a content-free structure only while the client's open/version
@@ -563,52 +564,73 @@ impl VerterLanguageServer {
         if !self.workspace_inventory_ready().await {
             return Err(Self::workspace_inventory_pending_error());
         }
-        let file_list = self.documents.host().list_files();
+        let host = self.documents.host();
+        // The population and its component carriers come from the workspace
+        // index; a population it could not certify is never served as complete.
+        // Every tracked file holds an import slot, rows or not.
+        let mut route = IndexRoute::new(host, WORKSPACE_INDEX_BUDGETS);
+        let mut population = route.units(IndexSurface::Imports);
+        let components = IndexDemand::of([
+            IndexSurface::ComponentInventory,
+            IndexSurface::ComponentUses,
+        ]);
+        let carriers = route.carriers(&components);
+        let mut uses = route.component_uses(&components);
+        population.sort_by(|a, b| a.basis.locator.cmp(&b.basis.locator));
+        population.dedup_by(|a, b| a.basis.locator == b.basis.locator);
+        let carrier_ids: std::collections::BTreeSet<&str> = carriers
+            .iter()
+            .map(|carrier| carrier.basis.locator.as_ref())
+            .collect();
 
-        let mut files = Vec::new();
+        let files = population
+            .iter()
+            .map(|unit| {
+                let canonical_id: &str = &unit.basis.locator;
+                let kind = if carrier_ids.contains(canonical_id) {
+                    "component"
+                } else if canonical_id.ends_with(".ts") || canonical_id.ends_with(".tsx") {
+                    "ts"
+                } else {
+                    "js"
+                };
+                ProjectOverviewFile {
+                    path: canonical_id.to_string(),
+                    kind,
+                }
+            })
+            .collect();
+
         let mut component_graph = Vec::new();
-        let mut total_component_files = 0usize;
+        let total_component_files = carriers.len();
         let mut total_components = 0usize;
         let mut files_with_scoped_styles = 0usize;
-
-        for (canonical_id, file_language) in &file_list {
-            let kind = if file_language.is_framework_carrier() {
-                "component"
-            } else if canonical_id.ends_with(".ts") || canonical_id.ends_with(".tsx") {
-                "ts"
-            } else {
-                "js"
-            };
-
-            files.push(ProjectOverviewFile {
-                path: canonical_id.clone(),
-                kind,
-            });
-
-            if file_language.is_framework_carrier() {
-                total_component_files += 1;
-
-                // Get analysis for component graph
-                if let Some(analysis) = self.documents.host().get_analysis(canonical_id) {
-                    // Component usage
-                    if let Some(template) = &analysis.template {
-                        let used: Vec<String> =
-                            template.components.iter().map(|c| c.name.clone()).collect();
-                        total_components += used.len();
-                        if !used.is_empty() {
-                            component_graph.push(ProjectOverviewComponentEdge {
-                                file: canonical_id.clone(),
-                                uses_components: used,
-                            });
-                        }
-                    }
-
-                    // Scoped styles check
-                    if analysis.styles.iter().any(|s| s.scoped) {
-                        files_with_scoped_styles += 1;
-                    }
-                }
+        for carrier in &carriers {
+            // Component usage, in template order.
+            let used: Vec<String> = uses
+                .remove(&carrier.basis.locator)
+                .unwrap_or_default()
+                .iter()
+                .map(|tag| tag.to_string())
+                .collect();
+            total_components += used.len();
+            if !used.is_empty() {
+                component_graph.push(ProjectOverviewComponentEdge {
+                    file: carrier.basis.locator.to_string(),
+                    uses_components: used,
+                });
             }
+            // Scoped styles are the carrier's own style facts.
+            match host.get_analysis(&carrier.basis.locator) {
+                Some(analysis) if analysis.styles.iter().any(|s| s.scoped) => {
+                    files_with_scoped_styles += 1;
+                }
+                Some(_) => {}
+                None => route.note_unavailable(&carrier.basis.locator),
+            }
+        }
+        if let Some(shortfall) = &route.finish(()).shortfall {
+            return Err(index_partial_error(shortfall));
         }
 
         Ok(ProjectOverviewResponse {
@@ -641,18 +663,25 @@ impl VerterLanguageServer {
             .unwrap_or_default());
         };
 
-        // Collect template components from all framework CARRIER analyses
-        let file_list = self.documents.host().list_files();
+        // Template components of every component carrier the workspace index
+        // names, from each carrier's own template facts.
+        // A carrier's template is produced on demand when the host holds
+        // none, which is blocking work the request must not run on a worker.
+        let mut route = IndexRoute::new(self.documents.host(), WORKSPACE_INDEX_BUDGETS);
+        let carriers = route.carriers(&IndexDemand::of([IndexSurface::ComponentInventory]));
         let mut template_components = Vec::new();
-        for (canonical_id, file_language) in &file_list {
-            if file_language.is_framework_carrier() {
-                if let Some(analysis) = self.documents.host().get_analysis(canonical_id) {
-                    if let Some(template) = &analysis.template {
-                        template_components
-                            .push((canonical_id.clone(), template.components.clone()));
-                    }
+        super::handler_guard::block_in_place_if_available(|| {
+            for carrier in &carriers {
+                if let Some(template) = route.template(&carrier.basis.locator) {
+                    template_components.push((
+                        carrier.basis.locator.to_string(),
+                        template.components.clone(),
+                    ));
                 }
             }
+        });
+        if let Some(shortfall) = &route.finish(()).shortfall {
+            return Err(index_partial_error(shortfall));
         }
 
         let workspace = self.documents.host().workspace_read();
@@ -813,92 +842,103 @@ impl VerterLanguageServer {
         if !self.workspace_inventory_ready().await {
             return Err(Self::workspace_inventory_pending_error());
         }
-        let file_list = self.documents.host().list_files();
+        // Candidates: the component carriers the workspace index names with at
+        // least one template component use. Each candidate's own template facts
+        // and the host resolver then decide which uses reach the target.
+        let mut route = IndexRoute::new(self.documents.host(), WORKSPACE_INDEX_BUDGETS);
+        let components = IndexDemand::of([
+            IndexSurface::ComponentInventory,
+            IndexSurface::ComponentUses,
+        ]);
+        let users: Vec<std::sync::Arc<str>> =
+            route.component_uses(&components).into_keys().collect();
         let mut parents = Vec::new();
-        let carrier_count = file_list
-            .iter()
-            .filter(|(_, k)| k.is_framework_carrier())
-            .count();
         tracing::info!(
             "getComponentParents: target='{}' scanning {} carrier files",
             target_normalized,
-            carrier_count
+            users.len()
         );
 
-        for (canonical_id, file_language) in &file_list {
-            if !file_language.is_framework_carrier() {
-                continue;
-            }
+        // Cold templates are produced off the async worker.
+        let templates: Vec<_> = super::handler_guard::block_in_place_if_available(|| {
+            users
+                .iter()
+                .map(|user| (std::sync::Arc::clone(user), route.template(user)))
+                .collect()
+        });
+        for (canonical_id, template) in templates {
+            let canonical_id: &str = &canonical_id;
             // Skip the target file itself (canonical-form comparison via owner)
             let normalized_id = verter_span::path::canonicalize_path(canonical_id);
             if normalized_id == target_normalized {
                 continue;
             }
 
-            if let Some(analysis) = self.documents.host().get_analysis(canonical_id) {
-                if let Some(template) = &analysis.template {
-                    for comp in &template.components {
-                        if let Some(src) = &comp.import_source {
-                            // Resolve the import source to an absolute path via VFS
-                            let transient_resolution = self
-                                .documents
-                                .host()
-                                .resolve_import_transient(&normalized_id, src);
-                            let resolved = match transient_resolution {
-                                Some(resolved) => resolved,
-                                None => {
-                                    if src.starts_with('.') {
-                                        let importer_dir = normalized_id
-                                            .rfind('/')
-                                            .map(|i| &normalized_id[..i])
-                                            .unwrap_or("");
-                                        resolve_import_path(importer_dir, src)
-                                    } else {
-                                        src.to_string()
-                                    }
+            if let Some(template) = template {
+                for comp in &template.components {
+                    if let Some(src) = &comp.import_source {
+                        // Resolve the import source to an absolute path via VFS
+                        let transient_resolution = self
+                            .documents
+                            .host()
+                            .resolve_import_transient(&normalized_id, src);
+                        let resolved = match transient_resolution {
+                            Some(resolved) => resolved,
+                            None => {
+                                if src.starts_with('.') {
+                                    let importer_dir = normalized_id
+                                        .rfind('/')
+                                        .map(|i| &normalized_id[..i])
+                                        .unwrap_or("");
+                                    resolve_import_path(importer_dir, src)
+                                } else {
+                                    src.to_string()
                                 }
-                            };
-                            tracing::info!(
-                                "  [{}] component '{}' import='{}' → resolved='{}'",
-                                normalized_id.rsplit('/').next().unwrap_or("?"),
-                                comp.name,
-                                src,
-                                resolved
-                            );
-                            let resolved_normalized =
-                                verter_span::path::canonicalize_path(&resolved);
-                            let matches = import_resolved_matches_target(
-                                self.documents.language_classifier(),
-                                &resolved_normalized,
-                                &target_normalized,
-                            );
-                            if matches {
-                                tracing::info!(
-                                    "  MATCH! resolved='{}' == target='{}'",
-                                    resolved_normalized,
-                                    target_normalized
-                                );
-                                let props_json = comp
-                                    .props
-                                    .iter()
-                                    .filter_map(|p| serde_json::to_value(p).ok())
-                                    .collect();
-                                parents.push(ComponentParentInfo {
-                                    file_path: canonical_id.clone(),
-                                    component_name: comp.name.clone(),
-                                    props: props_json,
-                                    slots_used: comp.slots_used.clone(),
-                                });
                             }
+                        };
+                        tracing::info!(
+                            "  [{}] component '{}' import='{}' → resolved='{}'",
+                            normalized_id.rsplit('/').next().unwrap_or("?"),
+                            comp.name,
+                            src,
+                            resolved
+                        );
+                        let resolved_normalized = verter_span::path::canonicalize_path(&resolved);
+                        let matches = import_resolved_matches_target(
+                            self.documents.language_classifier(),
+                            &resolved_normalized,
+                            &target_normalized,
+                        );
+                        if matches {
+                            tracing::info!(
+                                "  MATCH! resolved='{}' == target='{}'",
+                                resolved_normalized,
+                                target_normalized
+                            );
+                            let props_json = comp
+                                .props
+                                .iter()
+                                .filter_map(|p| serde_json::to_value(p).ok())
+                                .collect();
+                            parents.push(ComponentParentInfo {
+                                file_path: canonical_id.to_string(),
+                                component_name: comp.name.clone(),
+                                props: props_json,
+                                slots_used: comp.slots_used.clone(),
+                            });
                         }
                     }
                 }
             }
         }
+        let answer = route.finish(parents);
+        if let Some(shortfall) = &answer.shortfall {
+            return Err(index_partial_error(shortfall));
+        }
 
         Ok(ComponentParentsResponse {
             component_path: target_canonical,
-            parents,
+            parents: answer.value,
         })
     }
 
