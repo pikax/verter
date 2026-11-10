@@ -2437,6 +2437,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ts-rs",
+ "verter_identity",
  "verter_language",
  "verter_no_typeexpr",
  "verter_semantic",
